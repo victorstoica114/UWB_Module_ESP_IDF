@@ -1,0 +1,49 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ESP-IDF OTA Upload",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\tools\\ota_upload.ps1",
+        "-HostIp",
+        "${input:otaHostIp}"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Wireless Logs",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "-u",
+        "${workspaceFolder}\\tools\\wireless_log_listener.py",
+        "--port",
+        "${input:wirelessLogPort}",
+        "--force-color"
+      ],
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "otaHostIp",
+      "type": "promptString",
+      "description": "ESP32 IP address for OTA upload",
+      "default": "192.168.140.143"
+    },
+    {
+      "id": "wirelessLogPort",
+      "type": "promptString",
+      "description": "Wireless log TCP listener port",
+      "default": "6055"
+    }
+  ]
+}

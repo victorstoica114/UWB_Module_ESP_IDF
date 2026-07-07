@@ -1,0 +1,14 @@
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+secrets.h
+UWB_Module/
+reference/external/
+.agents/
+.vscode/settings.json
+**/.pio/
+**/.secrets/
+__pycache__/
+*.pyc

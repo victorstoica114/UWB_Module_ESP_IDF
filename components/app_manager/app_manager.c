@@ -1,0 +1,165 @@
+#include "app_manager.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "app_led.h"
+#include "board_config.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "ota_service.h"
+#include "sdkconfig.h"
+#include "uwb_dw3000.h"
+#include "wifi_service.h"
+#include "wireless_log_service.h"
+
+static const char *TAG = "app_manager";
+
+enum {
+    STATUS_LED_TASK_STACK_WORDS = 2048,
+    STATUS_LED_TASK_PRIORITY = 5,
+};
+
+#if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
+#define STATUS_LED_TASK_CORE 1
+#else
+#define STATUS_LED_TASK_CORE 0
+#endif
+
+static bool s_app_started;
+
+static int status_led_level(bool led_on)
+{
+    return led_on ? BOARD_CONFIG_STATUS_LED_ACTIVE_LEVEL
+                  : !BOARD_CONFIG_STATUS_LED_ACTIVE_LEVEL;
+}
+
+static enum app_led_mode status_led_mode_from_ota_status(
+    enum ota_service_status status)
+{
+    switch (status) {
+    case OTA_SERVICE_STATUS_UPDATING:
+    case OTA_SERVICE_STATUS_REBOOTING:
+        return APP_LED_MODE_OTA_UPDATING;
+    case OTA_SERVICE_STATUS_FAILED:
+        return APP_LED_MODE_OTA_ERROR;
+    default:
+        return APP_LED_MODE_RUN;
+    }
+}
+
+static uint32_t status_led_interval_ms(enum app_led_mode mode)
+{
+    switch (mode) {
+    case APP_LED_MODE_OTA_UPDATING:
+        return APP_LED_BLINK_INTERVAL_NORMAL_MS;
+    case APP_LED_MODE_OTA_ERROR:
+        return APP_LED_BLINK_INTERVAL_FAST_MS;
+    case APP_LED_MODE_RUN:
+    default:
+        return APP_LED_BLINK_INTERVAL_SLOW_MS;
+    }
+}
+
+static const char *status_led_mode_name(enum app_led_mode mode)
+{
+    switch (mode) {
+    case APP_LED_MODE_OTA_UPDATING:
+        return "ota";
+    case APP_LED_MODE_OTA_ERROR:
+        return "ota_error";
+    case APP_LED_MODE_RUN:
+    default:
+        return "run";
+    }
+}
+
+static void status_led_task(void *arg)
+{
+    (void)arg;
+
+    bool led_on = false;
+    enum app_led_mode last_mode = (enum app_led_mode)-1;
+
+    while (true) {
+        const enum app_led_mode mode =
+            status_led_mode_from_ota_status(ota_service_get_status());
+        const uint32_t interval_ms = status_led_interval_ms(mode);
+
+        if (mode != last_mode) {
+            ESP_LOGI(TAG, "Status LED mode: %s (%u ms)",
+                     status_led_mode_name(mode), (unsigned)interval_ms);
+            last_mode = mode;
+        }
+
+        led_on = !led_on;
+        gpio_set_level(BOARD_CONFIG_STATUS_LED_GPIO, status_led_level(led_on));
+        vTaskDelay(pdMS_TO_TICKS(interval_ms));
+    }
+}
+
+static void status_led_init(void)
+{
+    const gpio_config_t led_config = {
+        .pin_bit_mask = 1ULL << BOARD_CONFIG_STATUS_LED_GPIO,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    ESP_ERROR_CHECK(gpio_config(&led_config));
+    ESP_ERROR_CHECK(gpio_set_level(BOARD_CONFIG_STATUS_LED_GPIO,
+                                   status_led_level(false)));
+}
+
+void app_manager_start(void)
+{
+    if (s_app_started) {
+        return;
+    }
+
+    status_led_init();
+
+    const BaseType_t created = xTaskCreatePinnedToCore(status_led_task,
+                                                       "status_led",
+                                                       STATUS_LED_TASK_STACK_WORDS,
+                                                       NULL,
+                                                       STATUS_LED_TASK_PRIORITY,
+                                                       NULL,
+                                                       STATUS_LED_TASK_CORE);
+    if (created != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create status LED task");
+        return;
+    }
+
+    s_app_started = true;
+    ESP_LOGI(TAG, "Status LED blink started on GPIO%d, core %d",
+             BOARD_CONFIG_STATUS_LED_GPIO, STATUS_LED_TASK_CORE);
+
+    const esp_err_t wifi_err = wifi_service_start();
+    if (wifi_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start Wi-Fi service: %s",
+                 esp_err_to_name(wifi_err));
+    }
+
+    const esp_err_t wireless_log_err = wireless_log_service_start();
+    if (wireless_log_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start wireless log service: %s",
+                 esp_err_to_name(wireless_log_err));
+    }
+
+    const esp_err_t uwb_err = uwb_dw3000_start();
+    if (uwb_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start UWB service: %s",
+                 esp_err_to_name(uwb_err));
+    }
+
+    const esp_err_t ota_err = ota_service_start();
+    if (ota_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start OTA service: %s",
+                 esp_err_to_name(ota_err));
+    }
+}
