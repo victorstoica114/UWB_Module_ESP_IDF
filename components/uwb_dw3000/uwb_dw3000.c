@@ -82,12 +82,15 @@ enum {
 #define DW3000_TX_FCTRL_SUB 0x24
 #define DW3000_DX_TIME_SUB 0x2C
 #define DW3000_RX_FWTO_SUB 0x34
+#define DW3000_SYS_ENABLE_LO_SUB 0x3C
+#define DW3000_SYS_ENABLE_HI_SUB 0x40
 #define DW3000_SYS_STATUS_SUB 0x44
 #define DW3000_RX_FINFO_SUB 0x4C
 #define DW3000_RX_TIME_SUB 0x00
 #define DW3000_TX_ANTD_SUB 0x04
 #define DW3000_ACK_RESP_SUB 0x08
 #define DW3000_CHAN_CTRL_SUB 0x14
+#define DW3000_DRX_CAR_INT_SUB 0x29
 #define DW3000_TX_TIME_SUB 0x74
 #define DW3000_STS_CONFIG_LO_SUB 0x12
 #define DW3000_STS_CONFIG_HI_SUB 0x16
@@ -156,6 +159,9 @@ enum {
      DW3000_STATUS_CIAERR | DW3000_STATUS_ARFE)
 #define DW3000_RX_TIMEOUT_MASK \
     (DW3000_STATUS_RXFTO | DW3000_STATUS_RXPTO | DW3000_STATUS_RXSTO | DW3000_STATUS_CPERR)
+#define DW3000_IRQ_STATUS_MASK \
+    (DW3000_STATUS_TXFRS | DW3000_RX_GOOD_MASK | DW3000_RX_ERROR_MASK | \
+     DW3000_RX_TIMEOUT_MASK | DW3000_STATUS_HPDWARN)
 #define DW3000_RX_FINFO_RXFLEN_MASK 0x000003FFUL
 #define DW3000_RX_FINFO_RXPACC_MASK 0xFFF00000UL
 #define DW3000_RX_FINFO_RXPACC_SHIFT 20U
@@ -195,6 +201,10 @@ enum {
 
 #define DW3000_CIA_CONF_DIAGNOSTIC_OFF_MASK 0x00100000UL
 #define DW3000_CIA_DIAG_LOG_ALL 0x01U
+#define DW3000_CLOCK_OFFSET_RAW_MASK 0x001FFFFFUL
+#define DW3000_CLOCK_OFFSET_RAW_BITS 21U
+#define DW3000_CLOCK_OFFSET_CH5_FACTOR (-0.5731e-9)
+#define DW3000_CLOCK_OFFSET_CH9_FACTOR (-0.1252e-9)
 #define DW3000_IPATOV_PEAK_MASK 0x7FFFFFFFUL
 #define DW3000_IPATOV_PEAK_AMP_MASK 0x001FFFFFUL
 #define DW3000_IPATOV_PEAK_INDEX_SHIFT 21U
@@ -271,6 +281,8 @@ struct uwb_dw3000_rx_frame {
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN];
     uint16_t payload_len;
     uint64_t rx_timestamp;
+    bool clock_offset_valid;
+    int32_t clock_offset_raw;
     struct uwb_rx_diagnostics diagnostics;
 };
 
@@ -280,6 +292,8 @@ struct uwb_distance_frame {
     uint8_t destination_id;
     uint16_t sequence;
     uint64_t rx_timestamp;
+    bool clock_offset_valid;
+    int32_t clock_offset_raw;
     struct uwb_rx_diagnostics diagnostics;
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN];
     uint16_t payload_len;
@@ -291,6 +305,11 @@ struct uwb_distance_measurement {
     uint16_t sequence;
     double tof_dtu;
     double distance_m;
+    double raw_tof_dtu;
+    double raw_distance_m;
+    double clock_offset_ratio;
+    bool clock_offset_valid;
+    int32_t clock_offset_raw;
     uint64_t poll_tx_ts;
     uint64_t poll_rx_ts;
     uint64_t resp_tx_ts;
@@ -311,6 +330,8 @@ struct uwb_calibration_stats {
     double last_m;
 };
 
+static uint32_t uwb_dw3000_remaining_ms(TickType_t start_tick,
+                                        uint32_t timeout_ms);
 static esp_err_t uwb_dw3000_send_payload(const uint8_t *payload,
                                          size_t payload_len,
                                          uint64_t *tx_timestamp);
@@ -333,6 +354,8 @@ static esp_err_t uwb_dw3000_update_u32(uint8_t base, uint8_t sub,
 static spi_device_handle_t s_spi;
 static bool s_started;
 static bool s_rx_armed;
+static bool s_irq_enabled;
+static TaskHandle_t s_task_handle;
 static uint8_t s_source_id;
 static uint32_t s_device_id;
 static enum uwb_dw3000_runtime_mode s_runtime_mode =
@@ -363,6 +386,45 @@ static void uwb_dw3000_delay_ms(uint32_t delay_ms)
         ticks = 1;
     }
     vTaskDelay(ticks);
+}
+
+static void IRAM_ATTR uwb_dw3000_irq_isr_handler(void *arg)
+{
+    (void)arg;
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    if (s_task_handle != NULL) {
+        vTaskNotifyGiveFromISR(s_task_handle, &higher_priority_task_woken);
+    }
+    if (higher_priority_task_woken == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static void uwb_dw3000_wait_for_event_or_delay(TickType_t start_tick,
+                                               uint32_t timeout_ms,
+                                               uint32_t fallback_delay_ms)
+{
+#if APP_UWB_IRQ_ENABLED
+    if (s_irq_enabled) {
+        const uint32_t remaining_ms =
+            uwb_dw3000_remaining_ms(start_tick, timeout_ms);
+        if (remaining_ms == 0) {
+            return;
+        }
+
+        TickType_t ticks = pdMS_TO_TICKS(remaining_ms);
+        if (ticks == 0) {
+            ticks = 1;
+        }
+        (void)ulTaskNotifyTake(pdTRUE, ticks);
+        return;
+    }
+#else
+    (void)start_tick;
+    (void)timeout_ms;
+#endif
+
+    uwb_dw3000_delay_ms(fallback_delay_ms);
 }
 
 static bool uwb_dw3000_device_id_valid(uint32_t device_id)
@@ -432,6 +494,41 @@ static esp_err_t uwb_dw3000_configure_gpio(void)
         TAG, "set UWB RST inactive failed");
 
     return ESP_OK;
+}
+
+static esp_err_t uwb_dw3000_configure_host_irq(void)
+{
+#if APP_UWB_IRQ_ENABLED
+    esp_err_t err = gpio_install_isr_service(0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "DW3000 host IRQ service unavailable: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    err = gpio_isr_handler_add(BOARD_CONFIG_UWB_IRQ_GPIO,
+                               uwb_dw3000_irq_isr_handler, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DW3000 host IRQ handler unavailable: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_RETURN_ON_ERROR(gpio_set_intr_type(BOARD_CONFIG_UWB_IRQ_GPIO,
+                                           GPIO_INTR_POSEDGE),
+                        TAG, "set UWB IRQ edge failed");
+    ESP_RETURN_ON_ERROR(gpio_intr_enable(BOARD_CONFIG_UWB_IRQ_GPIO), TAG,
+                        "enable UWB IRQ GPIO failed");
+
+    s_irq_enabled = true;
+    ESP_LOGI(TAG, "DW3000 host IRQ enabled on GPIO%d",
+             BOARD_CONFIG_UWB_IRQ_GPIO);
+    return ESP_OK;
+#else
+    s_irq_enabled = false;
+    ESP_LOGI(TAG, "DW3000 host IRQ disabled by config");
+    return ESP_OK;
+#endif
 }
 
 static esp_err_t uwb_dw3000_hardware_reset(void)
@@ -651,6 +748,29 @@ static int32_t uwb_dw3000_sign_extend(uint32_t value, uint8_t bits)
     return (int32_t)((value ^ sign_bit) - sign_bit);
 }
 
+static esp_err_t uwb_dw3000_read_clock_offset_raw(int32_t *clock_offset_raw)
+{
+    if (clock_offset_raw == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint32_t raw = 0;
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_read32(DW3000_REG_DRX, DW3000_DRX_CAR_INT_SUB, &raw), TAG,
+        "clock offset read failed");
+    *clock_offset_raw = uwb_dw3000_sign_extend(
+        raw & DW3000_CLOCK_OFFSET_RAW_MASK, DW3000_CLOCK_OFFSET_RAW_BITS);
+    return ESP_OK;
+}
+
+static double uwb_dw3000_clock_offset_ratio(int32_t clock_offset_raw)
+{
+    const double factor = APP_UWB_RADIO_RF_CHANNEL_BIT == 0
+                              ? DW3000_CLOCK_OFFSET_CH5_FACTOR
+                              : DW3000_CLOCK_OFFSET_CH9_FACTOR;
+    return (double)clock_offset_raw * factor;
+}
+
 static uint64_t uwb_dw3000_add_timestamp_delta(uint64_t timestamp,
                                                uint64_t delta)
 {
@@ -783,20 +903,23 @@ uwb_dw3000_read_rx_diagnostics(struct uwb_rx_diagnostics *diagnostics)
     return ESP_OK;
 }
 
+static bool uwb_dw3000_payload_is_distance_frame(const uint8_t *payload,
+                                                 size_t payload_len)
+{
+    return payload != NULL && payload_len >= UWB_DISTANCE_FRAME_HEADER_LEN &&
+           payload[0] == UWB_DISTANCE_FRAME_MAGIC_0 &&
+           payload[1] == UWB_DISTANCE_FRAME_MAGIC_1 &&
+           payload[2] == UWB_DISTANCE_FRAME_MAGIC_2 &&
+           payload[3] == UWB_DISTANCE_FRAME_MAGIC_3 &&
+           payload[4] == UWB_DISTANCE_FRAME_VERSION;
+}
+
 static bool uwb_dw3000_should_capture_rx_diagnostics(const uint8_t *payload,
                                                      size_t payload_len)
 {
 #if APP_UWB_DIAGNOSTICS_ENABLED
-    if (payload == NULL || payload_len < UWB_DISTANCE_FRAME_HEADER_LEN ||
+    if (!uwb_dw3000_payload_is_distance_frame(payload, payload_len) ||
         APP_UWB_DIAGNOSTICS_LOG_EVERY == 0) {
-        return false;
-    }
-
-    if (payload[0] != UWB_DISTANCE_FRAME_MAGIC_0 ||
-        payload[1] != UWB_DISTANCE_FRAME_MAGIC_1 ||
-        payload[2] != UWB_DISTANCE_FRAME_MAGIC_2 ||
-        payload[3] != UWB_DISTANCE_FRAME_MAGIC_3 ||
-        payload[4] != UWB_DISTANCE_FRAME_VERSION) {
         return false;
     }
 
@@ -820,6 +943,44 @@ static esp_err_t uwb_dw3000_update_u32(uint8_t base, uint8_t sub,
     value &= ~clear_mask;
     value |= set_mask;
     return uwb_dw3000_write_u32_len(base, sub, value, sizeof(value));
+}
+
+static esp_err_t uwb_dw3000_configure_device_interrupts(void)
+{
+#if APP_UWB_IRQ_ENABLED
+    if (!s_irq_enabled) {
+        ESP_LOGW(TAG, "DW3000 IRQ fallback: host IRQ is unavailable");
+        return ESP_OK;
+    }
+
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW,
+                                 DW3000_SYS_ENABLE_LO_SUB, 0, 4),
+        TAG, "SYS_ENABLE low clear failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW,
+                                 DW3000_SYS_ENABLE_HI_SUB, 0, 2),
+        TAG, "SYS_ENABLE high clear failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW,
+                                 DW3000_SYS_ENABLE_LO_SUB,
+                                 DW3000_IRQ_STATUS_MASK, 4),
+        TAG, "SYS_ENABLE low write failed");
+
+    ESP_LOGI(TAG, "DW3000 device IRQ mask enabled: 0x%08lx",
+             (unsigned long)DW3000_IRQ_STATUS_MASK);
+#else
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW,
+                                 DW3000_SYS_ENABLE_LO_SUB, 0, 4),
+        TAG, "SYS_ENABLE low disable failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW,
+                                 DW3000_SYS_ENABLE_HI_SUB, 0, 2),
+        TAG, "SYS_ENABLE high disable failed");
+    ESP_LOGI(TAG, "DW3000 device IRQ mask disabled by config");
+#endif
+    return ESP_OK;
 }
 
 static esp_err_t
@@ -1728,6 +1889,8 @@ static esp_err_t uwb_dw3000_radio_init(void)
                         "initial status clear failed");
     ESP_RETURN_ON_ERROR(uwb_dw3000_configure_event_counters(), TAG,
                         "event counter setup failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_configure_device_interrupts(), TAG,
+                        "DW3000 IRQ setup failed");
     return ESP_OK;
 }
 
@@ -1889,6 +2052,16 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                 uwb_dw3000_read_rx_payload(frame->payload, &frame->payload_len);
             const esp_err_t ts_err =
                 uwb_dw3000_read_rx_timestamp(&frame->rx_timestamp);
+            esp_err_t clock_err = ESP_OK;
+            frame->clock_offset_valid = false;
+            frame->clock_offset_raw = 0;
+            if (read_err == ESP_OK &&
+                uwb_dw3000_payload_is_distance_frame(frame->payload,
+                                                     frame->payload_len)) {
+                clock_err =
+                    uwb_dw3000_read_clock_offset_raw(&frame->clock_offset_raw);
+                frame->clock_offset_valid = clock_err == ESP_OK;
+            }
             esp_err_t diag_err = ESP_OK;
             memset(&frame->diagnostics, 0, sizeof(frame->diagnostics));
             if (read_err == ESP_OK &&
@@ -1907,6 +2080,12 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             if (ts_err != ESP_OK) {
                 s_rx_error_count++;
                 return ts_err;
+            }
+            if (clock_err != ESP_OK) {
+                ESP_LOGD(TAG, "RX clock offset read failed: %s",
+                         esp_err_to_name(clock_err));
+                frame->clock_offset_valid = false;
+                frame->clock_offset_raw = 0;
             }
             if (diag_err != ESP_OK) {
                 ESP_LOGD(TAG, "RX diagnostics read failed: %s",
@@ -1942,7 +2121,8 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             return ESP_ERR_TIMEOUT;
         }
 
-        uwb_dw3000_delay_ms(UWB_DW3000_POLL_INTERVAL_MS);
+        uwb_dw3000_wait_for_event_or_delay(start, timeout_ms,
+                                           UWB_DW3000_POLL_INTERVAL_MS);
     }
 }
 
@@ -2017,6 +2197,8 @@ static bool uwb_distance_parse_frame(const struct uwb_dw3000_rx_frame *rx_frame,
     frame->destination_id = payload[7];
     frame->sequence = uwb_distance_get_u16(payload, 8);
     frame->rx_timestamp = rx_frame->rx_timestamp;
+    frame->clock_offset_valid = rx_frame->clock_offset_valid;
+    frame->clock_offset_raw = rx_frame->clock_offset_raw;
     frame->diagnostics = rx_frame->diagnostics;
     frame->payload_len = rx_frame->payload_len;
     memcpy(frame->payload, payload, rx_frame->payload_len);
@@ -2121,6 +2303,34 @@ static double uwb_distance_tof_dtu(uint64_t poll_tx_ts, uint64_t poll_rx_ts,
     }
 
     return ((round_a * round_b) - (reply_a * reply_b)) / denominator;
+}
+
+static double uwb_distance_tof_dtu_clock_corrected(
+    uint64_t poll_tx_ts, uint64_t poll_rx_ts, uint64_t resp_tx_ts,
+    uint64_t resp_rx_ts, uint64_t final_tx_ts, uint64_t final_rx_ts,
+    double clock_offset_ratio)
+{
+    const double round_a =
+        (double)uwb_distance_delta_ts(resp_rx_ts, poll_tx_ts);
+    const double round_b =
+        (double)uwb_distance_delta_ts(final_rx_ts, resp_tx_ts);
+    const double reply_a =
+        (double)uwb_distance_delta_ts(final_tx_ts, resp_rx_ts);
+    const double reply_b =
+        (double)uwb_distance_delta_ts(resp_tx_ts, poll_rx_ts);
+
+    const double reply_diff = reply_a - reply_b;
+    const double clock_correction = reply_a > reply_b
+                                        ? (1.0 + clock_offset_ratio)
+                                        : (1.0 - clock_offset_ratio);
+    const double first_round_trip = round_a - reply_b;
+    const double second_round_trip = round_b - reply_a;
+    const double combined_round_trip =
+        (first_round_trip + second_round_trip -
+         (reply_diff - (reply_diff * clock_correction))) /
+        2.0;
+
+    return combined_round_trip / 2.0;
 }
 
 static double uwb_distance_tof_to_meters(double tof_dtu)
@@ -2286,9 +2496,24 @@ static void uwb_distance_fill_measurement(
     const uint64_t final_tx_ts = uwb_distance_get_ts40(
         report->payload, UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET);
 
-    const double tof_dtu =
+    const double raw_tof_dtu =
         uwb_distance_tof_dtu(poll_tx_ts, poll->rx_timestamp, resp_tx_ts,
                              resp_rx_ts, final_tx_ts, final->rx_timestamp);
+    const bool clock_offset_valid = final->clock_offset_valid;
+    const double clock_offset_ratio =
+        clock_offset_valid
+            ? uwb_dw3000_clock_offset_ratio(final->clock_offset_raw)
+            : 0.0;
+#if APP_UWB_DISTANCE_TEST_CLOCK_OFFSET_CORRECTION
+    const double tof_dtu =
+        clock_offset_valid
+            ? uwb_distance_tof_dtu_clock_corrected(
+                  poll_tx_ts, poll->rx_timestamp, resp_tx_ts, resp_rx_ts,
+                  final_tx_ts, final->rx_timestamp, clock_offset_ratio)
+            : raw_tof_dtu;
+#else
+    const double tof_dtu = raw_tof_dtu;
+#endif
 
     memset(measurement, 0, sizeof(*measurement));
     measurement->initiator_id = poll->source_id;
@@ -2296,6 +2521,12 @@ static void uwb_distance_fill_measurement(
     measurement->sequence = poll->sequence;
     measurement->tof_dtu = tof_dtu;
     measurement->distance_m = uwb_distance_tof_to_meters(tof_dtu);
+    measurement->raw_tof_dtu = raw_tof_dtu;
+    measurement->raw_distance_m = uwb_distance_tof_to_meters(raw_tof_dtu);
+    measurement->clock_offset_valid = clock_offset_valid;
+    measurement->clock_offset_raw =
+        clock_offset_valid ? final->clock_offset_raw : 0;
+    measurement->clock_offset_ratio = clock_offset_ratio;
     measurement->poll_tx_ts = poll_tx_ts;
     measurement->poll_rx_ts = poll->rx_timestamp;
     measurement->resp_tx_ts = resp_tx_ts;
@@ -2385,10 +2616,15 @@ static void
 uwb_distance_log_measurement(const struct uwb_distance_measurement *measurement)
 {
     ESP_LOGI(TAG,
-             "DS-TWR distance seq=%u peer=%u distance=%.3f m %.1f cm tof=%.2f dtu",
+             "DS-TWR distance seq=%u peer=%u distance=%.3f m %.1f cm raw=%.3f m raw_tof=%.2f dtu tof=%.2f dtu clk_valid=%u clk_raw=%ld clk_ratio=%.3e clk_corr=%u",
              (unsigned)measurement->sequence,
              (unsigned)measurement->initiator_id, measurement->distance_m,
-             measurement->distance_m * 100.0, measurement->tof_dtu);
+             measurement->distance_m * 100.0, measurement->raw_distance_m,
+             measurement->raw_tof_dtu, measurement->tof_dtu,
+             measurement->clock_offset_valid ? 1U : 0U,
+             (long)measurement->clock_offset_raw,
+             measurement->clock_offset_ratio,
+             (unsigned)APP_UWB_DISTANCE_TEST_CLOCK_OFFSET_CORRECTION);
     ESP_LOGD(TAG,
              "DS-TWR timestamps seq=%u poll_tx=0x%010llx poll_rx=0x%010llx resp_tx=0x%010llx resp_rx=0x%010llx final_tx=0x%010llx final_rx=0x%010llx",
              (unsigned)measurement->sequence,
@@ -2921,7 +3157,8 @@ static esp_err_t uwb_dw3000_wait_for_tx_complete(uint64_t *tx_timestamp)
             return ESP_ERR_TIMEOUT;
         }
 
-        uwb_dw3000_delay_ms(UWB_DW3000_TX_POLL_MS);
+        uwb_dw3000_wait_for_event_or_delay(start, UWB_DW3000_TX_TIMEOUT_MS,
+                                           UWB_DW3000_TX_POLL_MS);
     }
 }
 
@@ -3113,6 +3350,7 @@ static void uwb_dw3000_task(void *arg)
     s_status = UWB_DW3000_STATUS_INITIALIZING;
     s_device_id = 0;
     s_source_id = uwb_dw3000_pick_source_id();
+    s_task_handle = xTaskGetCurrentTaskHandle();
 
     ESP_LOGI(TAG,
              "Starting DW3000 bring-up: CS=%d SCK=%d MISO=%d MOSI=%d RST=%d IRQ=%d WAKEUP=%d",
@@ -3125,6 +3363,13 @@ static void uwb_dw3000_task(void *arg)
              BOARD_CONFIG_UWB_WAKEUP_ACTIVE_HIGH ? "HIGH" : "LOW");
 
     esp_err_t err = uwb_dw3000_configure_gpio();
+    if (err == ESP_OK) {
+        const esp_err_t irq_err = uwb_dw3000_configure_host_irq();
+        if (irq_err != ESP_OK) {
+            ESP_LOGW(TAG, "Continuing with DW3000 polling fallback");
+            s_irq_enabled = false;
+        }
+    }
     if (err == ESP_OK) {
         err = uwb_dw3000_hardware_reset();
     }
