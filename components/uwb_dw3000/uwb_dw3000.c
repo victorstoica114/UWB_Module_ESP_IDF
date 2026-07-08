@@ -1,6 +1,7 @@
 #include "uwb_dw3000.h"
 
 #include <stdbool.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -17,20 +18,13 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
-#if __has_include("secrets.h")
-#include "secrets.h"
-#endif
-
+#include "app_identity.h"
 #include "uwb_config.h"
-
-#ifndef HOSTNAME
-#define HOSTNAME "uwb-module"
-#endif
 
 static const char *TAG = "uwb_dw3000";
 
 enum {
-    UWB_DW3000_TASK_STACK_WORDS = 6144,
+    UWB_DW3000_TASK_STACK_WORDS = 8192,
     UWB_DW3000_TASK_PRIORITY = 8,
     UWB_DW3000_SPI_CLOCK_HZ = 4 * 1000 * 1000,
     UWB_DW3000_SPI_MAX_TRANSFER_BYTES = 96,
@@ -43,7 +37,7 @@ enum {
     UWB_DW3000_POLL_INTERVAL_MS = 5,
     UWB_DW3000_TX_TIMEOUT_MS = 120,
     UWB_DW3000_TX_POLL_MS = 2,
-    UWB_DW3000_PAYLOAD_LEN = 32,
+    UWB_DW3000_PAYLOAD_LEN = 48,
     UWB_DW3000_ANTENNA_DELAY = APP_UWB_ANTENNA_DELAY_DEFAULT,
 };
 
@@ -80,14 +74,23 @@ enum {
 #define DW3000_CMD_TXRXOFF 0x00
 #define DW3000_CMD_TX 0x01
 #define DW3000_CMD_RX 0x02
+#define DW3000_CMD_DTX 0x03
+
+#define DW3000_DX_TIME_SUB 0x2C
+#define DW3000_RX_TIME_SUB 0x00
+#define DW3000_TX_TIME_SUB 0x74
 
 #define DW3000_GPIO_MODE_SUB 0x00
 #define DW3000_GPIO_DIR_SUB 0x08
 #define DW3000_PMSC_CLK_CTRL_SUB 0x04
 #define DW3000_PMSC_LED_CTRL_SUB 0x16
 
+#define DW3000_GPIO_MODE_MSGP0_MODE_BIT_MASK 0x7UL
+#define DW3000_GPIO_MODE_MSGP1_MODE_BIT_MASK 0x38UL
 #define DW3000_GPIO_MODE_MSGP2_MODE_BIT_MASK 0x1C0UL
 #define DW3000_GPIO_MODE_MSGP3_MODE_BIT_MASK 0xE00UL
+#define DW3000_GPIO_PIN0_RXOKLED 0x1UL
+#define DW3000_GPIO_PIN1_SFDLED (1UL << (1U * 3U))
 #define DW3000_GPIO_PIN2_RXLED (1UL << (2U * 3U))
 #define DW3000_GPIO_PIN3_TXLED (1UL << (3U * 3U))
 
@@ -108,6 +111,7 @@ enum {
 #define DW3000_STATUS_CIAERR 0x00040000UL
 #define DW3000_STATUS_RXPTO 0x00200000UL
 #define DW3000_STATUS_RXSTO 0x04000000UL
+#define DW3000_STATUS_HPDWARN 0x08000000UL
 #define DW3000_STATUS_CPERR 0x10000000UL
 #define DW3000_STATUS_ARFE 0x20000000UL
 #define DW3000_STATUS_SPIRDY 0x00000080UL
@@ -125,6 +129,83 @@ enum {
 #define DW3000_TX_FCTRL_TR_MASK 0x00000800UL
 #define DW3000_TX_FCTRL_TXFLEN_MASK 0x000003FFUL
 
+#define UWB_DW3000_TIMESTAMP_MASK ((1ULL << 40U) - 1ULL)
+#define UWB_DW3000_DELAYED_TIME_MASK 0xFFFFFFFEUL
+#define UWB_DW3000_TIME_UNIT_SECONDS 15.650040064102564e-12
+#define UWB_DW3000_SPEED_OF_LIGHT_MPS 299702547.0
+
+#define UWB_DISTANCE_FRAME_MAGIC_0 'U'
+#define UWB_DISTANCE_FRAME_MAGIC_1 'W'
+#define UWB_DISTANCE_FRAME_MAGIC_2 'B'
+#define UWB_DISTANCE_FRAME_MAGIC_3 'R'
+#define UWB_DISTANCE_FRAME_VERSION 1U
+#define UWB_DISTANCE_FRAME_HEADER_LEN 10U
+#define UWB_DISTANCE_FRAME_POLL_TX_TS_OFFSET 10U
+#define UWB_DISTANCE_FRAME_POLL_RX_TS_OFFSET 15U
+#define UWB_DISTANCE_FRAME_RESP_TX_TS_OFFSET 20U
+#define UWB_DISTANCE_FRAME_RESP_RX_TS_OFFSET 25U
+#define UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET 30U
+#define UWB_DISTANCE_FRAME_FINAL_RX_TS_OFFSET 35U
+
+enum uwb_distance_frame_type {
+    UWB_DISTANCE_FRAME_POLL = 1,
+    UWB_DISTANCE_FRAME_RESP = 2,
+    UWB_DISTANCE_FRAME_FINAL = 3,
+    UWB_DISTANCE_FRAME_REPORT = 4,
+};
+
+enum uwb_dw3000_runtime_mode {
+    UWB_DW3000_RUNTIME_BEACON_SMOKE = 0,
+    UWB_DW3000_RUNTIME_DISTANCE_TEST,
+    UWB_DW3000_RUNTIME_CALIBRATION,
+};
+
+struct uwb_dw3000_rx_frame {
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN];
+    uint16_t payload_len;
+    uint64_t rx_timestamp;
+};
+
+struct uwb_distance_frame {
+    uint8_t type;
+    uint8_t source_id;
+    uint8_t destination_id;
+    uint16_t sequence;
+    uint64_t rx_timestamp;
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN];
+    uint16_t payload_len;
+};
+
+struct uwb_distance_measurement {
+    uint8_t initiator_id;
+    uint8_t responder_id;
+    uint16_t sequence;
+    double tof_dtu;
+    double distance_m;
+    uint64_t poll_tx_ts;
+    uint64_t poll_rx_ts;
+    uint64_t resp_tx_ts;
+    uint64_t resp_rx_ts;
+    uint64_t final_tx_ts;
+    uint64_t final_rx_ts;
+};
+
+struct uwb_calibration_stats {
+    uint32_t samples;
+    double mean_m;
+    double m2_m;
+    double min_m;
+    double max_m;
+    double last_m;
+};
+
+static esp_err_t uwb_dw3000_send_payload(const uint8_t *payload,
+                                         size_t payload_len,
+                                         uint64_t *tx_timestamp);
+static esp_err_t uwb_dw3000_send_payload_delayed(
+    const uint8_t *payload, size_t payload_len, uint64_t tx_timestamp,
+    uint64_t *programmed_tx_timestamp, uint64_t *actual_tx_timestamp);
+
 #define DW3000_PMSC_STATE_IDLE 0x03
 
 static spi_device_handle_t s_spi;
@@ -132,6 +213,8 @@ static bool s_started;
 static bool s_rx_armed;
 static uint8_t s_source_id;
 static uint32_t s_device_id;
+static enum uwb_dw3000_runtime_mode s_runtime_mode =
+    UWB_DW3000_RUNTIME_BEACON_SMOKE;
 static volatile enum uwb_dw3000_status s_status = UWB_DW3000_STATUS_IDLE;
 static volatile uint32_t s_tx_count;
 static volatile uint32_t s_tx_error_count;
@@ -166,41 +249,17 @@ static bool uwb_dw3000_device_id_valid(uint32_t device_id)
            device_id == DW3000_DEV_ID_DW3120;
 }
 
-static uint8_t uwb_dw3000_parse_hostname_id(const char *hostname)
-{
-    uint16_t value = 0;
-    bool has_digit = false;
-
-    if (hostname == NULL) {
-        return 0;
-    }
-
-    for (size_t i = 0; hostname[i] != '\0'; ++i) {
-        const char c = hostname[i];
-        if (c >= '0' && c <= '9') {
-            has_digit = true;
-            value = (uint16_t)(value * 10U + (uint16_t)(c - '0'));
-            if (value > 255U) {
-                return 0;
-            }
-        } else {
-            has_digit = false;
-            value = 0;
-        }
-    }
-
-    return has_digit && value > 0 ? (uint8_t)value : 0;
-}
-
 static uint8_t uwb_dw3000_pick_source_id(void)
 {
     if (APP_UWB_SOURCE_ID > 0 && APP_UWB_SOURCE_ID <= 255) {
         return (uint8_t)APP_UWB_SOURCE_ID;
     }
 
-    const uint8_t hostname_id = uwb_dw3000_parse_hostname_id(HOSTNAME);
-    if (hostname_id != 0) {
-        return hostname_id;
+    if (app_identity_init() == ESP_OK) {
+        const uint8_t module_id = app_identity_get_module_id();
+        if (module_id != 0) {
+            return module_id;
+        }
     }
 
     uint8_t mac[6] = {0};
@@ -432,6 +491,67 @@ static esp_err_t uwb_dw3000_read32(uint8_t base, uint8_t sub, uint32_t *value)
     return ESP_OK;
 }
 
+static esp_err_t uwb_dw3000_read_timestamp40(uint8_t base, uint8_t sub,
+                                             uint64_t *timestamp)
+{
+    uint8_t bytes[5] = {0};
+    if (timestamp == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_RETURN_ON_ERROR(uwb_dw3000_read_bytes(base, sub, bytes, sizeof(bytes)),
+                        TAG, "timestamp read failed");
+    *timestamp = ((uint64_t)bytes[0]) | ((uint64_t)bytes[1] << 8) |
+                 ((uint64_t)bytes[2] << 16) |
+                 ((uint64_t)bytes[3] << 24) |
+                 ((uint64_t)bytes[4] << 32);
+    *timestamp &= UWB_DW3000_TIMESTAMP_MASK;
+    return ESP_OK;
+}
+
+static esp_err_t uwb_dw3000_read_rx_timestamp(uint64_t *timestamp)
+{
+    return uwb_dw3000_read_timestamp40(DW3000_REG_CIA_1, DW3000_RX_TIME_SUB,
+                                       timestamp);
+}
+
+static esp_err_t uwb_dw3000_read_tx_timestamp(uint64_t *timestamp)
+{
+    return uwb_dw3000_read_timestamp40(DW3000_REG_GEN_CFG_AES_LOW,
+                                       DW3000_TX_TIME_SUB, timestamp);
+}
+
+static uint64_t uwb_dw3000_add_timestamp_delta(uint64_t timestamp,
+                                               uint64_t delta)
+{
+    return (timestamp + delta) & UWB_DW3000_TIMESTAMP_MASK;
+}
+
+static uint64_t uwb_dw3000_ms_to_dtu(uint32_t delay_ms)
+{
+    const double delay_seconds = (double)delay_ms / 1000.0;
+    return (uint64_t)((delay_seconds / UWB_DW3000_TIME_UNIT_SECONDS) + 0.5);
+}
+
+static uint32_t uwb_dw3000_delayed_time_word(uint64_t tx_timestamp)
+{
+    return (uint32_t)(tx_timestamp >> 8U);
+}
+
+static uint64_t uwb_dw3000_programmed_tx_timestamp(uint32_t delayed_time_word)
+{
+    return ((((uint64_t)(delayed_time_word & UWB_DW3000_DELAYED_TIME_MASK))
+             << 8U) +
+            UWB_DW3000_ANTENNA_DELAY) &
+           UWB_DW3000_TIMESTAMP_MASK;
+}
+
+static esp_err_t uwb_dw3000_set_delayed_trx_time(uint32_t delayed_time_word)
+{
+    return uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW,
+                                    DW3000_DX_TIME_SUB, delayed_time_word, 4);
+}
+
 static esp_err_t uwb_dw3000_update_u32(uint8_t base, uint8_t sub,
                                        uint32_t clear_mask,
                                        uint32_t set_mask)
@@ -477,15 +597,16 @@ static esp_err_t uwb_dw3000_read_rx_payload(
     return ESP_OK;
 }
 
-static esp_err_t uwb_dw3000_write_tx_payload(
-    const uint8_t payload[UWB_DW3000_PAYLOAD_LEN])
+static esp_err_t uwb_dw3000_write_tx_payload(const uint8_t *payload,
+                                             size_t payload_len)
 {
-    if (payload == NULL) {
+    if (payload == NULL || payload_len == 0 ||
+        payload_len > UWB_DW3000_PAYLOAD_LEN) {
         return ESP_ERR_INVALID_ARG;
     }
 
     return uwb_dw3000_write_bytes(DW3000_REG_TX_BUFFER, DW3000_SUB_NONE,
-                                  payload, UWB_DW3000_PAYLOAD_LEN);
+                                  payload, payload_len);
 }
 
 static esp_err_t uwb_dw3000_fast_command(uint8_t command)
@@ -715,9 +836,16 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
     ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_CIA_3, 0x02, 0x01),
                         TAG, "CIA diagnostics enable failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_GEN_CFG_AES_HIGH, 0x04,
-                                  UWB_DW3000_ANTENNA_DELAY),
+        uwb_dw3000_write_u32_len(DW3000_REG_CIA_3, 0x00,
+                                 UWB_DW3000_ANTENNA_DELAY, 2),
+        TAG, "RX antenna delay write failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_HIGH, 0x04,
+                                 UWB_DW3000_ANTENNA_DELAY, 2),
         TAG, "TX antenna delay write failed");
+    ESP_LOGI(TAG, "DW3000 antenna delay set: rx=0x%04x tx=0x%04x",
+             (unsigned)UWB_DW3000_ANTENNA_DELAY,
+             (unsigned)UWB_DW3000_ANTENNA_DELAY);
 
     return ESP_OK;
 }
@@ -725,25 +853,57 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
 static esp_err_t uwb_dw3000_configure_hardware_leds(void)
 {
     if (!APP_UWB_DW_LEDS_ENABLED) {
-        ESP_LOGI(TAG, "DW3000 hardware TX/RX LEDs disabled");
+        ESP_LOGI(TAG, "DW3000 hardware LEDs disabled");
         return ESP_OK;
     }
 
-    if (BOARD_CONFIG_UWB_RX_DW_LED_INDEX != 2 ||
-        BOARD_CONFIG_UWB_TX_DW_LED_INDEX != 3) {
-        ESP_LOGE(TAG,
-                 "DW3000 hardware LED functions require RXLED=GPIO2 and "
-                 "TXLED=GPIO3, got RX=%d TX=%d",
-                 BOARD_CONFIG_UWB_RX_DW_LED_INDEX,
-                 BOARD_CONFIG_UWB_TX_DW_LED_INDEX);
-        return ESP_ERR_NOT_SUPPORTED;
+    uint32_t gpio_led_mask = 0;
+    uint32_t gpio_led_mode = 0;
+
+    if (APP_UWB_DW_RXOK_LED_ENABLED) {
+        if (BOARD_CONFIG_UWB_RXOK_DW_LED_INDEX != 0) {
+            ESP_LOGE(TAG, "RXOKLED requires DW3000 GPIO0, got GPIO%d",
+                     BOARD_CONFIG_UWB_RXOK_DW_LED_INDEX);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        gpio_led_mask |= DW3000_GPIO_MODE_MSGP0_MODE_BIT_MASK;
+        gpio_led_mode |= DW3000_GPIO_PIN0_RXOKLED;
     }
 
-    const uint32_t gpio_led_mask =
-        DW3000_GPIO_MODE_MSGP2_MODE_BIT_MASK |
-        DW3000_GPIO_MODE_MSGP3_MODE_BIT_MASK;
-    const uint32_t gpio_led_mode =
-        DW3000_GPIO_PIN2_RXLED | DW3000_GPIO_PIN3_TXLED;
+    if (APP_UWB_DW_SFD_LED_ENABLED) {
+        if (BOARD_CONFIG_UWB_SFD_DW_LED_INDEX != 1) {
+            ESP_LOGE(TAG, "SFDLED requires DW3000 GPIO1, got GPIO%d",
+                     BOARD_CONFIG_UWB_SFD_DW_LED_INDEX);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        gpio_led_mask |= DW3000_GPIO_MODE_MSGP1_MODE_BIT_MASK;
+        gpio_led_mode |= DW3000_GPIO_PIN1_SFDLED;
+    }
+
+    if (APP_UWB_DW_RX_LED_ENABLED) {
+        if (BOARD_CONFIG_UWB_RX_DW_LED_INDEX != 2) {
+            ESP_LOGE(TAG, "RXLED requires DW3000 GPIO2, got GPIO%d",
+                     BOARD_CONFIG_UWB_RX_DW_LED_INDEX);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        gpio_led_mask |= DW3000_GPIO_MODE_MSGP2_MODE_BIT_MASK;
+        gpio_led_mode |= DW3000_GPIO_PIN2_RXLED;
+    }
+
+    if (APP_UWB_DW_TX_LED_ENABLED) {
+        if (BOARD_CONFIG_UWB_TX_DW_LED_INDEX != 3) {
+            ESP_LOGE(TAG, "TXLED requires DW3000 GPIO3, got GPIO%d",
+                     BOARD_CONFIG_UWB_TX_DW_LED_INDEX);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        gpio_led_mask |= DW3000_GPIO_MODE_MSGP3_MODE_BIT_MASK;
+        gpio_led_mode |= DW3000_GPIO_PIN3_TXLED;
+    }
+
+    if (gpio_led_mask == 0) {
+        ESP_LOGI(TAG, "DW3000 hardware LED block enabled with no LED functions");
+        return ESP_OK;
+    }
 
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_update_u32(DW3000_REG_GPIO_CTRL, DW3000_GPIO_MODE_SUB,
@@ -779,9 +939,15 @@ static esp_err_t uwb_dw3000_configure_hardware_leds(void)
     }
 
     ESP_LOGI(TAG,
-             "DW3000 hardware LEDs enabled: RXLED=GPIO%d TXLED=GPIO%d "
-             "blink_time=0x%02x",
+             "DW3000 hardware LEDs enabled: RXOK=%s(GPIO%d) SFD=%s(GPIO%d) "
+             "RX=%s(GPIO%d) TX=%s(GPIO%d) blink_time=0x%02x",
+             APP_UWB_DW_RXOK_LED_ENABLED ? "on" : "off",
+             BOARD_CONFIG_UWB_RXOK_DW_LED_INDEX,
+             APP_UWB_DW_SFD_LED_ENABLED ? "on" : "off",
+             BOARD_CONFIG_UWB_SFD_DW_LED_INDEX,
+             APP_UWB_DW_RX_LED_ENABLED ? "on" : "off",
              BOARD_CONFIG_UWB_RX_DW_LED_INDEX,
+             APP_UWB_DW_TX_LED_ENABLED ? "on" : "off",
              BOARD_CONFIG_UWB_TX_DW_LED_INDEX,
              (unsigned)((uint32_t)APP_UWB_DW_LEDS_BLINK_TIME &
                         DW3000_LED_CTRL_BLINK_TIME_MASK));
@@ -1046,6 +1212,928 @@ static esp_err_t uwb_dw3000_poll_rx(void)
     return ESP_OK;
 }
 
+static uint32_t uwb_dw3000_remaining_ms(TickType_t start_tick,
+                                        uint32_t timeout_ms)
+{
+    const TickType_t elapsed_ticks = xTaskGetTickCount() - start_tick;
+    const uint32_t elapsed_ms = (uint32_t)elapsed_ticks * portTICK_PERIOD_MS;
+    if (elapsed_ms >= timeout_ms) {
+        return 0;
+    }
+    return timeout_ms - elapsed_ms;
+}
+
+static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
+                                          uint32_t timeout_ms)
+{
+    if (frame == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(frame, 0, sizeof(*frame));
+
+    if (!s_rx_armed) {
+        ESP_RETURN_ON_ERROR(uwb_dw3000_arm_rx(), TAG,
+                            "distance RX arm failed");
+    }
+
+    const TickType_t start = xTaskGetTickCount();
+    while (true) {
+        uint32_t status = 0;
+        ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW, 0x44,
+                                              &status),
+                            TAG, "distance SYS_STATUS read failed");
+
+        if ((status & DW3000_RX_GOOD_MASK) != 0) {
+            const esp_err_t read_err =
+                uwb_dw3000_read_rx_payload(frame->payload, &frame->payload_len);
+            const esp_err_t ts_err =
+                uwb_dw3000_read_rx_timestamp(&frame->rx_timestamp);
+            ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
+                                "clear after distance RX good failed");
+            s_rx_armed = false;
+
+            if (read_err != ESP_OK) {
+                s_rx_error_count++;
+                return read_err;
+            }
+            if (ts_err != ESP_OK) {
+                s_rx_error_count++;
+                return ts_err;
+            }
+
+            s_rx_count++;
+            return ESP_OK;
+        }
+
+        if ((status & DW3000_RX_ERROR_MASK) != 0) {
+            s_rx_error_count++;
+            ESP_LOGW(TAG, "UWB distance RX error SYS_STATUS=0x%08lx",
+                     (unsigned long)status);
+            ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
+                                "clear after distance RX error failed");
+            s_rx_armed = false;
+            return ESP_FAIL;
+        }
+
+        if ((status & DW3000_RX_TIMEOUT_MASK) != 0) {
+            ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
+                                "clear after distance RX timeout failed");
+            s_rx_armed = false;
+            return ESP_ERR_TIMEOUT;
+        }
+
+        if (uwb_dw3000_remaining_ms(start, timeout_ms) == 0) {
+            (void)uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF);
+            (void)uwb_dw3000_clear_status();
+            s_rx_armed = false;
+            return ESP_ERR_TIMEOUT;
+        }
+
+        uwb_dw3000_delay_ms(UWB_DW3000_POLL_INTERVAL_MS);
+    }
+}
+
+static void uwb_distance_put_u16(uint8_t *payload, size_t offset,
+                                 uint16_t value)
+{
+    payload[offset] = (uint8_t)(value & 0xFFU);
+    payload[offset + 1U] = (uint8_t)((value >> 8) & 0xFFU);
+}
+
+static uint16_t uwb_distance_get_u16(const uint8_t *payload, size_t offset)
+{
+    return (uint16_t)(((uint16_t)payload[offset]) |
+                      ((uint16_t)payload[offset + 1U] << 8));
+}
+
+static void uwb_distance_put_ts40(uint8_t *payload, size_t offset,
+                                  uint64_t timestamp)
+{
+    timestamp &= UWB_DW3000_TIMESTAMP_MASK;
+    for (size_t i = 0; i < 5U; ++i) {
+        payload[offset + i] = (uint8_t)((timestamp >> (8U * i)) & 0xFFU);
+    }
+}
+
+static uint64_t uwb_distance_get_ts40(const uint8_t *payload, size_t offset)
+{
+    uint64_t timestamp = 0;
+    for (size_t i = 0; i < 5U; ++i) {
+        timestamp |= ((uint64_t)payload[offset + i]) << (8U * i);
+    }
+    return timestamp & UWB_DW3000_TIMESTAMP_MASK;
+}
+
+static void uwb_distance_build_frame(enum uwb_distance_frame_type type,
+                                     uint8_t destination_id,
+                                     uint16_t sequence,
+                                     uint8_t payload[UWB_DW3000_PAYLOAD_LEN])
+{
+    memset(payload, 0, UWB_DW3000_PAYLOAD_LEN);
+    payload[0] = UWB_DISTANCE_FRAME_MAGIC_0;
+    payload[1] = UWB_DISTANCE_FRAME_MAGIC_1;
+    payload[2] = UWB_DISTANCE_FRAME_MAGIC_2;
+    payload[3] = UWB_DISTANCE_FRAME_MAGIC_3;
+    payload[4] = UWB_DISTANCE_FRAME_VERSION;
+    payload[5] = (uint8_t)type;
+    payload[6] = s_source_id;
+    payload[7] = destination_id;
+    uwb_distance_put_u16(payload, 8, sequence);
+}
+
+static bool uwb_distance_parse_frame(const struct uwb_dw3000_rx_frame *rx_frame,
+                                     struct uwb_distance_frame *frame)
+{
+    if (rx_frame == NULL || frame == NULL ||
+        rx_frame->payload_len < UWB_DISTANCE_FRAME_HEADER_LEN) {
+        return false;
+    }
+
+    const uint8_t *payload = rx_frame->payload;
+    if (payload[0] != UWB_DISTANCE_FRAME_MAGIC_0 ||
+        payload[1] != UWB_DISTANCE_FRAME_MAGIC_1 ||
+        payload[2] != UWB_DISTANCE_FRAME_MAGIC_2 ||
+        payload[3] != UWB_DISTANCE_FRAME_MAGIC_3 ||
+        payload[4] != UWB_DISTANCE_FRAME_VERSION) {
+        return false;
+    }
+
+    memset(frame, 0, sizeof(*frame));
+    frame->type = payload[5];
+    frame->source_id = payload[6];
+    frame->destination_id = payload[7];
+    frame->sequence = uwb_distance_get_u16(payload, 8);
+    frame->rx_timestamp = rx_frame->rx_timestamp;
+    frame->payload_len = rx_frame->payload_len;
+    memcpy(frame->payload, payload, rx_frame->payload_len);
+    return true;
+}
+
+static const char *uwb_distance_type_name(uint8_t type)
+{
+    switch (type) {
+    case UWB_DISTANCE_FRAME_POLL:
+        return "POLL";
+    case UWB_DISTANCE_FRAME_RESP:
+        return "RESP";
+    case UWB_DISTANCE_FRAME_FINAL:
+        return "FINAL";
+    case UWB_DISTANCE_FRAME_REPORT:
+        return "REPORT";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static esp_err_t uwb_distance_receive_matching(
+    uint8_t expected_type, uint8_t expected_source_id, bool match_sequence,
+    uint16_t expected_sequence, struct uwb_distance_frame *frame,
+    uint32_t timeout_ms)
+{
+    const TickType_t start = xTaskGetTickCount();
+
+    while (true) {
+        const uint32_t remaining_ms =
+            uwb_dw3000_remaining_ms(start, timeout_ms);
+        if (remaining_ms == 0) {
+            return ESP_ERR_TIMEOUT;
+        }
+
+        struct uwb_dw3000_rx_frame rx_frame = {0};
+        const esp_err_t err =
+            uwb_dw3000_receive_frame(&rx_frame, remaining_ms);
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        struct uwb_distance_frame parsed = {0};
+        if (!uwb_distance_parse_frame(&rx_frame, &parsed)) {
+            s_rx_ignored_count++;
+            ESP_LOGD(TAG, "Ignoring non-ranging frame len=%u ignored=%lu",
+                     (unsigned)rx_frame.payload_len,
+                     (unsigned long)s_rx_ignored_count);
+            continue;
+        }
+
+        const bool type_ok = parsed.type == expected_type;
+        const bool source_ok =
+            expected_source_id == 0 || parsed.source_id == expected_source_id;
+        const bool destination_ok = parsed.destination_id == s_source_id;
+        const bool sequence_ok =
+            !match_sequence || parsed.sequence == expected_sequence;
+
+        if (type_ok && source_ok && destination_ok && sequence_ok) {
+            s_last_rx_source_id = parsed.source_id;
+            s_last_rx_sequence = parsed.sequence;
+            *frame = parsed;
+            return ESP_OK;
+        }
+
+        s_rx_ignored_count++;
+        ESP_LOGD(TAG,
+                 "Ignoring ranging frame type=%s src=%u dst=%u seq=%u "
+                 "while waiting for type=%s src=%u seq=%u ignored=%lu",
+                 uwb_distance_type_name(parsed.type),
+                 (unsigned)parsed.source_id, (unsigned)parsed.destination_id,
+                 (unsigned)parsed.sequence,
+                 uwb_distance_type_name(expected_type),
+                 (unsigned)expected_source_id, (unsigned)expected_sequence,
+                 (unsigned long)s_rx_ignored_count);
+    }
+}
+
+static uint64_t uwb_distance_delta_ts(uint64_t later, uint64_t earlier)
+{
+    return (later - earlier) & UWB_DW3000_TIMESTAMP_MASK;
+}
+
+static double uwb_distance_tof_dtu(uint64_t poll_tx_ts, uint64_t poll_rx_ts,
+                                   uint64_t resp_tx_ts, uint64_t resp_rx_ts,
+                                   uint64_t final_tx_ts,
+                                   uint64_t final_rx_ts)
+{
+    const double round_a =
+        (double)uwb_distance_delta_ts(resp_rx_ts, poll_tx_ts);
+    const double round_b =
+        (double)uwb_distance_delta_ts(final_rx_ts, resp_tx_ts);
+    const double reply_a =
+        (double)uwb_distance_delta_ts(final_tx_ts, resp_rx_ts);
+    const double reply_b =
+        (double)uwb_distance_delta_ts(resp_tx_ts, poll_rx_ts);
+    const double denominator = round_a + round_b + reply_a + reply_b;
+
+    if (denominator == 0.0) {
+        return 0.0;
+    }
+
+    return ((round_a * round_b) - (reply_a * reply_b)) / denominator;
+}
+
+static double uwb_distance_tof_to_meters(double tof_dtu)
+{
+    return tof_dtu * UWB_DW3000_TIME_UNIT_SECONDS *
+           UWB_DW3000_SPEED_OF_LIGHT_MPS;
+}
+
+static uint8_t uwb_distance_peer_id(bool initiator)
+{
+    if (APP_UWB_DISTANCE_TEST_PEER_ID > 0 &&
+        APP_UWB_DISTANCE_TEST_PEER_ID <= 255) {
+        return (uint8_t)APP_UWB_DISTANCE_TEST_PEER_ID;
+    }
+
+    return initiator ? (uint8_t)APP_UWB_DISTANCE_TEST_RESPONDER_ID
+                     : (uint8_t)APP_UWB_DISTANCE_TEST_INITIATOR_ID;
+}
+
+static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
+                                            bool log_success)
+{
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+    uint64_t poll_tx_ts = 0;
+    uint64_t resp_rx_ts = 0;
+    uint64_t final_tx_ts = 0;
+
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_POLL, peer_id, sequence,
+                             payload);
+    esp_err_t err =
+        uwb_dw3000_send_payload(payload, sizeof(payload), &poll_tx_ts);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DS-TWR POLL TX failed seq=%u peer=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
+        return err;
+    }
+
+    struct uwb_distance_frame response = {0};
+    err = uwb_distance_receive_matching(UWB_DISTANCE_FRAME_RESP, peer_id, true,
+                                        sequence, &response,
+                                        APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DS-TWR RESP wait failed seq=%u peer=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
+        return err;
+    }
+    resp_rx_ts = response.rx_timestamp;
+
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_FINAL, peer_id, sequence,
+                             payload);
+#if APP_UWB_DISTANCE_TEST_USE_DELAYED_TX
+    const uint64_t final_tx_due = uwb_dw3000_add_timestamp_delta(
+        resp_rx_ts, uwb_dw3000_ms_to_dtu(APP_UWB_DISTANCE_TEST_FINAL_DELAY_MS));
+    uint64_t final_tx_actual_ts = 0;
+    err = uwb_dw3000_send_payload_delayed(payload, sizeof(payload),
+                                          final_tx_due, &final_tx_ts,
+                                          &final_tx_actual_ts);
+    ESP_LOGD(TAG,
+             "DS-TWR FINAL delayed seq=%u peer=%u due=0x%010llx programmed=0x%010llx actual=0x%010llx",
+             (unsigned)sequence, (unsigned)peer_id,
+             (unsigned long long)final_tx_due,
+             (unsigned long long)final_tx_ts,
+             (unsigned long long)final_tx_actual_ts);
+#else
+    uwb_dw3000_delay_ms(APP_UWB_DISTANCE_TEST_FINAL_DELAY_MS);
+    err = uwb_dw3000_send_payload(payload, sizeof(payload), &final_tx_ts);
+#endif
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DS-TWR FINAL TX failed seq=%u peer=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
+        return err;
+    }
+
+    uwb_dw3000_delay_ms(APP_UWB_DISTANCE_TEST_REPORT_DELAY_MS);
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_REPORT, peer_id, sequence,
+                             payload);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_POLL_TX_TS_OFFSET,
+                          poll_tx_ts);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_RESP_RX_TS_OFFSET,
+                          resp_rx_ts);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET,
+                          final_tx_ts);
+    err = uwb_dw3000_send_payload(payload, sizeof(payload), NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DS-TWR REPORT TX failed seq=%u peer=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
+        return err;
+    }
+
+    if (log_success) {
+        ESP_LOGI(TAG,
+                 "DS-TWR report sent seq=%u peer=%u poll_tx=0x%010llx resp_rx=0x%010llx final_tx=0x%010llx",
+                 (unsigned)sequence, (unsigned)peer_id,
+                 (unsigned long long)poll_tx_ts,
+                 (unsigned long long)resp_rx_ts,
+                 (unsigned long long)final_tx_ts);
+    }
+
+    return ESP_OK;
+}
+
+static void uwb_distance_fill_measurement(
+    const struct uwb_distance_frame *poll, const struct uwb_distance_frame *final,
+    const struct uwb_distance_frame *report, uint64_t resp_tx_ts,
+    struct uwb_distance_measurement *measurement)
+{
+    const uint64_t poll_tx_ts = uwb_distance_get_ts40(
+        report->payload, UWB_DISTANCE_FRAME_POLL_TX_TS_OFFSET);
+    const uint64_t resp_rx_ts = uwb_distance_get_ts40(
+        report->payload, UWB_DISTANCE_FRAME_RESP_RX_TS_OFFSET);
+    const uint64_t final_tx_ts = uwb_distance_get_ts40(
+        report->payload, UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET);
+
+    const double tof_dtu =
+        uwb_distance_tof_dtu(poll_tx_ts, poll->rx_timestamp, resp_tx_ts,
+                             resp_rx_ts, final_tx_ts, final->rx_timestamp);
+
+    memset(measurement, 0, sizeof(*measurement));
+    measurement->initiator_id = poll->source_id;
+    measurement->responder_id = s_source_id;
+    measurement->sequence = poll->sequence;
+    measurement->tof_dtu = tof_dtu;
+    measurement->distance_m = uwb_distance_tof_to_meters(tof_dtu);
+    measurement->poll_tx_ts = poll_tx_ts;
+    measurement->poll_rx_ts = poll->rx_timestamp;
+    measurement->resp_tx_ts = resp_tx_ts;
+    measurement->resp_rx_ts = resp_rx_ts;
+    measurement->final_tx_ts = final_tx_ts;
+    measurement->final_rx_ts = final->rx_timestamp;
+}
+
+static esp_err_t
+uwb_distance_respond_to_poll(const struct uwb_distance_frame *poll,
+                             struct uwb_distance_measurement *measurement)
+{
+    if (poll == NULL || measurement == NULL ||
+        poll->type != UWB_DISTANCE_FRAME_POLL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const uint8_t peer_id = poll->source_id;
+    const uint16_t sequence = poll->sequence;
+    uint64_t resp_tx_ts = 0;
+
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_RESP, peer_id, sequence,
+                             payload);
+#if APP_UWB_DISTANCE_TEST_USE_DELAYED_TX
+    const uint64_t resp_tx_due = uwb_dw3000_add_timestamp_delta(
+        poll->rx_timestamp,
+        uwb_dw3000_ms_to_dtu(APP_UWB_DISTANCE_TEST_RESP_DELAY_MS));
+    uint64_t resp_tx_actual_ts = 0;
+    esp_err_t err = uwb_dw3000_send_payload_delayed(
+        payload, sizeof(payload), resp_tx_due, &resp_tx_ts,
+        &resp_tx_actual_ts);
+    ESP_LOGD(TAG,
+             "DS-TWR RESP delayed seq=%u peer=%u due=0x%010llx programmed=0x%010llx actual=0x%010llx",
+             (unsigned)sequence, (unsigned)peer_id,
+             (unsigned long long)resp_tx_due,
+             (unsigned long long)resp_tx_ts,
+             (unsigned long long)resp_tx_actual_ts);
+#else
+    uwb_dw3000_delay_ms(APP_UWB_DISTANCE_TEST_RESP_DELAY_MS);
+    esp_err_t err =
+        uwb_dw3000_send_payload(payload, sizeof(payload), &resp_tx_ts);
+#endif
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DS-TWR RESP TX failed seq=%u peer=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
+        return err;
+    }
+
+    struct uwb_distance_frame final = {0};
+    err = uwb_distance_receive_matching(UWB_DISTANCE_FRAME_FINAL, peer_id, true,
+                                        sequence, &final,
+                                        APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DS-TWR FINAL wait failed seq=%u peer=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
+        return err;
+    }
+
+    struct uwb_distance_frame report = {0};
+    err = uwb_distance_receive_matching(UWB_DISTANCE_FRAME_REPORT, peer_id, true,
+                                        sequence, &report,
+                                        APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DS-TWR REPORT wait failed seq=%u peer=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
+        return err;
+    }
+
+    uwb_distance_fill_measurement(poll, &final, &report, resp_tx_ts,
+                                  measurement);
+    return ESP_OK;
+}
+
+static void
+uwb_distance_log_measurement(const struct uwb_distance_measurement *measurement)
+{
+    ESP_LOGI(TAG,
+             "DS-TWR distance seq=%u peer=%u distance=%.3f m %.1f cm tof=%.2f dtu",
+             (unsigned)measurement->sequence,
+             (unsigned)measurement->initiator_id, measurement->distance_m,
+             measurement->distance_m * 100.0, measurement->tof_dtu);
+    ESP_LOGD(TAG,
+             "DS-TWR timestamps seq=%u poll_tx=0x%010llx poll_rx=0x%010llx resp_tx=0x%010llx resp_rx=0x%010llx final_tx=0x%010llx final_rx=0x%010llx",
+             (unsigned)measurement->sequence,
+             (unsigned long long)measurement->poll_tx_ts,
+             (unsigned long long)measurement->poll_rx_ts,
+             (unsigned long long)measurement->resp_tx_ts,
+             (unsigned long long)measurement->resp_rx_ts,
+             (unsigned long long)measurement->final_tx_ts,
+             (unsigned long long)measurement->final_rx_ts);
+}
+
+static bool uwb_distance_is_initiator(void)
+{
+    if (s_source_id == (uint8_t)APP_UWB_DISTANCE_TEST_INITIATOR_ID) {
+        return true;
+    }
+    if (s_source_id == (uint8_t)APP_UWB_DISTANCE_TEST_RESPONDER_ID) {
+        return false;
+    }
+
+#if APP_UWB_DISTANCE_TEST_PEER_ID > 0 && APP_UWB_DISTANCE_TEST_PEER_ID <= 255
+    return s_source_id < (uint8_t)APP_UWB_DISTANCE_TEST_PEER_ID;
+#endif
+
+    return (s_source_id & 1U) != 0;
+}
+
+static void uwb_distance_initiator_loop(uint8_t peer_id)
+{
+    uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
+
+    s_status = UWB_DW3000_STATUS_READY;
+    ESP_LOGI(TAG,
+             "DS-TWR distance test active as initiator: source_id=%u peer_id=%u interval=%u ms timeout=%u ms",
+             (unsigned)s_source_id, (unsigned)peer_id,
+             (unsigned)APP_UWB_DISTANCE_TEST_INTERVAL_MS,
+             (unsigned)APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS);
+
+    while (true) {
+        (void)uwb_distance_initiate_once(peer_id, sequence, true);
+        sequence++;
+        uwb_dw3000_delay_ms(APP_UWB_DISTANCE_TEST_INTERVAL_MS);
+    }
+}
+
+static void uwb_distance_responder_loop(uint8_t peer_id)
+{
+    s_status = UWB_DW3000_STATUS_READY;
+    ESP_LOGI(TAG,
+             "DS-TWR distance test active as responder: source_id=%u peer_id=%u timeout=%u ms",
+             (unsigned)s_source_id, (unsigned)peer_id,
+             (unsigned)APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS);
+
+    while (true) {
+        struct uwb_distance_frame poll = {0};
+        esp_err_t err = uwb_distance_receive_matching(
+            UWB_DISTANCE_FRAME_POLL, peer_id, false, 0, &poll, 1000);
+        if (err == ESP_ERR_TIMEOUT) {
+            continue;
+        }
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "DS-TWR POLL wait failed: %s",
+                     esp_err_to_name(err));
+            uwb_dw3000_delay_ms(20);
+            continue;
+        }
+
+        struct uwb_distance_measurement measurement = {0};
+        err = uwb_distance_respond_to_poll(&poll, &measurement);
+        if (err == ESP_OK) {
+            uwb_distance_log_measurement(&measurement);
+        }
+    }
+}
+
+static void uwb_dw3000_distance_test_loop(void)
+{
+    const bool initiator = uwb_distance_is_initiator();
+    const uint8_t peer_id = uwb_distance_peer_id(initiator);
+
+    if (peer_id == 0 || peer_id == s_source_id) {
+        s_status = UWB_DW3000_STATUS_FAILED;
+        ESP_LOGE(TAG,
+                 "Invalid DS-TWR IDs: source_id=%u peer_id=%u initiator_id=%u responder_id=%u",
+                 (unsigned)s_source_id, (unsigned)peer_id,
+                 (unsigned)APP_UWB_DISTANCE_TEST_INITIATOR_ID,
+                 (unsigned)APP_UWB_DISTANCE_TEST_RESPONDER_ID);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    if (initiator) {
+        uwb_distance_initiator_loop(peer_id);
+    } else {
+        uwb_distance_responder_loop(peer_id);
+    }
+}
+
+static const char *uwb_calibration_method_name(void)
+{
+    switch (APP_UWB_CALIBRATION_METHOD) {
+    case APP_UWB_CALIBRATION_METHOD_TWO_MODULE:
+        return "two_module";
+    case APP_UWB_CALIBRATION_METHOD_THREE_MODULE:
+        return "three_module_edm";
+    default:
+        return "unknown";
+    }
+}
+
+static double uwb_calibration_known_distance_for_pair_m(uint8_t first_id,
+                                                       uint8_t second_id)
+{
+    const uint8_t id0 = (uint8_t)APP_UWB_CALIBRATION_THREE_ID_0;
+    const uint8_t id1 = (uint8_t)APP_UWB_CALIBRATION_THREE_ID_1;
+    const uint8_t id2 = (uint8_t)APP_UWB_CALIBRATION_THREE_ID_2;
+    const uint32_t fallback_mm = APP_UWB_CALIBRATION_KNOWN_DISTANCE_MM;
+    uint32_t distance_mm = fallback_mm;
+
+    if ((first_id == id0 && second_id == id1) ||
+        (first_id == id1 && second_id == id0)) {
+        distance_mm = APP_UWB_CALIBRATION_THREE_DISTANCE_0_1_MM;
+    } else if ((first_id == id0 && second_id == id2) ||
+               (first_id == id2 && second_id == id0)) {
+        distance_mm = APP_UWB_CALIBRATION_THREE_DISTANCE_0_2_MM;
+    } else if ((first_id == id1 && second_id == id2) ||
+               (first_id == id2 && second_id == id1)) {
+        distance_mm = APP_UWB_CALIBRATION_THREE_DISTANCE_1_2_MM;
+    }
+
+    return (double)distance_mm / 1000.0;
+}
+
+static double uwb_calibration_meters_per_dtu(void)
+{
+    return UWB_DW3000_TIME_UNIT_SECONDS * UWB_DW3000_SPEED_OF_LIGHT_MPS;
+}
+
+static int32_t uwb_calibration_round_to_i32(double value)
+{
+    return value >= 0.0 ? (int32_t)(value + 0.5)
+                        : (int32_t)(value - 0.5);
+}
+
+static uint32_t uwb_calibration_random_interval_ms(void)
+{
+    const uint32_t min_ms = APP_UWB_CALIBRATION_MIN_INTERVAL_MS;
+    const uint32_t max_ms = APP_UWB_CALIBRATION_MAX_INTERVAL_MS;
+    if (max_ms <= min_ms) {
+        return min_ms;
+    }
+
+    return min_ms + (esp_random() % (max_ms - min_ms + 1U));
+}
+
+static void uwb_calibration_stats_update(struct uwb_calibration_stats *stats,
+                                         double distance_m)
+{
+    if (stats->samples == 0) {
+        stats->min_m = distance_m;
+        stats->max_m = distance_m;
+        stats->mean_m = distance_m;
+        stats->m2_m = 0.0;
+        stats->last_m = distance_m;
+        stats->samples = 1;
+        return;
+    }
+
+    stats->samples++;
+    stats->last_m = distance_m;
+    if (distance_m < stats->min_m) {
+        stats->min_m = distance_m;
+    }
+    if (distance_m > stats->max_m) {
+        stats->max_m = distance_m;
+    }
+
+    const double delta = distance_m - stats->mean_m;
+    stats->mean_m += delta / (double)stats->samples;
+    const double delta2 = distance_m - stats->mean_m;
+    stats->m2_m += delta * delta2;
+}
+
+static double
+uwb_calibration_stats_stddev_m(const struct uwb_calibration_stats *stats)
+{
+    if (stats->samples < 2) {
+        return 0.0;
+    }
+
+    return sqrt(stats->m2_m / (double)(stats->samples - 1U));
+}
+
+static bool uwb_calibration_should_log_summary(uint32_t samples)
+{
+    if (samples == 0) {
+        return false;
+    }
+    if (samples == 1 || samples == APP_UWB_CALIBRATION_SAMPLE_COUNT) {
+        return true;
+    }
+    if (APP_UWB_CALIBRATION_SUMMARY_EVERY == 0) {
+        return false;
+    }
+    return (samples % APP_UWB_CALIBRATION_SUMMARY_EVERY) == 0;
+}
+
+static void uwb_calibration_log_stats(
+    const char *method, const struct uwb_distance_measurement *measurement,
+    const struct uwb_calibration_stats *stats)
+{
+    const double known_m = uwb_calibration_known_distance_for_pair_m(
+        measurement->initiator_id, measurement->responder_id);
+    const double error_m = stats->mean_m - known_m;
+    const double error_dtu = error_m / uwb_calibration_meters_per_dtu();
+    const int32_t suggested_delta =
+        uwb_calibration_round_to_i32(error_dtu);
+    int32_t suggested_delay =
+        (int32_t)APP_UWB_ANTENNA_DELAY_DEFAULT + suggested_delta;
+    if (suggested_delay < 0) {
+        suggested_delay = 0;
+    } else if (suggested_delay > 0xFFFF) {
+        suggested_delay = 0xFFFF;
+    }
+
+    ESP_LOGI(TAG,
+             "UWB CAL %s pair=%u->%u samples=%lu last=%.3f m mean=%.3f m std=%.3f m min=%.3f m max=%.3f m known=%.3f m error=%+.3f m error_dtu=%+.1f suggested_delta=%ld suggested_delay=0x%04lx",
+             method, (unsigned)measurement->initiator_id,
+             (unsigned)measurement->responder_id,
+             (unsigned long)stats->samples, stats->last_m, stats->mean_m,
+             uwb_calibration_stats_stddev_m(stats), stats->min_m,
+             stats->max_m, known_m, error_m, error_dtu,
+             (long)suggested_delta, (unsigned long)suggested_delay);
+}
+
+static void uwb_calibration_record_measurement(
+    const char *method, const struct uwb_distance_measurement *measurement,
+    struct uwb_calibration_stats *stats)
+{
+    uwb_calibration_stats_update(stats, measurement->distance_m);
+    ESP_LOGI(TAG,
+             "UWB CAL sample %s pair=%u->%u sample=%lu seq=%u distance=%.3f m %.1f cm tof=%.2f dtu",
+             method, (unsigned)measurement->initiator_id,
+             (unsigned)measurement->responder_id,
+             (unsigned long)stats->samples, (unsigned)measurement->sequence,
+             measurement->distance_m, measurement->distance_m * 100.0,
+             measurement->tof_dtu);
+
+    if (uwb_calibration_should_log_summary(stats->samples)) {
+        uwb_calibration_log_stats(method, measurement, stats);
+    }
+}
+
+static void uwb_calibration_two_module_loop(void)
+{
+    const uint8_t reference_id = (uint8_t)APP_UWB_CALIBRATION_REFERENCE_ID;
+    const uint8_t dut_id = (uint8_t)APP_UWB_CALIBRATION_DUT_ID;
+    struct uwb_calibration_stats stats = {0};
+    uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
+
+    s_status = UWB_DW3000_STATUS_READY;
+    ESP_LOGI(TAG,
+             "UWB CAL two-module active: source_id=%u reference_id=%u dut_id=%u known=%u mm delay=0x%04x",
+             (unsigned)s_source_id, (unsigned)reference_id,
+             (unsigned)dut_id, (unsigned)APP_UWB_CALIBRATION_KNOWN_DISTANCE_MM,
+             (unsigned)APP_UWB_ANTENNA_DELAY_DEFAULT);
+
+    if (reference_id == 0 || dut_id == 0 || reference_id == dut_id) {
+        s_status = UWB_DW3000_STATUS_FAILED;
+        ESP_LOGE(TAG, "Invalid two-module calibration IDs: reference=%u dut=%u",
+                 (unsigned)reference_id, (unsigned)dut_id);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    if (s_source_id == reference_id) {
+        ESP_LOGI(TAG,
+                 "UWB CAL two-module role=reference initiator peer_dut=%u",
+                 (unsigned)dut_id);
+        while (true) {
+            (void)uwb_distance_initiate_once(dut_id, sequence++, false);
+            uwb_dw3000_delay_ms(uwb_calibration_random_interval_ms());
+        }
+    }
+
+    if (s_source_id != dut_id) {
+        ESP_LOGW(TAG,
+                 "UWB CAL two-module idle: source_id=%u is neither reference nor DUT",
+                 (unsigned)s_source_id);
+        while (true) {
+            uwb_dw3000_delay_ms(1000);
+        }
+    }
+
+    ESP_LOGI(TAG,
+             "UWB CAL two-module role=DUT responder reference_peer=%u",
+             (unsigned)reference_id);
+    while (true) {
+        struct uwb_distance_frame poll = {0};
+        esp_err_t err = uwb_distance_receive_matching(
+            UWB_DISTANCE_FRAME_POLL, reference_id, false, 0, &poll, 1000);
+        if (err == ESP_ERR_TIMEOUT) {
+            continue;
+        }
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "UWB CAL two-module POLL wait failed: %s",
+                     esp_err_to_name(err));
+            uwb_dw3000_delay_ms(20);
+            continue;
+        }
+
+        struct uwb_distance_measurement measurement = {0};
+        err = uwb_distance_respond_to_poll(&poll, &measurement);
+        if (err == ESP_OK) {
+            uwb_calibration_record_measurement("two_module", &measurement,
+                                               &stats);
+        }
+    }
+}
+
+static bool uwb_calibration_id_in_three_set(uint8_t id)
+{
+    return id == (uint8_t)APP_UWB_CALIBRATION_THREE_ID_0 ||
+           id == (uint8_t)APP_UWB_CALIBRATION_THREE_ID_1 ||
+           id == (uint8_t)APP_UWB_CALIBRATION_THREE_ID_2;
+}
+
+static int uwb_calibration_pair_index(uint8_t initiator_id,
+                                      uint8_t responder_id)
+{
+    const uint8_t ids[3] = {
+        (uint8_t)APP_UWB_CALIBRATION_THREE_ID_0,
+        (uint8_t)APP_UWB_CALIBRATION_THREE_ID_1,
+        (uint8_t)APP_UWB_CALIBRATION_THREE_ID_2,
+    };
+    int index = 0;
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            if (i == j) {
+                continue;
+            }
+            if (ids[i] == initiator_id && ids[j] == responder_id) {
+                return index;
+            }
+            index++;
+        }
+    }
+
+    return -1;
+}
+
+static void uwb_calibration_three_module_loop(void)
+{
+    const uint8_t ids[3] = {
+        (uint8_t)APP_UWB_CALIBRATION_THREE_ID_0,
+        (uint8_t)APP_UWB_CALIBRATION_THREE_ID_1,
+        (uint8_t)APP_UWB_CALIBRATION_THREE_ID_2,
+    };
+    uint8_t peers[2] = {0};
+    size_t peer_count = 0;
+    struct uwb_calibration_stats pair_stats[6] = {0};
+    uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
+    size_t next_peer_index = 0;
+    TickType_t next_initiate_tick =
+        xTaskGetTickCount() +
+        pdMS_TO_TICKS(200U + (uint32_t)s_source_id * 73U);
+
+    s_status = UWB_DW3000_STATUS_READY;
+    ESP_LOGI(TAG,
+             "UWB CAL three-module EDM active: source_id=%u ids=[%u,%u,%u] known_edge=%u mm delay=0x%04x",
+             (unsigned)s_source_id, (unsigned)ids[0], (unsigned)ids[1],
+             (unsigned)ids[2],
+             (unsigned)APP_UWB_CALIBRATION_KNOWN_DISTANCE_MM,
+             (unsigned)APP_UWB_ANTENNA_DELAY_DEFAULT);
+
+    if (ids[0] == 0 || ids[1] == 0 || ids[2] == 0 || ids[0] == ids[1] ||
+        ids[0] == ids[2] || ids[1] == ids[2]) {
+        s_status = UWB_DW3000_STATUS_FAILED;
+        ESP_LOGE(TAG, "Invalid three-module calibration IDs");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    if (!uwb_calibration_id_in_three_set(s_source_id)) {
+        ESP_LOGW(TAG,
+                 "UWB CAL three-module idle: source_id=%u is not in the configured set",
+                 (unsigned)s_source_id);
+        while (true) {
+            uwb_dw3000_delay_ms(1000);
+        }
+    }
+
+    for (size_t i = 0; i < 3; ++i) {
+        if (ids[i] != s_source_id && peer_count < 2) {
+            peers[peer_count++] = ids[i];
+        }
+    }
+
+    while (true) {
+        struct uwb_distance_frame poll = {0};
+        esp_err_t err = uwb_distance_receive_matching(
+            UWB_DISTANCE_FRAME_POLL, 0, false, 0, &poll,
+            APP_UWB_CALIBRATION_RX_SLICE_MS);
+        if (err == ESP_OK) {
+            if (!uwb_calibration_id_in_three_set(poll.source_id)) {
+                ESP_LOGD(TAG,
+                         "Ignoring calibration poll from non-set source=%u",
+                         (unsigned)poll.source_id);
+                continue;
+            }
+
+            struct uwb_distance_measurement measurement = {0};
+            err = uwb_distance_respond_to_poll(&poll, &measurement);
+            if (err == ESP_OK) {
+                const int pair_index = uwb_calibration_pair_index(
+                    measurement.initiator_id, measurement.responder_id);
+                if (pair_index >= 0 && pair_index < 6) {
+                    uwb_calibration_record_measurement(
+                        "three_module_edm", &measurement,
+                        &pair_stats[pair_index]);
+                }
+            }
+        } else if (err != ESP_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "UWB CAL three-module RX slice failed: %s",
+                     esp_err_to_name(err));
+            uwb_dw3000_delay_ms(20);
+        }
+
+        if ((int32_t)(xTaskGetTickCount() - next_initiate_tick) >= 0) {
+            const uint8_t peer_id = peers[next_peer_index];
+            (void)uwb_distance_initiate_once(peer_id, sequence++, false);
+            next_peer_index = (next_peer_index + 1U) % peer_count;
+            next_initiate_tick =
+                xTaskGetTickCount() +
+                pdMS_TO_TICKS(uwb_calibration_random_interval_ms());
+        }
+    }
+}
+
+static void uwb_dw3000_calibration_loop(void)
+{
+    ESP_LOGI(TAG, "UWB calibration runtime start: method=%s(%u)",
+             uwb_calibration_method_name(),
+             (unsigned)APP_UWB_CALIBRATION_METHOD);
+
+    switch (APP_UWB_CALIBRATION_METHOD) {
+    case APP_UWB_CALIBRATION_METHOD_TWO_MODULE:
+        uwb_calibration_two_module_loop();
+        break;
+    case APP_UWB_CALIBRATION_METHOD_THREE_MODULE:
+        uwb_calibration_three_module_loop();
+        break;
+    default:
+        s_status = UWB_DW3000_STATUS_FAILED;
+        ESP_LOGE(TAG, "Unsupported UWB calibration method: %u",
+                 (unsigned)APP_UWB_CALIBRATION_METHOD);
+        vTaskDelete(NULL);
+        break;
+    }
+}
+
 static uint32_t uwb_dw3000_next_random_interval_ms(void)
 {
     const uint32_t min_ms = APP_UWB_BEACON_MIN_INTERVAL_MS;
@@ -1057,23 +2145,23 @@ static uint32_t uwb_dw3000_next_random_interval_ms(void)
     return min_ms + (esp_random() % (max_ms - min_ms + 1U));
 }
 
-static esp_err_t uwb_dw3000_send_beacon(uint32_t sequence)
+static esp_err_t uwb_dw3000_prepare_tx(const uint8_t *payload,
+                                       size_t payload_len)
 {
-    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
-    uwb_dw3000_build_payload(sequence, payload);
-
     ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF), TAG,
                         "TXRXOFF command failed");
     s_rx_armed = false;
     ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
                         "clear before TX failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_write_tx_payload(payload), TAG,
+    ESP_RETURN_ON_ERROR(uwb_dw3000_write_tx_payload(payload, payload_len), TAG,
                         "TX buffer write failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_set_frame_length(sizeof(payload)), TAG,
+    ESP_RETURN_ON_ERROR(uwb_dw3000_set_frame_length(payload_len), TAG,
                         "TX frame length write failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_TX), TAG,
-                        "TX command failed");
+    return ESP_OK;
+}
 
+static esp_err_t uwb_dw3000_wait_for_tx_complete(uint64_t *tx_timestamp)
+{
     const TickType_t start = xTaskGetTickCount();
     while (true) {
         uint32_t status = 0;
@@ -1084,20 +2172,23 @@ static esp_err_t uwb_dw3000_send_beacon(uint32_t sequence)
         }
 
         if ((status & DW3000_STATUS_TXFRS) != 0) {
+            if (tx_timestamp != NULL) {
+                ESP_RETURN_ON_ERROR(uwb_dw3000_read_tx_timestamp(tx_timestamp),
+                                    TAG, "TX timestamp read failed");
+            }
             s_tx_count++;
             ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
                                 "clear after TX failed");
-            ESP_LOGI(TAG, "UWB TX beacon src=%u seq=%lu total_tx=%lu",
-                     (unsigned)s_source_id, (unsigned long)sequence,
-                     (unsigned long)s_tx_count);
             return ESP_OK;
         }
 
         if ((xTaskGetTickCount() - start) >=
             pdMS_TO_TICKS(UWB_DW3000_TX_TIMEOUT_MS)) {
             s_tx_error_count++;
-            ESP_LOGW(TAG, "UWB TX timeout seq=%lu SYS_STATUS=0x%08lx",
-                     (unsigned long)sequence, (unsigned long)status);
+            ESP_LOGW(TAG, "UWB TX timeout SYS_STATUS=0x%08lx",
+                     (unsigned long)status);
+            ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF),
+                                TAG, "TXRXOFF after TX timeout failed");
             ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
                                 "clear after TX timeout failed");
             return ESP_ERR_TIMEOUT;
@@ -1105,6 +2196,71 @@ static esp_err_t uwb_dw3000_send_beacon(uint32_t sequence)
 
         uwb_dw3000_delay_ms(UWB_DW3000_TX_POLL_MS);
     }
+}
+
+static esp_err_t uwb_dw3000_send_payload(const uint8_t *payload,
+                                         size_t payload_len,
+                                         uint64_t *tx_timestamp)
+{
+    ESP_RETURN_ON_ERROR(uwb_dw3000_prepare_tx(payload, payload_len), TAG,
+                        "TX prepare failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_TX), TAG,
+                        "TX command failed");
+
+    return uwb_dw3000_wait_for_tx_complete(tx_timestamp);
+}
+
+static esp_err_t uwb_dw3000_send_payload_delayed(
+    const uint8_t *payload, size_t payload_len, uint64_t tx_timestamp,
+    uint64_t *programmed_tx_timestamp, uint64_t *actual_tx_timestamp)
+{
+    ESP_RETURN_ON_ERROR(uwb_dw3000_prepare_tx(payload, payload_len), TAG,
+                        "delayed TX prepare failed");
+
+    const uint32_t delayed_time_word =
+        uwb_dw3000_delayed_time_word(tx_timestamp);
+    ESP_RETURN_ON_ERROR(uwb_dw3000_set_delayed_trx_time(delayed_time_word),
+                        TAG, "DX_TIME write failed");
+
+    if (programmed_tx_timestamp != NULL) {
+        *programmed_tx_timestamp =
+            uwb_dw3000_programmed_tx_timestamp(delayed_time_word);
+    }
+
+    ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_DTX), TAG,
+                        "delayed TX command failed");
+
+    uint32_t status = 0;
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW, 0x44, &status), TAG,
+        "SYS_STATUS after delayed TX failed");
+    if ((status & DW3000_STATUS_HPDWARN) != 0) {
+        s_tx_error_count++;
+        ESP_LOGW(TAG,
+                 "UWB delayed TX rejected timestamp=0x%010llx word=0x%08lx SYS_STATUS=0x%08lx",
+                 (unsigned long long)tx_timestamp,
+                 (unsigned long)delayed_time_word, (unsigned long)status);
+        ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF), TAG,
+                            "TXRXOFF after delayed TX reject failed");
+        ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
+                            "clear after delayed TX reject failed");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return uwb_dw3000_wait_for_tx_complete(actual_tx_timestamp);
+}
+
+static esp_err_t uwb_dw3000_send_beacon(uint32_t sequence)
+{
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+    uwb_dw3000_build_payload(sequence, payload);
+
+    ESP_RETURN_ON_ERROR(uwb_dw3000_send_payload(payload, sizeof(payload), NULL),
+                        TAG, "beacon TX failed");
+    ESP_LOGI(TAG, "UWB TX beacon src=%u seq=%lu total_tx=%lu",
+             (unsigned)s_source_id, (unsigned long)sequence,
+             (unsigned long)s_tx_count);
+    return ESP_OK;
 }
 
 static void uwb_dw3000_radio_loop(void)
@@ -1219,14 +2375,26 @@ static void uwb_dw3000_task(void *arg)
         return;
     }
 
-    uwb_dw3000_radio_loop();
+    if (s_runtime_mode == UWB_DW3000_RUNTIME_DISTANCE_TEST) {
+        uwb_dw3000_distance_test_loop();
+    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_CALIBRATION) {
+        uwb_dw3000_calibration_loop();
+    } else {
+        uwb_dw3000_radio_loop();
+    }
 }
 
-esp_err_t uwb_dw3000_start(void)
+static esp_err_t uwb_dw3000_start_runtime(
+    enum uwb_dw3000_runtime_mode runtime_mode)
 {
     if (s_started) {
+        if (s_runtime_mode != runtime_mode) {
+            return ESP_ERR_INVALID_STATE;
+        }
         return ESP_OK;
     }
+
+    s_runtime_mode = runtime_mode;
 
     const BaseType_t created = xTaskCreatePinnedToCore(
         uwb_dw3000_task, "uwb_dw3000", UWB_DW3000_TASK_STACK_WORDS, NULL,
@@ -1238,6 +2406,21 @@ esp_err_t uwb_dw3000_start(void)
 
     s_started = true;
     return ESP_OK;
+}
+
+esp_err_t uwb_dw3000_start(void)
+{
+    return uwb_dw3000_start_runtime(UWB_DW3000_RUNTIME_BEACON_SMOKE);
+}
+
+esp_err_t uwb_dw3000_start_distance_test(void)
+{
+    return uwb_dw3000_start_runtime(UWB_DW3000_RUNTIME_DISTANCE_TEST);
+}
+
+esp_err_t uwb_dw3000_start_calibration(void)
+{
+    return uwb_dw3000_start_runtime(UWB_DW3000_RUNTIME_CALIBRATION);
 }
 
 bool uwb_dw3000_is_ready(void)

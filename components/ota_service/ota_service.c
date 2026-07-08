@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "app_identity.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "stability_test_service.h"
@@ -133,13 +134,21 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     const esp_partition_t *boot = esp_ota_get_boot_partition();
     const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
 
-    char response[2048];
+    char response[2300];
     const int len = snprintf(
         response, sizeof(response),
         "{"
         "\"project\":\"%s\","
         "\"version\":\"%s\","
         "\"idf\":\"%s\","
+        "\"hostname\":\"%s\","
+        "\"module_id\":%u,"
+        "\"module_id_from_nvs\":%s,"
+        "\"module_id_provisioned_this_boot\":%s,"
+        "\"uwb_role\":%u,"
+        "\"uwb_role_name\":\"%s\","
+        "\"uwb_role_from_nvs\":%s,"
+        "\"uwb_role_provisioned_this_boot\":%s,"
         "\"ota_status\":\"%s\","
         "\"wifi_connected\":%s,"
         "\"ip\":\"%s\","
@@ -179,6 +188,13 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"stability_log_stress_enqueue_failed\":%lu"
         "}\n",
         app->project_name, app->version, app->idf_ver,
+        app_identity_get_hostname(), (unsigned)app_identity_get_module_id(),
+        app_identity_module_id_from_nvs() ? "true" : "false",
+        app_identity_module_id_provisioned_this_boot() ? "true" : "false",
+        (unsigned)app_identity_get_uwb_role(),
+        app_identity_uwb_role_to_string(app_identity_get_uwb_role()),
+        app_identity_uwb_role_from_nvs() ? "true" : "false",
+        app_identity_uwb_role_provisioned_this_boot() ? "true" : "false",
         ota_status_to_string(s_status),
         wifi_service_is_connected() ? "true" : "false",
         wifi_service_get_ip_address(),

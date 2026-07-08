@@ -3,7 +3,7 @@
 
 /*
  * Non-secret application defaults live here and are versioned with the
- * firmware. Local credentials, tokens, hostnames, and PC IPs stay in secrets.h.
+ * firmware. Credentials and tokens stay in secrets.h.
  */
 
 #define APP_RUNTIME_MODE_UWB_BEACON_SMOKE 0
@@ -12,11 +12,45 @@
 #define APP_RUNTIME_MODE_UWB_RANGING 3
 
 #ifndef APP_RUNTIME_MODE
-#define APP_RUNTIME_MODE APP_RUNTIME_MODE_UWB_BEACON_SMOKE
+#define APP_RUNTIME_MODE APP_RUNTIME_MODE_UWB_DISTANCE_TEST
+#endif
+
+#ifndef APP_WIFI_SSID
+#define APP_WIFI_SSID "ED421"
 #endif
 
 #ifndef APP_UWB_ENABLED
 #define APP_UWB_ENABLED 1
+#endif
+
+#ifndef APP_IDENTITY_HOSTNAME_PREFIX
+#define APP_IDENTITY_HOSTNAME_PREFIX "uwb-module-"
+#endif
+
+/*
+ * 0 = read module ID from NVS. Set to 1 only for a provisioning boot that
+ * should write APP_IDENTITY_PROVISION_MODULE_ID to NVS. Keep this at 0 in the
+ * common firmware after the provisioning flash.
+ */
+#ifndef APP_IDENTITY_PROVISION_ENABLED
+#define APP_IDENTITY_PROVISION_ENABLED 0
+#endif
+
+#ifndef APP_IDENTITY_PROVISION_MODULE_ID
+#define APP_IDENTITY_PROVISION_MODULE_ID 0
+#endif
+
+#ifndef APP_IDENTITY_PROVISION_UWB_ROLE_ENABLED
+#define APP_IDENTITY_PROVISION_UWB_ROLE_ENABLED 0
+#endif
+
+#ifndef APP_IDENTITY_PROVISION_UWB_ROLE
+#define APP_IDENTITY_PROVISION_UWB_ROLE 0
+#endif
+
+/* Optional fallback if NVS is empty and no legacy HOSTNAME suffix is present. */
+#ifndef APP_IDENTITY_DEFAULT_MODULE_ID
+#define APP_IDENTITY_DEFAULT_MODULE_ID 0
 #endif
 
 #ifndef APP_WIFI_USE_WPA3
@@ -109,6 +143,10 @@
 
 #ifndef APP_WIRELESS_LOG_ENABLED
 #define APP_WIRELESS_LOG_ENABLED 1
+#endif
+
+#ifndef APP_WIRELESS_LOG_TARGET
+#define APP_WIRELESS_LOG_TARGET "192.168.140.121"
 #endif
 
 #ifndef APP_WIRELESS_LOG_PORT

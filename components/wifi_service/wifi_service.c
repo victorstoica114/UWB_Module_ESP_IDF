@@ -11,13 +11,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
-#include "nvs_flash.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
 #endif
 
 #include "app_config.h"
+#include "app_identity.h"
 
 #ifndef APP_WIFI_SSID
 #define APP_WIFI_SSID ""
@@ -25,10 +25,6 @@
 
 #ifndef APP_WIFI_PASSWORD
 #define APP_WIFI_PASSWORD ""
-#endif
-
-#ifndef HOSTNAME
-#define HOSTNAME "uwb-module"
 #endif
 
 #if APP_WIFI_SCAN_MAX_APS < 1
@@ -495,7 +491,7 @@ static esp_err_t wifi_service_scan_and_log(void)
         ESP_LOGW(TAG,
                  "Multiple BSSIDs found for this SSID. If connection stays "
                  "unstable, set APP_WIFI_LOCK_BSSID, APP_WIFI_BSSID, and "
-                 "APP_WIFI_LOCK_CHANNEL in secrets.h");
+                 "APP_WIFI_LOCK_CHANNEL in app_config.h");
     }
 
     return ESP_OK;
@@ -565,13 +561,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 
 static esp_err_t wifi_service_init_nvs(void)
 {
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
-        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
-    return err;
+    return app_identity_init();
 }
 
 static esp_err_t wifi_service_init_driver(void)
@@ -591,8 +581,8 @@ static esp_err_t wifi_service_init_driver(void)
         return ESP_FAIL;
     }
 
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_set_hostname(s_sta_netif,
-                                                         HOSTNAME));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_set_hostname(
+        s_sta_netif, app_identity_get_hostname()));
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "esp_wifi_init failed");
@@ -692,7 +682,7 @@ static void wifi_service_task(void *arg)
         return;
     }
 
-    ESP_LOGI(TAG, "Wi-Fi hostname: %s", HOSTNAME);
+    ESP_LOGI(TAG, "Wi-Fi hostname: %s", app_identity_get_hostname());
     err = esp_wifi_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_start failed: %s", esp_err_to_name(err));

@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "app_config.h"
+#include "app_identity.h"
 #include "app_led.h"
 #include "board_config.h"
 #include "driver/gpio.h"
@@ -138,22 +139,6 @@ static const char *runtime_mode_name(int mode)
     }
 }
 
-static const char *uwb_role_name(int role)
-{
-    switch (role) {
-    case APP_UWB_ROLE_UNSET:
-        return "unset";
-    case APP_UWB_ROLE_ANCHOR:
-        return "anchor";
-    case APP_UWB_ROLE_TAG:
-        return "tag";
-    case APP_UWB_ROLE_DISTANCE_TEST_NODE:
-        return "distance_test_node";
-    default:
-        return "unknown";
-    }
-}
-
 static esp_err_t app_manager_start_selected_runtime(void)
 {
     if (!APP_UWB_ENABLED) {
@@ -161,11 +146,14 @@ static esp_err_t app_manager_start_selected_runtime(void)
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Application runtime: mode=%s(%d), uwb_role=%s(%d), "
-                  "uwb_source_id=%u",
+    const uint8_t runtime_uwb_role = app_identity_get_uwb_role();
+    ESP_LOGI(TAG, "Application runtime: mode=%s(%d), uwb_role=%s(%u), "
+                  "uwb_source_id=%u, hostname=%s, module_id=%u",
              runtime_mode_name(APP_RUNTIME_MODE), APP_RUNTIME_MODE,
-             uwb_role_name(APP_UWB_ROLE), APP_UWB_ROLE,
-             (unsigned)APP_UWB_SOURCE_ID);
+             app_identity_uwb_role_to_string(runtime_uwb_role),
+             (unsigned)runtime_uwb_role,
+             (unsigned)APP_UWB_SOURCE_ID, app_identity_get_hostname(),
+             (unsigned)app_identity_get_module_id());
 
     switch (APP_RUNTIME_MODE) {
     case APP_RUNTIME_MODE_UWB_BEACON_SMOKE:
@@ -206,6 +194,12 @@ void app_manager_start(void)
     s_app_started = true;
     ESP_LOGI(TAG, "Status LED blink started on GPIO%d, core %d",
              BOARD_CONFIG_STATUS_LED_GPIO, STATUS_LED_TASK_CORE);
+
+    const esp_err_t identity_err = app_identity_init();
+    if (identity_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize app identity: %s",
+                 esp_err_to_name(identity_err));
+    }
 
     const esp_err_t wifi_err = wifi_service_start();
     if (wifi_err != ESP_OK) {

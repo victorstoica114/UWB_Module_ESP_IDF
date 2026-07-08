@@ -4,6 +4,7 @@ sdkconfig
 sdkconfig.old
 dependencies.lock
 secrets.h
+tools/ota_targets.local.txt
 UWB_Module/
 reference/external/
 .agents/

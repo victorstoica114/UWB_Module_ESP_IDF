@@ -18,6 +18,24 @@
       "problemMatcher": []
     },
     {
+      "label": "ESP-IDF OTA Upload All",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\tools\\ota_upload.ps1",
+        "-TargetList",
+        "${input:otaTargetList}",
+        "-Parallel",
+        "${input:otaParallel}"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
       "label": "Wireless Logs",
       "type": "shell",
       "command": "python",
@@ -30,6 +48,24 @@
       ],
       "isBackground": true,
       "problemMatcher": []
+    },
+    {
+      "label": "Serial Log",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\tools\\serial_log.ps1",
+        "-Port",
+        "${input:serialPort}",
+        "-Seconds",
+        "${input:serialSeconds}",
+        "-Reset"
+      ],
+      "problemMatcher": []
     }
   ],
   "inputs": [
@@ -40,10 +76,34 @@
       "default": "192.168.140.143"
     },
     {
+      "id": "otaTargetList",
+      "type": "promptString",
+      "description": "OTA target list file",
+      "default": "tools\\ota_targets.local.txt"
+    },
+    {
+      "id": "otaParallel",
+      "type": "promptString",
+      "description": "OTA parallel uploads",
+      "default": "5"
+    },
+    {
       "id": "wirelessLogPort",
       "type": "promptString",
       "description": "Wireless log TCP listener port",
       "default": "6055"
+    },
+    {
+      "id": "serialPort",
+      "type": "promptString",
+      "description": "Serial port",
+      "default": "COM55"
+    },
+    {
+      "id": "serialSeconds",
+      "type": "promptString",
+      "description": "Serial capture seconds, 0 keeps reading",
+      "default": "30"
     }
   ]
 }

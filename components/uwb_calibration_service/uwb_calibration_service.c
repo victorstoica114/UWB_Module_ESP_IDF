@@ -1,16 +1,24 @@
 #include "uwb_calibration_service.h"
 
+#include "app_identity.h"
 #include "esp_log.h"
+#include "uwb_dw3000.h"
 #include "uwb_config.h"
 
 static const char *TAG = "uwb_calibration";
 
 esp_err_t uwb_calibration_service_start(void)
 {
-    ESP_LOGW(TAG,
-             "Antenna delay calibration mode selected; runtime skeleton only. "
-             "default_delay=0x%04x source_id=%u",
+    ESP_LOGI(TAG,
+             "Antenna delay calibration mode selected: method=%u "
+             "known_distance=%u mm samples=%u default_delay=0x%04x "
+             "source_id=%u role=%s(%u)",
+             (unsigned)APP_UWB_CALIBRATION_METHOD,
+             (unsigned)APP_UWB_CALIBRATION_KNOWN_DISTANCE_MM,
+             (unsigned)APP_UWB_CALIBRATION_SAMPLE_COUNT,
              (unsigned)APP_UWB_ANTENNA_DELAY_DEFAULT,
-             (unsigned)APP_UWB_SOURCE_ID);
-    return ESP_OK;
+             (unsigned)APP_UWB_SOURCE_ID,
+             app_identity_uwb_role_to_string(app_identity_get_uwb_role()),
+             (unsigned)app_identity_get_uwb_role());
+    return uwb_dw3000_start_calibration();
 }

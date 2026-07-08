@@ -1,0 +1,6 @@
+# One OTA target per line. Use IP addresses, hostnames, or full http://... URLs.
+# Lines can include inline comments after whitespace + #.
+#
+# 192.168.140.143 # uwb-module-1
+# 192.168.140.144 # uwb-module-2
+# uwb-module-3.local

@@ -15,15 +15,8 @@
 #include "lwip/sockets.h"
 #include "wifi_service.h"
 
-#if __has_include("secrets.h")
-#include "secrets.h"
-#endif
-
 #include "app_config.h"
-
-#ifndef HOSTNAME
-#define HOSTNAME "uwb-module"
-#endif
+#include "app_identity.h"
 
 #ifndef APP_WIRELESS_LOG_TARGET
 #define APP_WIRELESS_LOG_TARGET ""
@@ -117,8 +110,8 @@ static bool wireless_log_parse_idf_line(const char *raw, char *out,
         message++;
     }
 
-    snprintf(out, out_size, "[%s] [%10lu ms] [%c][%s] %s", HOSTNAME,
-             uptime_ms, level, tag, message);
+    snprintf(out, out_size, "[%s] [%10lu ms] [%c][%s] %s",
+             app_identity_get_hostname(), uptime_ms, level, tag, message);
     return true;
 }
 
