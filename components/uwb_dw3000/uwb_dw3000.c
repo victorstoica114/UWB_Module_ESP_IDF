@@ -75,10 +75,42 @@ enum {
 #define DW3000_CMD_TX 0x01
 #define DW3000_CMD_RX 0x02
 #define DW3000_CMD_DTX 0x03
+#define DW3000_CMD_TX_W4R 0x0C
+#define DW3000_CMD_DTX_W4R 0x0D
 
+#define DW3000_SYS_CFG_SUB 0x10
+#define DW3000_TX_FCTRL_SUB 0x24
 #define DW3000_DX_TIME_SUB 0x2C
+#define DW3000_RX_FWTO_SUB 0x34
+#define DW3000_SYS_STATUS_SUB 0x44
+#define DW3000_RX_FINFO_SUB 0x4C
 #define DW3000_RX_TIME_SUB 0x00
+#define DW3000_TX_ANTD_SUB 0x04
+#define DW3000_ACK_RESP_SUB 0x08
+#define DW3000_CHAN_CTRL_SUB 0x14
 #define DW3000_TX_TIME_SUB 0x74
+#define DW3000_STS_CONFIG_LO_SUB 0x12
+#define DW3000_STS_CONFIG_HI_SUB 0x16
+
+#define DW3000_CIA_DIAG_0_SUB 0x20
+#define DW3000_IP_DIAG_0_SUB 0x28
+#define DW3000_IP_DIAG_1_SUB 0x2C
+#define DW3000_IP_DIAG_2_SUB 0x30
+#define DW3000_IP_DIAG_3_SUB 0x34
+#define DW3000_IP_DIAG_4_SUB 0x38
+#define DW3000_IP_DIAG_8_SUB 0x48
+#define DW3000_IP_DIAG_12_SUB 0x58
+#define DW3000_RDB_DIAG_MODE_SUB 0x28
+
+#define DW3000_EVC_CTRL_SUB 0x00
+#define DW3000_EVC_COUNT0_SUB 0x04
+#define DW3000_EVC_COUNT1_SUB 0x08
+#define DW3000_EVC_COUNT2_SUB 0x0C
+#define DW3000_EVC_COUNT3_SUB 0x10
+#define DW3000_EVC_COUNT4_SUB 0x14
+#define DW3000_EVC_COUNT5_SUB 0x18
+#define DW3000_EVC_COUNT6_SUB 0x1C
+#define DW3000_EVC_COUNT7_SUB 0x28
 
 #define DW3000_GPIO_MODE_SUB 0x00
 #define DW3000_GPIO_DIR_SUB 0x08
@@ -125,9 +157,52 @@ enum {
 #define DW3000_RX_TIMEOUT_MASK \
     (DW3000_STATUS_RXFTO | DW3000_STATUS_RXPTO | DW3000_STATUS_RXSTO | DW3000_STATUS_CPERR)
 #define DW3000_RX_FINFO_RXFLEN_MASK 0x000003FFUL
+#define DW3000_RX_FINFO_RXPACC_MASK 0xFFF00000UL
+#define DW3000_RX_FINFO_RXPACC_SHIFT 20U
 #define DW3000_TX_FCTRL_TXB_OFFSET_MASK 0x03FF0000UL
 #define DW3000_TX_FCTRL_TR_MASK 0x00000800UL
 #define DW3000_TX_FCTRL_TXFLEN_MASK 0x000003FFUL
+#define DW3000_TX_FCTRL_TXPSR_MASK 0x0000F000UL
+#define DW3000_TX_FCTRL_TXPSR_SHIFT 12U
+#define DW3000_TX_FCTRL_TXBR_MASK 0x00000400UL
+#define DW3000_TX_FCTRL_TXBR_SHIFT 10U
+#define DW3000_CHAN_CTRL_RX_PCODE_MASK 0x00001F00UL
+#define DW3000_CHAN_CTRL_RX_PCODE_SHIFT 8U
+#define DW3000_CHAN_CTRL_TX_PCODE_MASK 0x000000F8UL
+#define DW3000_CHAN_CTRL_TX_PCODE_SHIFT 3U
+#define DW3000_CHAN_CTRL_SFD_TYPE_MASK 0x00000006UL
+#define DW3000_CHAN_CTRL_SFD_TYPE_SHIFT 1U
+#define DW3000_CHAN_CTRL_RF_CHAN_MASK 0x00000001UL
+#define DW3000_SYS_CFG_RXWTOE_BIT_MASK 0x00000200UL
+#define DW3000_SYS_CFG_CP_SPC_BIT_MASK 0x00003000UL
+#define DW3000_SYS_CFG_CP_SDC_BIT_MASK 0x00008000UL
+#define DW3000_SYS_CFG_STS_MODE_MASK \
+    (DW3000_SYS_CFG_CP_SPC_BIT_MASK | DW3000_SYS_CFG_CP_SDC_BIT_MASK)
+#define DW3000_SYS_CFG_STS_MODE_SHIFT 12U
+#define DW3000_ACK_RESP_W4R_TIM_BIT_MASK 0x000FFFFFUL
+
+#define DW3000_STS_CONFIG_HI_RES 0x94UL
+#define DW3000_STS_CONFIG_HI_CHECK_MASK \
+    (0x80000000UL | 0x40000000UL | 0x000000F0UL)
+
+#define DW3000_EVC_CTRL_CLR_BIT_MASK 0x02U
+#define DW3000_EVC_CTRL_EN_BIT_MASK 0x01U
+#define DW3000_EVC_12BIT_LOW_MASK 0x00000FFFUL
+#define DW3000_EVC_12BIT_HIGH_MASK 0x0FFF0000UL
+#define DW3000_EVC_8BIT_LOW_MASK 0x000000FFUL
+#define DW3000_EVC_8BIT_HIGH_MASK 0x00FF0000UL
+#define DW3000_EVC_HIGH_SHIFT 16U
+
+#define DW3000_CIA_CONF_DIAGNOSTIC_OFF_MASK 0x00100000UL
+#define DW3000_CIA_DIAG_LOG_ALL 0x01U
+#define DW3000_IPATOV_PEAK_MASK 0x7FFFFFFFUL
+#define DW3000_IPATOV_PEAK_AMP_MASK 0x001FFFFFUL
+#define DW3000_IPATOV_PEAK_INDEX_SHIFT 21U
+#define DW3000_IPATOV_POWER_MASK 0x0001FFFFUL
+#define DW3000_IPATOV_F_MASK 0x003FFFFFUL
+#define DW3000_IPATOV_FP_INDEX_MASK 0x0000FFFFUL
+#define DW3000_IPATOV_ACCUM_COUNT_MASK 0x00000FFFUL
+#define DW3000_CIA_XTAL_OFFSET_MASK 0x00001FFFUL
 
 #define UWB_DW3000_TIMESTAMP_MASK ((1ULL << 40U) - 1ULL)
 #define UWB_DW3000_DELAYED_TIME_MASK 0xFFFFFFFEUL
@@ -160,10 +235,43 @@ enum uwb_dw3000_runtime_mode {
     UWB_DW3000_RUNTIME_CALIBRATION,
 };
 
+struct uwb_rx_diagnostics {
+    bool valid;
+    uint16_t rx_pacc;
+    int16_t xtal_offset;
+    uint32_t ipatov_peak_amp;
+    uint16_t ipatov_peak_index;
+    uint32_t ipatov_power;
+    uint32_t ipatov_f1;
+    uint32_t ipatov_f2;
+    uint32_t ipatov_f3;
+    uint16_t ipatov_fp_index;
+    uint16_t ipatov_accum_count;
+};
+
+struct uwb_event_counters {
+    uint16_t rse;
+    uint16_t phe;
+    uint16_t fce;
+    uint16_t fcg;
+    uint8_t ovr;
+    uint8_t ffr;
+    uint16_t pto;
+    uint16_t sfdt;
+    uint16_t txfs;
+    uint8_t fwto;
+    uint8_t swce;
+    uint8_t hpw;
+    uint16_t prej;
+    uint8_t vwarn;
+    uint8_t cpqe;
+};
+
 struct uwb_dw3000_rx_frame {
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN];
     uint16_t payload_len;
     uint64_t rx_timestamp;
+    struct uwb_rx_diagnostics diagnostics;
 };
 
 struct uwb_distance_frame {
@@ -172,6 +280,7 @@ struct uwb_distance_frame {
     uint8_t destination_id;
     uint16_t sequence;
     uint64_t rx_timestamp;
+    struct uwb_rx_diagnostics diagnostics;
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN];
     uint16_t payload_len;
 };
@@ -188,6 +297,9 @@ struct uwb_distance_measurement {
     uint64_t resp_rx_ts;
     uint64_t final_tx_ts;
     uint64_t final_rx_ts;
+    struct uwb_rx_diagnostics poll_rx_diagnostics;
+    struct uwb_rx_diagnostics final_rx_diagnostics;
+    struct uwb_rx_diagnostics report_rx_diagnostics;
 };
 
 struct uwb_calibration_stats {
@@ -202,9 +314,19 @@ struct uwb_calibration_stats {
 static esp_err_t uwb_dw3000_send_payload(const uint8_t *payload,
                                          size_t payload_len,
                                          uint64_t *tx_timestamp);
+static esp_err_t uwb_dw3000_send_payload_expect_rx(
+    const uint8_t *payload, size_t payload_len, uint32_t rx_after_tx_delay_uus,
+    uint32_t rx_timeout_ms, uint64_t *tx_timestamp);
 static esp_err_t uwb_dw3000_send_payload_delayed(
     const uint8_t *payload, size_t payload_len, uint64_t tx_timestamp,
     uint64_t *programmed_tx_timestamp, uint64_t *actual_tx_timestamp);
+static esp_err_t uwb_dw3000_send_payload_delayed_expect_rx(
+    const uint8_t *payload, size_t payload_len, uint64_t tx_timestamp,
+    uint32_t rx_after_tx_delay_uus, uint32_t rx_timeout_ms,
+    uint64_t *programmed_tx_timestamp, uint64_t *actual_tx_timestamp);
+static esp_err_t uwb_dw3000_update_u32(uint8_t base, uint8_t sub,
+                                       uint32_t clear_mask,
+                                       uint32_t set_mask);
 
 #define DW3000_PMSC_STATE_IDLE 0x03
 
@@ -521,6 +643,14 @@ static esp_err_t uwb_dw3000_read_tx_timestamp(uint64_t *timestamp)
                                        DW3000_TX_TIME_SUB, timestamp);
 }
 
+static int32_t uwb_dw3000_sign_extend(uint32_t value, uint8_t bits)
+{
+    const uint32_t sign_bit = 1UL << (bits - 1U);
+    const uint32_t mask = (1UL << bits) - 1UL;
+    value &= mask;
+    return (int32_t)((value ^ sign_bit) - sign_bit);
+}
+
 static uint64_t uwb_dw3000_add_timestamp_delta(uint64_t timestamp,
                                                uint64_t delta)
 {
@@ -552,6 +682,134 @@ static esp_err_t uwb_dw3000_set_delayed_trx_time(uint32_t delayed_time_word)
                                     DW3000_DX_TIME_SUB, delayed_time_word, 4);
 }
 
+static esp_err_t
+uwb_dw3000_configure_cia_diagnostics(bool enable_all_registers)
+{
+    if (!enable_all_registers) {
+        ESP_RETURN_ON_ERROR(
+            uwb_dw3000_update_u32(DW3000_REG_CIA_3, DW3000_SUB_NONE, 0,
+                                  DW3000_CIA_CONF_DIAGNOSTIC_OFF_MASK),
+            TAG, "CIA diagnostics disable failed");
+        ESP_LOGI(TAG, "DW3000 CIA diagnostics disabled");
+        return ESP_OK;
+    }
+
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_update_u32(DW3000_REG_CIA_3, DW3000_SUB_NONE,
+                              DW3000_CIA_CONF_DIAGNOSTIC_OFF_MASK, 0),
+        TAG, "CIA diagnostics enable failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_HIGH,
+                                 DW3000_RDB_DIAG_MODE_SUB,
+                                 DW3000_CIA_DIAG_LOG_ALL >> 1U, 1),
+        TAG, "RDB_DIAG_MODE write failed");
+    ESP_LOGI(TAG, "DW3000 CIA diagnostics enabled");
+    return ESP_OK;
+}
+
+static esp_err_t
+uwb_dw3000_read_rx_diagnostics(struct uwb_rx_diagnostics *diagnostics)
+{
+    if (diagnostics == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(diagnostics, 0, sizeof(*diagnostics));
+
+#if APP_UWB_DIAGNOSTICS_ENABLED
+    uint32_t rx_finfo = 0;
+    uint32_t cia_diag0 = 0;
+    uint32_t ip_diag0 = 0;
+    uint32_t ip_diag1 = 0;
+    uint32_t ip_diag2 = 0;
+    uint32_t ip_diag3 = 0;
+    uint32_t ip_diag4 = 0;
+    uint32_t ip_diag8 = 0;
+    uint32_t ip_diag12 = 0;
+
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW, DW3000_RX_FINFO_SUB,
+                          &rx_finfo),
+        TAG,
+        "RX diagnostics RX_FINFO read failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_read32(DW3000_REG_CIA_1, DW3000_CIA_DIAG_0_SUB,
+                          &cia_diag0),
+        TAG, "RX diagnostics CIA_DIAG_0 read failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_read32(DW3000_REG_CIA_1, DW3000_IP_DIAG_0_SUB, &ip_diag0),
+        TAG, "RX diagnostics IP_DIAG_0 read failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_read32(DW3000_REG_CIA_1, DW3000_IP_DIAG_1_SUB, &ip_diag1),
+        TAG, "RX diagnostics IP_DIAG_1 read failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_read32(DW3000_REG_CIA_1, DW3000_IP_DIAG_2_SUB, &ip_diag2),
+        TAG, "RX diagnostics IP_DIAG_2 read failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_read32(DW3000_REG_CIA_1, DW3000_IP_DIAG_3_SUB, &ip_diag3),
+        TAG, "RX diagnostics IP_DIAG_3 read failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_read32(DW3000_REG_CIA_1, DW3000_IP_DIAG_4_SUB, &ip_diag4),
+        TAG, "RX diagnostics IP_DIAG_4 read failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_read32(DW3000_REG_CIA_1, DW3000_IP_DIAG_8_SUB, &ip_diag8),
+        TAG, "RX diagnostics IP_DIAG_8 read failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_read32(DW3000_REG_CIA_1, DW3000_IP_DIAG_12_SUB,
+                          &ip_diag12),
+        TAG, "RX diagnostics IP_DIAG_12 read failed");
+
+    diagnostics->valid = true;
+    diagnostics->rx_pacc =
+        (uint16_t)((rx_finfo & DW3000_RX_FINFO_RXPACC_MASK) >>
+                   DW3000_RX_FINFO_RXPACC_SHIFT);
+    diagnostics->xtal_offset = (int16_t)uwb_dw3000_sign_extend(
+        cia_diag0 & DW3000_CIA_XTAL_OFFSET_MASK, 13);
+    ip_diag0 &= DW3000_IPATOV_PEAK_MASK;
+    diagnostics->ipatov_peak_amp =
+        ip_diag0 & DW3000_IPATOV_PEAK_AMP_MASK;
+    diagnostics->ipatov_peak_index =
+        (uint16_t)(ip_diag0 >> DW3000_IPATOV_PEAK_INDEX_SHIFT);
+    diagnostics->ipatov_power = ip_diag1 & DW3000_IPATOV_POWER_MASK;
+    diagnostics->ipatov_f1 = ip_diag2 & DW3000_IPATOV_F_MASK;
+    diagnostics->ipatov_f2 = ip_diag3 & DW3000_IPATOV_F_MASK;
+    diagnostics->ipatov_f3 = ip_diag4 & DW3000_IPATOV_F_MASK;
+    diagnostics->ipatov_fp_index =
+        (uint16_t)(ip_diag8 & DW3000_IPATOV_FP_INDEX_MASK);
+    diagnostics->ipatov_accum_count =
+        (uint16_t)(ip_diag12 & DW3000_IPATOV_ACCUM_COUNT_MASK);
+#endif
+
+    return ESP_OK;
+}
+
+static bool uwb_dw3000_should_capture_rx_diagnostics(const uint8_t *payload,
+                                                     size_t payload_len)
+{
+#if APP_UWB_DIAGNOSTICS_ENABLED
+    if (payload == NULL || payload_len < UWB_DISTANCE_FRAME_HEADER_LEN ||
+        APP_UWB_DIAGNOSTICS_LOG_EVERY == 0) {
+        return false;
+    }
+
+    if (payload[0] != UWB_DISTANCE_FRAME_MAGIC_0 ||
+        payload[1] != UWB_DISTANCE_FRAME_MAGIC_1 ||
+        payload[2] != UWB_DISTANCE_FRAME_MAGIC_2 ||
+        payload[3] != UWB_DISTANCE_FRAME_MAGIC_3 ||
+        payload[4] != UWB_DISTANCE_FRAME_VERSION) {
+        return false;
+    }
+
+    const uint16_t sequence =
+        (uint16_t)(((uint16_t)payload[8]) | ((uint16_t)payload[9] << 8));
+    return (sequence % APP_UWB_DIAGNOSTICS_LOG_EVERY) == 0;
+#else
+    (void)payload;
+    (void)payload_len;
+    return false;
+#endif
+}
+
 static esp_err_t uwb_dw3000_update_u32(uint8_t base, uint8_t sub,
                                        uint32_t clear_mask,
                                        uint32_t set_mask)
@@ -564,6 +822,277 @@ static esp_err_t uwb_dw3000_update_u32(uint8_t base, uint8_t sub,
     return uwb_dw3000_write_u32_len(base, sub, value, sizeof(value));
 }
 
+static esp_err_t
+uwb_dw3000_set_rx_after_tx_delay(uint32_t rx_after_tx_delay_uus)
+{
+    if ((rx_after_tx_delay_uus & ~DW3000_ACK_RESP_W4R_TIM_BIT_MASK) != 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return uwb_dw3000_update_u32(DW3000_REG_GEN_CFG_AES_HIGH,
+                                 DW3000_ACK_RESP_SUB,
+                                 DW3000_ACK_RESP_W4R_TIM_BIT_MASK,
+                                 rx_after_tx_delay_uus);
+}
+
+static esp_err_t uwb_dw3000_set_rx_timeout(uint32_t timeout_ms)
+{
+    if (timeout_ms == 0) {
+        return uwb_dw3000_update_u32(DW3000_REG_GEN_CFG_AES_LOW,
+                                     DW3000_SYS_CFG_SUB,
+                                     DW3000_SYS_CFG_RXWTOE_BIT_MASK, 0);
+    }
+
+    const uint32_t timeout_units = timeout_ms * 1000UL;
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW,
+                                 DW3000_RX_FWTO_SUB, timeout_units, 4),
+        TAG, "RX_FWTO write failed");
+    return uwb_dw3000_update_u32(DW3000_REG_GEN_CFG_AES_LOW,
+                                 DW3000_SYS_CFG_SUB, 0,
+                                 DW3000_SYS_CFG_RXWTOE_BIT_MASK);
+}
+
+static esp_err_t uwb_dw3000_prepare_rx_after_tx(uint32_t delay_uus,
+                                                uint32_t timeout_ms)
+{
+    ESP_RETURN_ON_ERROR(uwb_dw3000_set_rx_after_tx_delay(delay_uus), TAG,
+                        "RX-after-TX delay config failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_set_rx_timeout(timeout_ms), TAG,
+                        "RX timeout config failed");
+    return ESP_OK;
+}
+
+static bool uwb_dw3000_sts_mode_supported(uint32_t sts_mode)
+{
+    const uint32_t protocol = sts_mode & 0x3UL;
+    const uint32_t allowed_bits = 0xBUL;
+
+    if ((sts_mode & ~allowed_bits) != 0) {
+        return false;
+    }
+
+    if (sts_mode == APP_UWB_STS_MODE_OFF) {
+        return true;
+    }
+
+    return protocol == APP_UWB_STS_MODE_1 ||
+           protocol == APP_UWB_STS_MODE_2;
+}
+
+static esp_err_t uwb_dw3000_sts_length_reg_value(uint32_t symbols,
+                                                 uint8_t *reg_value)
+{
+    if (reg_value == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    switch (symbols) {
+    case 32:
+    case 64:
+    case 128:
+    case 256:
+    case 512:
+    case 1024:
+    case 2048:
+        *reg_value = (uint8_t)((symbols / 8U) - 1U);
+        return ESP_OK;
+    default:
+        return ESP_ERR_INVALID_ARG;
+    }
+}
+
+static const char *uwb_dw3000_sts_mode_name(uint32_t sts_mode)
+{
+    switch (sts_mode) {
+    case APP_UWB_STS_MODE_OFF:
+        return "off";
+    case APP_UWB_STS_MODE_1:
+        return "mode1";
+    case APP_UWB_STS_MODE_2:
+        return "mode2";
+    case APP_UWB_STS_MODE_1 | APP_UWB_STS_MODE_SDC:
+        return "mode1_sdc";
+    case APP_UWB_STS_MODE_2 | APP_UWB_STS_MODE_SDC:
+        return "mode2_sdc";
+    default:
+        return "unsupported";
+    }
+}
+
+static esp_err_t uwb_dw3000_configure_sts(void)
+{
+    const uint32_t sts_mode = APP_UWB_STS_MODE & 0xFUL;
+    uint8_t sts_len_reg = 0;
+
+    if (!uwb_dw3000_sts_mode_supported(sts_mode)) {
+        ESP_LOGE(TAG, "Unsupported STS mode 0x%lx for data frames",
+                 (unsigned long)sts_mode);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_sts_length_reg_value(APP_UWB_STS_LENGTH_SYMBOLS,
+                                        &sts_len_reg),
+        TAG, "invalid STS length");
+
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_STS_CFG, DW3000_SUB_NONE,
+                                 sts_len_reg, 1),
+        TAG, "STS length write failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_update_u32(DW3000_REG_GEN_CFG_AES_LOW, DW3000_SYS_CFG_SUB,
+                              DW3000_SYS_CFG_STS_MODE_MASK,
+                              sts_mode << DW3000_SYS_CFG_STS_MODE_SHIFT),
+        TAG, "STS mode write failed");
+
+    if (sts_mode != APP_UWB_STS_MODE_OFF) {
+        ESP_RETURN_ON_ERROR(
+            uwb_dw3000_update_u32(DW3000_REG_CIA_3,
+                                  DW3000_STS_CONFIG_HI_SUB,
+                                  DW3000_STS_CONFIG_HI_CHECK_MASK,
+                                  DW3000_STS_CONFIG_HI_RES),
+            TAG, "STS quality config write failed");
+    }
+
+    ESP_LOGI(TAG, "DW3000 STS config: mode=%s(0x%lx) length=%u symbols",
+             uwb_dw3000_sts_mode_name(sts_mode), (unsigned long)sts_mode,
+             (unsigned)APP_UWB_STS_LENGTH_SYMBOLS);
+    return ESP_OK;
+}
+
+static esp_err_t uwb_dw3000_configure_event_counters(void)
+{
+#if APP_UWB_EVENT_COUNTERS_ENABLED
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_DIG_DIAG, DW3000_EVC_CTRL_SUB,
+                                 DW3000_EVC_CTRL_CLR_BIT_MASK, 1),
+        TAG, "event counter clear failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_DIG_DIAG, DW3000_EVC_CTRL_SUB,
+                                 DW3000_EVC_CTRL_EN_BIT_MASK, 1),
+        TAG, "event counter enable failed");
+    ESP_LOGI(TAG, "DW3000 event counters enabled");
+#else
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_DIG_DIAG, DW3000_EVC_CTRL_SUB, 0,
+                                 1),
+        TAG, "event counter disable failed");
+    ESP_LOGI(TAG, "DW3000 event counters disabled");
+#endif
+    return ESP_OK;
+}
+
+static esp_err_t
+uwb_dw3000_read_event_counters(struct uwb_event_counters *counters)
+{
+    if (counters == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(counters, 0, sizeof(*counters));
+
+#if APP_UWB_EVENT_COUNTERS_ENABLED
+    uint32_t count0 = 0;
+    uint32_t count1 = 0;
+    uint32_t count2 = 0;
+    uint32_t count3 = 0;
+    uint32_t count4 = 0;
+    uint32_t count5 = 0;
+    uint32_t count6 = 0;
+    uint32_t count7 = 0;
+
+    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
+                                          DW3000_EVC_COUNT0_SUB, &count0),
+                        TAG, "EVC_COUNT0 read failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
+                                          DW3000_EVC_COUNT1_SUB, &count1),
+                        TAG, "EVC_COUNT1 read failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
+                                          DW3000_EVC_COUNT2_SUB, &count2),
+                        TAG, "EVC_COUNT2 read failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
+                                          DW3000_EVC_COUNT3_SUB, &count3),
+                        TAG, "EVC_COUNT3 read failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
+                                          DW3000_EVC_COUNT4_SUB, &count4),
+                        TAG, "EVC_COUNT4 read failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
+                                          DW3000_EVC_COUNT5_SUB, &count5),
+                        TAG, "EVC_COUNT5 read failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
+                                          DW3000_EVC_COUNT6_SUB, &count6),
+                        TAG, "EVC_COUNT6 read failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
+                                          DW3000_EVC_COUNT7_SUB, &count7),
+                        TAG, "EVC_COUNT7 read failed");
+
+    counters->phe = (uint16_t)(count0 & DW3000_EVC_12BIT_LOW_MASK);
+    counters->rse = (uint16_t)((count0 & DW3000_EVC_12BIT_HIGH_MASK) >>
+                               DW3000_EVC_HIGH_SHIFT);
+    counters->fcg = (uint16_t)(count1 & DW3000_EVC_12BIT_LOW_MASK);
+    counters->fce = (uint16_t)((count1 & DW3000_EVC_12BIT_HIGH_MASK) >>
+                               DW3000_EVC_HIGH_SHIFT);
+    counters->ffr = (uint8_t)(count2 & DW3000_EVC_8BIT_LOW_MASK);
+    counters->ovr = (uint8_t)((count2 & DW3000_EVC_8BIT_HIGH_MASK) >>
+                              DW3000_EVC_HIGH_SHIFT);
+    counters->sfdt = (uint16_t)(count3 & DW3000_EVC_12BIT_LOW_MASK);
+    counters->pto = (uint16_t)((count3 & DW3000_EVC_12BIT_HIGH_MASK) >>
+                               DW3000_EVC_HIGH_SHIFT);
+    counters->fwto = (uint8_t)(count4 & DW3000_EVC_8BIT_LOW_MASK);
+    counters->txfs = (uint16_t)((count4 & DW3000_EVC_12BIT_HIGH_MASK) >>
+                                DW3000_EVC_HIGH_SHIFT);
+    counters->hpw = (uint8_t)(count5 & DW3000_EVC_8BIT_LOW_MASK);
+    counters->swce = (uint8_t)((count5 & DW3000_EVC_8BIT_HIGH_MASK) >>
+                               DW3000_EVC_HIGH_SHIFT);
+    counters->prej = (uint16_t)(count6 & DW3000_EVC_12BIT_LOW_MASK);
+    counters->cpqe = (uint8_t)(count7 & DW3000_EVC_8BIT_LOW_MASK);
+    counters->vwarn = (uint8_t)((count7 & DW3000_EVC_8BIT_HIGH_MASK) >>
+                                DW3000_EVC_HIGH_SHIFT);
+#endif
+
+    return ESP_OK;
+}
+
+static bool uwb_dw3000_should_log_event_counters(uint16_t sequence)
+{
+#if APP_UWB_EVENT_COUNTERS_ENABLED
+    if (APP_UWB_EVENT_COUNTERS_LOG_EVERY == 0) {
+        return false;
+    }
+    return (sequence % APP_UWB_EVENT_COUNTERS_LOG_EVERY) == 0;
+#else
+    (void)sequence;
+    return false;
+#endif
+}
+
+static void uwb_dw3000_maybe_log_event_counters(uint16_t sequence)
+{
+    if (!uwb_dw3000_should_log_event_counters(sequence)) {
+        return;
+    }
+
+    struct uwb_event_counters counters = {0};
+    const esp_err_t err = uwb_dw3000_read_event_counters(&counters);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DW3000 event counter read failed seq=%u: %s",
+                 (unsigned)sequence, esp_err_to_name(err));
+        return;
+    }
+
+    ESP_LOGI(TAG,
+             "DW3000 counters seq=%u fcg=%u fce=%u phe=%u rse=%u sfdt=%u pto=%u fwto=%u txfs=%u hpw=%u prej=%u cpqe=%u vwarn=%u ffr=%u ovr=%u",
+             (unsigned)sequence, (unsigned)counters.fcg,
+             (unsigned)counters.fce, (unsigned)counters.phe,
+             (unsigned)counters.rse, (unsigned)counters.sfdt,
+             (unsigned)counters.pto, (unsigned)counters.fwto,
+             (unsigned)counters.txfs, (unsigned)counters.hpw,
+             (unsigned)counters.prej, (unsigned)counters.cpqe,
+             (unsigned)counters.vwarn, (unsigned)counters.ffr,
+             (unsigned)counters.ovr);
+}
+
 static esp_err_t uwb_dw3000_read_rx_payload(
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN], uint16_t *payload_len)
 {
@@ -573,7 +1102,9 @@ static esp_err_t uwb_dw3000_read_rx_payload(
 
     uint32_t rx_finfo = 0;
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW, 0x4C, &rx_finfo), TAG,
+        uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW, DW3000_RX_FINFO_SUB,
+                          &rx_finfo),
+        TAG,
         "RX_FINFO read failed");
 
     const uint16_t frame_len =
@@ -701,15 +1232,91 @@ static esp_err_t uwb_dw3000_soft_reset(void)
     return ESP_OK;
 }
 
+static uint16_t uwb_dw3000_preamble_len_symbols(uint8_t preamble_len_code)
+{
+    switch (preamble_len_code) {
+    case APP_UWB_RADIO_PLEN_32:
+        return 32;
+    case APP_UWB_RADIO_PLEN_64:
+        return 64;
+    case APP_UWB_RADIO_PLEN_72:
+        return 72;
+    case APP_UWB_RADIO_PLEN_128:
+        return 128;
+    case APP_UWB_RADIO_PLEN_256:
+        return 256;
+    case APP_UWB_RADIO_PLEN_512:
+        return 512;
+    case APP_UWB_RADIO_PLEN_1024:
+        return 1024;
+    case APP_UWB_RADIO_PLEN_1536:
+        return 1536;
+    case APP_UWB_RADIO_PLEN_2048:
+        return 2048;
+    default:
+        return 0;
+    }
+}
+
+static esp_err_t uwb_dw3000_validate_radio_profile(void)
+{
+    if (APP_UWB_RADIO_RF_CHANNEL_BIT > 1 ||
+        APP_UWB_RADIO_SFD_TYPE > 3 ||
+        APP_UWB_RADIO_PREAMBLE_CODE > 31 ||
+        APP_UWB_RADIO_PREAMBLE_LEN_CODE > 0x0F ||
+        APP_UWB_RADIO_DATA_RATE > APP_UWB_RADIO_BR_6M8) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (uwb_dw3000_preamble_len_symbols(APP_UWB_RADIO_PREAMBLE_LEN_CODE) ==
+        0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return ESP_OK;
+}
+
+static const char *uwb_dw3000_radio_data_rate_name(uint8_t data_rate)
+{
+    switch (data_rate) {
+    case APP_UWB_RADIO_BR_850K:
+        return "850k";
+    case APP_UWB_RADIO_BR_6M8:
+        return "6m8";
+    default:
+        return "unknown";
+    }
+}
+
 static esp_err_t uwb_dw3000_write_sys_config(void)
 {
-    const uint8_t channel = 0x00;
-    const uint8_t preamble_len = 0x05;
-    const uint8_t preamble_code = 10;
-    const uint8_t pac = 0x00;
-    const uint8_t datarate = 0x01;
-    const uint8_t phr_mode = 0x00;
-    const uint8_t phr_rate = 0x01;
+    ESP_RETURN_ON_ERROR(uwb_dw3000_validate_radio_profile(), TAG,
+                        "invalid radio profile");
+
+    const uint8_t channel = APP_UWB_RADIO_RF_CHANNEL_BIT;
+    const uint8_t preamble_len = APP_UWB_RADIO_PREAMBLE_LEN_CODE;
+    const uint8_t preamble_code = APP_UWB_RADIO_PREAMBLE_CODE;
+    const uint8_t pac = APP_UWB_RADIO_PAC;
+    const uint8_t datarate = APP_UWB_RADIO_DATA_RATE;
+    const uint8_t phr_mode = APP_UWB_RADIO_PHR_MODE;
+    const uint8_t phr_rate = APP_UWB_RADIO_PHR_RATE;
+    const uint8_t sfd_type = APP_UWB_RADIO_SFD_TYPE;
+
+    ESP_LOGI(TAG,
+             "DW3000 radio profile: profile=%u channel=%u rf_bit=%u plen=%u(code=0x%02x) pcode=%u pac=%u br=%s phr_mode=%u phr_rate=%u sfd=%u",
+             (unsigned)APP_UWB_RADIO_PROFILE,
+             (unsigned)APP_UWB_RADIO_CHANNEL, (unsigned)channel,
+             (unsigned)uwb_dw3000_preamble_len_symbols(preamble_len),
+             (unsigned)preamble_len, (unsigned)preamble_code, (unsigned)pac,
+             uwb_dw3000_radio_data_rate_name(datarate), (unsigned)phr_mode,
+             (unsigned)phr_rate, (unsigned)sfd_type);
+    ESP_LOGI(TAG,
+             "DW3000 RF profile: pg=0x%02x power=0x%08lx rf_tx2=0x%08lx pll=0x%04x pll_final=0x%04x",
+             (unsigned)APP_UWB_RADIO_TX_PG_DELAY,
+             (unsigned long)APP_UWB_RADIO_TX_POWER,
+             (unsigned long)APP_UWB_RADIO_RF_TX_CTRL_2,
+             (unsigned)APP_UWB_RADIO_PLL_CFG,
+             (unsigned)APP_UWB_RADIO_PLL_CFG_FINAL);
 
     const uint32_t usr_cfg = (0x188U & 0xFFFU) |
                              ((uint32_t)phr_mode << 3) |
@@ -727,9 +1334,8 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
                         TAG, "DTUNE0 reset failed");
     ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_DRX, 0x00, pac),
                         TAG, "PAC write failed");
-    ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_STS_CFG, 0x00, (64 / 8) - 1),
-        TAG, "STS config write failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_configure_sts(), TAG,
+                        "STS config failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW, 0x29, 0, 1),
         TAG, "AES config write failed");
@@ -739,42 +1345,61 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
 
     uint32_t chan_ctrl = 0;
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_HIGH, 0x14, &chan_ctrl),
+        uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_HIGH, DW3000_CHAN_CTRL_SUB,
+                          &chan_ctrl),
         TAG, "CHAN_CTRL read failed");
-    chan_ctrl &= ~0x1FFFUL;
-    chan_ctrl |= channel;
-    chan_ctrl |= (0x1F00UL & ((uint32_t)preamble_code << 8));
-    chan_ctrl |= (0x00F8UL & ((uint32_t)preamble_code << 3));
-    chan_ctrl |= 0x02UL;
+    chan_ctrl &= ~(DW3000_CHAN_CTRL_RF_CHAN_MASK |
+                   DW3000_CHAN_CTRL_SFD_TYPE_MASK |
+                   DW3000_CHAN_CTRL_RX_PCODE_MASK |
+                   DW3000_CHAN_CTRL_TX_PCODE_MASK);
+    chan_ctrl |= channel & DW3000_CHAN_CTRL_RF_CHAN_MASK;
+    chan_ctrl |= DW3000_CHAN_CTRL_RX_PCODE_MASK &
+                 ((uint32_t)preamble_code
+                  << DW3000_CHAN_CTRL_RX_PCODE_SHIFT);
+    chan_ctrl |= DW3000_CHAN_CTRL_TX_PCODE_MASK &
+                 ((uint32_t)preamble_code
+                  << DW3000_CHAN_CTRL_TX_PCODE_SHIFT);
+    chan_ctrl |= DW3000_CHAN_CTRL_SFD_TYPE_MASK &
+                 ((uint32_t)sfd_type << DW3000_CHAN_CTRL_SFD_TYPE_SHIFT);
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_HIGH, 0x14, chan_ctrl,
-                                 4),
+        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_HIGH,
+                                 DW3000_CHAN_CTRL_SUB, chan_ctrl, 4),
         TAG, "CHAN_CTRL write failed");
 
     uint32_t tx_fctrl = 0;
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW, 0x24, &tx_fctrl), TAG,
-        "TX_FCTRL read failed");
-    tx_fctrl |= ((uint32_t)preamble_len << 12);
-    tx_fctrl |= ((uint32_t)datarate << 10);
+        uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW, DW3000_TX_FCTRL_SUB,
+                          &tx_fctrl),
+        TAG, "TX_FCTRL read failed");
+    tx_fctrl &= ~(DW3000_TX_FCTRL_TXPSR_MASK |
+                  DW3000_TX_FCTRL_TXBR_MASK);
+    tx_fctrl |= DW3000_TX_FCTRL_TXPSR_MASK &
+                ((uint32_t)preamble_len << DW3000_TX_FCTRL_TXPSR_SHIFT);
+    tx_fctrl |= DW3000_TX_FCTRL_TXBR_MASK &
+                ((uint32_t)datarate << DW3000_TX_FCTRL_TXBR_SHIFT);
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW, 0x24, tx_fctrl,
-                                 4),
+        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW,
+                                 DW3000_TX_FCTRL_SUB, tx_fctrl, 4),
         TAG, "TX_FCTRL write failed");
 
     ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_DRX, 0x02, 0x81),
                         TAG, "DRX 0x02 write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1C, 0x1C071134),
+        uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1C,
+                                  APP_UWB_RADIO_RF_TX_CTRL_2),
         TAG, "RF_TX_CTRL_2 write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_FS_CTRL, 0x00, 0x0F3C), TAG,
-        "PLL_CFG write failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x51, 0x14),
+        uwb_dw3000_write_u32_auto(DW3000_REG_FS_CTRL, 0x00,
+                                  APP_UWB_RADIO_PLL_CFG),
+        TAG, "PLL_CFG write failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x51,
+                                                  APP_UWB_RADIO_RF_0X51),
                         TAG, "RF 0x51 write failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1A, 0x0E),
+    ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1A,
+                                                  APP_UWB_RADIO_RF_TX_CTRL_1),
                         TAG, "RF_TX_CTRL_1 write failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_FS_CTRL, 0x08, 0x81),
+    ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_FS_CTRL, 0x08,
+                                                  APP_UWB_RADIO_PLL_CAL),
                         TAG, "PLL_CAL write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_GEN_CFG_AES_LOW, 0x44, 0x02),
@@ -833,8 +1458,6 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x48, ldo_ctrl), TAG,
         "LDO restore failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_CIA_3, 0x02, 0x01),
-                        TAG, "CIA diagnostics enable failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_len(DW3000_REG_CIA_3, 0x00,
                                  UWB_DW3000_ANTENNA_DELAY, 2),
@@ -843,6 +1466,13 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
         uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_HIGH, 0x04,
                                  UWB_DW3000_ANTENNA_DELAY, 2),
         TAG, "TX antenna delay write failed");
+#if APP_UWB_DIAGNOSTICS_ENABLED
+    ESP_RETURN_ON_ERROR(uwb_dw3000_configure_cia_diagnostics(true), TAG,
+                        "CIA diagnostics config failed");
+#else
+    ESP_RETURN_ON_ERROR(uwb_dw3000_configure_cia_diagnostics(false), TAG,
+                        "CIA diagnostics config failed");
+#endif
     ESP_LOGI(TAG, "DW3000 antenna delay set: rx=0x%04x tx=0x%04x",
              (unsigned)UWB_DW3000_ANTENNA_DELAY,
              (unsigned)UWB_DW3000_ANTENNA_DELAY);
@@ -1055,16 +1685,22 @@ static esp_err_t uwb_dw3000_radio_init(void)
         uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x48, 0x14), TAG,
         "LDO_RLOAD write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1A, 0x0E), TAG,
-        "RF_TX_CTRL_1 final write failed");
+        uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1A,
+                                  APP_UWB_RADIO_RF_TX_CTRL_1),
+        TAG, "RF_TX_CTRL_1 final write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1C, 0x1C071134),
+        uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1C,
+                                  APP_UWB_RADIO_RF_TX_CTRL_2),
         TAG, "RF_TX_CTRL_2 final write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_FS_CTRL, 0x00, 0x1F3C), TAG,
+        uwb_dw3000_write_u32_auto(DW3000_REG_FS_CTRL, 0x00,
+                                  APP_UWB_RADIO_PLL_CFG_FINAL),
+        TAG,
         "PLL_CFG final write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_FS_CTRL, 0x08, 0x81), TAG,
+        uwb_dw3000_write_u32_auto(DW3000_REG_FS_CTRL, 0x08,
+                                  APP_UWB_RADIO_PLL_CAL_FINAL),
+        TAG,
         "PLL_CAL final write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_PMSC, 0x04, 0xB40200), TAG,
@@ -1080,14 +1716,18 @@ static esp_err_t uwb_dw3000_radio_init(void)
     ESP_RETURN_ON_ERROR(uwb_dw3000_configure_hardware_leds(), TAG,
                         "DW3000 hardware LED setup failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1C, 0x34), TAG,
+        uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1C,
+                                  APP_UWB_RADIO_TX_PG_DELAY),
+        TAG,
         "TX PG delay write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_GEN_CFG_AES_HIGH, 0x0C,
-                                  0xFDFDFDFD),
+                                  APP_UWB_RADIO_TX_POWER),
         TAG, "TX power write failed");
     ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
                         "initial status clear failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_configure_event_counters(), TAG,
+                        "event counter setup failed");
     return ESP_OK;
 }
 
@@ -1249,6 +1889,13 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                 uwb_dw3000_read_rx_payload(frame->payload, &frame->payload_len);
             const esp_err_t ts_err =
                 uwb_dw3000_read_rx_timestamp(&frame->rx_timestamp);
+            esp_err_t diag_err = ESP_OK;
+            memset(&frame->diagnostics, 0, sizeof(frame->diagnostics));
+            if (read_err == ESP_OK &&
+                uwb_dw3000_should_capture_rx_diagnostics(
+                    frame->payload, frame->payload_len)) {
+                diag_err = uwb_dw3000_read_rx_diagnostics(&frame->diagnostics);
+            }
             ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
                                 "clear after distance RX good failed");
             s_rx_armed = false;
@@ -1260,6 +1907,11 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             if (ts_err != ESP_OK) {
                 s_rx_error_count++;
                 return ts_err;
+            }
+            if (diag_err != ESP_OK) {
+                ESP_LOGD(TAG, "RX diagnostics read failed: %s",
+                         esp_err_to_name(diag_err));
+                memset(&frame->diagnostics, 0, sizeof(frame->diagnostics));
             }
 
             s_rx_count++;
@@ -1365,6 +2017,7 @@ static bool uwb_distance_parse_frame(const struct uwb_dw3000_rx_frame *rx_frame,
     frame->destination_id = payload[7];
     frame->sequence = uwb_distance_get_u16(payload, 8);
     frame->rx_timestamp = rx_frame->rx_timestamp;
+    frame->diagnostics = rx_frame->diagnostics;
     frame->payload_len = rx_frame->payload_len;
     memcpy(frame->payload, payload, rx_frame->payload_len);
     return true;
@@ -1487,6 +2140,47 @@ static uint8_t uwb_distance_peer_id(bool initiator)
                      : (uint8_t)APP_UWB_DISTANCE_TEST_INITIATOR_ID;
 }
 
+static bool uwb_distance_should_log_diagnostics(uint16_t sequence)
+{
+#if APP_UWB_DIAGNOSTICS_ENABLED
+    if (APP_UWB_DIAGNOSTICS_LOG_EVERY == 0) {
+        return false;
+    }
+    return (sequence % APP_UWB_DIAGNOSTICS_LOG_EVERY) == 0;
+#else
+    (void)sequence;
+    return false;
+#endif
+}
+
+static void
+uwb_distance_log_rx_diagnostics(uint16_t sequence, const char *label,
+                                const struct uwb_rx_diagnostics *diagnostics)
+{
+    if (label == NULL || diagnostics == NULL) {
+        return;
+    }
+
+    if (!diagnostics->valid) {
+        ESP_LOGI(TAG, "DS-TWR quality seq=%u %s unavailable",
+                 (unsigned)sequence, label);
+        return;
+    }
+
+    ESP_LOGI(TAG,
+             "DS-TWR quality seq=%u %s rx_pacc=%u fp=%.2f peak_idx=%u peak_amp=%lu power=%lu f1=%lu f2=%lu f3=%lu acc=%u xtal=%d",
+             (unsigned)sequence, label, (unsigned)diagnostics->rx_pacc,
+             (double)diagnostics->ipatov_fp_index / 64.0,
+             (unsigned)diagnostics->ipatov_peak_index,
+             (unsigned long)diagnostics->ipatov_peak_amp,
+             (unsigned long)diagnostics->ipatov_power,
+             (unsigned long)diagnostics->ipatov_f1,
+             (unsigned long)diagnostics->ipatov_f2,
+             (unsigned long)diagnostics->ipatov_f3,
+             (unsigned)diagnostics->ipatov_accum_count,
+             (int)diagnostics->xtal_offset);
+}
+
 static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
                                             bool log_success)
 {
@@ -1497,8 +2191,14 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
 
     uwb_distance_build_frame(UWB_DISTANCE_FRAME_POLL, peer_id, sequence,
                              payload);
+#if APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX
+    esp_err_t err = uwb_dw3000_send_payload_expect_rx(
+        payload, sizeof(payload), APP_UWB_DISTANCE_TEST_AUTO_RX_DELAY_UUS,
+        APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS, &poll_tx_ts);
+#else
     esp_err_t err =
         uwb_dw3000_send_payload(payload, sizeof(payload), &poll_tx_ts);
+#endif
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "DS-TWR POLL TX failed seq=%u peer=%u: %s",
                  (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
@@ -1515,6 +2215,10 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
         return err;
     }
     resp_rx_ts = response.rx_timestamp;
+    if (uwb_distance_should_log_diagnostics(sequence)) {
+        uwb_distance_log_rx_diagnostics(sequence, "RESP_RX",
+                                        &response.diagnostics);
+    }
 
     uwb_distance_build_frame(UWB_DISTANCE_FRAME_FINAL, peer_id, sequence,
                              payload);
@@ -1565,6 +2269,7 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
                  (unsigned long long)resp_rx_ts,
                  (unsigned long long)final_tx_ts);
     }
+    uwb_dw3000_maybe_log_event_counters(sequence);
 
     return ESP_OK;
 }
@@ -1597,6 +2302,9 @@ static void uwb_distance_fill_measurement(
     measurement->resp_rx_ts = resp_rx_ts;
     measurement->final_tx_ts = final_tx_ts;
     measurement->final_rx_ts = final->rx_timestamp;
+    measurement->poll_rx_diagnostics = poll->diagnostics;
+    measurement->final_rx_diagnostics = final->diagnostics;
+    measurement->report_rx_diagnostics = report->diagnostics;
 }
 
 static esp_err_t
@@ -1620,9 +2328,17 @@ uwb_distance_respond_to_poll(const struct uwb_distance_frame *poll,
         poll->rx_timestamp,
         uwb_dw3000_ms_to_dtu(APP_UWB_DISTANCE_TEST_RESP_DELAY_MS));
     uint64_t resp_tx_actual_ts = 0;
+#if APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX
+    esp_err_t err = uwb_dw3000_send_payload_delayed_expect_rx(
+        payload, sizeof(payload), resp_tx_due,
+        APP_UWB_DISTANCE_TEST_AUTO_RX_DELAY_UUS,
+        APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS, &resp_tx_ts,
+        &resp_tx_actual_ts);
+#else
     esp_err_t err = uwb_dw3000_send_payload_delayed(
         payload, sizeof(payload), resp_tx_due, &resp_tx_ts,
         &resp_tx_actual_ts);
+#endif
     ESP_LOGD(TAG,
              "DS-TWR RESP delayed seq=%u peer=%u due=0x%010llx programmed=0x%010llx actual=0x%010llx",
              (unsigned)sequence, (unsigned)peer_id,
@@ -1682,6 +2398,13 @@ uwb_distance_log_measurement(const struct uwb_distance_measurement *measurement)
              (unsigned long long)measurement->resp_rx_ts,
              (unsigned long long)measurement->final_tx_ts,
              (unsigned long long)measurement->final_rx_ts);
+    if (uwb_distance_should_log_diagnostics(measurement->sequence)) {
+        uwb_distance_log_rx_diagnostics(measurement->sequence, "POLL_RX",
+                                        &measurement->poll_rx_diagnostics);
+        uwb_distance_log_rx_diagnostics(measurement->sequence, "FINAL_RX",
+                                        &measurement->final_rx_diagnostics);
+    }
+    uwb_dw3000_maybe_log_event_counters(measurement->sequence);
 }
 
 static bool uwb_distance_is_initiator(void)
@@ -1706,10 +2429,12 @@ static void uwb_distance_initiator_loop(uint8_t peer_id)
 
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
-             "DS-TWR distance test active as initiator: source_id=%u peer_id=%u interval=%u ms timeout=%u ms",
+             "DS-TWR distance test active as initiator: source_id=%u peer_id=%u interval=%u ms timeout=%u ms auto_rx=%u delay=%u uus",
              (unsigned)s_source_id, (unsigned)peer_id,
              (unsigned)APP_UWB_DISTANCE_TEST_INTERVAL_MS,
-             (unsigned)APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS);
+             (unsigned)APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS,
+             (unsigned)APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX,
+             (unsigned)APP_UWB_DISTANCE_TEST_AUTO_RX_DELAY_UUS);
 
     while (true) {
         (void)uwb_distance_initiate_once(peer_id, sequence, true);
@@ -1722,9 +2447,11 @@ static void uwb_distance_responder_loop(uint8_t peer_id)
 {
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
-             "DS-TWR distance test active as responder: source_id=%u peer_id=%u timeout=%u ms",
+             "DS-TWR distance test active as responder: source_id=%u peer_id=%u timeout=%u ms auto_rx=%u delay=%u uus",
              (unsigned)s_source_id, (unsigned)peer_id,
-             (unsigned)APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS);
+             (unsigned)APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS,
+             (unsigned)APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX,
+             (unsigned)APP_UWB_DISTANCE_TEST_AUTO_RX_DELAY_UUS);
 
     while (true) {
         struct uwb_distance_frame poll = {0};
@@ -2210,6 +2937,25 @@ static esp_err_t uwb_dw3000_send_payload(const uint8_t *payload,
     return uwb_dw3000_wait_for_tx_complete(tx_timestamp);
 }
 
+static esp_err_t uwb_dw3000_send_payload_expect_rx(
+    const uint8_t *payload, size_t payload_len, uint32_t rx_after_tx_delay_uus,
+    uint32_t rx_timeout_ms, uint64_t *tx_timestamp)
+{
+    ESP_RETURN_ON_ERROR(uwb_dw3000_prepare_tx(payload, payload_len), TAG,
+                        "TX/RX prepare failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_prepare_rx_after_tx(rx_after_tx_delay_uus, rx_timeout_ms),
+        TAG, "TX/RX auto-RX config failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_TX_W4R), TAG,
+                        "TX_W4R command failed");
+
+    const esp_err_t err = uwb_dw3000_wait_for_tx_complete(tx_timestamp);
+    if (err == ESP_OK) {
+        s_rx_armed = true;
+    }
+    return err;
+}
+
 static esp_err_t uwb_dw3000_send_payload_delayed(
     const uint8_t *payload, size_t payload_len, uint64_t tx_timestamp,
     uint64_t *programmed_tx_timestamp, uint64_t *actual_tx_timestamp)
@@ -2248,6 +2994,57 @@ static esp_err_t uwb_dw3000_send_payload_delayed(
     }
 
     return uwb_dw3000_wait_for_tx_complete(actual_tx_timestamp);
+}
+
+static esp_err_t uwb_dw3000_send_payload_delayed_expect_rx(
+    const uint8_t *payload, size_t payload_len, uint64_t tx_timestamp,
+    uint32_t rx_after_tx_delay_uus, uint32_t rx_timeout_ms,
+    uint64_t *programmed_tx_timestamp, uint64_t *actual_tx_timestamp)
+{
+    ESP_RETURN_ON_ERROR(uwb_dw3000_prepare_tx(payload, payload_len), TAG,
+                        "delayed TX/RX prepare failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_prepare_rx_after_tx(rx_after_tx_delay_uus, rx_timeout_ms),
+        TAG, "delayed TX/RX auto-RX config failed");
+
+    const uint32_t delayed_time_word =
+        uwb_dw3000_delayed_time_word(tx_timestamp);
+    ESP_RETURN_ON_ERROR(uwb_dw3000_set_delayed_trx_time(delayed_time_word),
+                        TAG, "DX_TIME write failed");
+
+    if (programmed_tx_timestamp != NULL) {
+        *programmed_tx_timestamp =
+            uwb_dw3000_programmed_tx_timestamp(delayed_time_word);
+    }
+
+    ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_DTX_W4R), TAG,
+                        "delayed TX_W4R command failed");
+
+    uint32_t status = 0;
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW, DW3000_SYS_STATUS_SUB,
+                          &status),
+        TAG, "SYS_STATUS after delayed TX/RX failed");
+    if ((status & DW3000_STATUS_HPDWARN) != 0) {
+        s_tx_error_count++;
+        ESP_LOGW(TAG,
+                 "UWB delayed TX/RX rejected timestamp=0x%010llx word=0x%08lx SYS_STATUS=0x%08lx",
+                 (unsigned long long)tx_timestamp,
+                 (unsigned long)delayed_time_word, (unsigned long)status);
+        ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF), TAG,
+                            "TXRXOFF after delayed TX/RX reject failed");
+        ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
+                            "clear after delayed TX/RX reject failed");
+        s_rx_armed = false;
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const esp_err_t err =
+        uwb_dw3000_wait_for_tx_complete(actual_tx_timestamp);
+    if (err == ESP_OK) {
+        s_rx_armed = true;
+    }
+    return err;
 }
 
 static esp_err_t uwb_dw3000_send_beacon(uint32_t sequence)
