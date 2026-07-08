@@ -15,6 +15,7 @@
 #include "ota_service.h"
 #include "sdkconfig.h"
 #include "stability_test_service.h"
+#include "uwb_anchor_survey_service.h"
 #include "uwb_calibration_service.h"
 #include "uwb_config.h"
 #include "uwb_distance_test_service.h"
@@ -134,6 +135,8 @@ static const char *runtime_mode_name(int mode)
         return "uwb_antenna_delay_calibration";
     case APP_RUNTIME_MODE_UWB_RANGING:
         return "uwb_ranging";
+    case APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY:
+        return "uwb_anchor_survey";
     default:
         return "unknown";
     }
@@ -164,6 +167,8 @@ static esp_err_t app_manager_start_selected_runtime(void)
         return uwb_distance_test_service_start();
     case APP_RUNTIME_MODE_UWB_RANGING:
         return uwb_ranging_service_start();
+    case APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY:
+        return uwb_anchor_survey_service_start();
     default:
         ESP_LOGE(TAG, "Unsupported application runtime mode: %d",
                  APP_RUNTIME_MODE);

@@ -231,18 +231,28 @@ enum {
 #define UWB_DISTANCE_FRAME_RESP_RX_TS_OFFSET 25U
 #define UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET 30U
 #define UWB_DISTANCE_FRAME_FINAL_RX_TS_OFFSET 35U
+#define UWB_DISTANCE_FRAME_BROADCAST_ID 255U
+
+#define UWB_ANCHOR_SURVEY_MAX_ANCHORS 4U
+#define UWB_ANCHOR_SURVEY_MAX_PAIRS \
+    ((UWB_ANCHOR_SURVEY_MAX_ANCHORS * (UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U)) / 2U)
+#define UWB_ANCHOR_SURVEY_CMD_INITIATOR_OFFSET 10U
+#define UWB_ANCHOR_SURVEY_CMD_RESPONDER_OFFSET 11U
+#define UWB_ANCHOR_SURVEY_CMD_SLOT_OFFSET 12U
 
 enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_POLL = 1,
     UWB_DISTANCE_FRAME_RESP = 2,
     UWB_DISTANCE_FRAME_FINAL = 3,
     UWB_DISTANCE_FRAME_REPORT = 4,
+    UWB_DISTANCE_FRAME_SURVEY_CMD = 5,
 };
 
 enum uwb_dw3000_runtime_mode {
     UWB_DW3000_RUNTIME_BEACON_SMOKE = 0,
     UWB_DW3000_RUNTIME_DISTANCE_TEST,
     UWB_DW3000_RUNTIME_CALIBRATION,
+    UWB_DW3000_RUNTIME_ANCHOR_SURVEY,
 };
 
 struct uwb_rx_diagnostics {
@@ -328,6 +338,11 @@ struct uwb_calibration_stats {
     double min_m;
     double max_m;
     double last_m;
+};
+
+struct uwb_anchor_survey_pair {
+    uint8_t initiator_id;
+    uint8_t responder_id;
 };
 
 static uint32_t uwb_dw3000_remaining_ms(TickType_t start_tick,
@@ -2216,8 +2231,55 @@ static const char *uwb_distance_type_name(uint8_t type)
         return "FINAL";
     case UWB_DISTANCE_FRAME_REPORT:
         return "REPORT";
+    case UWB_DISTANCE_FRAME_SURVEY_CMD:
+        return "SURVEY_CMD";
     default:
         return "UNKNOWN";
+    }
+}
+
+static bool uwb_distance_destination_matches(uint8_t destination_id)
+{
+    return destination_id == s_source_id ||
+           destination_id == UWB_DISTANCE_FRAME_BROADCAST_ID;
+}
+
+static esp_err_t uwb_distance_receive_next(struct uwb_distance_frame *frame,
+                                           uint32_t timeout_ms)
+{
+    if (frame == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const TickType_t start = xTaskGetTickCount();
+
+    while (true) {
+        const uint32_t remaining_ms =
+            uwb_dw3000_remaining_ms(start, timeout_ms);
+        if (remaining_ms == 0) {
+            return ESP_ERR_TIMEOUT;
+        }
+
+        struct uwb_dw3000_rx_frame rx_frame = {0};
+        const esp_err_t err =
+            uwb_dw3000_receive_frame(&rx_frame, remaining_ms);
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        struct uwb_distance_frame parsed = {0};
+        if (!uwb_distance_parse_frame(&rx_frame, &parsed)) {
+            s_rx_ignored_count++;
+            ESP_LOGD(TAG, "Ignoring non-ranging frame len=%u ignored=%lu",
+                     (unsigned)rx_frame.payload_len,
+                     (unsigned long)s_rx_ignored_count);
+            continue;
+        }
+
+        s_last_rx_source_id = parsed.source_id;
+        s_last_rx_sequence = parsed.sequence;
+        *frame = parsed;
+        return ESP_OK;
     }
 }
 
@@ -2254,7 +2316,8 @@ static esp_err_t uwb_distance_receive_matching(
         const bool type_ok = parsed.type == expected_type;
         const bool source_ok =
             expected_source_id == 0 || parsed.source_id == expected_source_id;
-        const bool destination_ok = parsed.destination_id == s_source_id;
+        const bool destination_ok =
+            uwb_distance_destination_matches(parsed.destination_id);
         const bool sequence_ok =
             !match_sequence || parsed.sequence == expected_sequence;
 
@@ -2732,6 +2795,434 @@ static void uwb_dw3000_distance_test_loop(void)
     } else {
         uwb_distance_responder_loop(peer_id);
     }
+}
+
+static size_t uwb_anchor_survey_anchor_ids(
+    uint8_t ids[UWB_ANCHOR_SURVEY_MAX_ANCHORS])
+{
+    const uint8_t configured[UWB_ANCHOR_SURVEY_MAX_ANCHORS] = {
+        (uint8_t)APP_UWB_ANCHOR_0_ID,
+        (uint8_t)APP_UWB_ANCHOR_1_ID,
+        (uint8_t)APP_UWB_ANCHOR_2_ID,
+        (uint8_t)APP_UWB_ANCHOR_3_ID,
+    };
+    const size_t configured_count =
+        APP_UWB_ANCHOR_COUNT < UWB_ANCHOR_SURVEY_MAX_ANCHORS
+            ? APP_UWB_ANCHOR_COUNT
+            : UWB_ANCHOR_SURVEY_MAX_ANCHORS;
+    size_t count = 0;
+
+    for (size_t i = 0; i < configured_count; ++i) {
+        if (configured[i] != 0) {
+            ids[count++] = configured[i];
+        }
+    }
+
+    return count;
+}
+
+static bool uwb_anchor_survey_id_in_set(const uint8_t *ids, size_t count,
+                                        uint8_t id)
+{
+    for (size_t i = 0; i < count; ++i) {
+        if (ids[i] == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool uwb_anchor_survey_ids_valid(const uint8_t *ids, size_t count,
+                                        uint8_t coordinator_id)
+{
+    if (count < 2 || count > UWB_ANCHOR_SURVEY_MAX_ANCHORS ||
+        coordinator_id == 0) {
+        return false;
+    }
+
+    if (!uwb_anchor_survey_id_in_set(ids, count, coordinator_id)) {
+        return false;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        if (ids[i] == 0) {
+            return false;
+        }
+        for (size_t j = i + 1U; j < count; ++j) {
+            if (ids[i] == ids[j]) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+static size_t uwb_anchor_survey_build_pairs(
+    const uint8_t *ids, size_t count,
+    struct uwb_anchor_survey_pair pairs[UWB_ANCHOR_SURVEY_MAX_PAIRS])
+{
+    size_t pair_count = 0;
+    for (size_t i = 0; i < count; ++i) {
+        for (size_t j = i + 1U; j < count; ++j) {
+            if (pair_count < UWB_ANCHOR_SURVEY_MAX_PAIRS) {
+                pairs[pair_count].initiator_id = ids[i];
+                pairs[pair_count].responder_id = ids[j];
+                pair_count++;
+            }
+        }
+    }
+    return pair_count;
+}
+
+static void uwb_anchor_survey_build_command(
+    const struct uwb_anchor_survey_pair *pair, uint8_t slot_index,
+    uint16_t sequence, uint8_t payload[UWB_DW3000_PAYLOAD_LEN])
+{
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_SURVEY_CMD,
+                             pair->initiator_id, sequence, payload);
+    payload[UWB_ANCHOR_SURVEY_CMD_INITIATOR_OFFSET] = pair->initiator_id;
+    payload[UWB_ANCHOR_SURVEY_CMD_RESPONDER_OFFSET] = pair->responder_id;
+    payload[UWB_ANCHOR_SURVEY_CMD_SLOT_OFFSET] = slot_index;
+}
+
+static bool uwb_anchor_survey_parse_command(
+    const struct uwb_distance_frame *frame,
+    struct uwb_anchor_survey_pair *pair, uint8_t *slot_index)
+{
+    if (frame == NULL || pair == NULL || slot_index == NULL ||
+        frame->type != UWB_DISTANCE_FRAME_SURVEY_CMD ||
+        frame->payload_len <= UWB_ANCHOR_SURVEY_CMD_SLOT_OFFSET) {
+        return false;
+    }
+
+    pair->initiator_id =
+        frame->payload[UWB_ANCHOR_SURVEY_CMD_INITIATOR_OFFSET];
+    pair->responder_id =
+        frame->payload[UWB_ANCHOR_SURVEY_CMD_RESPONDER_OFFSET];
+    *slot_index = frame->payload[UWB_ANCHOR_SURVEY_CMD_SLOT_OFFSET];
+    return pair->initiator_id != 0 && pair->responder_id != 0 &&
+           pair->initiator_id != pair->responder_id;
+}
+
+static void uwb_anchor_survey_log_measurement(
+    const struct uwb_distance_measurement *measurement)
+{
+    if (measurement == NULL) {
+        return;
+    }
+
+    ESP_LOGI(TAG,
+             "ANCHOR_SURVEY result pair=%u-%u seq=%u distance=%.3f m %.1f cm raw=%.3f m clk_valid=%u",
+             (unsigned)measurement->initiator_id,
+             (unsigned)measurement->responder_id,
+             (unsigned)measurement->sequence,
+             measurement->distance_m,
+             measurement->distance_m * 100.0,
+             measurement->raw_distance_m,
+             measurement->clock_offset_valid ? 1U : 0U);
+}
+
+static esp_err_t uwb_anchor_survey_send_command(
+    const struct uwb_anchor_survey_pair *pair, uint8_t slot_index,
+    uint16_t sequence)
+{
+    if (pair == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+    uwb_anchor_survey_build_command(pair, slot_index, sequence, payload);
+
+    const esp_err_t err = uwb_dw3000_send_payload(payload, sizeof(payload),
+                                                  NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "ANCHOR_SURVEY command TX failed slot=%u seq=%u pair=%u-%u: %s",
+                 (unsigned)slot_index, (unsigned)sequence,
+                 (unsigned)pair->initiator_id,
+                 (unsigned)pair->responder_id,
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "ANCHOR_SURVEY command slot=%u seq=%u initiator=%u responder=%u",
+             (unsigned)slot_index, (unsigned)sequence,
+             (unsigned)pair->initiator_id, (unsigned)pair->responder_id);
+    return ESP_OK;
+}
+
+static void uwb_anchor_survey_handle_poll(
+    const struct uwb_distance_frame *frame, const uint8_t *anchor_ids,
+    size_t anchor_count)
+{
+    if (frame == NULL || frame->type != UWB_DISTANCE_FRAME_POLL ||
+        !uwb_distance_destination_matches(frame->destination_id)) {
+        return;
+    }
+
+    if (!uwb_anchor_survey_id_in_set(anchor_ids, anchor_count,
+                                     frame->source_id)) {
+        ESP_LOGD(TAG, "ANCHOR_SURVEY ignoring POLL from non-anchor src=%u",
+                 (unsigned)frame->source_id);
+        return;
+    }
+
+    struct uwb_distance_measurement measurement = {0};
+    const esp_err_t err = uwb_distance_respond_to_poll(frame, &measurement);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ANCHOR_SURVEY respond failed src=%u seq=%u: %s",
+                 (unsigned)frame->source_id, (unsigned)frame->sequence,
+                 esp_err_to_name(err));
+        return;
+    }
+
+    uwb_distance_log_measurement(&measurement);
+    uwb_anchor_survey_log_measurement(&measurement);
+}
+
+static void uwb_anchor_survey_handle_command(
+    const struct uwb_distance_frame *frame, uint8_t coordinator_id,
+    const uint8_t *anchor_ids, size_t anchor_count)
+{
+    if (frame == NULL || frame->type != UWB_DISTANCE_FRAME_SURVEY_CMD) {
+        return;
+    }
+
+    if (frame->source_id != coordinator_id ||
+        !uwb_distance_destination_matches(frame->destination_id)) {
+        return;
+    }
+
+    struct uwb_anchor_survey_pair pair = {0};
+    uint8_t slot_index = 0;
+    if (!uwb_anchor_survey_parse_command(frame, &pair, &slot_index)) {
+        ESP_LOGW(TAG, "ANCHOR_SURVEY invalid command seq=%u",
+                 (unsigned)frame->sequence);
+        return;
+    }
+
+    if (pair.initiator_id != s_source_id ||
+        !uwb_anchor_survey_id_in_set(anchor_ids, anchor_count,
+                                     pair.responder_id)) {
+        return;
+    }
+
+    ESP_LOGI(TAG,
+             "ANCHOR_SURVEY command accepted slot=%u seq=%u peer=%u delay=%u ms",
+             (unsigned)slot_index, (unsigned)frame->sequence,
+             (unsigned)pair.responder_id,
+             (unsigned)APP_UWB_ANCHOR_SURVEY_COMMAND_DELAY_MS);
+    uwb_dw3000_delay_ms(APP_UWB_ANCHOR_SURVEY_COMMAND_DELAY_MS);
+    const esp_err_t err = uwb_distance_initiate_once(
+        pair.responder_id, frame->sequence, false);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ANCHOR_SURVEY initiated pair=%u-%u seq=%u failed: %s",
+                 (unsigned)pair.initiator_id, (unsigned)pair.responder_id,
+                 (unsigned)frame->sequence, esp_err_to_name(err));
+    }
+}
+
+static void uwb_anchor_survey_process_frame(
+    const struct uwb_distance_frame *frame, uint8_t coordinator_id,
+    const uint8_t *anchor_ids, size_t anchor_count)
+{
+    if (frame == NULL) {
+        return;
+    }
+
+    switch (frame->type) {
+    case UWB_DISTANCE_FRAME_POLL:
+        uwb_anchor_survey_handle_poll(frame, anchor_ids, anchor_count);
+        break;
+    case UWB_DISTANCE_FRAME_SURVEY_CMD:
+        uwb_anchor_survey_handle_command(frame, coordinator_id, anchor_ids,
+                                         anchor_count);
+        break;
+    default:
+        break;
+    }
+}
+
+static void uwb_anchor_survey_listen_until(TickType_t end_tick,
+                                           uint8_t coordinator_id,
+                                           const uint8_t *anchor_ids,
+                                           size_t anchor_count)
+{
+    while ((int32_t)(xTaskGetTickCount() - end_tick) < 0) {
+        const TickType_t now = xTaskGetTickCount();
+        const uint32_t remaining_ms =
+            (uint32_t)(end_tick - now) * portTICK_PERIOD_MS;
+        uint32_t slice_ms = APP_UWB_ANCHOR_SURVEY_RX_SLICE_MS;
+        if (remaining_ms < slice_ms) {
+            slice_ms = remaining_ms;
+        }
+        if (slice_ms == 0) {
+            break;
+        }
+
+        struct uwb_distance_frame frame = {0};
+        const esp_err_t err = uwb_distance_receive_next(&frame, slice_ms);
+        if (err == ESP_OK) {
+            uwb_anchor_survey_process_frame(&frame, coordinator_id,
+                                            anchor_ids, anchor_count);
+        } else if (err != ESP_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "ANCHOR_SURVEY listen failed: %s",
+                     esp_err_to_name(err));
+            uwb_dw3000_delay_ms(20);
+        }
+    }
+}
+
+static void uwb_anchor_survey_passive_tag_loop(uint8_t coordinator_id)
+{
+    uint32_t frame_count = 0;
+    s_status = UWB_DW3000_STATUS_READY;
+    ESP_LOGI(TAG,
+             "ANCHOR_SURVEY passive tag active: source_id=%u coordinator=%u",
+             (unsigned)s_source_id, (unsigned)coordinator_id);
+
+    while (true) {
+        struct uwb_distance_frame frame = {0};
+        const esp_err_t err =
+            uwb_distance_receive_next(&frame, APP_UWB_ANCHOR_SURVEY_RX_SLICE_MS);
+        if (err == ESP_OK) {
+            frame_count++;
+            if (APP_UWB_ANCHOR_SURVEY_PASSIVE_TAG_LOG_EVERY > 0 &&
+                (frame_count % APP_UWB_ANCHOR_SURVEY_PASSIVE_TAG_LOG_EVERY) ==
+                    1U) {
+                ESP_LOGI(TAG,
+                         "ANCHOR_SURVEY passive frame type=%s src=%u dst=%u seq=%u total=%lu",
+                         uwb_distance_type_name(frame.type),
+                         (unsigned)frame.source_id,
+                         (unsigned)frame.destination_id,
+                         (unsigned)frame.sequence,
+                         (unsigned long)frame_count);
+            }
+        } else if (err != ESP_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "ANCHOR_SURVEY passive RX failed: %s",
+                     esp_err_to_name(err));
+            uwb_dw3000_delay_ms(20);
+        }
+    }
+}
+
+static void uwb_anchor_survey_anchor_loop(uint8_t coordinator_id,
+                                          const uint8_t *anchor_ids,
+                                          size_t anchor_count)
+{
+    s_status = UWB_DW3000_STATUS_READY;
+
+    if (s_source_id != coordinator_id) {
+        ESP_LOGI(TAG,
+                 "ANCHOR_SURVEY anchor follower active: source_id=%u coordinator=%u",
+                 (unsigned)s_source_id, (unsigned)coordinator_id);
+        while (true) {
+            struct uwb_distance_frame frame = {0};
+            const esp_err_t err = uwb_distance_receive_next(
+                &frame, APP_UWB_ANCHOR_SURVEY_RX_SLICE_MS);
+            if (err == ESP_OK) {
+                uwb_anchor_survey_process_frame(&frame, coordinator_id,
+                                                anchor_ids, anchor_count);
+            } else if (err != ESP_ERR_TIMEOUT) {
+                ESP_LOGW(TAG, "ANCHOR_SURVEY follower RX failed: %s",
+                         esp_err_to_name(err));
+                uwb_dw3000_delay_ms(20);
+            }
+        }
+    }
+
+    struct uwb_anchor_survey_pair pairs[UWB_ANCHOR_SURVEY_MAX_PAIRS] = {0};
+    const size_t pair_count =
+        uwb_anchor_survey_build_pairs(anchor_ids, anchor_count, pairs);
+    uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
+    uint32_t round = 0;
+
+    ESP_LOGI(TAG,
+             "ANCHOR_SURVEY coordinator active: source_id=%u pair_count=%u slot=%u ms round_gap=%u ms",
+             (unsigned)s_source_id, (unsigned)pair_count,
+             (unsigned)APP_UWB_ANCHOR_SURVEY_SLOT_MS,
+             (unsigned)APP_UWB_ANCHOR_SURVEY_ROUND_GAP_MS);
+
+    while (true) {
+        ESP_LOGI(TAG, "ANCHOR_SURVEY round=%lu start",
+                 (unsigned long)round);
+        for (size_t i = 0; i < pair_count; ++i) {
+            const struct uwb_anchor_survey_pair *pair = &pairs[i];
+            const TickType_t slot_end =
+                xTaskGetTickCount() +
+                pdMS_TO_TICKS(APP_UWB_ANCHOR_SURVEY_SLOT_MS);
+
+            if (pair->initiator_id == s_source_id) {
+                ESP_LOGI(TAG,
+                         "ANCHOR_SURVEY local slot=%u seq=%u pair=%u-%u",
+                         (unsigned)i, (unsigned)sequence,
+                         (unsigned)pair->initiator_id,
+                         (unsigned)pair->responder_id);
+                const esp_err_t err = uwb_distance_initiate_once(
+                    pair->responder_id, sequence, false);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG,
+                             "ANCHOR_SURVEY local pair=%u-%u seq=%u failed: %s",
+                             (unsigned)pair->initiator_id,
+                             (unsigned)pair->responder_id,
+                             (unsigned)sequence, esp_err_to_name(err));
+                }
+            } else {
+                (void)uwb_anchor_survey_send_command(pair, (uint8_t)i,
+                                                     sequence);
+            }
+
+            sequence++;
+            uwb_anchor_survey_listen_until(slot_end, coordinator_id,
+                                           anchor_ids, anchor_count);
+        }
+
+        round++;
+        ESP_LOGI(TAG, "ANCHOR_SURVEY round=%lu complete",
+                 (unsigned long)(round - 1UL));
+        uwb_dw3000_delay_ms(APP_UWB_ANCHOR_SURVEY_ROUND_GAP_MS);
+    }
+}
+
+static void uwb_dw3000_anchor_survey_loop(void)
+{
+    uint8_t anchor_ids[UWB_ANCHOR_SURVEY_MAX_ANCHORS] = {0};
+    const size_t anchor_count = uwb_anchor_survey_anchor_ids(anchor_ids);
+    const uint8_t coordinator_id =
+        (uint8_t)APP_UWB_ANCHOR_SURVEY_COORDINATOR_ID;
+
+    ESP_LOGI(TAG,
+             "ANCHOR_SURVEY runtime start: source_id=%u tag_id=%u coordinator=%u anchors=[%u,%u,%u,%u]",
+             (unsigned)s_source_id, (unsigned)APP_UWB_TAG_ID,
+             (unsigned)coordinator_id,
+             (unsigned)anchor_ids[0], (unsigned)anchor_ids[1],
+             (unsigned)anchor_ids[2], (unsigned)anchor_ids[3]);
+
+    if (!uwb_anchor_survey_ids_valid(anchor_ids, anchor_count,
+                                     coordinator_id)) {
+        s_status = UWB_DW3000_STATUS_FAILED;
+        ESP_LOGE(TAG, "ANCHOR_SURVEY invalid anchor configuration");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    if (s_source_id == (uint8_t)APP_UWB_TAG_ID) {
+        uwb_anchor_survey_passive_tag_loop(coordinator_id);
+        return;
+    }
+
+    if (!uwb_anchor_survey_id_in_set(anchor_ids, anchor_count, s_source_id)) {
+        s_status = UWB_DW3000_STATUS_READY;
+        ESP_LOGW(TAG,
+                 "ANCHOR_SURVEY idle: source_id=%u is neither tag nor configured anchor",
+                 (unsigned)s_source_id);
+        while (true) {
+            uwb_dw3000_delay_ms(1000);
+        }
+    }
+
+    uwb_anchor_survey_anchor_loop(coordinator_id, anchor_ids, anchor_count);
 }
 
 static const char *uwb_calibration_method_name(void)
@@ -3421,6 +3912,8 @@ static void uwb_dw3000_task(void *arg)
         uwb_dw3000_distance_test_loop();
     } else if (s_runtime_mode == UWB_DW3000_RUNTIME_CALIBRATION) {
         uwb_dw3000_calibration_loop();
+    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_ANCHOR_SURVEY) {
+        uwb_dw3000_anchor_survey_loop();
     } else {
         uwb_dw3000_radio_loop();
     }
@@ -3463,6 +3956,11 @@ esp_err_t uwb_dw3000_start_distance_test(void)
 esp_err_t uwb_dw3000_start_calibration(void)
 {
     return uwb_dw3000_start_runtime(UWB_DW3000_RUNTIME_CALIBRATION);
+}
+
+esp_err_t uwb_dw3000_start_anchor_survey(void)
+{
+    return uwb_dw3000_start_runtime(UWB_DW3000_RUNTIME_ANCHOR_SURVEY);
 }
 
 bool uwb_dw3000_is_ready(void)
