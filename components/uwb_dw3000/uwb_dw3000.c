@@ -21,24 +21,10 @@
 #include "secrets.h"
 #endif
 
+#include "uwb_config.h"
+
 #ifndef HOSTNAME
 #define HOSTNAME "uwb-module"
-#endif
-
-#ifndef APP_UWB_SOURCE_ID
-#define APP_UWB_SOURCE_ID 0
-#endif
-
-#ifndef APP_UWB_BEACON_ENABLED
-#define APP_UWB_BEACON_ENABLED 1
-#endif
-
-#ifndef APP_UWB_BEACON_MIN_INTERVAL_MS
-#define APP_UWB_BEACON_MIN_INTERVAL_MS 700
-#endif
-
-#ifndef APP_UWB_BEACON_MAX_INTERVAL_MS
-#define APP_UWB_BEACON_MAX_INTERVAL_MS 1900
 #endif
 
 static const char *TAG = "uwb_dw3000";
@@ -58,7 +44,7 @@ enum {
     UWB_DW3000_TX_TIMEOUT_MS = 120,
     UWB_DW3000_TX_POLL_MS = 2,
     UWB_DW3000_PAYLOAD_LEN = 32,
-    UWB_DW3000_ANTENNA_DELAY = 0x3FCA,
+    UWB_DW3000_ANTENNA_DELAY = APP_UWB_ANTENNA_DELAY_DEFAULT,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -94,6 +80,23 @@ enum {
 #define DW3000_CMD_TXRXOFF 0x00
 #define DW3000_CMD_TX 0x01
 #define DW3000_CMD_RX 0x02
+
+#define DW3000_GPIO_MODE_SUB 0x00
+#define DW3000_GPIO_DIR_SUB 0x08
+#define DW3000_PMSC_CLK_CTRL_SUB 0x04
+#define DW3000_PMSC_LED_CTRL_SUB 0x16
+
+#define DW3000_GPIO_MODE_MSGP2_MODE_BIT_MASK 0x1C0UL
+#define DW3000_GPIO_MODE_MSGP3_MODE_BIT_MASK 0xE00UL
+#define DW3000_GPIO_PIN2_RXLED (1UL << (2U * 3U))
+#define DW3000_GPIO_PIN3_TXLED (1UL << (3U * 3U))
+
+#define DW3000_CLK_CTRL_GPIO_DCLK_EN_BIT_MASK 0x40000UL
+#define DW3000_CLK_CTRL_LP_CLK_EN_BIT_MASK 0x800000UL
+
+#define DW3000_LED_CTRL_BLINK_EN_BIT_MASK 0x100UL
+#define DW3000_LED_CTRL_FORCE_TRIGGER_BIT_MASK 0xF0000UL
+#define DW3000_LED_CTRL_BLINK_TIME_MASK 0xFFUL
 
 #define DW3000_STATUS_TXFRS 0x00000080UL
 #define DW3000_STATUS_RXFR 0x00002000UL
@@ -429,6 +432,18 @@ static esp_err_t uwb_dw3000_read32(uint8_t base, uint8_t sub, uint32_t *value)
     return ESP_OK;
 }
 
+static esp_err_t uwb_dw3000_update_u32(uint8_t base, uint8_t sub,
+                                       uint32_t clear_mask,
+                                       uint32_t set_mask)
+{
+    uint32_t value = 0;
+    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(base, sub, &value), TAG,
+                        "read before register update failed");
+    value &= ~clear_mask;
+    value |= set_mask;
+    return uwb_dw3000_write_u32_len(base, sub, value, sizeof(value));
+}
+
 static esp_err_t uwb_dw3000_read_rx_payload(
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN], uint16_t *payload_len)
 {
@@ -707,6 +722,72 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
     return ESP_OK;
 }
 
+static esp_err_t uwb_dw3000_configure_hardware_leds(void)
+{
+    if (!APP_UWB_DW_LEDS_ENABLED) {
+        ESP_LOGI(TAG, "DW3000 hardware TX/RX LEDs disabled");
+        return ESP_OK;
+    }
+
+    if (BOARD_CONFIG_UWB_RX_DW_LED_INDEX != 2 ||
+        BOARD_CONFIG_UWB_TX_DW_LED_INDEX != 3) {
+        ESP_LOGE(TAG,
+                 "DW3000 hardware LED functions require RXLED=GPIO2 and "
+                 "TXLED=GPIO3, got RX=%d TX=%d",
+                 BOARD_CONFIG_UWB_RX_DW_LED_INDEX,
+                 BOARD_CONFIG_UWB_TX_DW_LED_INDEX);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    const uint32_t gpio_led_mask =
+        DW3000_GPIO_MODE_MSGP2_MODE_BIT_MASK |
+        DW3000_GPIO_MODE_MSGP3_MODE_BIT_MASK;
+    const uint32_t gpio_led_mode =
+        DW3000_GPIO_PIN2_RXLED | DW3000_GPIO_PIN3_TXLED;
+
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_update_u32(DW3000_REG_GPIO_CTRL, DW3000_GPIO_MODE_SUB,
+                              gpio_led_mask, gpio_led_mode),
+        TAG, "configure DW3000 LED GPIO mode failed");
+
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_update_u32(DW3000_REG_PMSC, DW3000_PMSC_CLK_CTRL_SUB, 0,
+                              DW3000_CLK_CTRL_GPIO_DCLK_EN_BIT_MASK |
+                                  DW3000_CLK_CTRL_LP_CLK_EN_BIT_MASK),
+        TAG, "enable DW3000 LED clocks failed");
+
+    uint32_t led_ctrl =
+        DW3000_LED_CTRL_BLINK_EN_BIT_MASK |
+        ((uint32_t)APP_UWB_DW_LEDS_BLINK_TIME &
+         DW3000_LED_CTRL_BLINK_TIME_MASK);
+    if (APP_UWB_DW_LEDS_INIT_BLINK) {
+        led_ctrl |= DW3000_LED_CTRL_FORCE_TRIGGER_BIT_MASK;
+    }
+
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_PMSC, DW3000_PMSC_LED_CTRL_SUB,
+                                 led_ctrl, sizeof(led_ctrl)),
+        TAG, "enable DW3000 hardware LED blink failed");
+
+    if (APP_UWB_DW_LEDS_INIT_BLINK) {
+        led_ctrl &= ~DW3000_LED_CTRL_FORCE_TRIGGER_BIT_MASK;
+        ESP_RETURN_ON_ERROR(
+            uwb_dw3000_write_u32_len(DW3000_REG_PMSC,
+                                     DW3000_PMSC_LED_CTRL_SUB, led_ctrl,
+                                     sizeof(led_ctrl)),
+            TAG, "clear DW3000 LED init blink trigger failed");
+    }
+
+    ESP_LOGI(TAG,
+             "DW3000 hardware LEDs enabled: RXLED=GPIO%d TXLED=GPIO%d "
+             "blink_time=0x%02x",
+             BOARD_CONFIG_UWB_RX_DW_LED_INDEX,
+             BOARD_CONFIG_UWB_TX_DW_LED_INDEX,
+             (unsigned)((uint32_t)APP_UWB_DW_LEDS_BLINK_TIME &
+                        DW3000_LED_CTRL_BLINK_TIME_MASK));
+    return ESP_OK;
+}
+
 static esp_err_t uwb_dw3000_radio_init(void)
 {
     uint32_t sys_cfg = 0;
@@ -827,8 +908,11 @@ static esp_err_t uwb_dw3000_radio_init(void)
         "PMSC final 0x08 write failed");
 
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_GPIO_CTRL, 0x08, 0xF0), TAG,
-        "DW3000 GPIO setup failed");
+        uwb_dw3000_write_u32_auto(DW3000_REG_GPIO_CTRL, DW3000_GPIO_DIR_SUB,
+                                  0xF0),
+        TAG, "DW3000 GPIO direction setup failed");
+    ESP_RETURN_ON_ERROR(uwb_dw3000_configure_hardware_leds(), TAG,
+                        "DW3000 hardware LED setup failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1C, 0x34), TAG,
         "TX PG delay write failed");

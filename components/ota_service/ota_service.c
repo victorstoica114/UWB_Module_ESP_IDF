@@ -13,6 +13,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "stability_test_service.h"
 #include "uwb_dw3000.h"
 #include "wifi_service.h"
 #include "wireless_log_service.h"
@@ -132,7 +133,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     const esp_partition_t *boot = esp_ota_get_boot_partition();
     const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
 
-    char response[1152];
+    char response[2048];
     const int len = snprintf(
         response, sizeof(response),
         "{"
@@ -142,6 +143,16 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"ota_status\":\"%s\","
         "\"wifi_connected\":%s,"
         "\"ip\":\"%s\","
+        "\"wifi_disconnect_count\":%lu,"
+        "\"wifi_last_disconnect_reason\":%u,"
+        "\"wifi_last_disconnect_reason_name\":\"%s\","
+        "\"wifi_connected_bssid\":\"%s\","
+        "\"wifi_connected_channel\":%u,"
+        "\"wifi_connected_rssi\":%d,"
+        "\"wifi_scan_ap_count\":%u,"
+        "\"wifi_scan_best_bssid\":\"%s\","
+        "\"wifi_scan_best_channel\":%u,"
+        "\"wifi_scan_best_rssi\":%d,"
         "\"running_partition\":\"%s\","
         "\"boot_partition\":\"%s\","
         "\"next_update_partition\":\"%s\","
@@ -161,12 +172,27 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"wireless_log_connected\":%s,"
         "\"wireless_log_target\":\"%s\","
         "\"wireless_log_port\":%u,"
-        "\"wireless_log_dropped\":%lu"
+        "\"wireless_log_dropped\":%lu,"
+        "\"stability_log_stress_enabled\":%s,"
+        "\"stability_log_stress_status\":\"%s\","
+        "\"stability_log_stress_generated\":%lu,"
+        "\"stability_log_stress_enqueue_failed\":%lu"
         "}\n",
         app->project_name, app->version, app->idf_ver,
         ota_status_to_string(s_status),
         wifi_service_is_connected() ? "true" : "false",
-        wifi_service_get_ip_address(), partition_label_or_unknown(running),
+        wifi_service_get_ip_address(),
+        (unsigned long)wifi_service_get_disconnect_count(),
+        (unsigned)wifi_service_get_last_disconnect_reason(),
+        wifi_service_get_last_disconnect_reason_name(),
+        wifi_service_get_connected_bssid(),
+        (unsigned)wifi_service_get_connected_channel(),
+        wifi_service_get_connected_rssi(),
+        (unsigned)wifi_service_get_last_scan_ap_count(),
+        wifi_service_get_last_scan_best_bssid(),
+        (unsigned)wifi_service_get_last_scan_best_channel(),
+        wifi_service_get_last_scan_best_rssi(),
+        partition_label_or_unknown(running),
         partition_label_or_unknown(boot), partition_label_or_unknown(next),
         s_ota_in_progress ? "true" : "false",
         ota_token_configured() ? "true" : "false",
@@ -185,7 +211,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         wireless_log_service_is_connected() ? "true" : "false",
         wireless_log_service_get_target(),
         (unsigned)wireless_log_service_get_port(),
-        (unsigned long)wireless_log_service_get_dropped_count());
+        (unsigned long)wireless_log_service_get_dropped_count(),
+        stability_test_service_is_enabled() ? "true" : "false",
+        stability_test_service_status_to_string(
+            stability_test_service_get_status()),
+        (unsigned long)stability_test_service_get_log_generated_count(),
+        (unsigned long)stability_test_service_get_log_enqueue_failed_count());
 
     if (len < 0 || len >= (int)sizeof(response)) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,

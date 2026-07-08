@@ -27,6 +27,9 @@ bool wireless_log_service_is_connected(void);
 const char *wireless_log_service_get_target(void);
 uint16_t wireless_log_service_get_port(void);
 uint32_t wireless_log_service_get_dropped_count(void);
+bool wireless_log_service_submit(char level, const char *tag,
+                                 const char *format, ...)
+    __attribute__((format(printf, 3, 4)));
 
 #ifdef __cplusplus
 }

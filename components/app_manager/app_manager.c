@@ -3,15 +3,22 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "app_config.h"
 #include "app_led.h"
 #include "board_config.h"
 #include "driver/gpio.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "ota_service.h"
 #include "sdkconfig.h"
+#include "stability_test_service.h"
+#include "uwb_calibration_service.h"
+#include "uwb_config.h"
+#include "uwb_distance_test_service.h"
 #include "uwb_dw3000.h"
+#include "uwb_ranging_service.h"
 #include "wifi_service.h"
 #include "wireless_log_service.h"
 
@@ -115,6 +122,67 @@ static void status_led_init(void)
                                    status_led_level(false)));
 }
 
+static const char *runtime_mode_name(int mode)
+{
+    switch (mode) {
+    case APP_RUNTIME_MODE_UWB_BEACON_SMOKE:
+        return "uwb_beacon_smoke";
+    case APP_RUNTIME_MODE_UWB_DISTANCE_TEST:
+        return "uwb_distance_test";
+    case APP_RUNTIME_MODE_UWB_ANTENNA_DELAY_CALIBRATION:
+        return "uwb_antenna_delay_calibration";
+    case APP_RUNTIME_MODE_UWB_RANGING:
+        return "uwb_ranging";
+    default:
+        return "unknown";
+    }
+}
+
+static const char *uwb_role_name(int role)
+{
+    switch (role) {
+    case APP_UWB_ROLE_UNSET:
+        return "unset";
+    case APP_UWB_ROLE_ANCHOR:
+        return "anchor";
+    case APP_UWB_ROLE_TAG:
+        return "tag";
+    case APP_UWB_ROLE_DISTANCE_TEST_NODE:
+        return "distance_test_node";
+    default:
+        return "unknown";
+    }
+}
+
+static esp_err_t app_manager_start_selected_runtime(void)
+{
+    if (!APP_UWB_ENABLED) {
+        ESP_LOGW(TAG, "Selected runtime uses UWB, but APP_UWB_ENABLED is 0");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Application runtime: mode=%s(%d), uwb_role=%s(%d), "
+                  "uwb_source_id=%u",
+             runtime_mode_name(APP_RUNTIME_MODE), APP_RUNTIME_MODE,
+             uwb_role_name(APP_UWB_ROLE), APP_UWB_ROLE,
+             (unsigned)APP_UWB_SOURCE_ID);
+
+    switch (APP_RUNTIME_MODE) {
+    case APP_RUNTIME_MODE_UWB_BEACON_SMOKE:
+        return uwb_dw3000_start();
+    case APP_RUNTIME_MODE_UWB_ANTENNA_DELAY_CALIBRATION:
+        return uwb_calibration_service_start();
+    case APP_RUNTIME_MODE_UWB_DISTANCE_TEST:
+        return uwb_distance_test_service_start();
+    case APP_RUNTIME_MODE_UWB_RANGING:
+        return uwb_ranging_service_start();
+    default:
+        ESP_LOGE(TAG, "Unsupported application runtime mode: %d",
+                 APP_RUNTIME_MODE);
+        return ESP_ERR_INVALID_ARG;
+    }
+}
+
 void app_manager_start(void)
 {
     if (s_app_started) {
@@ -151,15 +219,21 @@ void app_manager_start(void)
                  esp_err_to_name(wireless_log_err));
     }
 
-    const esp_err_t uwb_err = uwb_dw3000_start();
-    if (uwb_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start UWB service: %s",
-                 esp_err_to_name(uwb_err));
+    const esp_err_t runtime_err = app_manager_start_selected_runtime();
+    if (runtime_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start selected runtime: %s",
+                 esp_err_to_name(runtime_err));
     }
 
     const esp_err_t ota_err = ota_service_start();
     if (ota_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start OTA service: %s",
                  esp_err_to_name(ota_err));
+    }
+
+    const esp_err_t stability_err = stability_test_service_start();
+    if (stability_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start stability test service: %s",
+                 esp_err_to_name(stability_err));
     }
 }

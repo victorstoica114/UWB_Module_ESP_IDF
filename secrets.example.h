@@ -6,21 +6,14 @@
 #define APP_OTA_PASSWORD "your-ota-password"
 
 #define APP_WIRELESS_LOG_TARGET "your-pc-ip"
-#define APP_WIRELESS_LOG_PORT 6055
-#define APP_WIRELESS_LOG_ENABLED 1
+
+/* Optional, useful when the same SSID is broadcast by multiple AP/BSSID radios. */
+/* #define APP_WIFI_LOCK_BSSID 1 */
+/* #define APP_WIFI_BSSID "aa:bb:cc:dd:ee:ff" */
+/* #define APP_WIFI_LOCK_CHANNEL 6 */
 
 #ifndef HOSTNAME
 #define HOSTNAME "uwb-module-1"
-#endif
-
-#define APP_UWB_BEACON_ENABLED 1
-#define APP_UWB_BEACON_MIN_INTERVAL_MS 700
-#define APP_UWB_BEACON_MAX_INTERVAL_MS 1900
-/* 0 = derive from HOSTNAME suffix, then Wi-Fi MAC fallback. */
-#define APP_UWB_SOURCE_ID 0
-
-#ifndef APP_WIFI_USE_WPA3
-#define APP_WIFI_USE_WPA3 0
 #endif
 
 #endif /* SECRETS_H */

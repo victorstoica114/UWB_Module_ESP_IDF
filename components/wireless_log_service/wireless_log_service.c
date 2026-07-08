@@ -19,20 +19,14 @@
 #include "secrets.h"
 #endif
 
+#include "app_config.h"
+
 #ifndef HOSTNAME
 #define HOSTNAME "uwb-module"
 #endif
 
 #ifndef APP_WIRELESS_LOG_TARGET
 #define APP_WIRELESS_LOG_TARGET ""
-#endif
-
-#ifndef APP_WIRELESS_LOG_PORT
-#define APP_WIRELESS_LOG_PORT 6055
-#endif
-
-#ifndef APP_WIRELESS_LOG_ENABLED
-#define APP_WIRELESS_LOG_ENABLED 1
 #endif
 
 enum {
@@ -145,10 +139,10 @@ static bool wireless_log_should_skip_idf_tag(const char *raw)
            strcmp(tag, "phy_init") == 0;
 }
 
-static void wireless_log_enqueue_raw(const char *raw)
+static bool wireless_log_enqueue_raw(const char *raw)
 {
     if (s_log_queue == NULL || !wireless_log_target_configured()) {
-        return;
+        return false;
     }
 
     wireless_log_line_t item = {0};
@@ -158,21 +152,24 @@ static void wireless_log_enqueue_raw(const char *raw)
     wireless_log_strip_line(normalized);
     wireless_log_strip_ansi(normalized);
     if (normalized[0] == '\0') {
-        return;
+        return false;
     }
 
     if (wireless_log_should_skip_idf_tag(normalized)) {
-        return;
+        return false;
     }
 
     if (!wireless_log_parse_idf_line(normalized, item.line,
                                      sizeof(item.line))) {
-        return;
+        return false;
     }
 
     if (xQueueSend(s_log_queue, &item, 0) != pdTRUE) {
         s_dropped_count++;
+        return false;
     }
+
+    return true;
 }
 
 static int wireless_log_vprintf(const char *format, va_list args)
@@ -191,7 +188,7 @@ static int wireless_log_vprintf(const char *format, va_list args)
     vsnprintf(raw, sizeof(raw), format, copy);
     va_end(copy);
 
-    wireless_log_enqueue_raw(raw);
+    (void)wireless_log_enqueue_raw(raw);
     return written;
 }
 
@@ -246,13 +243,27 @@ static bool wireless_log_send_all(int sock, const char *line)
     }
 
     int sent_total = 0;
+    const TickType_t start = xTaskGetTickCount();
     while (sent_total < len) {
         const int sent = send(sock, payload + sent_total,
                               (size_t)(len - sent_total), MSG_DONTWAIT);
+        if (sent > 0) {
+            sent_total += sent;
+            continue;
+        }
+
+        if (sent < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+            if ((xTaskGetTickCount() - start) >=
+                pdMS_TO_TICKS(WIRELESS_LOG_SEND_TIMEOUT_MS)) {
+                return false;
+            }
+            vTaskDelay(1);
+            continue;
+        }
+
         if (sent <= 0) {
             return false;
         }
-        sent_total += sent;
     }
 
     return true;
@@ -324,7 +335,8 @@ static void wireless_log_task(void *arg)
 
             s_connected = true;
             s_status = WIRELESS_LOG_STATUS_CONNECTED;
-            wireless_log_enqueue_raw("I (0) wireless_log: TCP log stream connected");
+            (void)wireless_log_enqueue_raw(
+                "I (0) wireless_log: TCP log stream connected");
         }
 
         wireless_log_line_t item;
@@ -431,4 +443,33 @@ uint16_t wireless_log_service_get_port(void)
 uint32_t wireless_log_service_get_dropped_count(void)
 {
     return s_dropped_count;
+}
+
+bool wireless_log_service_submit(char level, const char *tag,
+                                 const char *format, ...)
+{
+    if (tag == NULL || format == NULL) {
+        return false;
+    }
+
+    char message[WIRELESS_LOG_LINE_MAX] = {0};
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+
+    const uint32_t uptime_ms =
+        (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    char raw[WIRELESS_LOG_LINE_MAX] = {0};
+    const int prefix_len = snprintf(raw, sizeof(raw), "%c (%lu) %.39s: ",
+                                    level, (unsigned long)uptime_ms, tag);
+    if (prefix_len < 0 || prefix_len >= (int)sizeof(raw)) {
+        return false;
+    }
+
+    const size_t remaining = sizeof(raw) - (size_t)prefix_len;
+    strncpy(raw + prefix_len, message, remaining - 1U);
+    raw[sizeof(raw) - 1U] = '\0';
+
+    return wireless_log_enqueue_raw(raw);
 }
