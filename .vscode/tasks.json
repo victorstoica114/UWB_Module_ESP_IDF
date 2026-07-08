@@ -4,14 +4,10 @@
     {
       "label": "ESP-IDF OTA Upload",
       "type": "shell",
-      "command": "powershell",
+      "command": "python3",
       "args": [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "${workspaceFolder}\\tools\\ota_upload.ps1",
-        "-HostIp",
+        "${workspaceFolder}/tools/ota_upload.py",
+        "--host-ip",
         "${input:otaHostIp}"
       ],
       "group": "build",
@@ -20,17 +16,13 @@
     {
       "label": "ESP-IDF OTA Upload All",
       "type": "shell",
-      "command": "powershell",
+      "command": "python3",
       "args": [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "${workspaceFolder}\\tools\\ota_upload.ps1",
-        "-TargetList",
-        "${input:otaTargetList}",
-        "-Parallel",
-        "${input:otaParallel}"
+        "${workspaceFolder}/tools/ota_upload.py",
+        "--target-list",
+        "tools/ota_targets.local.txt",
+        "--parallel",
+        "5"
       ],
       "group": "build",
       "problemMatcher": []
@@ -38,10 +30,10 @@
     {
       "label": "Wireless Logs",
       "type": "shell",
-      "command": "python",
+      "command": "python3",
       "args": [
         "-u",
-        "${workspaceFolder}\\tools\\wireless_log_listener.py",
+        "${workspaceFolder}/tools/wireless_log_listener.py",
         "--port",
         "${input:wirelessLogPort}",
         "--force-color"
@@ -73,19 +65,7 @@
       "id": "otaHostIp",
       "type": "promptString",
       "description": "ESP32 IP address for OTA upload",
-      "default": "192.168.140.143"
-    },
-    {
-      "id": "otaTargetList",
-      "type": "promptString",
-      "description": "OTA target list file",
-      "default": "tools\\ota_targets.local.txt"
-    },
-    {
-      "id": "otaParallel",
-      "type": "promptString",
-      "description": "OTA parallel uploads",
-      "default": "5"
+      "default": "192.168.139.72"
     },
     {
       "id": "wirelessLogPort",

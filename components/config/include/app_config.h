@@ -17,7 +17,7 @@
 #endif
 
 #ifndef APP_WIFI_SSID
-#define APP_WIFI_SSID "ED421"
+#define APP_WIFI_SSID "ED313"
 #endif
 
 #ifndef APP_UWB_ENABLED
@@ -147,7 +147,7 @@
 #endif
 
 #ifndef APP_WIRELESS_LOG_TARGET
-#define APP_WIRELESS_LOG_TARGET "192.168.140.121"
+#define APP_WIRELESS_LOG_TARGET "192.168.139.87"
 #endif
 
 #ifndef APP_WIRELESS_LOG_PORT

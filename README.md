@@ -233,6 +233,12 @@ for example `tools/ota_targets.local.txt`, with one IP or hostname per line:
 powershell -ExecutionPolicy Bypass -File tools\ota_upload.ps1 -TargetList tools\ota_targets.local.txt -Parallel 5
 ```
 
+On Linux/macOS, use the Python helper:
+
+```sh
+python3 tools/ota_upload.py --target-list tools/ota_targets.local.txt --parallel 5
+```
+
 In VS Code, use `Terminal > Run Task... > ESP-IDF OTA Upload All`.
 
 Wireless logs are part of the normal multi-module workflow. With five modules
