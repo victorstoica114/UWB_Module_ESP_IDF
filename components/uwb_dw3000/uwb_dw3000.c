@@ -38,7 +38,6 @@ enum {
     UWB_DW3000_TX_TIMEOUT_MS = 120,
     UWB_DW3000_TX_POLL_MS = 2,
     UWB_DW3000_PAYLOAD_LEN = 48,
-    UWB_DW3000_ANTENNA_DELAY = APP_UWB_ANTENNA_DELAY_DEFAULT,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -383,6 +382,7 @@ static volatile uint32_t s_rx_error_count;
 static volatile uint32_t s_rx_ignored_count;
 static volatile uint8_t s_last_rx_source_id;
 static volatile uint32_t s_last_rx_sequence;
+static uint16_t s_antenna_delay = APP_UWB_ANTENNA_DELAY_DEFAULT;
 
 static int gpio_level_active(int active_high)
 {
@@ -807,7 +807,7 @@ static uint64_t uwb_dw3000_programmed_tx_timestamp(uint32_t delayed_time_word)
 {
     return ((((uint64_t)(delayed_time_word & UWB_DW3000_DELAYED_TIME_MASK))
              << 8U) +
-            UWB_DW3000_ANTENNA_DELAY) &
+            s_antenna_delay) &
            UWB_DW3000_TIMESTAMP_MASK;
 }
 
@@ -1636,11 +1636,11 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
         "LDO restore failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_len(DW3000_REG_CIA_3, 0x00,
-                                 UWB_DW3000_ANTENNA_DELAY, 2),
+                                 s_antenna_delay, 2),
         TAG, "RX antenna delay write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_HIGH, 0x04,
-                                 UWB_DW3000_ANTENNA_DELAY, 2),
+                                 s_antenna_delay, 2),
         TAG, "TX antenna delay write failed");
 #if APP_UWB_DIAGNOSTICS_ENABLED
     ESP_RETURN_ON_ERROR(uwb_dw3000_configure_cia_diagnostics(true), TAG,
@@ -1650,8 +1650,7 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
                         "CIA diagnostics config failed");
 #endif
     ESP_LOGI(TAG, "DW3000 antenna delay set: rx=0x%04x tx=0x%04x",
-             (unsigned)UWB_DW3000_ANTENNA_DELAY,
-             (unsigned)UWB_DW3000_ANTENNA_DELAY);
+             (unsigned)s_antenna_delay, (unsigned)s_antenna_delay);
 
     return ESP_OK;
 }
@@ -3345,7 +3344,7 @@ static void uwb_calibration_log_stats(
     const int32_t suggested_delta =
         uwb_calibration_round_to_i32(error_dtu);
     int32_t suggested_delay =
-        (int32_t)APP_UWB_ANTENNA_DELAY_DEFAULT + suggested_delta;
+        (int32_t)s_antenna_delay + suggested_delta;
     if (suggested_delay < 0) {
         suggested_delay = 0;
     } else if (suggested_delay > 0xFFFF) {
@@ -3392,7 +3391,7 @@ static void uwb_calibration_two_module_loop(void)
              "UWB CAL two-module active: source_id=%u reference_id=%u dut_id=%u known=%u mm delay=0x%04x",
              (unsigned)s_source_id, (unsigned)reference_id,
              (unsigned)dut_id, (unsigned)APP_UWB_CALIBRATION_KNOWN_DISTANCE_MM,
-             (unsigned)APP_UWB_ANTENNA_DELAY_DEFAULT);
+             (unsigned)s_antenna_delay);
 
     if (reference_id == 0 || dut_id == 0 || reference_id == dut_id) {
         s_status = UWB_DW3000_STATUS_FAILED;
@@ -3500,7 +3499,7 @@ static void uwb_calibration_three_module_loop(void)
              (unsigned)s_source_id, (unsigned)ids[0], (unsigned)ids[1],
              (unsigned)ids[2],
              (unsigned)APP_UWB_CALIBRATION_KNOWN_DISTANCE_MM,
-             (unsigned)APP_UWB_ANTENNA_DELAY_DEFAULT);
+             (unsigned)s_antenna_delay);
 
     if (ids[0] == 0 || ids[1] == 0 || ids[2] == 0 || ids[0] == ids[1] ||
         ids[0] == ids[2] || ids[1] == ids[2]) {
@@ -3841,6 +3840,7 @@ static void uwb_dw3000_task(void *arg)
     s_status = UWB_DW3000_STATUS_INITIALIZING;
     s_device_id = 0;
     s_source_id = uwb_dw3000_pick_source_id();
+    s_antenna_delay = app_identity_get_uwb_antenna_delay();
     s_task_handle = xTaskGetCurrentTaskHandle();
 
     ESP_LOGI(TAG,
@@ -3852,6 +3852,9 @@ static void uwb_dw3000_task(void *arg)
     ESP_LOGI(TAG, "DW3000 GPIO polarity: reset active-%s, wakeup active-%s",
              BOARD_CONFIG_UWB_RST_ACTIVE_HIGH ? "HIGH" : "LOW",
              BOARD_CONFIG_UWB_WAKEUP_ACTIVE_HIGH ? "HIGH" : "LOW");
+    ESP_LOGI(TAG, "DW3000 active antenna delay: 0x%04x (%s)",
+             (unsigned)s_antenna_delay,
+             app_identity_uwb_antenna_delay_from_nvs() ? "nvs" : "fallback");
 
     esp_err_t err = uwb_dw3000_configure_gpio();
     if (err == ESP_OK) {
@@ -4034,4 +4037,13 @@ uint8_t uwb_dw3000_get_last_rx_source_id(void)
 uint32_t uwb_dw3000_get_last_rx_sequence(void)
 {
     return s_last_rx_sequence;
+}
+
+uint16_t uwb_dw3000_get_antenna_delay(void)
+{
+    if (!s_started) {
+        return app_identity_get_uwb_antenna_delay();
+    }
+
+    return s_antenna_delay;
 }

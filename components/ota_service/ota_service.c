@@ -1,8 +1,10 @@
 #include "ota_service.h"
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 
@@ -38,6 +40,7 @@ enum {
     OTA_SERVICE_WIFI_WAIT_MS = 500,
     OTA_SERVICE_REBOOT_DELAY_MS = 1200,
     OTA_SERVICE_MAX_TOKEN_LEN = 128,
+    OTA_SERVICE_MAX_QUERY_LEN = 160,
 };
 
 #define OTA_SERVICE_TOKEN_HEADER "X-OTA-Token"
@@ -48,6 +51,8 @@ static bool s_running;
 static volatile bool s_ota_in_progress;
 static volatile enum ota_service_status s_status = OTA_SERVICE_STATUS_IDLE;
 static uint8_t s_ota_buffer[OTA_SERVICE_CHUNK_SIZE];
+
+static void reboot_task(void *arg);
 
 static const char *ota_status_to_string(enum ota_service_status status)
 {
@@ -116,12 +121,38 @@ static bool ota_request_authorized(httpd_req_t *req)
     return constant_time_string_equal(token, APP_OTA_PASSWORD);
 }
 
+static bool ota_parse_u16(const char *text, uint16_t *value)
+{
+    if (text == NULL || text[0] == '\0' || value == NULL) {
+        return false;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    const unsigned long parsed = strtoul(text, &end, 0);
+    if (errno != 0 || end == text || *end != '\0' || parsed > 0xFFFFUL) {
+        return false;
+    }
+
+    *value = (uint16_t)parsed;
+    return true;
+}
+
+static bool ota_query_option_enabled(const char *query, const char *key)
+{
+    char value[8] = {0};
+    return httpd_query_key_value(query, key, value, sizeof(value)) == ESP_OK &&
+           strcmp(value, "1") == 0;
+}
+
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     static const char response[] =
         "uwb_esp_idf\n"
         "GET  /status\n"
-        "POST /ota    raw firmware image, requires X-OTA-Token header\n";
+        "POST /ota    raw firmware image, requires X-OTA-Token header\n"
+        "POST /config/antenna-delay?value=0x4018[&reboot=1]\n"
+        "POST /config/antenna-delay?clear=1[&reboot=1]\n";
 
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
@@ -133,8 +164,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     const esp_partition_t *running = esp_ota_get_running_partition();
     const esp_partition_t *boot = esp_ota_get_boot_partition();
     const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+    const uint16_t active_antenna_delay = uwb_dw3000_get_antenna_delay();
+    const uint16_t configured_antenna_delay =
+        app_identity_get_uwb_antenna_delay();
 
-    char response[2300];
+    char response[2800];
     const int len = snprintf(
         response, sizeof(response),
         "{"
@@ -170,6 +204,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"uwb_status\":\"%s\","
         "\"uwb_device_id\":\"0x%08lx\","
         "\"uwb_source_id\":%u,"
+        "\"uwb_active_antenna_delay\":%u,"
+        "\"uwb_active_antenna_delay_hex\":\"0x%04x\","
+        "\"uwb_configured_antenna_delay\":%u,"
+        "\"uwb_configured_antenna_delay_hex\":\"0x%04x\","
+        "\"uwb_antenna_delay_from_nvs\":%s,"
+        "\"uwb_antenna_delay_reboot_required\":%s,"
         "\"uwb_tx_count\":%lu,"
         "\"uwb_tx_error_count\":%lu,"
         "\"uwb_rx_count\":%lu,"
@@ -215,6 +255,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         uwb_dw3000_status_to_string(uwb_dw3000_get_status()),
         (unsigned long)uwb_dw3000_get_device_id(),
         (unsigned)uwb_dw3000_get_source_id(),
+        (unsigned)active_antenna_delay, (unsigned)active_antenna_delay,
+        (unsigned)configured_antenna_delay,
+        (unsigned)configured_antenna_delay,
+        app_identity_uwb_antenna_delay_from_nvs() ? "true" : "false",
+        active_antenna_delay != configured_antenna_delay ? "true" : "false",
         (unsigned long)uwb_dw3000_get_tx_count(),
         (unsigned long)uwb_dw3000_get_tx_error_count(),
         (unsigned long)uwb_dw3000_get_rx_count(),
@@ -243,12 +288,116 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     return httpd_resp_send(req, response, (ssize_t)len);
 }
 
+static esp_err_t antenna_delay_post_handler(httpd_req_t *req)
+{
+    if (!ota_request_authorized(req)) {
+        ESP_LOGW(TAG,
+                 "Rejected antenna delay config: missing or invalid token");
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED,
+                                   "Missing or invalid OTA token");
+    }
+
+    if (s_ota_in_progress) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "OTA already in progress");
+    }
+
+    const size_t query_len = httpd_req_get_url_query_len(req);
+    if (query_len == 0 || query_len >= OTA_SERVICE_MAX_QUERY_LEN) {
+        return httpd_resp_send_err(
+            req, HTTPD_400_BAD_REQUEST,
+            "Use ?value=0x4018 or ?clear=1");
+    }
+
+    char query[OTA_SERVICE_MAX_QUERY_LEN] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid query string");
+    }
+
+    const bool clear_requested = ota_query_option_enabled(query, "clear");
+    const bool reboot_requested = ota_query_option_enabled(query, "reboot");
+    esp_err_t err = ESP_OK;
+
+    if (clear_requested) {
+        err = app_identity_clear_uwb_antenna_delay();
+    } else {
+        char value_text[24] = {0};
+        if (httpd_query_key_value(query, "value", value_text,
+                                  sizeof(value_text)) != ESP_OK) {
+            return httpd_resp_send_err(
+                req, HTTPD_400_BAD_REQUEST,
+                "Missing antenna delay value; use ?value=0x4018");
+        }
+
+        uint16_t delay = 0;
+        if (!ota_parse_u16(value_text, &delay)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid antenna delay value");
+        }
+
+        err = app_identity_set_uwb_antenna_delay(delay);
+    }
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Antenna delay config failed: %s",
+                 esp_err_to_name(err));
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Antenna delay config failed");
+    }
+
+    const uint16_t active_delay = uwb_dw3000_get_antenna_delay();
+    const uint16_t configured_delay = app_identity_get_uwb_antenna_delay();
+    const bool reboot_required = active_delay != configured_delay;
+    ESP_LOGW(TAG,
+             "Antenna delay config: active=0x%04x configured=0x%04x source=%s reboot_required=%s reboot_requested=%s",
+             (unsigned)active_delay, (unsigned)configured_delay,
+             app_identity_uwb_antenna_delay_from_nvs() ? "nvs" : "fallback",
+             reboot_required ? "true" : "false",
+             reboot_requested ? "true" : "false");
+
+    char response[420];
+    const int len = snprintf(
+        response, sizeof(response),
+        "{"
+        "\"ok\":true,"
+        "\"uwb_active_antenna_delay\":%u,"
+        "\"uwb_active_antenna_delay_hex\":\"0x%04x\","
+        "\"uwb_configured_antenna_delay\":%u,"
+        "\"uwb_configured_antenna_delay_hex\":\"0x%04x\","
+        "\"uwb_antenna_delay_from_nvs\":%s,"
+        "\"reboot_required\":%s,"
+        "\"rebooting\":%s"
+        "}\n",
+        (unsigned)active_delay, (unsigned)active_delay,
+        (unsigned)configured_delay, (unsigned)configured_delay,
+        app_identity_uwb_antenna_delay_from_nvs() ? "true" : "false",
+        reboot_required ? "true" : "false",
+        reboot_requested ? "true" : "false");
+
+    if (len < 0 || len >= (int)sizeof(response)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "response too long");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    const esp_err_t response_err = httpd_resp_send(req, response, len);
+
+    if (reboot_requested) {
+        xTaskCreate(reboot_task, "cfg_reboot",
+                    OTA_SERVICE_RESTART_TASK_STACK_WORDS, NULL,
+                    OTA_SERVICE_RESTART_TASK_PRIORITY, NULL);
+    }
+
+    return response_err;
+}
+
 static void reboot_task(void *arg)
 {
     (void)arg;
 
     vTaskDelay(pdMS_TO_TICKS(OTA_SERVICE_REBOOT_DELAY_MS));
-    ESP_LOGI(TAG, "Restarting into updated firmware");
+    ESP_LOGI(TAG, "Restarting device");
     esp_restart();
 }
 
@@ -418,10 +567,18 @@ static esp_err_t start_http_server(void)
         .handler = ota_post_handler,
         .user_ctx = NULL,
     };
+    const httpd_uri_t antenna_delay_uri = {
+        .uri = "/config/antenna-delay",
+        .method = HTTP_POST,
+        .handler = antenna_delay_post_handler,
+        .user_ctx = NULL,
+    };
 
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &root_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &status_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &ota_uri));
+    ESP_ERROR_CHECK(
+        httpd_register_uri_handler(s_http_server, &antenna_delay_uri));
 
     s_running = true;
     s_status = OTA_SERVICE_STATUS_RUNNING;

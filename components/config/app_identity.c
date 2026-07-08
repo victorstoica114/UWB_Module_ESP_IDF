@@ -26,14 +26,17 @@ enum {
 #define APP_IDENTITY_NVS_NAMESPACE "identity"
 #define APP_IDENTITY_NVS_KEY_MODULE_ID "module_id"
 #define APP_IDENTITY_NVS_KEY_UWB_ROLE "uwb_role"
+#define APP_IDENTITY_NVS_KEY_UWB_ANTENNA_DELAY "ant_delay"
 
 static bool s_initialized;
 static bool s_module_id_from_nvs;
 static bool s_module_id_provisioned_this_boot;
 static bool s_uwb_role_from_nvs;
 static bool s_uwb_role_provisioned_this_boot;
+static bool s_uwb_antenna_delay_from_nvs;
 static uint8_t s_module_id = 1;
 static uint8_t s_uwb_role = APP_UWB_ROLE_UNSET;
+static uint16_t s_uwb_antenna_delay = APP_UWB_ANTENNA_DELAY_DEFAULT;
 static char s_hostname[APP_IDENTITY_HOSTNAME_MAX] = "uwb-module-1";
 
 static bool module_id_valid(uint32_t module_id)
@@ -52,6 +55,11 @@ static bool uwb_role_valid_for_provisioning(uint32_t role)
 {
     return role == APP_UWB_ROLE_ANCHOR || role == APP_UWB_ROLE_TAG ||
            role == APP_UWB_ROLE_DISTANCE_TEST_NODE;
+}
+
+static bool antenna_delay_valid(uint32_t delay)
+{
+    return delay <= 0xFFFFU;
 }
 
 static uint8_t parse_hostname_id(const char *hostname)
@@ -130,6 +138,19 @@ static esp_err_t read_u8_from_nvs(const char *key, uint8_t *value)
     return err;
 }
 
+static esp_err_t read_u16_from_nvs(const char *key, uint16_t *value)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(APP_IDENTITY_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_get_u16(handle, key, value);
+    nvs_close(handle);
+    return err;
+}
+
 static esp_err_t write_u8_to_nvs(const char *key, uint8_t value)
 {
     nvs_handle_t handle = 0;
@@ -138,6 +159,41 @@ static esp_err_t write_u8_to_nvs(const char *key, uint8_t value)
         "open identity NVS failed");
 
     esp_err_t err = nvs_set_u8(handle, key, value);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+
+    nvs_close(handle);
+    return err;
+}
+
+static esp_err_t write_u16_to_nvs(const char *key, uint16_t value)
+{
+    nvs_handle_t handle = 0;
+    ESP_RETURN_ON_ERROR(
+        nvs_open(APP_IDENTITY_NVS_NAMESPACE, NVS_READWRITE, &handle), TAG,
+        "open identity NVS failed");
+
+    esp_err_t err = nvs_set_u16(handle, key, value);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+
+    nvs_close(handle);
+    return err;
+}
+
+static esp_err_t erase_key_from_nvs(const char *key)
+{
+    nvs_handle_t handle = 0;
+    ESP_RETURN_ON_ERROR(
+        nvs_open(APP_IDENTITY_NVS_NAMESPACE, NVS_READWRITE, &handle), TAG,
+        "open identity NVS failed");
+
+    esp_err_t err = nvs_erase_key(handle, key);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    }
     if (err == ESP_OK) {
         err = nvs_commit(handle);
     }
@@ -232,15 +288,32 @@ esp_err_t app_identity_init(void)
         }
     }
 
+    uint16_t stored_antenna_delay = 0;
+    const esp_err_t delay_read_err = read_u16_from_nvs(
+        APP_IDENTITY_NVS_KEY_UWB_ANTENNA_DELAY, &stored_antenna_delay);
+    if (delay_read_err == ESP_OK &&
+        antenna_delay_valid(stored_antenna_delay)) {
+        s_uwb_antenna_delay = stored_antenna_delay;
+        s_uwb_antenna_delay_from_nvs = true;
+    } else {
+        s_uwb_antenna_delay = (uint16_t)APP_UWB_ANTENNA_DELAY_DEFAULT;
+        s_uwb_antenna_delay_from_nvs = false;
+        ESP_LOGW(TAG,
+                 "No persistent UWB antenna delay in NVS; using fallback delay=0x%04x",
+                 (unsigned)s_uwb_antenna_delay);
+    }
+
     update_hostname();
     s_initialized = true;
 
     ESP_LOGI(TAG,
-             "Identity ready: hostname=%s module_id=%u module_source=%s uwb_role=%s(%u) role_source=%s",
+             "Identity ready: hostname=%s module_id=%u module_source=%s uwb_role=%s(%u) role_source=%s antenna_delay=0x%04x antenna_delay_source=%s",
              s_hostname, (unsigned)s_module_id,
              s_module_id_from_nvs ? "nvs" : "fallback",
              app_identity_uwb_role_to_string(s_uwb_role),
-             (unsigned)s_uwb_role, s_uwb_role_from_nvs ? "nvs" : "fallback");
+             (unsigned)s_uwb_role, s_uwb_role_from_nvs ? "nvs" : "fallback",
+             (unsigned)s_uwb_antenna_delay,
+             s_uwb_antenna_delay_from_nvs ? "nvs" : "fallback");
     return ESP_OK;
 }
 
@@ -269,6 +342,15 @@ uint8_t app_identity_get_uwb_role(void)
     }
 
     return s_uwb_role;
+}
+
+uint16_t app_identity_get_uwb_antenna_delay(void)
+{
+    if (!s_initialized) {
+        (void)app_identity_init();
+    }
+
+    return s_uwb_antenna_delay;
 }
 
 const char *app_identity_uwb_role_to_string(uint8_t role)
@@ -305,4 +387,48 @@ bool app_identity_uwb_role_from_nvs(void)
 bool app_identity_uwb_role_provisioned_this_boot(void)
 {
     return s_uwb_role_provisioned_this_boot;
+}
+
+bool app_identity_uwb_antenna_delay_from_nvs(void)
+{
+    return s_uwb_antenna_delay_from_nvs;
+}
+
+esp_err_t app_identity_set_uwb_antenna_delay(uint16_t delay)
+{
+    if (!s_initialized) {
+        ESP_RETURN_ON_ERROR(app_identity_init(), TAG,
+                            "identity init failed before delay write");
+    }
+    if (!antenna_delay_valid(delay)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_RETURN_ON_ERROR(
+        write_u16_to_nvs(APP_IDENTITY_NVS_KEY_UWB_ANTENNA_DELAY, delay), TAG,
+        "UWB antenna delay write failed");
+
+    s_uwb_antenna_delay = delay;
+    s_uwb_antenna_delay_from_nvs = true;
+    ESP_LOGW(TAG, "Configured persistent UWB antenna delay=0x%04x",
+             (unsigned)s_uwb_antenna_delay);
+    return ESP_OK;
+}
+
+esp_err_t app_identity_clear_uwb_antenna_delay(void)
+{
+    if (!s_initialized) {
+        ESP_RETURN_ON_ERROR(app_identity_init(), TAG,
+                            "identity init failed before delay clear");
+    }
+
+    ESP_RETURN_ON_ERROR(
+        erase_key_from_nvs(APP_IDENTITY_NVS_KEY_UWB_ANTENNA_DELAY), TAG,
+        "UWB antenna delay clear failed");
+
+    s_uwb_antenna_delay = (uint16_t)APP_UWB_ANTENNA_DELAY_DEFAULT;
+    s_uwb_antenna_delay_from_nvs = false;
+    ESP_LOGW(TAG, "Cleared persistent UWB antenna delay; fallback=0x%04x",
+             (unsigned)s_uwb_antenna_delay);
+    return ESP_OK;
 }

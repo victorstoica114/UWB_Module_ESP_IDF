@@ -3,6 +3,7 @@
 #include "app_identity.h"
 #include "esp_log.h"
 #include "uwb_config.h"
+#include "uwb_dw3000.h"
 
 static const char *TAG = "uwb_ranging";
 
@@ -22,6 +23,6 @@ esp_err_t uwb_ranging_service_start(void)
              (unsigned)APP_UWB_ANCHOR_1_ID,
              (unsigned)APP_UWB_ANCHOR_2_ID,
              (unsigned)APP_UWB_ANCHOR_3_ID,
-             (unsigned)APP_UWB_ANTENNA_DELAY_DEFAULT);
+             (unsigned)uwb_dw3000_get_antenna_delay());
     return ESP_OK;
 }

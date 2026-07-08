@@ -16,7 +16,7 @@ esp_err_t uwb_calibration_service_start(void)
              (unsigned)APP_UWB_CALIBRATION_METHOD,
              (unsigned)APP_UWB_CALIBRATION_KNOWN_DISTANCE_MM,
              (unsigned)APP_UWB_CALIBRATION_SAMPLE_COUNT,
-             (unsigned)APP_UWB_ANTENNA_DELAY_DEFAULT,
+             (unsigned)uwb_dw3000_get_antenna_delay(),
              (unsigned)APP_UWB_SOURCE_ID,
              app_identity_uwb_role_to_string(app_identity_get_uwb_role()),
              (unsigned)app_identity_get_uwb_role());

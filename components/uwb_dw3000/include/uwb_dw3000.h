@@ -34,6 +34,7 @@ uint32_t uwb_dw3000_get_rx_error_count(void);
 uint32_t uwb_dw3000_get_rx_ignored_count(void);
 uint8_t uwb_dw3000_get_last_rx_source_id(void);
 uint32_t uwb_dw3000_get_last_rx_sequence(void);
+uint16_t uwb_dw3000_get_antenna_delay(void);
 
 #ifdef __cplusplus
 }

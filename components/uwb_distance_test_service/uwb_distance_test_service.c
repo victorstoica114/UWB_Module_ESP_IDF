@@ -15,6 +15,6 @@ esp_err_t uwb_distance_test_service_start(void)
              (unsigned)APP_UWB_DISTANCE_TEST_PEER_ID,
              (unsigned)APP_UWB_DISTANCE_TEST_INITIATOR_ID,
              (unsigned)APP_UWB_DISTANCE_TEST_RESPONDER_ID,
-             (unsigned)APP_UWB_ANTENNA_DELAY_DEFAULT);
+             (unsigned)uwb_dw3000_get_antenna_delay());
     return uwb_dw3000_start_distance_test();
 }

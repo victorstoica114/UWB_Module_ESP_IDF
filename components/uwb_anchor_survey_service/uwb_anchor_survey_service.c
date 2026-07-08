@@ -26,6 +26,6 @@ esp_err_t uwb_anchor_survey_service_start(void)
              (unsigned)APP_UWB_ANCHOR_SURVEY_SLOT_MS,
              (unsigned)APP_UWB_ANCHOR_SURVEY_COMMAND_DELAY_MS,
              (unsigned)APP_UWB_ANCHOR_SURVEY_ROUND_GAP_MS,
-             (unsigned)APP_UWB_ANTENNA_DELAY_DEFAULT);
+             (unsigned)uwb_dw3000_get_antenna_delay());
     return uwb_dw3000_start_anchor_survey();
 }
