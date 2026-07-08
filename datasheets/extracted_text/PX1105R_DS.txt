@@ -1,0 +1,1109 @@
+                                             PX1105R
+
+
+                                               Small-Size Dual-Band GNSS
+                                               Receiver for Centimeter-Level
+                                               Accuracy Applications
+
+
+
+Features
+⚫   Centimeter-level accuracy RTK receiver     The PX1105R offers centimeter-level accuracy based on carrier
+                                               phase RTK technique and can be used for a wide range of
+⚫   GPS/QZSS L1/L5, Galileo E1/E5a,            high-accuracy positioning applications. Its 10.1mm x 9.7mm
+    BDS B1I/B2a, GLONASS L1, NavIC L5          form factor makes it ideal for mobile precision positioning
+                                               application requiring small size.
+⚫   10.1mm x 9.7mm size
+⚫   NMEA-0183 and RTCM 3.x protocol            The receiver receives RTCM 3.x data from a local base station, a
+                                               virtual reference station (VRS) in a Network RTK configuration,
+⚫   Easy to integrate                          or another SkyTraq RTK receiver setup as in base station mode
+⚫   Operating temperature -40 ~ +85ºC          to perform carrier phase RTK processing, achieving centimeter
+                                               level accurate relative positioning.
+⚫   RoHS compliant
+                                               The PX1105R receiver is based on SkyTraq’s high-performance
+                                               Phoenix GNSS chipset, featuring fast signal acquisition search
+                                               engine and high-sensitivity track engine. Search engine performs
+Applications                                   16 million time-frequency hypothesis testing per second,
+                                               offering industry-leading signal acquisition performance.
+⚫    Machine control & automation
+⚫    Unmanned aerial vehicle                   The receiver is optimized for mass market applications requiring
+                                               high-precision centimeter-level accuracy, high-performance, low
+⚫    Precision agriculture
+                                               power, and lower cost.
+⚫    GIS data collection
+⚫    Precision heading & attitude              PX1105R use GNSS chips qualified according to AEC‑Q100 and
+                                               are manufactured in ISO/TS 16949 certified sites.
+
+
+
+
+                                                   1
+                                                                                        www.skytraq.com.tw
+TECHNICAL SPECIFICATIONS
+
+Receiver Type                      230 channel Phoenix GNSS engine
+                                   GPS/QZSS L1/L5, Galileo E1/E5a, BDS B1I/B2a, GLONASS L1, NavIC L5
+
+Accuracy                           Position            1.5m CEP                 autonomous mode
+                                                       1cm + 1ppm               RTK mode
+                                   Velocity            0.05m/sec*1
+                                   Time                12ns
+                                   Moving Base Heading 0.13 degree*2
+
+Time to First Fix                  1 second hot-start under open sky (average)
+                                   28 second warm-start under open sky (average)
+                                   29 second cold-start under open sky (average)
+
+RTK Convergence                    < 10sec
+
+Reacquisition                      1s
+
+Max Update Rate                    RTK 1 / 2 / 4 / 5 / 8 / 10 Hz
+                                   Raw Measurement 1 / 2 / 4 / 5 / 8 / 10 / 20 Hz
+                                   Moving Base RTK and Advance Moving Base RTK1 / 2 / 4 / 5 / 8 Hz
+
+                                    RTK: for precise positioning. Moving-Base (MB) RTK for precise heading. Advanced Moving Base
+                                    (AMB) RTK for precise positioning & heading.
+
+Operational Limits                 Altitude < 80,000m and velocity < 515m/s
+
+Serial Interface                   3.3V LVTTL level
+
+Protocol                           NMEA-0183 V4.1
+                                   GGA, GLL, GSA, GSV, RMC, VTG
+                                   115200 baud, 8, N, 1
+
+                                   RTCM 3.x or SkyTraq raw data binary
+                                   115200 baud, 8, N, 1
+
+Datum                              Default WGS-84 and user definable in stand-alone mode
+                                   Depends on base reference frame when in RTK mode
+
+Input Voltage                      3.3V DC +/-10%
+
+Current Consumption                115mA acquisition, 95mA tracking
+
+Dimension                          10.1mm L x 9.7mm W x 2.9mm H
+
+Weight:                            1.7g
+
+Operating Temperature              -40oC ~ +85oC
+
+Storage Temperature                -55 oC ~ +100oC
+
+Humidity                           5% ~ 95% non-condensing
+
+*1 50% @ 30 m/s for dynamic operation
+*2 (1-sigma) heading accuracy using 1 meter baseline
+
+
+                                                                   2
+                                                                                                           www.skytraq.com.tw
+FUNCTIONAL DESCRIPTION
+
+
+
+
+Active antenna is required to use with PX1105R. The received signal goes through a L1/L5 SAW
+diplexer to remove out-band interference, then to the PX100 GNSS receiver chip for RTK signal
+processing. Using correction data from an RTK base station, the rover PX1105R computes its
+position to centimeter-level accuracy relative to the base station.
+
+
+
+
+SUPPORTED RTCM MESSAGES
+
+When operating in rover mode, PX1105R can decode following RTCM 3.3 messages:
+
+  RTCM Message Type                                            Description
+        1005             Stationary RTK reference station antenna reference point
+        1006             Stationary RTK reference station ARP with antenna height
+        1033             Receiver and antenna description
+        1074             GPS MSM4
+        1075             GPS MSM5
+        1076             GPS MSM6
+        1077             GPS MSM7
+        1084             GLONASS MSM4
+        1085             GLONASS MSM5
+        1086             GLONASS MSM6
+        1087             GLONASS MSM7
+        1094             Galileo MSM4
+        1095             Galileo MSM5
+        1096             Galileo MSM6
+        1097             Galileo MSM7
+        1114             QZSS MSM4
+        1115             QZSS MSM5
+        1116             QZSS MSM6
+        1117             QZSS MSM7
+        1124             BeiDou MSM4
+                                                        3
+                                                                                    www.skytraq.com.tw
+         1125            BeiDou MSM5
+         1126            BeiDou MSM6
+         1127            BeiDou MSM7
+         1134            NavIC MSM4
+         1135            NavIC MSM5
+         1136            NavIC MSM6
+         1137            NavIC MSM7
+
+
+When operating in base mode, PX1105R can output following RTCM 3.3 messages:
+
+  RTCM Message Type                                            Description
+        1005             Stationary RTK reference station antenna reference point
+        1074             GPS MSM4
+        1077             GPS MSM7
+        1084             GLONASS MSM4
+        1087             GLONASS MSM7
+        1094             Galileo MSM4
+        1097             Galileo MSM7
+        1114             QZSS MSM4
+        1117             QZSS MSM7
+        1124             BeiDou MSM4
+        1127             BeiDou MSM7
+        1134             NavIC MSM4
+        1137             NavIC MSM7
+
+
+
+
+                                                       4
+                                                                                    www.skytraq.com.tw
+PINOUT DESCRIPTION
+
+
+
+
+    Pin No.     Name                                    Description
+      1         GND     Ground
+      2         TXD     UART serial data output, 3.3V LVTTL.
+                        One full-duplex asynchronous serial UART port is implemented. This UART
+                        output is normally used for sending position, time and velocity information
+                        from the receiver in NMEA-0183 format. When idle, this pin output HIGH.
+     3          RXD     UART serial data input, 3.3V LVTTL.
+                        One full-duplex asynchronous serial UART port is implemented. This UART input
+                        is normally for sending commands or information to the receiver in SkyTraq
+                        binary protocol. In the idle condition, this pin should be driven HIGH. If the
+                        driving circuitry is powered independently of PX1100S, ensure that this pin is
+                        not driven to HIGH when primary power to PX1100S is removed, or a 10K-ohm
+                        series resistor can be added to minimize leakage current from application to
+                        the powered off module.
+     4          1PPS    One-pulse-per-second (1PPS) time mark output, 3.3V LVTTL. The rising edge
+                        synchronized to UTC second when getting 3D position fix. The pulse duration is
+                        about 100msec at rate of 1 Hz.
+     5          TRIG    External trigger, 3.3V LVTTL.
+     6         V_BCKP   Backup supply voltage for internal RTC and backup SRAM, 1.3V ~ 3.6V. V_BCKP
+                        must be applied whenever VCC is applied. This pin should be powered
+                        continuously to minimize the startup time. If VCC and V_BCKP are both
+                        removed, the receiver will be in factory default mode upon power up, all user
+                        configuration set is lost. For applications the does not care cold starting every
+                        time, this pin can be connected to VCC.
+     7          NC      No connection, empty pin
+     8          VCC     Main power supply, 3.3V +/- 10%
+
+
+
+                                          5
+                                                                                www.skytraq.com.tw
+        9               RSTN      External active-low reset input to the baseband.
+                                  Only needed when power supply rise time is very slow or software-controlled
+                                  reset is desired.
+       10               GND       Ground
+       11               RF_IN     RF input with 3.3V active antenna bias voltage
+
+       12                GND      Ground
+       13                 NC      No connection, empty pin
+       14               VCC_RF    Output voltage RF section
+
+       15               RXD2      UART serial data input, 3.3V LVTTL. One simplex asynchronous serial UART port is
+                                  implemented. This UART input is normally for sending RTCM-SC104 correction
+                                  data or base station SkyTraq raw measurement data to the receiver at 115200
+                                  baud rate. In the idle condition, this pin should be driven HIGH. If the driving
+                                  circuitry is powered independently of PX1105R, ensure that this pin is not driven
+                                  to HIGH when PX1105R is put to sleep, or a 10K-ohm series resistor can be added
+                                  to minimize leakage current.
+
+       16                SDA      Not used. Leave unconnected
+
+       17                SCL      Not used. Leave unconnected
+       18              BOOT_SEL   No connection for normal use. Pull-low for loading firmware into empty or
+                                  corrupted Flash memory from ROM mode.
+
+
+
+
+ELECTRICAL SPECIFICATIONS
+
+ABSOLUTE MAXIMUM RATINGS
+Parameter                                  Minimum               Maximum                  Condition
+Supply Voltage (VCC)                          -0.5                  3.6                      Volt
+Backup Battery Voltage (V_BCKP)               -0.5                  3.6                      Volt
+Input Pin Voltage                             -0.5                VCC+0.5                    Volt
+Input Power at RF_IN                                                +5                       dBm
+Storage Temperature                           -55                  +100                      degC
+
+
+
+
+                                                     6
+                                                                                         www.skytraq.com.tw
+OPERATING CONDITIONS
+Parameter                                                  Min   Typ   Max   Unit
+Supply Voltage (VCC)                                        3    3.3   3.6   Volt
+Acquisition Current (exclude active antenna current)             115         mA
+Tracking Current (exclude active antenna current)                95          mA
+Backup Voltage (V_BCKP)                                    1.3         3.6   Volt
+Backup Current (VCC voltage applied)                             54          uA
+Backup Current (VCC voltage off)                                 13          uA
+Output Low Voltage                                                     0.4   Volt
+Output HIGH Voltage                                        2.4               Volt
+Input LOW Voltage                                                      0.8   Volt
+Input HIGH Voltage                                          2                Volt
+Input LOW Current                                          -10         10    uA
+Input HIGH Current                                         -10         10    uA
+RF Input Impedance (RF_IN)                                       50          Ohm
+
+
+
+
+APPLICATION CIRCUIT
+
+
+
+
+                                                       7
+                                                                 www.skytraq.com.tw
+For Precise Positioning, Rover Mode Configuration 1
+
+
+
+
+For Precise Positioning, Rover Mode Configuration 2
+
+
+
+
+                                                      8
+                                                          www.skytraq.com.tw
+For Precise Heading, Moving Base Mode Configuration
+
+
+
+
+For Precise Positioning & Heading, Advanced Moving Base Mode Configuration #1
+
+
+
+
+                                                      9
+                                                                                www.skytraq.com.tw
+For Precise Positioning & Heading, Advanced Moving Base Mode Configuration #2
+
+
+
+
+                                                     10
+                                                                                www.skytraq.com.tw
+MECHANICAL DIMENSIONS
+
+
+
+
+RECOMMANDED FOOTPRINT
+
+
+
+
+                        11
+                             www.skytraq.com.tw
+RECOMMANDED REFLOW PROFILE
+
+
+
+
+The reflow profile shown above should not be exceeded, since excessive temperatures or transport times during
+reflow can damage the module. Cooling temperature fall rate: max 3°C / sec
+
+ANTENNA CONSIDERATIONS
+
+The PX1105R is designed to be used with GPS/QZSS L1/L5, Galileo E1/E5a, BDS B1I/B2a, GLONASS L1, NavIC L5 dual
+band active antenna. Antenna with gain up to 40dB and noise figure less than 2dB can be used. It is important to
+select a high-performance antenna to achieve optimal RTK performance.
+
+
+POWER SUPPLY REQUIREMENT
+
+PX1105R requires a stable power supply, avoid ripple on VCC pin (<50mVpp). Power supply noise can affect the
+receiver’s sensitivity. Bypass capacitors should be placed close to the module VCC pin, with values adjusted depending
+on the amount and type of noise present on the supply line.
+
+
+BACKUP SUPPLY
+
+The purpose of backup supply voltage pin (V_BCKP) is to keep the SRAM memory and the RTC powered when the
+module is powered down. This enables the module to have a faster time-to-first-fix when the module is powered on
+again. The backup current drain is less than 55μA. In normal powered on state, the internal processor access the SRAM
+and current drain is higher in active mode
+
+
+1PPS OUTPUT
+
+A 1 pulse per second signal (100msec HIGH duration) is generated on 1PPS pin when the receiver has 3D position fix
+using 4 or more satellites. The rising edge of the pulse is aligned with UTC second, with accuracy of about 10nsec. It
+outputs constant LOW when no position fix is available initially.
+
+
+                                                         12
+                                                                                               www.skytraq.com.tw
+LAYOUT GUIDELINES
+
+Separate RF and digital circuits into different PCB regions.
+
+It is necessary to maintain 50-ohm impedance throughout the entire RF signal path. Try keeping the RF signal path as
+short as possible.
+
+Do not route the RF signal line near noisy sources such as digital signals, oscillators, switching power supplies, or other
+RF transmitting circuit. Do not route the RF signal under or over any other components (including PX1105R), or other
+signal traces. Do not route the RF signal path on an inner layer of a multi-layer PCB to minimize signal loss.
+
+Avoid sharp bends for RF signal path. Make two 45-deg bends or a circular bend instead of a single 90-degree bend if
+needed.
+
+Avoid vias with RF signal path whenever possible. Every via adds inductive impedance. Vias are acceptable for
+connecting the RF grounds between different layers. Each of the module’s ground pins should have short trace tying
+immediately to the ground plane below through a via.
+
+The bypass capacitors should be low ESR ceramic types and located directly adjacent to the pin they are for.
+
+
+
+
+HANDLING GUIDELINE
+
+The PX1105R modules are rated MSL4, must be used for SMT reflow mounting within 72 hours after taken out from
+the vacuumed ESD-protective moisture barrier bag in factory condition < 30degC / 60% RH. If this floor life time is
+exceeded, or if the received ESD-protective moisture barrier bag is not in vacuumed state, then the device need to be
+pre-baked before SMT reflow process. Baking is to be done at 85degC for 8 to 12 hours. Once baked, floor life counting
+begins from 0, and has 72 hours of floor life at factory condition < 30degC / 60% RH.
+
+
+PX1105R module is ESD sensitive device and should be handled with care.
+
+
+
+
+RTK Usage Guideline
+
+Below conditions are required for getting RTK fix solution. If the conditions are not met, PX1105R will only have float
+or DGPS/3D solution and behave like a normal GNSS receiver.
+
+
+* Base and rover distance under 30Km
+* Open sky environment without interference
+* Signal over 37dB/Hz
+* 8 or more satellites above 15 degree elevation angle with good satellite geometry or low DOP value; generally more
+satellites will have faster RTK fix
+
+
+
+
+                                                               13
+                                                                                                   www.skytraq.com.tw
+                                            NMEA Output Description
+
+The output protocol supports NMEA-0183 standard. The implemented messages include GGA, GLL, GSA, GSV, VTG,
+RMC, ZDA and GNS messages. The NMEA message output has the following sentence structure:
+
+  $aaccc,c–c*hh<CR><LF>
+
+  The detail of the sentence structure is explained in Table 1.
+
+Table 1: The NMEA sentence structure
+ character          HEX                   Description
+ “$”                24                    Start of sentence.
+ Aaccc                                    Address field. “aa” is the talker identifier. “ccc” identifies the sentence type.
+ “,”                2C                    Field delimiter.
+ C–c                                      Data sentence block.
+ “*”                2A                    Checksum delimiter.
+ Hh                                       Checksum field.
+ <CR><LF>           0D0A                  Ending of sentence. (carriage return, line feed)
+
+
+Table 2: Overview of SkyTraq receiver’s NMEA messages
+$GPGGA         Time, position, and fix related data of the receiver.
+$GNGLL         Position, time and fix status.
+$GNGSA         Used to represent the ID’s of satellites which are used for position fix. When GPS satellites are used for
+               position fix, $GNGSA sentence is output with system ID 1. When GLONASS satellites are used for
+               position fix, $GNGSA sentence is output with system ID 2. When Galileo satellites are used for position
+               fix, $GNGSA sentence is output with system ID 3. When BDS satellites are used for position fix,
+               $GNGSA sentence is output with system ID 4. When NAVIC satellites are used for position fix, $GNGSA
+               sentence is output with system ID 6.
+$GPGSV         Satellite information about elevation, azimuth and CNR, $GPGSV is used for GPS satellites, $GLGSV is
+$GLGSV         used for GLONASS satellites, $GAGSV is used for GALILEO satellites, while $GBGSV is used for BDS
+$GAGSV         satellites, while $GIGSV is used for NAVIC satellites
+$GBGSV
+$GIGSV
+$GNRMC         Time, date, position, course and speed data.
+$GNVTG         Course and speed relative to the ground.
+$GNZDA         UTC, day, month and year and time zone.
+$GNTHS         True Heading and Status.
+
+
+
+
+                                                            14
+                                                                                                     www.skytraq.com.tw
+The formats of the supported NMEA messages are described as follows:
+
+
+GGA – Global Positioning System Fix Data
+Time, position and fix related data for a GPS receiver.
+
+Structure:
+$GPGGA,hhmmss.sss,ddmm.mmmmmmm,a,dddmm.mmmmmmm,a,x,xx,x.x,x.x,M,x.x,M,x.x,xxxx*hh<CR><LF>
+            1          2       3        4      5 6 7 8 9        10     11 12
+
+Example:
+$GPGGA,072120.000,2447.0913289,N,12100.5212111,E,4,27,0.5,94.715,M,19.600,M,2.000,0000*49<CR><LF>
+
+Field   Name                  Example     Description
+1       UTC Time              072120.000  UTC of position in hhmmss.sss format, (000000.000 ~ 235959.999)
+2       Latitude              2447.0913289Latitude in ddmm.mmmmmmm format
+                                          Leading zeros transmitted
+3       N/S Indicator       N             Latitude hemisphere indicator, ‘N’ = North, ‘S’ = South
+4       Longitude           12100.5212111 Longitude in dddmm.mmmmmmm format
+                                          Leading zeros transmitted
+5       E/W Indicator       E             Longitude hemisphere indicator, ‘E’ = East, ‘W’ = West
+6       GPS quality         4             GPS quality indicator
+        indicator                         0: position fix unavailable
+                                          1: valid position fix, SPS mode
+                                          2: valid position fix, differential GPS mode
+                                          3: GPS PPS Mode, fix valid
+                                          4: Real Time Kinematic. System used in RTK mode with fixed integers
+                                          5: Float RTK. Satellite system used in RTK mode., floating integers
+                                          6: Estimated (dead reckoning) Mode
+                                          7: Manual Input Mode
+                                          8: Simulator Mode
+7       Satellites Used     27            Number of satellites in use, (00 ~ 12)
+8       HDOP                0.5           Horizontal dilution of precision, (0.0 ~ 99.9)
+9       Altitude            94.715        mean sea level (geoid), (-9999.9 ~ 17999.9)
+10      Geoidal Separation 19.600         Geoidal separation in meters
+11      Age pf Differential 2.000         Age of Differential
+        GPS data                          NULL when not in RTK fix or RTK float
+12      DGPS Station ID     0000          Differential reference station ID, 0000 ~ 1023
+13      Checksum            49
+
+
+
+
+                                                          15
+                                                                                           www.skytraq.com.tw
+GLL – Latitude/Longitude
+Latitude and longitude of current position, time, and status.
+
+Structure:
+$GNGLL,ddmm.mmmmmmm,a,dddmm.mmmmmmm,a,hhmmss.sss,A,a*hh<CR><LF>
+            1       2      3        4     5      67 8
+
+Example:
+$GNGLL,2447.0913289,N,12100.5212111,E,072120.000,A,D*4E<CR><LF>
+
+Field   Name                    Example       Description
+1       Latitude                2447.0913289  Latitude in ddmm.mmmmmmm format
+                                              Leading zeros transmitted
+2       N/S Indicator           N             Latitude hemisphere indicator
+                                              ‘N’ = North
+                                              ‘S’ = South
+3       Longitude               12100.5212111 Longitude in dddmm.mmmmmmm format
+                                              Leading zeros transmitted
+4       E/W Indicator           E             Longitude hemisphere indicator
+                                              ‘E’ = East
+                                              ‘W’ = West
+5       UTC Time                072120.000    UTC time in hhmmss.sss format (000000.000 ~ 235959.999)
+6       Status                  A             Status, ‘A’ = Data valid, ‘V’ = Data not valid
+7       Mode Indicator          D             Mode indicator
+                                              ‘A’ = Autonomous mode
+                                              ‘D’ = Differential mode
+                                              ‘E’ = Estimated (dead reckoning) mode
+                                              ‘M’ = Manual input mode
+                                              ‘S’ = Simulator mode
+                                              ‘N’ = Data not valid
+8       Checksum                4E
+
+
+
+
+                                                           16
+                                                                                         www.skytraq.com.tw
+GSA – GNSS DOP and Active Satellites
+GNSS receiver operating mode, satellites used in the navigation solution reported by the GGA or GNS sentence and
+DOP values.
+
+
+Structure:
+$GNGSA,A,x,xx,xx,xx,xx,xx,xx,xx,xx,xx,xx,xx,xx,x.x,x.x,x.x,x*hh<CR><LF>
+        1 2 3 3 3 3 3 3 3 3 3 3 3 3 4 5 6 7 8
+
+Example:
+$GNGSA,A,3,02,05,06,12,13,19,20,193,195,199,,,1.0,0.5,0.9,1*01<CR><LF>
+$GNGSA,A,3,03,05,09,36,,,,,,,,,1.0,0.5,0.9,3*34<CR><LF>
+$GNGSA,A,3,06,07,08,09,10,19,22,29,35,38,39,40,1.0,0.5,0.9,4*38<CR><LF>
+$GNGSA,A,3,44,,,,,,,,,,,,1.0,0.5,0.9,4*39<CR><LF>
+$GNGSA,A,3,02,03,,,,,,,,,,,1.1,0.5,1.0,6*33<CR><LF>
+
+
+Field   Name                   Example          Description
+1       Mode                   A                Mode
+                                                ‘M’ = Manual, forced to operate in 2D or 3D mode
+                                                ‘A’ = Automatic, allowed to automatically switch 2D/3D
+2       Mode                   3                Fix type
+                                                1 = Fix not available
+                                                2 = 2D
+                                                3 = 3D
+3       Satellite used 1~12    02,05,06,12,13,1 01 ~ 32 are for GPS; 33 ~ 64 are for WAAS (PRN minus 87); 193
+                               9,20,193,195,19 ~ 197 are for QZSS; 65 ~ 88 are for GLONASS (GL PRN) ; 01 ~ 36
+                               9                are for GALILEO (GA PRN); 01 ~ 37 are for BDS (BD PRN). GPS,
+                                                GLONASS, GALILEO and BDS satellites are differentiated by the
+                                                GNSS system ID in table 3. Maximally 12 satellites are included
+                                                in each GSA sentence.
+4       PDOP                   1.0              Position dilution of precision (0.0 to 99.9)
+5       HDOP                   0.5              Horizontal dilution of precision (0.0 to 99.9)
+6       VDOP                   0.9              Vertical dilution of precision (0.0 to 99.9)
+7       GNSS System ID         1                GNSS system ID*
+                                                1 = GPS
+                                                2 = GLONASS
+                                                3 = GALILEO
+                                                4 = BDS
+                                                6 = IRNSS
+8       Checksum               01
+
+*GNSS System ID identifies the GNSS system ID according to Table 3.
+
+
+
+
+                                                          17
+                                                                                               www.skytraq.com.tw
+*GNSS Signal ID identifies the GNSS signal name according to Table 3.
+
+
+                                      Table 3: GNSS Identification Table for GSA, GSV
+     System          System ID (Talker)              Signal ID                         Signal Name
+      GPS                 1 (GP)                         0                              All signals
+                                                         1                                L1 C/A
+                                                         2                                L1 P(Y)
+                                                         3                                  L1C
+                                                         4                                L2 P(Y)
+                                                         5                                L2C-M
+                                                         6                                 L2C-L
+                                                         7                                  L5-I
+                                                         8                                 L5-Q
+    GLONASS               2 (GL)                         0                              All signals
+                                                         1                                G1 C/A
+                                                         2                                  G1P
+                                                         3                                G2 C/A
+                                                         4                          GLONASS (M) G2P
+     GALILEO              3 (GA)                         0                              All signals
+                                                         1                                  E5a
+                                                         2                                  E5b
+                                                         3                                E5 a+b
+                                                         4                                  E6-A
+                                                         5                                 E6-BC
+                                                         6                                  L1-A
+                                                         7                                 L1-BC
+       BDS                4 (BD)                         0                              All signals
+                                                         1                                   B1
+                                                         5                                  B2A
+                                                         B                                   B2
+                                                         8                                   B3
+                                                         3                                  B1C
+      IRNSS               6 (GI)                         0                              All signals
+                                                         1                                   L5
+
+
+
+
+                                                          18
+                                                                                           www.skytraq.com.tw
+GSV – GNSS Satellites in View
+Number of satellites (SV) in view, satellite ID numbers, elevation, azimuth, and SNR value. Four satellites maximum per
+transmission.
+
+Structure:
+$GPGSV,x,x,xx,xx,xx,xxx,xx,…,xx,xx,xxx,xx,x *hh<CR><LF>
+        1 2 3 4 5 6 7         4 5 6 7 8 9
+
+Example:
+$GPGSV,3,1,11,195,73,125,46,193,71,078,46,199,60,166,41,02,56,002,46,1*59<CR><LF>
+$GPGSV,3,2,11,11,54,011,45,20,53,298,47,06,46,061,45,05,40,268,45,1*6F<CR><LF>
+$GPGSV,3,3,11,19,36,148,45,13,27,186,41,12,23,260,43,1*59<CR><LF>
+$GPGSV,1,1,04,195,73,125,44,193,71,078,43,199,60,166,45,06,46,061,45,8*56<CR><LF>
+$GAGSV,2,1,07,05,74,099,45,18,58,157,48,36,48,080,43,03,39,201,43,7*70<CR><LF>
+$GAGSV,2,2,07,09,29,043,36,02,10,211,,11,07,112,,7*40<CR><LF>
+$GAGSV,2,1,05,05,74,099,43,18,58,157,46,36,48,080,42,03,39,201,43,1*7D<CR><LF>
+$GAGSV,2,2,05,09,29,043,37,1*41<CR><LF>
+$GBGSV,4,1,13,35,78,358,50,22,60,245,50,19,58,025,48,38,53,351,46,1*75<CR><LF>
+$GBGSV,4,2,13,08,49,356,41,29,43,129,47,06,36,170,42,40,35,211,44,1*74<CR><LF>
+$GBGSV,4,3,13,10,35,224,43,39,31,181,44,07,28,198,42,44,25,322,40,1*7C<CR><LF>
+$GBGSV,4,4,13,09,16,189,37,1*4E<CR><LF>
+$GBGSV,2,1,08,35,78,358,43,22,60,245,45,19,58,025,44,38,53,351,42,5*73<CR><LF>
+$GBGSV,2,2,08,29,43,129,42,40,35,211,41,39,31,181,40,44,25,322,36,5*7A<CR><LF>
+$GIGSV,2,1,07,03,37,239,44,02,25,278,41,04,00,000,44,09,00,000,33,1*76<CR><LF>
+$GIGSV,2,2,07,07,00,000,46,05,00,000,45,01,00,000,39,1*40<CR><LF>
+
+
+Field   Name                   Example           Description
+1       Number of message      3                 Total number of GSV messages to be transmitted (1-5)
+2       Sequence number        1                 Sequence number of current GSV message
+3       Satellites in view     11                Total number of satellites in view (00 ~ 20)
+4       Satellite ID           195               01 ~ 32 are for GPS; 33 ~ 64 are for WAAS (PRN minus 87); 193
+                                                 ~ 197 are for QZSS; 65 ~ 88 are for GLONASS (GL PRN) ; 01 ~ 36
+                                                 are for GALILEO (GA PRN); 01 ~ 37 are for BDS (BD PRN). GPS,
+                                                 GLONASS, GALILEO and BDS satellites are differentiated by the
+                                                 GNSS system ID in table 3. Maximally 4 satellites are included in
+                                                 each GSV sentence.
+5       Elevation              73                Satellite elevation in degrees, (00 ~ 90)
+6       Azimuth                125               Satellite azimuth angle in degrees, (000 ~ 359 )
+7       SNR                    46                C/No in dB (00 ~ 99)
+                                                 Null when not tracking
+8       Signal ID              1                 Signal ID*
+9       Checksum               59
+
+
+
+
+                                                          19
+                                                                                                 www.skytraq.com.tw
+RMC – Recommended Minimum Specific GNSS Data
+Time, date, position, course and speed data provided by a GNSS navigation receiver.
+
+Structure:
+$GPRMC,hhmmss.sss,A,dddmm.mmmmmmm,a,dddmm.mmmmmmm,a,x.x,x.x,ddmmyy,,,a,a*hh<CR><LF>
+            1     2         3           4        5             6 7 8       9    10 11 12
+Example:
+$GNRMC,072120.000,A,2447.0913289,N,12100.5212111,E,000.0,000.0,050721,,,R,V*14<CR><LF>
+
+Field   Name                   Example       Description
+1       UTC time               072120.000    UTC time in hhmmss.sss format (000000.00 ~ 235959.999)
+2       Status                 A             Status
+                                             ‘V’ = Navigation receiver warning
+                                             ‘A’ = Data Valid
+3       Latitude               2447.0913289 Latitude in dddmm.mmmmmmm format
+                                             Leading zeros transmitted
+4       N/S indicator          N             Latitude hemisphere indicator
+                                             ‘N’ = North
+                                             ‘S’ = South
+5       Longitude              12100.5212111 Longitude in dddmm.mmmmmmm format
+                                             Leading zeros transmitted
+6       E/W Indicator          E             Longitude hemisphere indicator
+                                             ‘E’ = East
+                                             ‘W’ = West
+7       Speed over ground      000.0         Speed over ground in knots (000.0 ~ 999.9)
+8       Course over ground     000.0         Course over ground in degrees (000.0 ~ 359.9)
+9       UTC Date               050721        UTC date of position fix, ddmmyy format
+10      Mode indicator         R             Mode indicator
+                                             ‘A’ = Autonomous mode
+                                             ‘D’ = Differential mode
+                                             ‘E’ = Estimated (dead reckoning) mode
+                                             ‘F’ = Float RTK. Satellite system used in RTK mode, floating
+                                             integers
+                                             ‘M’ = Manual Input Mode
+                                             ‘N’ = Data not valid
+                                             ‘P’ = Precise
+                                             ‘R’ = Real Time Kinematic. System used in RTK mode with fixed
+                                             integers
+                                             ‘S’ = Simulator Mode
+11      Navigation status      V             Navigation status indicator according to IEC61108 requirement
+                                             on ‘Navigational (or Failure) warnings and status indicators’.
+                                             ‘S’ = Safe
+                                             ‘C’ = Caution
+                                             ‘U’ = Unsafe
+                                             ‘V’ = Navigation status not valid, equipment is not providing
+                                             navigation status indicator.
+12      checksum               14
+
+
+
+
+                                                         20
+                                                                                            www.skytraq.com.tw
+VTG – Course Over Ground and Ground Speed
+The actual course and speed relative to the ground.
+
+Structure:
+GPVTG,x.x,T,,M,x.x,N,x.x,K,a*hh<CR><LF>
+        1      2     3     4 5
+
+Example:
+$GNVTG,000.0,T,,M,000.0,N,000.0,K,D*16<CR><LF>
+
+Field   Name                   Example          Description
+1       Course                 000.0            True course over ground in degrees (000.0 ~ 359.9)
+2       Speed                  000.0            Speed over ground in knots (000.0 ~ 999.9)
+3       Speed                  000.0            Speed over ground in kilometers per hour (000.0 ~ 1800.0)
+4       Mode                   D                Mode indicator
+                                                ‘A’ = Autonomous mode
+                                                ‘D’ = Differential mode
+                                                ‘E’ = Estimated (dead reckoning) mode
+                                                ‘M’ = Manual input mode
+                                                ‘N’ = Data not valid
+                                                ‘P’ = Precise
+                                                ‘S’ = Simulator mode
+5       Checksum               16
+
+
+
+
+ZDA – TIME AND DATE
+UTC, day, month, year and local time zone
+
+Structure:
+$GPZDA,hhmmss.sss,xx,xx,xxxx,xx,xx*hh<CR><LF>
+           1       2 3 4 5 6 7
+
+Example:
+$GNZDA,072120.000,05,07,2021,00,00*4D<CR><LF>
+
+Field   Name                  Example          Description
+1       UTC time              072120.000       UTC time in hhmmss.ss format (000000.00 ~ 235959.999)
+2       UTC Day               05               UTC time: day (01 ~ 31)
+3       UTC Month             07               UTC time: month (01 ~ 12)
+4       UTC Year              2021             UTC time: year (4 digit format)
+5       Local zone hour       00               Local zone hours (00 ~ +/- 13)
+6       Local zone minutes    00               Local zone minutes (00 ~59)
+7       Checksum              4D               Checksum
+
+
+
+
+                                                        21
+                                                                                              www.skytraq.com.tw
+THS – True Heading and Status
+Actual vessel heading in degrees True produced by any device or system producing true heading. This sentence
+includes a “Mode indicator” field providing critical safety related information about the heading data, and replaces the
+HDT sentence.
+
+Structure:
+$GPTHS, x.x,a*hh<CR><LF>
+         1 2 3
+
+Example:
+$GNTHS, 349.10.A*34<CR><LF>
+
+Field   Name                  Example           Description
+1       Heading               349.10            Heading, degrees True
+2       Mode                  A                 Mode indicator
+                                                ‘A’ = Autonomous
+                                                ‘E’ = Estimated (dead reckoning)
+                                                ‘M’ = Manual input
+                                                ‘S’ = Simulator
+                                                ‘V’ = Data not valid
+3       Checksum              34                Checksum
+
+
+
+
+                                                          22
+                                                                                                 www.skytraq.com.tw
+STI,005 – Time Stamp Output
+
+An output message, ID 0x005, contains module pin-4 event-triggered time stamp. The trigger input should be spaced
+more than 1msec apart, not more than 10 triggers between update rate interval.
+
+Structure:
+$PSTI,005,hhmmss.sssssss,xx,xx,xxxx,,,,,*hh<CR><LF>
+       1         2       3 4 5           11
+
+
+Example:
+$PSTI,005,072120.0000003,05,07,2021,,,,,*33<CR><LF>
+
+
+Field   Name                Example        Description
+1       ID                  005            Proprietary NMEA message identifier
+2       UTC time            072120.0000003 Time-stamp UTC time in hhmmss.sssssss format
+                                           (000000.0000000 ~ 235959.9999999)
+3       UTC Day             05             Time-stamp UTC time: day (01 ~ 31)
+4       UTC Month           07             Time-stamp UTC time: month (01 ~ 12)
+5       UTC Year            2021           Time-stamp UTC time: year (4 digit format)
+6       Reserved
+7       Reserved
+8       Reserved
+9       Reserved
+10      Reserved
+11      Checksum            33               Checksum
+
+
+
+
+                                                        23
+                                                                                             www.skytraq.com.tw
+STI,030– Recommended Minimum 3D GNSS Data
+Time, date, position, course and speed data provided by a GNSS navigation receiver.
+
+Structure:
+$PSTI,030,hhmmss.sss,A,dddmm.mmmmmmm,a,dddmm.mmmmmmm,a,x.x,x.x,x.x,x.x,ddmmyy,a.x.x,x.x*hh<CR><LF>
+               1      2         3          4        5              6 7 8 9 10       11 12 13 14 15
+Example:
+$PSTI,030,072120.000,A,2447.0913289,N,12100.5212111,E,94.715,0.00,-0.00,0.02,050721,R,2.000,10.000*28
+<CR><LF>
+
+Field   Name                   Example       Description
+1       UTC time               072120.000    UTC time in hhmmss.sss format (000000.00 ~ 235959.999)
+2       Status                 A             Status
+                                             ‘V’ = Navigation receiver warning
+                                             ‘A’ = Data Valid
+3       Latitude               2447.0913289 Latitude in dddmm.mmmmmmm format
+                                             Leading zeros transmitted
+4       N/S indicator          N             Latitude hemisphere indicator
+                                             ‘N’ = North
+                                             ‘S’ = South
+5       Longitude              12100.5212111 Longitude in dddmm.mmmmmmm format
+                                             Leading zeros transmitted
+6       E/W Indicator          E             Longitude hemisphere indicator
+                                             ‘E’ = East
+                                             ‘W’ = West
+7       Altitude               94.715        mean sea level (geoid), (-9999.999 ~ 17999.999)
+8       East Velocity          0.00          ‘East’ component of ENU velocity (m/s)
+9       North Velocity         -0.00             ‘North’ component of ENU velocity (m/s)
+10      Up Velocity            0.02              ‘Up’ component of ENU velocity (m/s)
+11      UTC Date               050721            UTC date of position fix, ddmmyy format
+12      Mode indicator         R                 Mode indicator
+                                                 ‘A’ = Autonomous mode
+                                                 ‘D’ = Differential mode
+                                                 ‘E’ = Estimated (dead reckoning) mode
+                                                 ‘F’ = Float RTK. Satellite system used in RTK mode, floating
+                                                 integers
+                                                 ‘M’ = Manual input mode
+                                                 ‘N’ = Data not valid
+                                                 ‘P’ = Precise
+                                                 ‘R’ = Real Time Kinematic. System used in RTK mode with fixed
+                                                 integers
+                                                 ‘S’ = Simulator mode
+13      RTK Age                2.000             Age of differential
+14      RTK Ratio              10.000            AR ratio factor for validation
+15      Checksum               28
+
+
+
+
+                                                         24
+                                                                                               www.skytraq.com.tw
+STI,032– RTK Baseline Data
+Time, date, status and baseline related data provided by a GNSS navigation receiver.
+
+Structure:
+$PSTI,032,hhmmss.sss,ddmmyy,A,R,x.xxx,x.xxx,x.xxx,x.xxx,x.xx,,,,,*hh<CR><LF>
+               1       2     3 4 5       6    7     8     9
+Example:
+$PSTI,032,072120.000,050721,A,R,-1.821,9.457,0.634,9.651,349.10,,,,,*3A
+
+Field   Name                    Example            Description
+1       UTC time                072120.000         UTC time in hhmmss.sss format (000000.000~235959.999)
+2       UTC Date                050721             UTC date of position fix, ddmmyy format
+                                                   Status
+3       Status                  A                  ‘V’ = Void
+                                                   ‘A’ = Active
+                                                   Mode indicator
+                                                   ‘F’ = Float RTK. System used in RTK mode with float ambiguity
+4       Mode indicator          R
+                                                   ‘R’ = Real Time Kinematic. System used in RTK mode with fixed
+                                                   ambiguity
+        East-projection of
+5                               -1.821             East-projection of baseline, meters
+        baseline
+        North-projection of
+6                               9.457              North-projection of baseline, meters
+        baseline
+        Up-projection of
+7                               0.634              Up-projection of baseline, meters
+        baseline
+8       Baseline length         9.651              Baseline length, meters
+                                                   Baseline course (angle between baseline vector and north
+9       Baseline course         349.10
+                                                   direction), degrees
+10      Reserve                                    Reserve
+11      Reserve                                    Reserve
+12      Reserve                                    Reserve
+13      Reserve                                    Reserve
+14      Reserve                                    Reserve
+15      Checksum                3A
+
+
+
+
+                                                          25
+                                                                                               www.skytraq.com.tw
+STI,033– RTK RAW Measurement Monitoring Data
+Time, date, and raw measurement monitoring data provided by a GNSS navigation receiver.
+
+Structure:
+$PSTI,033,hhmmss.sss,ddmmyy,x,R,x,G,x,x,,,C,x,x,,,E,x,x,,,R,,,,,I,x,,,*hh <CR><LF>
+               1       2     3 4 56 78 11         16      21
+Example:
+$PSTI,033,072120.000,050721,2,R,0,G,0,0,,,C,0,0,,,E,0,0,,,R,,,,,I,0,,,*27
+
+
+Field   Name                          Example           Description
+1       UTC time                      072120.000        UTC time in hhmmss.sss format (000000.000~235959.999)
+2       UTC Date                      050721            UTC date of position fix, ddmmyy format
+3       Version                       2
+4       Receiver                      R                 R – Rover; B – Base
+        Number of total cycle-slipped                   Number of total cycle-slipped raw measurements, this statistic
+5                                     0
+        raw measurements                                is only summed by the measurements which are valid for RTK
+6       Designate system type         G                 GPS
+        Number of cycle-slipped raw                     Number of cycle-slipped raw measurements of designate signal
+7       measurements of designate 0                     type of all satellite type, this statistic is only summed by the
+        signal type of GPS L1                           measurements which are valid for RTK
+        Number of cycle-slipped raw                     Number of cycle-slipped raw measurements of designate signal
+8       measurements of designate 0                     type of all satellite type, this statistic is only summed by the
+        signal type of GPS L2                           measurements which are valid for RTK
+        Reserve for GPS frequency
+9                                                       Reserve
+        band
+        Reserve for GPS frequency
+10                                                      Reserve
+        band
+11      Designate system type         C                 BDS
+        Number of cycle-slipped raw                     Number of cycle-slipped raw measurements of designate signal
+12      measurements of designate 0                     type of all satellite type, this statistic is only summed by the
+        signal type of BDS B1                           measurements which are valid for RTK
+        Number of cycle-slipped raw                     Number of cycle-slipped raw measurements of designate signal
+13      measurements of designate 0                     type of all satellite type, this statistic is only summed by the
+        signal type of BDS B2                           measurements which are valid for RTK
+        Reserve for BDS frequency
+14                                                      Reserve
+        band
+        Reserve for BDS frequency
+15                                                      Reserve
+        band
+16      Designate system type         E                 Galileo
+        Number of cycle-slipped raw                     Number of cycle-slipped raw measurements of designate signal
+17      measurements of designate 0                     type of all satellite type, this statistic is only summed by the
+        signal type of Galileo E1                       measurements which are valid for RTK
+        Number of cycle-slipped raw                     Number of cycle-slipped raw measurements of designate signal
+18      measurements of designate 0                     type of all satellite type, this statistic is only summed by the
+        signal type of Galileo E5b                      measurements which are valid for RTK
+        Reserve for Galileo frequency
+19                                                      Reserve
+        band
+        Reserve for Galileo frequency
+20                                                      Reserve
+        band
+21      Designate system type         R                 Glonass
+        Number of cycle-slipped raw                     Number of cycle-slipped raw measurements of designate signal
+22      measurements of designate                       type of all satellite type, this statistic is only summed by the
+        signal type of Glonass G1                       measurements which are valid for RTK
+        Number of cycle-slipped raw                     Number of cycle-slipped raw measurements of designate signal
+23      measurements of designate                       type of all satellite type, this statistic is only summed by the
+        signal type of Glonass G2                       measurements which are valid for RTK
+
+                                                           26
+                                                                                                 www.skytraq.com.tw
+     Reserve for Glonass
+24                                   Reserve
+     frequency band
+     Reserve for Glonass
+25                                   Reserve
+     frequency band
+26   Designate system type       I   NAVIC
+     Number of cycle-slipped raw     Number of cycle-slipped raw measurements of designate signal
+27   measurements of designate 0     type of all satellite type, this statistic is only summed by the
+     signal type of NAVIC L5         measurements which are valid for RTK
+28   Reserve                         Reserve
+29   Reserve                         Reserve
+20   Reserve                         Reserve
+31   Checksum                   27
+
+
+
+
+                                        27
+                                                                              www.skytraq.com.tw
+STI,035 – RTK Baseline Data of Rover Moving Base Receiver
+Time, date, status and baseline related data of GNSS rover moving base receiver provided by GNSS precisely kinematic
+base receiver.
+
+Structure:
+$PSTI,035,hhmmss.sss,ddmmyy,A,R,x.xxx,x.xxx,x.xxx,x.xxx,x.xx,,,,,*hh<CR><LF>
+              1        2    3 4 5       6     7     8     9
+
+Example:
+$PSTI,035,072120.000,050721,A,R,-1.821,9.457,0.634,9.651,349.10,,,,,*3D
+
+Field   Name                    Example           Description
+1       UTC time                072120.000        UTC time in hhmmss.sss format (000000.000~235959.999)
+2       UTC Date                050721            UTC date of position fix, ddmmyy format
+                                                  Status
+3       Status                  A                 ‘V’ = Void
+                                                  ‘A’ = Active
+                                                  Mode indicator
+                                                  ‘F’ = Float RTK. System used in RTK mode with float ambiguity
+4       Mode indicator          R
+                                                  ‘R’ = Real Time Kinematic. System used in RTK mode with fixed
+                                                  ambiguity
+        East-projection of
+5                               -1.821            East-projection of baseline, meters
+        baseline
+        North-projection of
+6                               9.457             North-projection of baseline, meters
+        baseline
+        Up-projection of
+7                               0.634             Up-projection of baseline, meters
+        baseline
+8       Baseline length         9.651             Baseline length, meters
+                                                  Baseline course (angle between baseline vector and north
+9       Baseline course         349.10
+                                                  direction), degrees
+10      Reserve                                   Reserve
+11      Reserve                                   Reserve
+12      Reserve                                   Reserve
+13      Reserve                                   Reserve
+14      Reserve                                   Reserve
+15      Checksum                3D
+
+
+
+
+                                                         28
+                                                                                               www.skytraq.com.tw
+ORDERING INFORMATION
+   Model Name                                     Description
+PX1105R         L1/L5 GNSS RTK Receiver Module
+                GPS/QZSS L1/L5 + Galileo E1/E5a + Beidou B1I/B2a +GLONASS L1 + NavIC L5
+PX1105R-01      L1/L5 GNSS RTK Receiver Module
+                GPS/QZSS L1/L5 + Galileo E1/E5a + Beidou B1I/B2a + GLONASS L1 signal reception
+
+
+
+
+                                                 29
+                                                                                      www.skytraq.com.tw
+Revision History
+
+Revision     Date                      Description
+1            June 21, 2024             Initial release
+2            December 27, 2024         Updated qualification status
+
+
+
+
+The information provided is believed to be accurate and reliable. These materials are provided to customers and may be used for
+informational purposes only. No responsibility is assumed for errors or omissions in these materials, or for its use. Changes to
+specification can occur at any time without notice.
+
+These materials are provided “as is” without warranty of any kind, either expressed or implied, relating to sale and/or use including
+liability or warranties relating to fitness for a particular purpose, consequential or incidental damages, merchantability, or
+infringement of any patent, copyright or other intellectual property right. No warrant on the accuracy or completeness of the
+information, text, graphics or other items contained within these materials. No liability assumed for any special, indirect, incidental,
+or consequential damages, including without limitation, lost revenues or lost profits, which may result from the use of these
+materials.
+
+The product is not intended for use in medical, life-support devices, or applications involving potential risk of death, personal injury,
+or severe property damage in case of failure of the product.
+
+                                                                   30
+                                                                                                               www.skytraq.com.tw
+

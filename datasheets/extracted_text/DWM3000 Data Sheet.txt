@@ -1,0 +1,1602 @@
+                                                                                                                                                     DWM3000
+                                                                  ®
+                                                                                                     IEEE 802.15.4-z UWB Transceiver Module
+Product Overview
+The Qorvo® DWM3000 is a fully integrated Ultra-Wideband
+(UWB) transceiver module based on the Qorvo® DW3110 IC.
+It integrates antenna, all RF circuitry, power management and
+clock circuitry in one module simplifying integration. It can be
+used in 2-way ranging or TDoA location systems to locate assets
+to a precision of 10 cm and supports data rates of up to
+6.8 Mbps.
+
+The DWM3000 is designed to be compliant to the FiRa™ PHY
+and MAC specifications enabling interoperability with other
+FiRa™ compliant devices.
+                                                                                                                        24 Pin 23 x 13 mm side castellated package
+
+
+                                                                                                               Key Features
+                                                                                                               • IEEE 802.15.4-2015 and IEEE 802.15.4z BPRF compliant
+Functional Block Diagram                                                                                       • Fully aligned with FiRa™ PHY, MAC and certification
+                                                                                                                 development
+                                                                                                               • Supports UWB Channels 5 (6.5 GHz) and 9 (8 GHz)
+                                                                                                               • Programmable transmitter output power
+                                                                                                               • Fully coherent receiver for maximum range and accuracy
+                                            Ceramic                                                            • Designed to comply with FCC & ETSI UWB spectral masks
+                                             UWB                                                               • Supply voltage VDD3V3: 2.5 V – 3.6 V
+                                            antenna                                                                              VDD1: 1.62 V – 3.6 V
+                                                                                                               • Low power consumption
+                                                                                                               • Data rates of 850 kbps, 6.8 Mbps
+                                                                                                               • Maximum packet length of 1023 bytes for high data
+    EXTON    1                                                                        24   VSS
+                                                                                                                 throughput applications
+  WAKEUP     2                                                                        23   VSS                 • Integrated MAC support features
+                                                                                                               • SPI interface to host processor
+      RSTn   3                                                                        22   IRQ                 • Pin and pitch compatible with the DWM1000
+                                                    R
+
+
+
+
+     GPIO7   4                                                                        21   VSS
+                                                                                                               Applications
+     VDD1    5                       VDD1                                             20   SPICLK
+
+   VDD3V3    6                       VDD2 DW3110                        xtal          19   SPIMISO             • Precision real time location systems (RTLS) using two-way
+                                                                                                                 ranging or TDoA schemes in a variety of markets.
+   VDD3V3    7            DC-DC      VDD3
+                                              EXTON
+                                                                                      18   SPIMOSI             • Location aware wireless sensor networks (WSNs)
+       VSS   8                                                                        17   SPICSn
+
+
+                  9         10      11      12          13      14      15      16                             Ordering Information
+                                                                                VSS
+                  GPIO6
+
+                            GPIO5
+
+                                    GPIO4
+
+                                            GPIO3
+
+                                                        GPIO2
+
+                                                                GPIO1
+
+                                                                        GPIO0
+
+
+
+
+                                                                                                                 PART NUMBER            DESCRIPTION
+                                                                                                                 DWM3000SB              5 pcs bag
+                                            Top View
+                                                                                                                 DWM3000SQ              25 pcs bag
+                                                                                                                 DWM3000SR              100 pcs on a 7’’ reel
+                                                                                                                 DWM3000TR13            500 pcs on a 13’’ reel
+                                                                                                                 DWM3000EVB             Evaluation board
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                                                     1 of 27                                                    www.qorvo.com
+                                                                                                                                                                    DWM3000
+                                                         ®
+                                                                                                  IEEE 802.15.4-z UWB Transceiver Module
+Table of Contents
+
+1         Overview ..............................................................3                              4.1 Nominal Operating Conditions ..........................................13
+                                                                                                                4.2 DC Characteristics ...........................................................13
+    1.1 DWM3000 Functional Description ..................................... 3
+                                                                                                                4.3 Receiver AC Characteristics.............................................14
+    1.2 DWM3000 Power Up ........................................................ 3
+                                                                                                                4.4 Reference Clock AC Characteristics .................................14
+    1.3 SPI Host Interface............................................................. 5
+                                                                                                                   4.4.1 Reference Frequency ............................................... 14
+       1.3.1 SPI Timing Parameters .............................................. 5
+                                                                                                                4.5 Transmitter AC Characteristics .........................................14
+       1.3.2 SPI Operating Modes ................................................. 6
+                                                                                                                4.6 Absolute Maximum Ratings ..............................................15
+       1.3.3 SPI Transaction Formatting ........................................ 7
+    1.4 General Purpose Input Output (GPIO) ............................... 8                               5         Antenna Performance ......................................... 16
+    1.5 Always-On (AON) Memory ................................................ 8                           6         Application Information ...................................... 19
+    1.6 One-Time Programmable (OTP) Memory .......................... 8
+                                                                                                                6.1     Application Board Layout Guidelines ................................19
+    1.7 Interrupts and Device Status ............................................. 8
+                                                                                                                6.2     Application Circuit Diagram ..............................................20
+    1.8 MAC ................................................................................. 8
+                                                                                                                6.3     GPIO and SPI I/O Internal Pull Up / Down ........................20
+2         DWM3000 Calibration ...........................................9                                  7         Package Information .......................................... 21
+    2.1     Crystal Oscillator Trim ....................................................... 9
+                                                                                                                7.1     Module Drawings .............................................................21
+    2.2     Transmitter Calibration ...................................................... 9
+                                                                                                                7.2     Module Land Pattern........................................................22
+    2.3     Antenna Delay Calibration ................................................. 9
+                                                                                                                7.3     Module Marking Information .............................................22
+3         DWM3000 Pin Connections................................. 10                                           7.4     Module Solder Profile.......................................................23
+    3.1     Pin Numbering .................................................................10                   7.5     Tape and Reel Information ...............................................24
+    3.2     Pin Descriptions ...............................................................11              8         Glossary ............................................................. 25
+4         Electrical Specifications ..................................... 13                                9         Revision History ................................................. 26
+                                                                                                            10        Further Information ............................................ 26
+
+
+List of Figures
+Figure 1: Timing diagram for cold start POR ................4                                               Figure 10: Application Board Keep-Out Areas ........... 19
+Figure 2: Timing diagram for warm start ......................4                                             Figure 11: Example DWM3000 Application Circuit ..... 20
+Figure 3: SPI Timing Diagram.......................................5                                        Figure 12: SPI and GPIO Pull Up / Down .................... 20
+Figure 4: SPI Detailed Timing Diagram.........................5                                             Figure 13: Module Package Size (mm) ....................... 21
+Figure 5: DW3000 SPIPHA=0 Transfer Protocol ...........6                                                    Figure 14: Module Land Pattern (units: mm) .............. 22
+Figure 6: DW3000 SPIPHA=1 Transfer Protocol ...........7                                                    Figure 15: Module Marking Information...................... 22
+Figure 7: SPI Command Formatting .............................7                                             Figure 16: DWM3000 Module Solder Profile ............... 23
+Figure 8: DWM3000 Pin Diagram ................................ 10                                           Figure 17: Module Carrier Dimension (mm) ................ 24
+Figure 9: Carrier Board Dimensions and Radiation                                                            Figure 18: Module Tape Carrier Dimension (mm) ....... 24
+         Pattern Planes .............................................. 16
+
+
+List of Tables
+Table 1: SPI Timing Parameters ...................................6                                         Table 8: DWM3000 Transmitter AC Characteristics .... 14
+Table 2: DWM3000 Pin Functions ............................... 11                                           Table 9: DWM3000 Absolute Maximum Ratings ......... 15
+Table 3: Explanation of Abbreviations ....................... 12                                            Table 10 Antenna Radiation Patterns - Channel 5 ...... 17
+Table 4: DWM3000 Operating Conditions ................... 13                                                Table 11 Antenna Radiation Patterns - Channel 9 ...... 18
+Table 5: DWM3000 DC Characteristics ....................... 13                                              Table 12: Glossary of Terms ...................................... 25
+Table 6: DWM3000 Receiver AC Characteristics ........ 14
+Table 7: Reference Clock AC Characteristics ............. 14
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                                                  2 of 27                                                                       www.qorvo.com
+                                                                                                                    DWM3000
+                                                  ®
+                                                                    IEEE 802.15.4-z UWB Transceiver Module
+1          Overview
+The DWM3000 module is an IEEE 802.15.4-2011 and IEEE 802.15.4z (BPRF mode) UWB implementation. RF components, Qorvo
+DW3110 UWB transceiver, and other components reside on-module. DWM3000 enables cost effective and reduced complexity
+integration of UWB communications and ranging features, greatly accelerating design implementation.
+
+
+
+1.1      DWM3000 Functional Description
+The DW3110 on-board the DWM3000 is a fully integrated low-power, single chip CMOS RF transceiver IC. The DWM3000 module
+requires no RF design as the antenna and associated analog and RF components are on the module.
+
+The module contains an on-board 38.4 MHz reference crystal. The crystal has been trimmed in production to reduce the initial
+frequency error to approximately 2 ppm, using the DW3110 IC’s internal on-chip crystal trimming circuit, see section 2.1.
+
+Always-On (AON) memory can be used to retain DWM3000 configuration data during the lowest power operational states when the on-chip
+voltage regulators are disabled. This data is uploaded and downloaded automatically. Use of DWM3000 AON memory is configurable.
+
+The on-chip voltage and temperature monitors allow the host to read the voltage on the VDD1 pin and the internal die temperature
+information from the DW3110.
+
+See the DW3000 datasheet for more detailed information on device functionality, electrical specifications, and typical performance.
+
+
+
+
+1.2      DWM3000 Power Up
+
+DWM3000 is designed such that it can be powered in a number of different configurations depending on the application. These options
+are described below. Figure 1 shows the power up sequence when external power sources are applied. The power supply design
+should ensure that VDD2a/b and VDD3 are stable less than 10 ms after VDD1 (3.3 V) comes up, otherwise a device reset is required.
+
+When the external power source is applied to the DWM3000 for the first time (cold power up), the internal Power On Reset (POR)
+circuit compares the externally applied supply voltage (VDD1) to an internal power-on threshold (approximately 1.5 V), and once this
+threshold is passed, the AON block is released from reset and the external device enable pin EXTON is asserted.
+
+Then the VDD2a/b and VDD3 supplies are monitored and once they are above the required voltage as specified in the datasheet (2.2 V
+and 1.4 V respectively), the fast RC oscillator (FAST_RC) and crystal (XTAL Oscillator) will come on within 500 µs and 1 ms respectively.
+
+The DWM3000 digital core will be held in reset until the crystal oscillator is stable. Once the digital reset is de-asserted the digital core
+wakes up and enters the INIT_RC state, (see Figure 1 and Figure 2). Then once the configurations stored in AON and OTP have been
+restored (into the configuration registers) the device will enter IDLE_RC. Then the host can set the AINIT2IDLE configuration bit in
+SEQ_CTRL and the IC will enable the CLKPLL and wait for it to lock before entering the IDLE_PLL state.
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                    3 of 27                                                  www.qorvo.com
+                                                                                                                                          DWM3000
+                                                   ®
+                                                                           IEEE 802.15.4-z UWB Transceiver Module
+
+
+
+
+                                                         Figure 1: Timing diagram for cold start POR
+
+
+
+
+                                              VDD1
+                   POR
+
+
+
+
+                                       PORn/RSTn
+
+
+                                            EXTON
+                Comparators
+
+
+
+
+                                      VDD2/VDD3
+                  Supply
+
+
+
+
+                                   VDD2/VDD3 OK
+
+
+
+                                     Fast Oscillator
+                   Oscillators
+
+
+
+
+                                    XTAL Oscillator
+                                                                                                <1 ms
+
+
+                                          DIG State                                     OFF            WAKEUP     INIT_RC       IDLE_RC           IDLE_PLL
+                   Digital Core
+
+
+
+
+                                                                             Sample GPIOs 5&6 to set             ~70 µs
+                                                                             SPI mode                           OTP boot
+                                                                                                                            Host interrupt (SPI comms
+                                       HOST IRQ
+                                                                                                                            allowed @ 38 MHz)
+
+
+
+
+                                                                                                                            ACTIVE States
+                                                                              AON Power up
+                                                                                                                (INIT_RC, IDLE_RC, IDLE_PLL, TX, RX)
+
+
+                                                          Figure 2: Timing diagram for warm start
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                            4 of 27                                                                www.qorvo.com
+                                                                                                                                                        DWM3000
+                                                       ®
+                                                                                                       IEEE 802.15.4-z UWB Transceiver Module
+1.3       SPI Host Interface
+The host interface to DWM3000 is a 4-wire SPI-compatible slave. The assertion of SPICSn low by the SPI master indicates the
+beginning of a transaction.
+
+The SPI interface is used to read and write registers in the DW3110 device. All data and address transfers on the SPI are most
+significant bit first. All address bytes are transmitted with MSB first, and all data is transmitted commencing with lowest addressed byte.
+
+      •    Assertion low of SPICSn initializes transaction.
+      •    De-assertion high of SPICSn ends the SPI transaction.
+      •    The device supports direct and per-byte sub-addressing access to the full register space.
+      •    Efficient block data reading / writing is allowed. Continuous, long transactions can be carried out while the addressed location
+           is auto incremented on the DW3110 side.
+
+The SPIMISO I/O is required to go open-drain when SPICSn is de-asserted, to allow interoperation with other slaves on the SPI bus. SPI
+daisy chaining is not supported. This is the mode where the MISO, MOSI lines are passed through a device when it is not chip selected.
+
+
+
+
+1.3.1      SPI Timing Parameters
+
+The SPI slave complies with the Motorola SPI protocol within the constraints of the timing parameters listed in Table 1 and illustrated in
+Figure 3 and Figure 4.
+
+
+           SPICSn
+
+           SPICLK
+
+          SPIMISO            Bit 7 Bit 6 Bit 5 Bit 4 Bit 3 Bit 2 Bit 1 Bit 0         Bit 7 Bit 6 Bit 5 Bit 4 Bit 3 Bit 2 Bit 1 Bit 0                    Bit 7 Bit 6 Bit 5
+
+
+          SPIMOSI            7     6     5      4     3       2   1        0          7            6     5   4       3   2   1   0                      7     6      5
+
+
+                                                                                                                                              t6
+                        t7                                                      t5                                                       t8
+                                                                                                                                                   t9
+
+
+
+
+                                                                               Figure 3: SPI Timing Diagram
+
+
+
+                                                     SPICSn
+
+                                                     SPICLK
+
+                                                    SPIMISO                               Bit 7                  Bit 6               Bit 5
+
+
+                                                    SPIMOSI                               7                      6                   5
+
+
+                                                                                     t3       t4
+                                                                      t1                                t2
+
+
+
+
+                                                                   Figure 4: SPI Detailed Timing Diagram
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                                                       5 of 27                                                    www.qorvo.com
+                                                                                                                                             DWM3000
+                                                     ®
+                                                                                                IEEE 802.15.4-z UWB Transceiver Module
+                                                                       Table 1: SPI Timing Parameters
+
+            Parameter               Min.      Typ.       Max.         Unit                                          Description
+                   t1                3                                 ns           SPI select asserted low to valid slave output data.
+                   t2                                     3            ns           SPICLK low to valid slave output data.
+                   t3                14                                ns           Master data setup time.
+                   t4                2                                 ns           Master data hold time.
+                   t5                27                                ns           LSB last byte to MSB next byte.
+                   t6                                     3            ns           SPICSn de-asserted high to MISO tristate.
+                   t7                14                                ns           Start time; time from select asserted to first SPICLK.
+                   t8                24                                ns           Last SPICLK to SPICSn de-asserted.
+                   t9                24                                ns           Idle time between consecutive accesses.
+                   t10                                    38          MHz           SPI CLK Fmax @1.8 V VDD1, 25C, SPI mode 0.
+
+
+
+
+1.3.2      SPI Operating Modes
+
+Both clock polarities (SPIPOL=0/1) and phases (SPIPHA=0/1) are supported, as defined in the Motorola SPI protocol. The DW3110
+transfer protocols for each SPIPOL and SPIPHA setting are given in Figure 5 and Figure 6.
+
+               Cycle                                                                                                                      8*Number of
+                                          1          2            3             4           5           6       7         8         9
+                                                                                                                                             bytes
+               Number, #
+
+
+               SPIPOL=0, SPIPHA=0
+
+
+               SPICLK
+
+
+               SPIPOL=1, SPIPHA=0
+
+
+               SPICLK
+
+
+
+               SPICSn
+
+
+
+
+               SPIMISO        z      MSB         6            5             4           3           2       1       LSB       MSB         LSB           X    Z
+
+
+               SPIMOSI        z      MSB         6            5             4           3           2       1       LSB       MSB         LSB           X    Z
+
+
+
+
+                                                          Figure 5: DW3000 SPIPHA=0 Transfer Protocol
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                                                6 of 27                                                     www.qorvo.com
+                                                                                                                                                                                                           DWM3000
+                                                             ®
+                                                                                                                            IEEE 802.15.4-z UWB Transceiver Module
+                    Cycle                                                                                                                                                                         8*Number of
+                                                   1                 2                  3                4              5            6           7            8             9
+                    Number, #                                                                                                                                                                        bytes
+
+
+
+                    SPIPOL=0, SPIPHA=1
+
+                    SPICLK
+
+
+                    SPIPOL=1, SPIPHA=1
+
+
+                    SPICLK
+
+
+
+                    SPICSn
+
+
+
+
+                    SPIMISO          z         X       MSB               6                   5               4              3            2           1            LSB           MSB                      LSB       Z
+
+
+                    SPIMOSI          z         X       MSB               6                   5               4              3            2           1            LSB           MSB                      LSB       Z
+
+
+
+
+                                                                         Figure 6: DW3000 SPIPHA=1 Transfer Protocol
+
+1.3.3      SPI Transaction Formatting
+
+The SPI command structure allows for 4 different types of SPI command:
+
+   1.      Fast, single byte commands. Up to 32 unique commands such as “TX now”, “TX/RX Off”.
+   2.      Fast addressed mode. Allowing for read and write addressing to 32 master addresses. This command structure is padded by a
+           trailing bit to allow the SPI address decoder time to fetch any read data. The length of the read is determined by the length of
+           the SPI transaction.
+   3.      Full addressed mode. Allowing for read and write addressing to 32 master addresses and up to 128-byte offset addressing.
+           This command structure is padded by a trailing bit to allow the SPI address decoder time to fetch any read data. The length of
+           the read or write is determined by the length of the SPI transaction.
+   4.      Masked write transaction. These are intended to simplify read-modify-write operations by allowing the host to write to an
+           address and apply a set, clear or toggle mask to 1, 2, or 4 bytes. The SPI command decoder then carries out the required
+           read-modify-write instructions internally.
+                                                                                                                                Bit count
+                                                         0       1       2      3      4         5   6       7   8     9    10 11 12 13 14 15 16 17 18 19 20 21 22 23
+                                                        MSB                         byte0                LSB     MSB               byte1             LSB
+                                                        RD 8/
+                                                         /                                                                                                                Mode bits (M1, M0):
+                                                            16
+                                                        WR ADD                                                                                                                00 = RD/WR
+                                                                                                                                                                        01= WR: AND/OR 8-bit
+                                     Fast                                                                                                                               10 = WR: AND/OR 16-bit
+                                  command                1    0               Fast Command                   1                                                          11 = WR: AND/OR 32-bit
+                                 transaction
+
+
+                             Short addressed            1/                       byte0[5:1]
+                                                              0                                              0                   X octet data
+                               transaction              0                    5-bit base address
+
+                                                                                               byte0[0]
+                                                                                            sub-address [6]                                     M1 M0
+                                     Full
+                                  addressed             1/                       byte0[5:1]                             byte1[7:2]
+                                 transaction                  1                                                                                 0        0                 X octet data
+                                                        0                    5-bit base address                      sub-address [5:0]
+
+
+
+                                                                                 byte0[5:1]                             byte1[7:2]
+                                                         1    1                                                                                 0        1   1 octet AND mask         1 octet OR mask
+                                                                             5-bit base address                      sub-address [5:0]
+
+
+                                Masked write                                     byte0[5:1]                             byte1[7:2]
+                                                         1    1                                                                                 1        0   2 octet AND mask          2 octet OR mask
+                                 transaction                                 5-bit base address                      sub-address [5:0]
+
+
+                                                                                 byte0[5:1]                             byte1[6:0]
+                                                         1    1                                                                                 1        1        4 octet AND mask               4 octet OR mask
+                                                                             5-bit base address                      7-bit sub-address
+
+
+
+                                                                                        Figure 7: SPI Command Formatting
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                                                                            7 of 27                                                                                    www.qorvo.com
+                                                                                                                DWM3000
+                                                  ®
+                                                                 IEEE 802.15.4-z UWB Transceiver Module
+1.4      General Purpose Input Output (GPIO)
+The DWM3000 provides 8 configurable pins.
+
+On reset, all GPIO pins default to input. GPIO inputs, when appropriately configured, are capable of generating interrupts to the host
+processor via the IRQ signal.
+
+See DW3000 datasheet and DW3000 user manual for full details of the configuration and use of the GPIO lines.
+
+
+
+
+1.5      Always-On (AON) Memory
+Configuration retention in lowest power states is enabled in DWM3000 by provision of an Always-On (AON) memory array with a
+separate power supply, VDD1. The DWM3000 may be configured to upload its configuration to AON before entering a low-power state
+and to download the configuration when waking up from the low–power state.
+
+
+
+1.6      One-Time Programmable (OTP) Memory
+The DWM3000 contains a 128x32-bit user programmable OTP memory that is used to store per chip calibration information.
+
+
+
+
+1.7      Interrupts and Device Status
+DWM3000 has a number of interrupt events that can be configured to drive the IRQ output pin. The default IRQ pin polarity is active
+high. A number of status registers are provided in the system to monitor and report data of interest. See DW3000 user manual for a full
+description of system interrupts and their configuration and of status registers.
+
+
+
+
+1.8      MAC
+A number of MAC features are implemented including CRC generation, CRC checking and receive frame filtering. See the DW3000
+datasheet and DW3000 user manual for full details.
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                  8 of 27                                                www.qorvo.com
+                                                                                                                 DWM3000
+                                                  ®
+                                                                  IEEE 802.15.4-z UWB Transceiver Module
+2          DWM3000 Calibration
+Depending on the end-use applications and the system design, DWM3000 settings may need to be tuned. To help with this tuning a
+number of built-in functions such as continuous wave TX and continuous frame transmission can be enabled. See the DW3000 user
+manual for further details.
+
+The DWM3000 has crystal oscillator trimmed during module production but no transmit power or antenna delay calibration.
+
+
+
+
+2.1      Crystal Oscillator Trim
+DWM3000 modules are calibrated at production at room temperature to minimise initial frequency error to reduce carrier frequency
+offset between modules and thus improve receiver sensitivity. The calibration carried out at module production will trim the initial
+frequency offset to less than 2 ppm, typically.
+
+
+
+2.2        Transmitter Calibration
+In order to maximize range, DWM3000 transmit power spectral density (PSD) should be set to the maximum allowable for the
+geographic region in which it will be used. For most regions this is -41.3 dBm/ MHz.
+
+As the module contains an integrated antenna, the transmit power can only be measured over the air. The Effective Isotropic Radiated
+Power (EIRP) must be measured, and the power level adjusted to ensure compliance with applicable regulations.
+
+The DWM3000 provides the facility to adjust the transmit power in coarse and fine steps; 2 dB and 0.5 dB nominally. It also provides
+the ability to adjust the spectral bandwidth. These adjustments can be used to maximize transmit power whilst meeting regulatory
+spectral mask.
+
+If required, transmit calibration should be carried out on a per DWM3000 module basis, see DW3000 user manual for full details.
+
+
+
+
+2.3        Antenna Delay Calibration
+In order to measure range accurately, precise calculation of timestamps is required. To do this the antenna delay must be known. The
+DWM3000 allows this delay to be calibrated and provides the facility to compensate for delays introduced by PCB, external
+components, antenna and internal DWM3000 delays.
+
+To calibrate the antenna delay, range is measured at a known distance using two DWM3000 systems. Antenna delay is adjusted until
+the known distance and reported range agree. The antenna delay can be stored in OTP memory.
+
+Antenna delay calibration must be carried out as a once-off measurement for each DWM3000 design implementation. If required, for greater
+accuracy, antenna delay calibration should be carried out on a per DWM3000 module basis, see DW3000 user manual for full details.
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                  9 of 27                                                 www.qorvo.com
+                                                                                                                                                         DWM3000
+                                                  ®
+                                                                                         IEEE 802.15.4-z UWB Transceiver Module
+3          DWM3000 Pin Connections
+
+3.1      Pin Numbering
+
+DWM3000 module pin assignments are as follows (viewed from top):
+
+
+
+
+                                                                             UWB
+                                                                             Chip
+                                                                            Antenna
+
+
+                                          EXTON 1                                                                                           24 VSS
+
+                                        WAKEUP 2                                                                                            23 VSS
+
+                                             RSTn 3                                                                                         22 GPIO8
+
+                                            GPIO7 4                                                                                         21 VSS
+                                             VDD1 5                                                                                         20 SPICLK
+                                         VDD3V3 6                                                                                           19 SPIMISO
+                                         VDD3V3 7                                                                                           18 SPIMOSI
+
+                                               VSS 8                                                                                        17 SPICSn
+                                                         9
+                                                                 GPIO5 10
+
+                                                                            GPIO4 11
+
+                                                                                       GPIO3 12
+                                                                                                  GPIO2 13
+                                                                                                             GPIO1 14
+
+                                                                                                                        GPIO0 15
+
+                                                                                                                                   VSS 16
+                                                         GPIO6
+
+
+
+
+                                                          Figure 8: DWM3000 Pin Diagram
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                                         10 of 27                                                          www.qorvo.com
+                                                                                                                               DWM3000
+                                                  ®
+                                                                               IEEE 802.15.4-z UWB Transceiver Module
+3.2      Pin Descriptions
+                                                                 Table 2: DWM3000 Pin Functions
+
+     Signal                                          I/O
+                               Pin                                                                   Description
+     Name                                         (Default)
+                                                                        Digital Interface
+ SPICLK                         20                        DI      SPI clock
+                                                       DO
+ SPIMISO                        19                                SPI data output.
+                                                      (O–L)
+ SPIMOSI                        18                        DI      SPI data input.
+                                                                  SPI chip select. This is an active low enable input. The high-to-low transition on
+ SPICSn                         17                        DI      SPICSn signals the start of a new SPI transaction. SPICSn can also act as a
+                                                                  wake-up signal to bring DW3110 out of either SLEEP or DEEPSLEEP states.
+                                                                  When asserted into its active high state, the WAKEUP pin brings the DW3110 out
+ WAKEUP                          2                       DIO      of SLEEP or DEEPSLEEP states into operational mode.
+                                                                  If unused, this pin can be tied to ground.
+                                                                  External device enable. Asserted during wake-up process and held active until
+                                                          DO      device enters sleep mode. Can be used to control external DC-DC converters or
+ EXTON                           1
+                                                         (O-L)    other circuits that are not required when the device is in sleep mode so as to
+                                                                  minimize power consumption.
+                                                                  Interrupt Request output from the DWM3000 to the host processor. By default,
+                                                                  IRQ is an active-high output but may be configured to be active low if required.
+                                                                  For correct operation in SLEEP and DEEPSLEEP modes it should be configured
+                                                          DIO     for active high operation. This pin will float in SLEEP and DEEPSLEEP states and
+ GPIO8 / IRQ                    22                                may cause spurious interrupts unless pulled low externally (100 kΩ
+                                                         (O-L)
+                                                                  recommended).
+                                                                  When the IRQ functionality is not being used the pin may be reconfigured as a
+                                                                  general purpose I/O line, GPIO8.
+ GPIO7 /                                                 DIO      Defaults to operate as a SYNC input. This pin may be reconfigured as a general
+                                 4
+ SYNC                                                     (I)     purpose I/O pin under software control.
+                                                                  General purpose I/O pin.
+ GPIO6 /                                                          On power-up it acts as the SPIPHA (SPI phase selection) pin for configuring the
+                                                         DIO
+ EXTRXE /                        9                                SPI mode of operation.
+ SPIPHA                                                   (I)
+                                                                  After power-up, the pin will default to a General Purpose I/O pin.
+                                                                  On engineering samples E1.0 GPIO6 is on pin 10.
+                                                                  General purpose I/O pin.
+ GPIO5 /                                                          On power-up it acts as the SPIPOL (SPI polarity selection) pin for configuring the
+                                                         DIO
+ EXTTXE /                       10                                SPI operation mode.
+ SPIPOL                                                   (I)
+                                                                  After power-up, the pin will default to a General Purpose I/O pin.
+                                                                  On engineering samples E1.0 GPIO5 is on pin 9.
+                                                         DIO
+ GPIO4                          11                                General purpose I/O pin.
+                                                          (I)
+                                                                  General purpose I/O pin.
+ GPIO3 /                                                 DIO
+                                12                                It may be configured for use as a TXLED driving pin that can be used to light a
+ TXLED                                                    (I)
+                                                                  LED following a transmission.
+                                                                  General purpose I/O pin.
+ GPIO2 /                                                 DIO
+                                13                                It may be configured for use as a RXLED driving pin that can be used to light a
+ RXLED                                                    (I)
+                                                                  LED during receive mode.
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                               11 of 27                                                www.qorvo.com
+                                                                                                                                  DWM3000
+                                                   ®
+                                                                                       IEEE 802.15.4-z UWB Transceiver Module
+     Signal                                           I/O
+                               Pin                                                                         Description
+     Name                                          (Default)
+                                                                       General purpose I/O pin.
+ GPIO1 /                                                 DIO
+                                14                                     It may be configured for use as a SFDLED driving pin that can be used to light a
+ SFDLED                                                   (I)
+                                                                       LED when SFD (Start Frame Delimiter) is found by the receiver.
+                                                                       General purpose I/O pin.
+ GPIO0 /                                                 DIO
+                                15                                     It may be configured for use as a RXOKLED driving pin that can be used to light a
+ RXOKLED                                                  (I)
+                                                                       LED on reception of a good frame.
+                                                        DIO            Reset pin. Active Low Output.
+ RSTn                            3
+                                                       (O-H)           May be pulled low by external open drain driver to reset the DW3000.
+                                                                               Power Supplies
+ VDD1                            5                        P            External supply for the Always-On (AON) portion of the chip.
+ VDD3V3                         6,7                       P            3 V supply pins.
+                                                                                     Ground
+ GND                    8,16, 21,23,24                    G            Common ground.
+
+
+
+
+                                                                Table 3: Explanation of Abbreviations
+
+                              Abbreviation                                                        Explanation
+                                       I                      Input
+                                      IO                      Input / Output
+                                       O                      Output
+                                       G                      Ground
+                                       P                      Power Supply
+                                      PD                      Power Decoupling
+                                      O-L                     Defaults to output, low level after reset
+                                      O-H                     Defaults to output, high level after reset
+                                       I                      Defaults to input.
+                        Note: Any signal with the suffix ‘n’ indicates an active low signal.
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                                       12 of 27                                           www.qorvo.com
+                                                                                                                       DWM3000
+                                                  ®
+                                                                                  IEEE 802.15.4-z UWB Transceiver Module
+4          Electrical Specifications
+4.1      Nominal Operating Conditions
+                                                         Table 4: DWM3000 Operating Conditions
+
+                       Parameter                                  Min.             Typ.       Max.      Units        Condition / Note
+ Operating temperature                                             -40                        +85        ˚C
+ Supply voltage VDD1                                              1.62                         3.6       V
+ Supply voltage VDD3V3                                             2.5                         3.6       V
+ Voltage on digital pins                                                                       3.6       V
+
+Note: Unit operation is guaranteed by design when operating within these ranges
+
+
+
+
+4.2      DC Characteristics
+
+Tamb = 25 ˚C, all supplies centered on typical values
+
+                                                           Table 5: DWM3000 DC Characteristics
+
+                      Parameter                                   Min.              Typ.      Max.      Units        Condition / Note
+ Supply current DEEP SLEEP mode                                                     260                  nA
+ Supply current SLEEP mode                                                          850                  nA
+ Supply current CH5 IDLE mode                                                        12                  mA     Total current drawn from all
+ Supply current CH9 IDLE mode                                                        20                  mA     supplies.
+ Supply current CH5 INIT mode                                                         6                  mA
+ Supply current CH9 INIT mode                                                         6                  mA
+ CH5 TX: 3.3 V supplies
+                                                                                     40                  mA
+ (VDD1, VDD3V3)
+ CH9 TX: 3.3 V supplies
+                                                                                     45                  mA
+ (VDD1, VDD3V3)
+ CH5 RX: 3.3 V supplies                                                                                         Receiver active, no frames
+                                                                                     50                  mA
+ (VDD1, VDD3V3)                                                                                                 received
+ CH9 RX: 3.3 V supplies                                                                                         Receiver active, no frames
+                                                                                     55                  mA
+ (VDD1, VDD3V3)                                                                                                 received
+ Digital input voltage high                                    0.7*VDD1                                   V
+ Digital input voltage low                                                                   0.3*VDD1     V
+ Digital output voltage high                                   0.7*VDD1                                   V     Assumes 500 Ω load
+ Digital output voltage low                                                                  0.3*VDD1     V     Assumes 500 Ω load
+ Digital Output Drive Current GPIOx, IRQ                                             0.8                 mA
+ Digital Output Drive Current SPIMISO                               8                10                  mA
+ Digital Output Drive Current EXTON                                 3                 4                  mA
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                                  13 of 27                                     www.qorvo.com
+                                                                                                                          DWM3000
+                                                  ®
+                                                                             IEEE 802.15.4-z UWB Transceiver Module
+
+4.3      Receiver AC Characteristics
+
+Tamb = 25 ˚C, all supplies centered on nominal values
+
+                                                          Table 6: DWM3000 Receiver AC Characteristics
+
+                          Parameter                                Min.     Typ.        Max.      Units                Condition / Note
+ Centre Frequency CH5                                                      6489.6
+ Centre Frequency CH9                                                      7987.2                  MHz
+ Channel bandwidth                                                          500                                  Channel 5 and 9
+
+
+
+
+4.4      Reference Clock AC Characteristics
+Tamb = 25 ˚C, all supplies centered on typical values
+
+
+
+4.4.1      Reference Frequency
+
+                                                           Table 7: Reference Clock AC Characteristics
+
+                         Parameter                                 Min.    Typ.         Max.       Units                Condition / Note
+ On-board crystal oscillator reference frequency                           38.4                     MHz
+
+ On-board crystal aging                                                     ±1                 ppm in 1st year
+
+
+
+
+4.5      Transmitter AC Characteristics
+
+Tamb = 25 ˚C, all supplies centered on typical values
+
+                                                         Table 8: DWM3000 Transmitter AC Characteristics
+
+                         Parameter                                 Min.    Typ.         Max.      Units                Condition / Note
+ Frequency range                                                   6250                 8250       MHz
+ Channel Bandwidths                                                         500                    MHz           Channel 5 and 9
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                             14 of 27                                              www.qorvo.com
+                                                                                                               DWM3000
+                                                  ®
+                                                                            IEEE 802.15.4-z UWB Transceiver Module
+4.6      Absolute Maximum Ratings
+
+                                                          Table 9: DWM3000 Absolute Maximum Ratings
+
+                                                         Parameter                           Min.     Max.        Units
+                  Voltage
+                                                                                              -0.3    4.0           V
+                  VDD3V3 / VDD1
+                  Receiver Power                                                                       0          dBm
+                  Temperature - Storage temperature                                           -40     +125          ˚C
+                  Temperature - Operating temperature                                         -40     +85           ˚C
+                  ESD (Charged Device Model)                                                          1000          V
+
+
+Stresses beyond those listed in this table may cause permanent damage to the device. This is a stress rating only; functional operation
+of the device at these or any other conditions beyond those indicated in the operating conditions of the specification is not implied.
+Exposure to the absolute maximum rating conditions for extended periods may affect device reliability.
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                           15 of 27                                      www.qorvo.com
+                                                                                                                  DWM3000
+                                                  ®
+                                                                           IEEE 802.15.4-z UWB Transceiver Module
+5          Antenna Performance
+This section presents antenna radiation patterns for the DWM3000. As is illustrated in Figure 9, measured radiation patterns were made
+with the module mounted on a DWM3000EVB evaluation board.
+
+Table 10 and Table 11 show antenna radiation patterns in channels 5 and 9, respectively. Three planes in spherical space about the
+centre of the board are measured, with theta and phi plots representing perpendicular polarisations.
+
+The DWM3000 antenna is vertically polarised, meaning that the module is intended to be positioned vertically upright when used in an
+RTLS system. An omnidirectional radiation pattern is seen in the XZ plane when observed by another antenna which is also vertically
+polarised. This is shown in the XZ plane antenna patterns, where the vertically polarised plot, phi, has a circular, or omnidirectional
+shape.
+
+If the antennas are oriented perpendicular relative to each other, then the polarisation changes. In this case, the horizontally polarised
+pattern, theta, applies and there are nulls at certain angles which can limit range and introduce location inaccuracy.
+
+
+                                                                           y
+                                                                           UW B0 B
+
+
+
+
+                                                                                                   x
+
+                                                         z
+
+
+
+
+                                                             Figure 9: Radiation Pattern Planes
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                           16 of 27                                        www.qorvo.com
+                                                                                                                                                                                               DWM3000
+                                                      ®
+                                                                                   IEEE 802.15.4-z UWB Transceiver Module
+                                                          Table 10: Antenna Radiation Patterns - Channel 5
+           Planes:                                                                                    Antenna Gain (dBi) vs. Angle (°)
+
+              XZ Plane                                                                                                                      0
+                                                                                                                              344 352 5           8   16
+                                                                                                                        336                                 24
+                                                                                                                 328                    0                          32
+                                                                                                        320                                                              40
+                                                                                                     312                               -5                                      48
+                                                                                                304                                   -10                                           56
+                                                                                              296                                                                                        64
+                                            UW B0 B
+
+
+
+
+                                                                                                                                      -15
+                                                            180°                         288                                                                                                 72
+                                                                                                                                      -20
+                                                                                        280                                                                                                   80
+                                                                                                                                      -25
+             270°                                                                       272
+                                                                                                                                      -30
+                                                                                                                                                                                               88
+
+                                                                                        264                                                                                                    96
+                      Phi                                                   90°          256                                                                                                  104
+                                                                                          248                                                                                            112
+                                                                                               240                                                                                      120
+                                                                                                    232                                                                            128
+                        0°                                                                                224                                                                136
+                                    Theta                                                                       216                                                    144
+                                                                                                                      208                                        152
+                                                                                                                            200                            160
+                                                                                                                                  192 184       176 168
+
+
+
+              XY Plane                                                                                                                      0
+                                                                                                                              344 352 5           8   16
+                                                                                                                        336                                 24
+                                                      90°                                                         328                   0                         32
+                                                                                                         320                                                            40
+                                                                                                      312                              -5                                     48
+                                                                                                    304                               -10                                          56
+                                                                                               296                                    -15                                               64
+             180°                                                                         288
+                                                                                                                                      -20
+                                                                                                                                                                                         72
+
+                                                                                         280                                                                                                 80
+                                                                                                                                      -25
+                                                                                         272                                                                                                 88
+                                                                                                                                      -30
+                                                             Phi Theta                   264                                                                                                 96
+
+                                                                                          256                                                                                                104
+                                                                                              248                                                                                        112
+                                                                     0°
+                                                                                                240                                                                                 120
+                                                                                                     232                                                                       128
+                                                                                                          224                                                                136
+                                                                                                                216                                                    144
+                                                                                                                      208                                        152
+                                                                                                                            200                           160
+                                                                                                                                  192 184       176 168
+                         270°
+
+              YZ Plane                                                                                                                      0
+                                                                                                                              344 352 5           8   16
+                                                                                                                       336                                   24
+                                                                                                                 328                    0                          32
+                                                                                                        320                                                              40
+                                                                                                     312                               -5                                      48
+                             180°                                                              304                                    -10                                           56
+                                                                                          296                                         -15                                                64
+                                                                                         288                                                                                                 72
+                                                                                                                                      -20
+                                                                                        280                                                                                                    80
+                                                                             90°                                                      -25
+                                                                                       272                                                                                                     88
+                                                                                                                                      -30
+             270°                                                                       264                                                                                                    96
+                                                                   Phi
+                                                                                        256                                                                                                   104
+                                                                                         248                                                                                                 112
+                                                                                              240                                                                                       120
+
+                                                               0°         Theta                     232
+                                                                                                      224                                                                    136
+                                                                                                                                                                                   128
+
+                                                                                                            216                                                        144
+                                                                                                                      208                                        152
+                                                                                                                            200                            160
+                                                                                                                                  192 184       176 168
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                                   17 of 27                                                                                                         www.qorvo.com
+                                                                                                                                                                                               DWM3000
+                                                        ®
+                                                                                      IEEE 802.15.4-z UWB Transceiver Module
+                                                            Table 11: Antenna Radiation Patterns - Channel 9
+
+             Planes:                                                                                          Antenna Gain (dBi) vs. Angle (°)
+
+                XZ Plane                                                                                                                         0
+                                                                                                                                  344 352
+                                                                                                                                        5.00           8   16
+                                                                                                                            336                                  24
+                                                                                                                     328                  0.00                          32
+                                                                                                             320                                                              40
+                                                                                                          312                            -5.00                                     48
+                                                                                                       304                              -10.00                                           56
+                                                                                                  296                                                                                         64
+                                              UW B0 B
+
+
+
+
+                                                                                                                                        -15.00
+                                                              180°                            288                                                                                              72
+                                                                                                                                        -20.00
+                                                                                             280                                                                                                   80
+                                                                                                                                        -25.00
+               270°                                                                         272
+                                                                                                                                        -30.00
+                                                                                                                                                                                                    88
+
+                                                                                            264                                                                                                     96
+                        Phi                                                     90°          256                                                                                                   104
+                                                                                                 248                                                                                           112
+                                                                                                   240                                                                                    120
+                                                                                                        232                                                                             128
+                          0°                                                                                  224                                                                 136
+                                      Theta                                                                         216                                                     144
+                                                                                                                          208                                         152
+                                                                                                                                200                             160
+                                                                                                                                      192 184        176 168
+
+
+                XY Plane
+                                                                                                                                                 0
+                                                                                                                                  344 352
+                                                                                                                                        5.00           8   16
+                                                            90°                                                             336                                  24
+                                                                                                                      328                 0.00                         32
+                                                                                                             320                                                             40
+                                                                                                          312                            -5.00                                     48
+                                                                                                       304                              -10.00                                           56
+                                                                                                   296                                  -15.00                                                64
+               180°                                                                              288                                                                                           72
+                                                                                                                                        -20.00
+                                                                                             280                                                                                                   80
+                                                                                                                                        -25.00
+                                                                                             272                                                                                                   88
+                                                                  Phi Theta
+                                                                                                                                        -30.00
+                                                                                             264                                                                                                   96
+
+                                                                                              256                                                                                                  104
+                                                                                                  248                                                                                         112
+                                                                           0°
+                                                                                                    240                                                                                   120
+                                                                                                         232                                                                        128
+                                                                                                              224                                                                 136
+                                                                                                                    216                                                     144
+                                                                                                                          208                                         152
+                                                                                                                                200                            160
+                                                                                                                                      192 184        176 168
+                           270°
+
+
+                YZ Plane                                                                                                          344 352
+                                                                                                                                                 0
+                                                                                                                                                       8   16
+                                                                                                                                        5.00
+                                                                                                                            336                                   24
+                                                                                                                     328                 0.00                           32
+                                                                                                            320                                                               40
+                                                                                                         312                             -5.00                                      48
+                                                                                                    304                                 -10.00                                           56
+                                                                                                 296                                    -15.00                                                 64
+
+                               180°                                                          288
+                                                                                                                                        -20.00
+                                                                                                                                                                                                   72
+
+                                                                                            280                                                                                                     80
+                                                                                                                                        -25.00
+                                                                                            272                                                                                                      88
+                                                                                                                                        -30.00
+                                                                                90°         264                                                                                                     96
+
+                                                                                            256                                                                                                     104
+               270°
+                                                                     Phi                      248                                                                                              112
+                                                                                                  240                                                                                         120
+                                                                                                        232                                                                             128
+                                                                                                             224                                                                   136
+                                                                                                                   216                                                       144
+                                                                  0°       Theta                                          208
+                                                                                                                                200                             160
+                                                                                                                                                                      152
+                                                                                                                                      192 184        176 168
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                                      18 of 27                                                                                                            www.qorvo.com
+                                                                                                                       DWM3000
+                                                  ®
+                                                                            IEEE 802.15.4-z UWB Transceiver Module
+
+6          Application Information
+
+6.1      Application Board Layout Guidelines
+
+When designing the PCB onto which DWM3000 will be soldered, the proximity of the DWM3000 on-board ceramic monopole antenna to
+metal and other non-RF transparent materials needs to be considered carefully. Two suggested placement schemes are shown below.
+
+For best RF performance, ground copper should be flooded in all areas of the application board, except in the areas marked
+“Keep-Out Area”, where there should be no metal either side, above or below (e.g., do not place battery under antenna).
+
+The placement schemes in Figure 10 show an application board with no non-RF transparent material in the keep-out area, or an
+application board with the antenna projecting off of the board so that the keep out area is in free-space. In this second scheme it is still
+important not to place metal components above or below the antenna in a system implementation. It is also important to note that the
+ground plane on the application board affects the DWM3000 antenna radiation pattern. In Figure 10 below, ‘d’ should ideally be 10 mm.
+This gives the most vertically polarized radiation pattern. As ‘d’ is increased from 10 mm the degree of vertical polarization reduces.
+
+
+                                    d                              d
+
+
+                                Keep-Out           Antenna       Keep-Out                          Antenna
+                                  Area                             Area
+                                                                                         d                         d
+
+
+
+                                                 DWM3000                                         DWM3000
+
+
+
+
+                                             Application Board                                 Application Board
+
+
+
+
+                                                         Figure 10: Application Board Keep-Out Areas
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                            19 of 27                                       www.qorvo.com
+                                                                                                                                                                                                       DWM3000
+                                                            ®
+                                                                                                                                          IEEE 802.15.4-z UWB Transceiver Module
+6.2      Application Circuit Diagram
+
+A simple application circuit integrating the DWM3000 module need only power the device and connect the device to a host controller,
+see Figure 11.
+
+
+
+                                                              UWB
+                                                              Chip
+                                                             Antenna
+               DWM3000_RSTn
+                                                                                                                                     24 VSS                       DWM3000_RSTn
+                            EXTON   1
+                                                                                                                                                                                          Open Drain
+                                                                                                                                     23 VSS                                                 GPIO
+                           WAKEUP   2
+
+                             RSTn   3                                                                                                22 IRQ / GPIO8
+                                                                                                                                                                    Optional pulldown
+
+                  +3.3 V
+                            GPIO7   4                                                                                                21 VSS             100 k       on IRQ to prevent
+                                                                                                                                                                         spurious            Host
+                             VDD1   5            DWM3000                                                                             20 SPICLK                  GND     interrupts
+
+
+                           VDD3V3   6                                                                                                19 SPIMISO
+                                                                                                                                                                                          uProcessor
+                           VDD3V3   7                                                                                                18 SPIMOSI
+
+                              VSS   8                                                                                                17 SPICSn
+                                                 GPIO5 10
+
+                                                            GPIO4 11
+
+                                                                        GPIO3 12
+
+                                                                                      GPIO2 13
+
+                                                                                                 GPIO1 14
+
+                                                                                                            GPIO0 15
+                                         9
+
+
+
+
+                                                                                                                            VSS 16
+                                         GPIO6
+
+
+
+
+                                                                                                                         GND
+
+
+                                                                        Figure 11: Example DWM3000 Application Circuit
+
+
+
+
+6.3      GPIO and SPI I/O Internal Pull Up / Down
+
+All of the GPIO pins have a software controllable internal pull up/down resistor to ensure safe operation when input pins are not driven.
+This defaults to enabled and pull-down except for the SPICSn pin which defaults to pull-up. The value of the pull-up / down will vary
+with the VDD1 supply voltage over a range from 10 kΩ to 30 kΩ.
+                                                                                                 VDD1
+                                                                                   30kOhm (1.8V)
+
+                                                                                                                                              SPICSn
+
+
+                                                                                                                                              SPIMOSI
+
+                                                                                   30kOhm (1.8V)
+                                                                                                                                                                    SPI PORT
+
+
+
+
+                                                                                                                                                                                   Host
+                                                                                                                                              SPICLK                             Controller
+                                                                       DW3000
+                                                                                   30kOhm (1.8V)
+
+                                                                                                                                              SPIMISO
+                                                                                                                       AON IO
+
+
+                                                                                                                                                 IRQ
+                                                                                                                                              GPIO(x)
+
+                                                                                   30kOhm (1.8V)
+
+                                                                                                                       DIG IO
+
+
+
+
+                                                                                             Figure 12: SPI and GPIO Pull Up / Down
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                                                                                          20 of 27                                                       www.qorvo.com
+                                                                                               DWM3000
+                                                  ®
+                                                                       IEEE 802.15.4-z UWB Transceiver Module
+7          Package Information
+
+7.1      Module Drawings
+
+
+
+
+                                                         Figure 13: Module Package Size (mm)
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                       21 of 27                     www.qorvo.com
+                                                                                                         DWM3000
+                                                   ®
+                                                                              IEEE 802.15.4-z UWB Transceiver Module
+7.2      Module Land Pattern
+
+The diagram below shows the DWM3000 module land pattern.
+
+
+
+
+                                                                                                  22.7
+                                                            Figure 14: Module Land Pattern (units: mm)
+
+
+
+
+7.3      Module Marking Information
+The module is identified by a sticker on the shield can which gives the part number and serial number as follows:
+“YY” is year, “WW” is calendar week number (week code per ISO-8601), “3” is DWM3000, SSSSS is serial number: 00001, 00002…….
+                                                  7.00 mm
+
+
+
+
+                                                               9.00 mm
+
+
+
+                                                              Figure 15: Module Marking Information
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                              22 of 27                       www.qorvo.com
+                                                                                                    DWM3000
+                                                  ®
+                                                                          IEEE 802.15.4-z UWB Transceiver Module
+7.4      Module Solder Profile
+
+
+
+
+                                                         Figure 16: DWM3000 Module Solder Profile
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                          23 of 27                     www.qorvo.com
+                                                                                                         DWM3000
+                                                  ®
+                                                                            IEEE 802.15.4-z UWB Transceiver Module
+7.5      Tape and Reel Information
+
+
+
+
+                                                           Figure 17: Module Carrier Dimension (mm)
+
+
+
+
+                                                         Figure 18: Module Tape Carrier Dimension (mm)
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                            24 of 27                       www.qorvo.com
+                                                                                                                                DWM3000
+                                                  ®
+                                                                               IEEE 802.15.4-z UWB Transceiver Module
+8          Glossary
+                                                                  Table 12: Glossary of Terms
+
+  Abbreviation                   Full Title                                                      Explanation
+                                                         The amount of power that a theoretical isotropic antenna (which evenly distributes power in
+                           Equivalent Isotropic
+ EIRP                                                    all directions) would emit to produce the peak power density observed in the direction of
+                           Radiated Power
+                                                         maximum gain of the antenna being used.
+                           European
+                                                         Regulatory body in the EU charged with the management of the radio spectrum and the
+ ETSI                      Telecommunication
+                                                         setting of regulations for devices that use it.
+                           Standards Institute
+                           Federal
+                                                         Regulatory body in the USA charged with the management of the radio spectrum and the
+ FCC                       Communications
+                                                         setting of regulations for devices that use it.
+                           Commission
+                           General Purpose               Pin of an IC that can be configured as an input or output under software control and has no
+ GPIO
+                           Input / Output                specifically identified function.
+                           Institute of
+                                                         Is the world’s largest technical professional society. It is designed to serve professionals
+                           Electrical and
+ IEEE                                                    involved in all aspects of the electrical, electronic and computing fields and related areas of
+                           Electronic
+                                                         science and technology.
+                           Engineers
+                           Phase Locked                  Circuit designed to generate a signal at a particular frequency whose phase is related to an
+ PLL
+                           Loop                          incoming “reference” signal.
+                                                         Used to quantify very small relative proportions. Just as 1% is one out of a hundred, 1 ppm
+ PPM                       Parts Per Million
+                                                         is one part in a million.
+                                                         Generally used to refer to signals in the range of 3 kHz to 300 GHz. In the context of a
+ RF                        Radio Frequency               radio receiver, the term is generally used to refer to circuits in a receiver before
+                                                         down-conversion takes place and in a transmitter after up-conversion takes place.
+                           Real Time Location
+ RTLS                                                    System intended to provide information on the location of various items in real-time.
+                           System
+                           Start of Frame
+ SFD                                                     Defined in the context of the IEEE 802.15.4-2011 standard.
+                           Delimiter
+                           Serial Peripheral             An industry standard method for interfacing between IC’s using a synchronous serial
+ SPI
+                           Interface                     scheme first introduced by Motorola.
+                           Temperature
+                                                         A crystal oscillator whose output frequency is very accurately maintained at its specified
+ TCXO                      Controlled Crystal
+                                                         value over its specified temperature range of operation.
+                           Oscillator
+                                                         Method of measuring the physical distance between two radio units by exchanging
+ TWR                       Two Way Ranging               messages between the units and noting the times of transmission and reception. Refer to
+                                                         Qorvo’s website for further information.
+                                                         Method of deriving information on the location of a transmitter. The time of arrival of a
+                                                         transmission at two physically different locations whose clocks are synchronized is noted
+                           Time Difference of            and the difference in the arrival times provides information on the location of the
+ TDoA
+                           Arrival                       transmitter. A number of such TDoA measurements at different locations can be used to
+                                                         uniquely determine the position of the transmitter. Refer to Qorvo’s website for further
+                                                         information.
+ UWB                       Ultra-Wideband                A radio scheme employing channel bandwidths of, or in excess of, 500 MHz.
+                           Wireless Sensor               A network of wireless nodes intended to enable the monitoring and control of the physical
+ WSN
+                           Network                       environment.
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                               25 of 27                                                 www.qorvo.com
+                                                                                                                     DWM3000
+                                                  ®
+                                                                            IEEE 802.15.4-z UWB Transceiver Module
+9          Revision History
+
+ Revision                                                                   Change Description
+
+       A                         Preliminary version
+
+
+       B          May 2021       Updated for production release, completion of outstanding information.
+
+
+
+
+10         Further Information
+Qorvo develops semiconductors solutions, software, modules, reference designs - that enable real-time, ultra-accurate, ultra-reliable
+local area micro-location services. Qorvo’s technology enables an entirely new class of easy to implement, highly secure, intelligent
+location functionality and services for IoT and smart consumer products and applications.
+
+For further information on this or any other Qorvo product, please refer to our website www.qorvo.com.
+
+
+
+Handling Precautions
+
+ Parameter                                               Rating          Standard
+ ESD - Charged Device Model (CDM)                        1000V     ANSI/ESDA/JEDEC JS-002                       Caution!
+                                                                                                                ESD-Sensitive Device
+ MSL – Moisture Sensitivity Level                        Level 3    IPC/JEDEC J-STD-020
+
+
+
+Regulatory Approvals
+The DWM3000, as supplied from Qorvo, has not been certified for use in any particular geographic region by the appropriate regulatory
+body governing radio emissions in that region although it is capable of such certification depending on the region and the manner in
+which it is used.
+
+All products developed by the user incorporating the DWM3000 must be approved by the relevant authority governing radio emissions
+in any given jurisdiction prior to the marketing or sale of such products in that jurisdiction and user bears all responsibility for obtaining
+such approval as needed from the appropriate authorities.
+
+
+
+RoHS Compliance
+This part is compliant with 2011/65/EU RoHS directive (Restrictions on the Use of Certain Hazardous Substances in Electrical and
+Electronic Equipment) as amended by Directive 2015/863/EU.
+
+This product also has the following attributes:
+
+• Antimony Free
+• TBBP-A (C15H12Br402) Free
+• SVHC Free
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                            26 of 27                                          www.qorvo.com
+                                                                                                                                                       DWM3000
+                                                   ®
+                                                                                        IEEE 802.15.4-z UWB Transceiver Module
+Contact Information
+For the latest specifications, additional product information, worldwide sales and distribution locations:
+Web: www.qorvo.com
+Tel: 1-844-890-8163
+Email: customer.support@qorvo.com
+
+
+
+Important Notice
+The information contained in this Data Sheet and any associated documents (“Data Sheet Information”) is believed to be reliable; however, Qorvo makes no warranties
+regarding the Data Sheet Information and assumes no responsibility or liability whatsoever for the use of said information. All Data Sheet Information is subject to change
+without notice. Customers should obtain and verify the latest relevant Data Sheet Information before placing orders for Qorvo® products. Data Sheet Information or the use
+thereof does not grant, explicitly, implicitly or otherwise any rights or licenses to any third party with respect to patents or any other intellectual property whether with regard to
+such Data Sheet Information itself or anything described by such information.
+
+DATA SHEET INFORMATION DOES NOT CONSTITUTE A WARRANTY WITH RESPECT TO THE PRODUCTS DESCRIBED HEREIN, AND QORVO HEREBY
+DISCLAIMS ANY AND ALL WARRANTIES WITH RESPECT TO SUCH PRODUCTS WHETHER EXPRESS OR IMPLIED BY LAW, COURSE OF DEALING, COURSE OF
+PERFORMANCE, USAGE OF TRADE OR OTHERWISE, INCLUDING THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE. Without limiting the generality of the foregoing, Qorvo® products are not warranted or authorized for use as critical components in medical, life-saving, or life-
+sustaining applications, or other applications where a failure would reasonably be expected to cause severe personal injury or death. Applications described in the Data Sheet
+Information are for illustrative purposes only. Customers are responsible for validating that a particular product described in the Data Sheet Information is suitable for use in a
+particular application.
+
+FiRa, FiRa Consortium, the FiRa logo, the FiRa Certified logo, and FiRa tagline are trademarks or registered trademarks of FiRa Consortium or its licensor(s)/ supplier(s) in
+the US and other countries and may not be used without permission. All other trademarks, service marks, and product or service names are trademarks or registered
+trademarks of their respective owners.
+
+© 2021 Qorvo US, Inc. All rights reserved. This document is subject to copyright laws in various jurisdictions worldwide and may not be reproduced or distributed, in whole or
+in part, without the express written consent of Qorvo US, Inc. | QORVO® is a registered trademark of Qorvo US, Inc.
+
+
+
+
+DWM3000 Data Sheet Rev B, May 2021
+Subject to change without notice | All rights reserved
+                                                                                       27 of 27                                                                   www.qorvo.com
+

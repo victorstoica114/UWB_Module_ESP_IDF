@@ -6,7 +6,6 @@ dependencies.lock
 secrets.h
 UWB_Module/
 reference/external/
-datasheets/
 .agents/
 .vscode/settings.json
 **/.pio/

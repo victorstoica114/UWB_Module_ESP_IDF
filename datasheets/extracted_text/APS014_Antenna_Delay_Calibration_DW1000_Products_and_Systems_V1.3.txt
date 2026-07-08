@@ -1,0 +1,1014 @@
+APS014 APPLICATION NOTE
+ANTENNA DELAY
+CALIBRATION OF
+DW1000-BASED PRODUCTS
+AND SYSTEMS
+
+Version 1.3
+This document is subject to change without
+notice
+
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+APS014: DW1000 Antenna Delay Calibration
+TABLE OF CONTENTS
+LIST OF TABLES ............................................................................................................................ 2
+LIST OF FIGURES........................................................................................................................... 2
+1
+
+INTRODUCTION ..................................................................................................................... 3
+1.1
+1.2
+
+2
+
+OVERVIEW ................................................................................................................................... 3
+ABOUT THIS DOCUMENT................................................................................................................. 4
+
+ANTENNA DELAY CALIBRATION ............................................................................................. 5
+2.1 APPLICATION REQUIREMENTS ......................................................................................................... 5
+2.1.1
+Ranging Method and Antenna Delay Calibration ............................................................. 5
+2.1.2
+Accuracy ............................................................................................................................ 6
+2.1.3
+Temperature Variation ...................................................................................................... 6
+2.2 REFERENCE DEVICE GENERATION ..................................................................................................... 6
+2.2.1
+TWR Antenna Delay Calibration Reference Device Generation ........................................ 6
+2.2.2
+TWR Antenna Delay Calibration Reference Device Generation Example........................ 10
+2.3 ANTENNA DELAY CALIBRATION USING A KNOWN REFERENCE DEVICE .................................................. 11
+2.3.1
+Using Wired Channels in Antenna Delay Calibration Setups........................................... 11
+2.3.2
+Antenna Delay Calibration Using TWR with a Reference Device .................................... 11
+2.3.3
+Antenna Delay Calibration for an RTLS Environment ...................................................... 11
+
+3
+
+GLOSSARY ........................................................................................................................... 13
+
+4
+
+REFERENCES ........................................................................................................................ 14
+4.1
+
+LISTING ..................................................................................................................................... 14
+
+5
+
+DOCUMENT HISTORY .......................................................................................................... 14
+
+6
+
+MAJOR CHANGES ................................................................................................................ 14
+
+7
+
+FURTHER INFORMATION ..................................................................................................... 15
+
+LIST OF TABLES
+TABLE 1 : ANTENNA DELAYS REQUIRED BY RANGING REQUIREMENTS ................................................................. 5
+TABLE 2 : DW1000-BASED EVK1000 ANTENNA DELAY CALIBRATION BASED ON STANDARD DEVIATION OF ANTENNA
+DELAY VARIATION AND REQUIRED LOCATION ACCURACY .............................................................................. 6
+TABLE 3: EXAMPLE ANTENNA DELAY CALIBRATION EDM POPULATION ............................................................... 10
+TABLE 4: PERCENTAGE TRANSMIT AND RECEIVE ANTENNA DELAY IN TOTAL AGGREGATE DELAY................................ 12
+TABLE 5: GLOSSARY OF TERMS..................................................................................................................... 13
+TABLE 6: TABLE OF REFERENCES .................................................................................................................. 14
+LIST OF FIGURES
+FIGURE 1: ANTENNA DELAY DIAGRAM ............................................................................................................ 3
+FIGURE 2: TWR REFERENCE DEVICE GENERATION SETUP .................................................................................... 7
+FIGURE 3 : TWR ANTENNA DELAY CALIBRATION ALGORITHM - OVERALL FLOWCHART ............................................. 8
+FIGURE 4: POPULATE THE SET OF CANDIDATE DELAY ESTIMATES - FLOWCHART ...................................................... 9
+FIGURE 5: EVALUATE THE QUALITY OF THE CANDIDATES - FLOWCHART ............................................................... 10
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 2 of 15
+
+APS014: DW1000 Antenna Delay Calibration
+
+1 INTRODUCTION
+1.1
+
+Overview
+
+DecaWave’s DW1000, a multi-channel transceiver based on Ultra Wideband (UWB) radio
+communications, allows very accurate time-stamping of messages as they leave from and
+arrive at the transceiver.
+The delays which are measured in these timestamps include the propagation delay through
+the DW1000 devices from the points at which the transmitter timestamps are applied to the
+points at which the receiver timestamps are captured. These delays are referred to as the
+transmit/receive antenna delays.
+These antenna delays are internal to the chip and not included in the Time of Flight (ToF)
+but are included in the propagation delay from transmission timestamp to receive message
+timestamp, see Figure 1. Refer to [2] for more information on timestamps.
+When measuring the Time of Flight (ToF) from a transmitter to a receiver the delay
+measured includes the antenna delays (see Figure 1):
+𝑡𝑀𝑒𝑎𝑠𝑢𝑟𝑒𝑑 = 𝑡𝐴𝐷𝑇𝑋 + 𝑇𝑜𝐹 + 𝑡𝐴𝐷𝑅𝑋
+where:
+ToF
+tMeasured
+tADTX
+tADRX
+
+=
+=
+=
+=
+
+Time of Flight
+The measured time from the transmit timestamp to the receive timestamp
+Transmit antenna delay
+Receive antenna delay
+
+To find the Time of Flight, we need to know the transmit and receive antenna delays.
+
+Antenna
+
+External
+RF
+
+tADTX
+
+DW1000based product
+or system 2
+
+tADRX
+
+RF Switch
+
+DW1000based product
+or system 1
+
+Antenna
+External
+RF
+
+tADTX
+
+tADRX
+
+Transmit
+timestamp
+applied
+
+Analog
+TX
+
+Analog
+RX
+
+Digital TX
+
+Digital RX
+
+Receive
+timestamp
+captured
+
+RF Switch
+DW1000
+
+Transmit
+timestamp
+applied
+
+Analog
+TX
+
+Analog
+RX
+
+Digital TX
+
+Digital RX
+
+Host Interface
+
+Receive
+timestamp
+captured
+
+DW1000
+Host Interface
+
+Figure 1: Antenna Delay Diagram
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 3 of 15
+
+APS014: DW1000 Antenna Delay Calibration
+The internal propagation delays in DW1000 devices vary slightly from chip to chip. There
+can also be variations due to components between DW1000 and the antenna. Since we are
+measuring RF signals moving at the speed of light these variations can make differences to
+ranging measurements in the tens of centimeters. Antenna delay calibration is used to
+remove these variations.
+
+1.2
+
+About this document
+
+This document is intended to be read together with [4] which gives a guide to production
+testing and calibration for DW1000-based products to understand how to integrate antenna
+delay calibration into the production test environment.
+The document is divided into three main sections:
+•
+•
+•
+
+A description of antenna delay and application requirements.
+How to generate a reference device for antenna delay calibration.
+How to carry out antenna delay calibration using reference devices on the production
+line.
+
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 4 of 15
+
+APS014: DW1000 Antenna Delay Calibration
+
+2 ANTENNA DELAY CALIBRATION
+Depending on the accuracy needed in an application, antenna delay calibration may or may
+not be required. Table 1 shows the accuracy that can be expected with and without
+calibration.
+Antenna delay calibration should be carried out using the exact use case(s) that will be used
+in the final application. For example; PRF, channels, and power-up modes. You should refer
+to [3] for a detailed treatment of the sources of error in TWR.
+
+2.1
+
+Application Requirements
+
+Two-Way Ranging (TWR) is the calibration method described in this document for all
+applications including TDoA applications.
+2.1.1
+
+Ranging Method and Antenna Delay Calibration
+
+Depending on whether TWR, Time difference of Arrival (TDoA) and on whether wireless or
+wired synchronization is required in the final application, the system will need different
+antenna delay information.
+For a TWR system, the aggregate antenna delay (the sum of the transmitter and receiver
+antenna delay) is required in the calculations. Where antenna delay calibration is required,
+both anchors and tags should be calibrated.
+In a TDoA system using wired synchronization, the receiver (anchor) antenna delay only is
+required.
+In a TDoA system using wireless synchronization, the individual transmitter and receiver
+delays is required.
+Table 1 summarises the system ranging requirements and the associated types of antenna
+delays needed.
+Table 1: Antenna Delays Required by Ranging Requirements
+Application Type
+
+Antenna Delays Needed
+
+TWR
+
+Aggregate (sum of) transmitter and receiver antenna
+delays. Both anchors and tags require calibration if
+calibration is being carried out.
+
+TDoA / Wired Synchronization
+
+Receiver antenna delay, calibrate anchors only, if
+calibration is being carried out.
+
+TDoA / Wireless
+Synchronization
+
+Both transmitter and receiver antenna delays are
+needed in systems that are required to perform wireless
+synchronization. Calibrate anchors only, if calibration is
+being carried out.
+
+DecaWave calibrates antenna delay using a method described below using TWR.
+For that reason, devices which are intended to be calibrated for antenna delay using this
+method must be capable of acting as a transmitter and as a receiver. If the device to be
+calibrated includes an LNA, for example, a transmit path must be included in order to carry
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 5 of 15
+
+APS014: DW1000 Antenna Delay Calibration
+out TWR for antenna delay calibration.
+2.1.2
+
+Accuracy
+
+Whether antenna delay calibration is needed for a product depends on the location accuracy
+required in the application and on the antenna delay variation observed between parts.
+Ranging data for 2000 DW1000-based DecaWave EVB1000’s was analysed to find the
+standard deviation of the antenna delay variation before and after the EVB1000’s had been
+calibrated.
+The 3-sigma variation (99.7% of samples) of the antenna delay was found to be 30 cm
+before calibration and 4.5 cm after calibration.
+So, applications requiring accuracy of 30 cm or less do not require any per-board antenna
+delay calibration. For such applications, a default value must be worked out during product
+characterization using a statistically significant sample. If the EVB1000’s were calibrated for
+antenna delay, the best accuracy achievable would be 4.5 cm. See Table 2.
+Table 2: DW1000-based EVK1000 antenna delay calibration based on standard deviation of
+antenna delay variation and required location accuracy
+TWR Accuracy
+Required
+
+2.1.3
+
+Example Antenna Delay Calibration Recommended
+
+30 cm
+
+No per-board antenna delay calibration needed
+
+4.5 cm
+
+Calibration using known reference device(s)
+
+Temperature Variation
+
+The antenna delay will vary with temperature. It is recommended that the temperature at
+which calibration was carried out is recorded. This will allow the application to adjust
+measurements if required.
+Range has been shown to vary by 2.15 mm / °C (or 7.17 ps / °C) per device for DW1000
+devices.
+
+2.2
+
+Reference Device Generation
+
+To carry out antenna delay calibration on a production line as described in section 2.3, a
+known reference device is required. Before the production calibration can be carried out it is
+necessary to have a reference device.
+2.2.1
+
+TWR Antenna Delay Calibration Reference Device Generation
+
+This calibration method gives accurate measurements of aggregate transmitter and receiver
+antenna delay.
+This method is performed by carrying out TWR using at least three devices. A Euclidean
+Distance Matrix (EDM) is constructed using ranges obtained using TWR, having set the
+antenna delay to zero. The device temperature should be noted.
+A Euclidean Distance Matrix is an n x n matrix representing the spacing of a set of n points
+in Euclidean space (3-D space in this case). To construct an EDM suitable for this antenna
+delay calibration with devices numbered 1 to n, the average ranges for each pair
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 6 of 15
+
+APS014: DW1000 Antenna Delay Calibration
+permutation are entered in the matrix:
+𝑑11 𝑑12 … 𝑑1𝑛
+𝑑
+𝑑22 … 𝑑2𝑛 ]
+𝐸𝐷𝑀 = [ 21
+…
+
+…
+
+…
+
+…
+
+𝑑31 𝑑32 … 𝑑𝑛𝑛
+where:
+𝑑𝑋𝑌 = 𝑑𝑖𝑠𝑡𝑎𝑛𝑐𝑒 𝑓𝑟𝑜𝑚 𝑑𝑒𝑣𝑖𝑐𝑒 𝑋 𝑡𝑜 𝑑𝑒𝑣𝑖𝑐𝑒 𝑌
+The entries along the diagonal are always zero; the distance from device 1 to device 1 is
+zero. The other entries are filled with the ranges measured by TWR between each pair of
+devices used.
+The actual distances must be known; measure the actual distances between devices.
+The distances between devices should be the same, or close to the same so that treatment
+of the range bias (see [3] for a full description of range bias) in the calculations is simplified.
+See [4] for a description of how to use a known wired channel instead of an over the air
+channel.
+The devices can be arranged as shown in Figure 2 or the paired measurements can be
+done in turn using two devices at a time. Keeping the distances between the devices the
+same is recommended.
+
+Host running
+DecaRanging
+
+DW1000-based
+device
+1
+
+Equidistant free space/
+known wired channels
+
+DW1000-based
+device
+2
+
+Host running
+DecaRanging
+
+Antenna for free space
+OR test port for known
+wired channel
+
+Host running
+DecaRanging
+
+DW1000-based
+device
+3
+
+Figure 2: TWR reference device generation setup
+
+The antenna delays can be determined by minimizing the norm of the difference between
+the two EDM’s:
+𝑚𝑖𝑛∀𝜏 ||(𝐸𝐷𝑀𝐴𝑐𝑡𝑢𝑎𝑙 − 𝐸𝐷𝑀𝑀𝑒𝑎𝑠𝑢𝑟𝑒𝑑 )||
+where 𝐸𝐷𝑀𝐴𝑐𝑡𝑢𝑎𝑙 is given by the known distances between the devices in the calibration
+array as measured using a laser range finder or other calibrated measuring device and
+𝐸𝐷𝑀𝑀𝑒𝑎𝑠𝑢𝑟𝑒𝑑 is given by the ranges measured using the DW1000-based devices performing
+TWR.
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 7 of 15
+
+APS014: DW1000 Antenna Delay Calibration
+0
+𝐸𝐷𝑀 = [𝑑21
+
+𝑑31
+
+𝑑12 𝑑13
+0
+𝑑23 ]
+𝑑32 0
+
+Figure 3, Figure 4 and Figure 5 below show an example flowchart of an algorithm to carry
+out the reference device calibration.
+This will require
+nChips*(nChips-1)
+measurements.
+Ideally each measurement
+should be an average of
+several range estimates, we
+use 200 range estimates for
+each measurement.
+
+Start
+
+Use TWR to measure
+the EDMMeasured with all
+antenna delays set to
+zero.
+
+All EDMActual ranges
+should be the same.
+
+Convert measured
+EDMMeasured and
+EDMActual to times
+(ToFmeasured and
+ToFactual)
+
+For example, 100 iterations
+
+Required
+number of
+iterations
+For example, 1000
+candidates
+
+no
+Populate the
+set of
+candidate
+delay
+estimates
+
+yes
+Evaluate the
+quality of the
+candidates
+
+Return Best
+Candidate
+
+Figure 3: TWR Antenna delay calibration algorithm - overall flowchart
+
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 8 of 15
+
+APS014: DW1000 Antenna Delay Calibration
+
+Populating the set of
+candidate delay estimates
+
+Set initial delays
+(~513ns) and
+perturbation limits
+(~0.2ns)
+
+no
+
+First iteration
+yes
+
+Select the best
+25% of the set and
+include them in
+the new set.
+
+Perform 3
+times
+
+Generate a set of
+random delays
+uniformly
+distributed round
+initial delay ±6ns.
+
+Randomly perturb
+the initial 25%
+within the
+perturbation limits
+and add them to
+the set.
+
+Every 20 iterations
+halve the
+perturbation limits
+
+Return the
+candidate Set
+
+Figure 4: Populate the set of candidate delay estimates - flowchart
+
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 9 of 15
+
+APS014: DW1000 Antenna Delay Calibration
+
+Candidate
+Evaluation
+
+Foreach
+candidate
+
+Compute the time of flight matrix given the
+candidate delays
+tofcandidate=[2Delchip1+2Delchip2+4tofmeasured]/4
+
+Compute the norm of the difference
+between the tofactual matrix and the
+tofcandidate matrix
+
+Sort the
+candidates.
+Lowest error first.
+
+Return sorted list
+of candidates
+
+Figure 5: Evaluate the quality of the candidates - flowchart
+
+2.2.2
+
+TWR Antenna Delay Calibration Reference Device Generation Example
+
+Three DW1000 evaluation boards, EVB1000’s, were used in pair permutations to generate
+the Euclidean Distance Matrix (EDM).
+The distance between the two ranging points was measured as: 7.914 m.
+DecaWave’s DecaRanging TWR application was used to capture the ranging
+measurements, setting the antenna delay of the two EVB1000’s to 0.000. The following
+measurements were taken using 1000 TWR range measurements in each case:
+Table 3: Example antenna delay calibration EDM population
+d12
+
+d13
+
+d21
+
+d23
+
+d31
+
+d32
+
+Average Range Measured
+(inc. Range Bias)
+
+162.23
+
+162.3218
+
+162.2407
+
+162.3136
+
+162.2842
+
+162.3269
+
+Range Bias @ 162 m, PRF
+= 16 MHz, Channel = 2
+
++0.13
+
++0.13
+
++0.13
+
++0.13
+
++0.13
+
++0.13
+
+Average Measured Range
+(excl. Range Bias correction)
+
+162.0913
+
+162.1813
+
+162.1020
+
+162.1749
+
+162.1455
+
+162.1882
+
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 10 of 15
+
+APS014: DW1000 Antenna Delay Calibration
+d12
+
+d13
+
+d21
+
+d23
+
+d31
+
+d32
+
+Range Bias @ 7.914 m, PRF
+= 16 MHz, Channel = 2
+
+-0.07
+
+-0.07
+
+-0.07
+
+-0.07
+
+-0.07
+
+-0.07
+
+Average Measured Range
+(incl. Range Bias correction)
+
+162.1613
+
+162.2531
+
+162.172
+
+162.2449
+
+162.2155
+
+162.2582
+
+Note that a detailed description of range bias is given in [3]. The range bias values in Table
+3 are as applied in the DecaRanging application.
+The expression to be minimized is then given by:
+0
+7.914 7.914
+0
+162.1613 162.2531
+𝐸𝐷𝑀𝐴𝑐𝑡𝑢𝑎𝑙 − 𝐸𝐷𝑀𝐷𝑒𝑐𝑎𝑟𝑎𝑛𝑔𝑖𝑛𝑔 = [7.914
+0
+7.914] − [162.1720
+0
+162.2449]
+7.914 7.914
+0
+162.2155 162.2582
+0
+Applying an algorithm as described above, the following values are found as the best fit for
+the aggregate antenna delays of the three devices:
+Aggregate antenna delay, device 1 = 514.4747 ns
+Aggregate antenna delay, device 2 = 514.5911 ns
+Aggregate antenna delay, device 3 = 515.0413 ns
+
+2.3
+
+Antenna Delay Calibration Using a Known Reference Device
+
+2.3.1
+
+Using Wired Channels in Antenna Delay Calibration Setups
+
+Please refer to [4] for details of free space measurements and test setup calibration
+procedures.
+2.3.2
+
+Antenna Delay Calibration Using TWR with a Reference Device
+
+For TWR systems, if the antenna delay of the reference device and the delay of the test
+setup are known then the antenna delay of the device under test (DUT) can be calculated.
+2.3.2.1 Antenna Delay Calibration Using TWR with a Reference Device Procedure
+The following procedure may be used to carry out antenna delay calibration:
+1. Set the antenna delay in the DUT to some initial value, e.g. 515 ns, and set the
+antenna delay in the reference device to its known value.
+2. Carry out say 1000 TWR measurements of the range between the reference device
+and the DUT across the known channel.
+3. Average the measurements taken.
+4. Find the difference between the known range and the measured range and adjust the
+antenna delay of the DUT to give the correct range.
+2.3.3
+
+Antenna Delay Calibration for an RTLS Environment
+
+For RTLS systems generally, the receiver antenna delay should be known for most accurate
+ranging in a system using wired synchronization and both the transmitter and receiver
+antenna delays should be known in a system using wireless synchronization.
+Currently, DecaWave recommends using a TWR antenna delay calibration to determine the
+aggregate antenna delay and then to apportion the aggregate delay to the transmitter and
+receiver in the percentages given in Table 4 below.
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 11 of 15
+
+APS014: DW1000 Antenna Delay Calibration
+
+Table 4: Percentage transmit and receive antenna delay in total aggregate delay
+Antenna Delay
+
+Percentage of Total
+
+Transmit
+
+44%
+
+Receive
+
+56%
+
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 12 of 15
+
+APS014: DW1000 Antenna Delay Calibration
+
+3 GLOSSARY
+Table 5: Glossary of terms
+Abbreviation
+
+Full Title
+
+Explanation
+
+EDM
+
+Euclidean
+Distance Matrix
+
+A Euclidean Distance Matrix is an n x n matrix representing the
+spacing of a set of n points in Euclidean space.
+
+EVB1000
+
+Evaluation
+Board
+
+DW1000 evaluation board and antenna.
+
+EVK1000
+
+Evaluation Kit
+
+DW1000 evaluation kit including two PCB boards and antennas.
+
+LNA
+
+Low Noise
+Amplifier
+
+Circuit normally found at the front-end of a radio receiver
+designed to amplify very low level signals while keeping any
+added noise to as low a level as possible
+
+RF
+
+Radio
+Frequency
+
+Generally used to refer to signals in the range of 3 kHz to 300
+GHz. In the context of a radio receiver, the term is generally used
+to refer to circuits in a receiver before down-conversion takes
+place and in a transmitter after up-conversion takes place.
+
+RTLS
+
+Real Time
+Location System
+
+System intended to provide information on the location of various
+items in real-time.
+
+TCXO
+
+Temperature
+Controlled
+Crystal
+Oscillator
+
+A crystal oscillator whose output frequency is very accurately
+maintained at its specified value over its specified temperature
+range of operation.
+
+ToF
+
+Time of Flight
+
+Time taken for an object or a wave to travel through a medium.
+
+TWR
+
+Two Way
+Ranging
+
+Method of measuring the physical distance between two radio
+units by exchanging messages between the units and noting the
+times of transmission and reception. Refer to DecaWave’s
+website for further information.
+
+TDoA
+
+Time Difference
+of Arrival
+
+Method of deriving information on the location of a transmitter.
+The time of arrival of a transmission at two physically different
+locations whose clocks are synchronized is noted and the
+difference in the arrival times provides information on the location
+of the transmitter. A number of such TDoA measurements at
+different locations can be used to uniquely determine the position
+of the transmitter. Refer to DecaWave’s website for further
+information.
+
+UWB
+
+Ultra Wideband
+
+A radio scheme employing channel bandwidths of, or in excess
+of, 500 MHz.
+
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 13 of 15
+
+APS014: DW1000 Antenna Delay Calibration
+
+4 REFERENCES
+4.1
+
+Listing
+
+Reference is made to the following documents in the course of this application note: Table 6: Table of references
+
+Ref
+
+Author
+
+Version
+
+Title
+
+[1]
+
+DecaWave
+
+Current
+
+DW1000 Data Sheet
+
+[2]
+
+DecaWave
+
+Current
+
+DW1000 User Manual
+
+[3]
+
+DecaWave
+
+Current
+
+APS011 Sources of error in TWR
+
+[4]
+
+DecaWave
+
+Current
+
+APS012 Production Tests for DW1000-based Products
+
+[5]
+
+DecaWave
+
+Current
+
+APS013 Two-way ranging implementation with the
+DW1000
+
+5
+
+DOCUMENT HISTORY
+Table 7: Document History
+
+Revision
+
+Date
+
+1.00
+
+Description
+Initial release.
+
+1.01
+
+Scheduled update
+st
+
+1.2
+
+31 July 2018
+
+Scheduled update
+
+1.3
+
+14th May 2024
+
+Scheduled update
+
+6 MAJOR CHANGES
+Revision 1.00
+Page
+All
+
+Change Description
+Initial release
+
+Revision 1.01
+Page
+All
+
+Change Description
+Scheduled update
+
+Revision 1.2
+Page
+Front page
+All
+
+Change Description
+Change in version number from 1.01 to 1.2
+Update of company logo
+
+Revision 1.3
+Page
+All
+
+Change Description
+Modification to footer.
+
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 14 of 15
+
+APS014: DW1000 Antenna Delay Calibration
+
+7 FURTHER INFORMATION
+Decawave develops semiconductors solutions, software, modules, reference designs - that
+enable real-time, ultra-accurate, ultra-reliable local area micro-location services.
+Decawave’s technology enables an entirely new class of easy to implement, highly secure,
+intelligent location functionality and services for IoT and smart consumer products and
+applications.
+For further information on this or any other Decawave product, please refer to our website
+www.decawave.com.
+
+© 2024 Qorvo, US, Inc. – All Rights Reserved
+
+Page 15 of 15
+
+
