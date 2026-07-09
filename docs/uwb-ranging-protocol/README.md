@@ -6,8 +6,14 @@ module `1` is the tag/initiator and modules `2`, `3`, `4`, and `5` are anchors.
 
 The implementation is based on Double-Sided Two-Way Ranging (DS-TWR). The
 classic DS-TWR exchange uses three UWB frames: `POLL`, `RESP`, and `FINAL`.
-This firmware adds a fourth frame, `REPORT`, so the tag can send its hardware
-timestamps back to the anchor. The anchor then calculates and logs the distance.
+This firmware adds two verification frames:
+
+- `REPORT`: the tag sends its hardware timestamps to the anchor.
+- `REPORT2`: the anchor sends its hardware timestamps and calculated distance
+  back to the tag.
+
+The anchor still calculates and logs the normal ranging result. The tag then
+recalculates the same distance locally and logs a verification comparison.
 
 ## Current Runtime Shape
 
@@ -48,7 +54,7 @@ The important runtime values are exposed by `/status` and can be changed with
 | `dt_rx_timeout_ms` | `250 ms` | Max wait for expected DS-TWR frames |
 | `dt_resp_delay_ms` | `20 ms` | Scheduled delay from `POLL RX` to `RESP TX` on the anchor |
 | `dt_final_delay_ms` | `20 ms` | Scheduled delay from `RESP RX` to `FINAL TX` on the tag |
-| `dt_report_delay_ms` | `10 ms` | Software delay from `FINAL TX` to `REPORT TX` on the tag |
+| `dt_report_delay_ms` | `10 ms` | Software delay before `REPORT TX`, and before anchor `REPORT2 TX` |
 | `dt_auto_rx_delay_uus` | `500 UUS` | Hardware delay after a TX before DW3000 opens RX |
 
 The `dt_*` names come from the older distance-test runtime, but the current
@@ -106,6 +112,16 @@ REPORT TX  -------------------------------------->
                                                    REPORT RX
                                                    calculate distance
                                                    log UWB_RANGING result
+
+                                                   wait dt_report_delay_ms
+
+                                 <---------------- REPORT2 TX:
+                                                   T2, T3, T6,
+                                                   anchor distance
+
+REPORT2 RX
+calculate distance on tag
+compare tag vs anchor result
 ```
 
 There are two different kinds of delay in the diagram:
@@ -114,7 +130,7 @@ There are two different kinds of delay in the diagram:
 | --- | --- | --- |
 | `dt_resp_delay_ms = 20 ms` | Anchor delayed TX | Sets the exact `RESP` transmit timestamp after receiving `POLL` |
 | `dt_final_delay_ms = 20 ms` | Tag delayed TX | Sets the exact `FINAL` transmit timestamp after receiving `RESP` |
-| `dt_report_delay_ms = 10 ms` | Tag software delay | Gives a small gap before sending timestamp report |
+| `dt_report_delay_ms = 10 ms` | Tag/anchor software delay | Gives a small gap before sending `REPORT` or `REPORT2` |
 | `dt_auto_rx_delay_uus = 500 UUS` | DW3000 auto RX-after-TX | Prevents RX from opening immediately after TX |
 
 The critical `RESP` and `FINAL` instants are owned by the DW3000 radio through
@@ -130,6 +146,7 @@ scheduler jitter.
 | `RESP` | Anchor | Tag | Confirms the anchor received `POLL`; anchor captures `T3`, tag captures `T4` |
 | `FINAL` | Tag | Anchor | Completes the DS-TWR timing triangle; tag captures `T5`, anchor captures `T6` |
 | `REPORT` | Tag | Anchor | Carries tag timestamps so the anchor can compute distance |
+| `REPORT2` | Anchor | Tag | Carries anchor timestamps and anchor distance so the tag can verify locally |
 
 The anchor already knows its own receive/transmit timestamps:
 
@@ -143,7 +160,15 @@ The anchor already knows its own receive/transmit timestamps:
 | `T6` | Anchor | `FINAL` received |
 
 The tag includes `T1`, `T4`, and `T5` in `REPORT`. The anchor combines those
-with `T2`, `T3`, and `T6`.
+with `T2`, `T3`, and `T6`, calculates the distance, then sends `T2`, `T3`,
+`T6`, and the anchor-calculated distance back in `REPORT2`.
+
+The tag already still has `T1`, `T4`, and `T5` locally. After `REPORT2`, it has
+all six timestamps too, so it recalculates and logs:
+
+```text
+DS-TWR tag verify ... tag=<distance> anchor=<distance> diff=<cm>
+```
 
 ## Distance Calculation
 
@@ -233,8 +258,10 @@ uwb_antenna_delay_from_nvs
 | `DS-TWR RESP wait failed` | Tag sent `POLL` but did not receive a matching `RESP` before timeout |
 | `DS-TWR FINAL wait failed` | Anchor sent `RESP` but did not receive the tag's `FINAL` before timeout |
 | `DS-TWR REPORT wait failed` | Anchor received `FINAL` but did not receive the final timestamp report |
+| `DS-TWR REPORT2 wait failed` | Anchor calculated the result, but the tag did not receive the verification report |
 | `UWB distance RX error` | DW3000 reported a PHY/RX error instead of a valid frame |
 | `UWB_RANGING result` | Full exchange completed; distance was calculated by the anchor |
+| `DS-TWR tag verify` | Tag recalculated the same exchange and compared against anchor result |
 
 ## Code Map
 

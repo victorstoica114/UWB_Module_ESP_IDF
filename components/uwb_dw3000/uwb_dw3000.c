@@ -231,6 +231,8 @@ enum {
 #define UWB_DISTANCE_FRAME_RESP_RX_TS_OFFSET 25U
 #define UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET 30U
 #define UWB_DISTANCE_FRAME_FINAL_RX_TS_OFFSET 35U
+#define UWB_DISTANCE_FRAME_DISTANCE_MM_OFFSET 40U
+#define UWB_DISTANCE_FRAME_RAW_DISTANCE_MM_OFFSET 44U
 #define UWB_DISTANCE_FRAME_BROADCAST_ID 255U
 
 #define UWB_ANCHOR_SURVEY_MAX_ANCHORS 4U
@@ -246,6 +248,7 @@ enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_FINAL = 3,
     UWB_DISTANCE_FRAME_REPORT = 4,
     UWB_DISTANCE_FRAME_SURVEY_CMD = 5,
+    UWB_DISTANCE_FRAME_REPORT2 = 6,
 };
 
 enum uwb_dw3000_runtime_mode {
@@ -364,6 +367,14 @@ static esp_err_t uwb_dw3000_send_payload_delayed_expect_rx(
 static esp_err_t uwb_dw3000_update_u32(uint8_t base, uint8_t sub,
                                        uint32_t clear_mask,
                                        uint32_t set_mask);
+static void uwb_distance_fill_tag_measurement(
+    uint8_t peer_id, uint16_t sequence, uint64_t poll_tx_ts,
+    const struct uwb_distance_frame *response, uint64_t final_tx_ts,
+    const struct uwb_distance_frame *report2,
+    struct uwb_distance_measurement *measurement);
+static void
+uwb_distance_log_tag_verification(const struct uwb_distance_measurement *measurement,
+                                  const struct uwb_distance_frame *report2);
 
 #define DW3000_PMSC_STATE_IDLE 0x03
 
@@ -1829,25 +1840,32 @@ static esp_err_t uwb_dw3000_radio_init(void)
         uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x20, 0x1B6DA489), TAG,
         "DGC_CFG1 write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x38, 0x0001C0FD), TAG,
+        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x38,
+                                  APP_UWB_DGC_LUT_0), TAG,
         "DGC_LUT_0 write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x3C, 0x0001C43E), TAG,
+        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x3C,
+                                  APP_UWB_DGC_LUT_1), TAG,
         "DGC_LUT_1 write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x40, 0x0001C6BE), TAG,
+        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x40,
+                                  APP_UWB_DGC_LUT_2), TAG,
         "DGC_LUT_2 write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x44, 0x0001C77E), TAG,
+        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x44,
+                                  APP_UWB_DGC_LUT_3), TAG,
         "DGC_LUT_3 write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x48, 0x0001CF36), TAG,
+        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x48,
+                                  APP_UWB_DGC_LUT_4), TAG,
         "DGC_LUT_4 write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x4C, 0x0001CFB5), TAG,
+        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x4C,
+                                  APP_UWB_DGC_LUT_5), TAG,
         "DGC_LUT_5 write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x50, 0x0001CFF5), TAG,
+        uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x50,
+                                  APP_UWB_DGC_LUT_6), TAG,
         "DGC_LUT_6 write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x18, 0xE5E5), TAG,
@@ -2155,6 +2173,24 @@ static uint16_t uwb_distance_get_u16(const uint8_t *payload, size_t offset)
                       ((uint16_t)payload[offset + 1U] << 8));
 }
 
+static void uwb_distance_put_i32(uint8_t *payload, size_t offset, int32_t value)
+{
+    const uint32_t raw = (uint32_t)value;
+    payload[offset] = (uint8_t)(raw & 0xFFU);
+    payload[offset + 1U] = (uint8_t)((raw >> 8U) & 0xFFU);
+    payload[offset + 2U] = (uint8_t)((raw >> 16U) & 0xFFU);
+    payload[offset + 3U] = (uint8_t)((raw >> 24U) & 0xFFU);
+}
+
+static int32_t uwb_distance_get_i32(const uint8_t *payload, size_t offset)
+{
+    const uint32_t raw = ((uint32_t)payload[offset]) |
+                         ((uint32_t)payload[offset + 1U] << 8U) |
+                         ((uint32_t)payload[offset + 2U] << 16U) |
+                         ((uint32_t)payload[offset + 3U] << 24U);
+    return (int32_t)raw;
+}
+
 static void uwb_distance_put_ts40(uint8_t *payload, size_t offset,
                                   uint64_t timestamp)
 {
@@ -2232,6 +2268,8 @@ static const char *uwb_distance_type_name(uint8_t type)
         return "FINAL";
     case UWB_DISTANCE_FRAME_REPORT:
         return "REPORT";
+    case UWB_DISTANCE_FRAME_REPORT2:
+        return "REPORT2";
     case UWB_DISTANCE_FRAME_SURVEY_CMD:
         return "SURVEY_CMD";
     default:
@@ -2403,6 +2441,18 @@ static double uwb_distance_tof_to_meters(double tof_dtu)
            UWB_DW3000_SPEED_OF_LIGHT_MPS;
 }
 
+static int32_t uwb_distance_meters_to_mm(double distance_m)
+{
+    const double mm = distance_m * 1000.0;
+    if (mm > (double)INT32_MAX) {
+        return INT32_MAX;
+    }
+    if (mm < (double)INT32_MIN) {
+        return INT32_MIN;
+    }
+    return (int32_t)(mm >= 0.0 ? mm + 0.5 : mm - 0.5);
+}
+
 static uint8_t uwb_distance_peer_id(bool initiator)
 {
     const app_runtime_config_t *config = app_runtime_config_get();
@@ -2535,11 +2585,32 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
                           resp_rx_ts);
     uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET,
                           final_tx_ts);
+#if APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX
+    err = uwb_dw3000_send_payload_expect_rx(payload, sizeof(payload),
+                                            auto_rx_delay_uus, rx_timeout_ms,
+                                            NULL);
+#else
     err = uwb_dw3000_send_payload(payload, sizeof(payload), NULL);
+#endif
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "DS-TWR REPORT TX failed seq=%u peer=%u: %s",
                  (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
         return err;
+    }
+
+    struct uwb_distance_frame report2 = {0};
+    err = uwb_distance_receive_matching(UWB_DISTANCE_FRAME_REPORT2, peer_id,
+                                        true, sequence, &report2,
+                                        rx_timeout_ms);
+    if (err == ESP_OK) {
+        struct uwb_distance_measurement tag_measurement = {0};
+        uwb_distance_fill_tag_measurement(peer_id, sequence, poll_tx_ts,
+                                          &response, final_tx_ts, &report2,
+                                          &tag_measurement);
+        uwb_distance_log_tag_verification(&tag_measurement, &report2);
+    } else {
+        ESP_LOGW(TAG, "DS-TWR REPORT2 wait failed seq=%u peer=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
     }
 
     if (log_success) {
@@ -2555,6 +2626,50 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
     return ESP_OK;
 }
 
+static void uwb_distance_fill_measurement_from_timestamps(
+    uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
+    uint64_t poll_tx_ts, uint64_t poll_rx_ts, uint64_t resp_tx_ts,
+    uint64_t resp_rx_ts, uint64_t final_tx_ts, uint64_t final_rx_ts,
+    bool clock_offset_valid, int32_t clock_offset_raw,
+    struct uwb_distance_measurement *measurement)
+{
+    const double raw_tof_dtu =
+        uwb_distance_tof_dtu(poll_tx_ts, poll_rx_ts, resp_tx_ts, resp_rx_ts,
+                             final_tx_ts, final_rx_ts);
+    const double clock_offset_ratio =
+        clock_offset_valid
+            ? uwb_dw3000_clock_offset_ratio(clock_offset_raw)
+            : 0.0;
+#if APP_UWB_DISTANCE_TEST_CLOCK_OFFSET_CORRECTION
+    const double tof_dtu =
+        clock_offset_valid
+            ? uwb_distance_tof_dtu_clock_corrected(
+                  poll_tx_ts, poll_rx_ts, resp_tx_ts, resp_rx_ts, final_tx_ts,
+                  final_rx_ts, clock_offset_ratio)
+            : raw_tof_dtu;
+#else
+    const double tof_dtu = raw_tof_dtu;
+#endif
+
+    memset(measurement, 0, sizeof(*measurement));
+    measurement->initiator_id = initiator_id;
+    measurement->responder_id = responder_id;
+    measurement->sequence = sequence;
+    measurement->tof_dtu = tof_dtu;
+    measurement->distance_m = uwb_distance_tof_to_meters(tof_dtu);
+    measurement->raw_tof_dtu = raw_tof_dtu;
+    measurement->raw_distance_m = uwb_distance_tof_to_meters(raw_tof_dtu);
+    measurement->clock_offset_valid = clock_offset_valid;
+    measurement->clock_offset_raw = clock_offset_valid ? clock_offset_raw : 0;
+    measurement->clock_offset_ratio = clock_offset_ratio;
+    measurement->poll_tx_ts = poll_tx_ts;
+    measurement->poll_rx_ts = poll_rx_ts;
+    measurement->resp_tx_ts = resp_tx_ts;
+    measurement->resp_rx_ts = resp_rx_ts;
+    measurement->final_tx_ts = final_tx_ts;
+    measurement->final_rx_ts = final_rx_ts;
+}
+
 static void uwb_distance_fill_measurement(
     const struct uwb_distance_frame *poll, const struct uwb_distance_frame *final,
     const struct uwb_distance_frame *report, uint64_t resp_tx_ts,
@@ -2567,46 +2682,97 @@ static void uwb_distance_fill_measurement(
     const uint64_t final_tx_ts = uwb_distance_get_ts40(
         report->payload, UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET);
 
-    const double raw_tof_dtu =
-        uwb_distance_tof_dtu(poll_tx_ts, poll->rx_timestamp, resp_tx_ts,
-                             resp_rx_ts, final_tx_ts, final->rx_timestamp);
-    const bool clock_offset_valid = final->clock_offset_valid;
-    const double clock_offset_ratio =
-        clock_offset_valid
-            ? uwb_dw3000_clock_offset_ratio(final->clock_offset_raw)
-            : 0.0;
-#if APP_UWB_DISTANCE_TEST_CLOCK_OFFSET_CORRECTION
-    const double tof_dtu =
-        clock_offset_valid
-            ? uwb_distance_tof_dtu_clock_corrected(
-                  poll_tx_ts, poll->rx_timestamp, resp_tx_ts, resp_rx_ts,
-                  final_tx_ts, final->rx_timestamp, clock_offset_ratio)
-            : raw_tof_dtu;
-#else
-    const double tof_dtu = raw_tof_dtu;
-#endif
-
-    memset(measurement, 0, sizeof(*measurement));
-    measurement->initiator_id = poll->source_id;
-    measurement->responder_id = s_source_id;
-    measurement->sequence = poll->sequence;
-    measurement->tof_dtu = tof_dtu;
-    measurement->distance_m = uwb_distance_tof_to_meters(tof_dtu);
-    measurement->raw_tof_dtu = raw_tof_dtu;
-    measurement->raw_distance_m = uwb_distance_tof_to_meters(raw_tof_dtu);
-    measurement->clock_offset_valid = clock_offset_valid;
-    measurement->clock_offset_raw =
-        clock_offset_valid ? final->clock_offset_raw : 0;
-    measurement->clock_offset_ratio = clock_offset_ratio;
-    measurement->poll_tx_ts = poll_tx_ts;
-    measurement->poll_rx_ts = poll->rx_timestamp;
-    measurement->resp_tx_ts = resp_tx_ts;
-    measurement->resp_rx_ts = resp_rx_ts;
-    measurement->final_tx_ts = final_tx_ts;
-    measurement->final_rx_ts = final->rx_timestamp;
+    uwb_distance_fill_measurement_from_timestamps(
+        poll->source_id, s_source_id, poll->sequence, poll_tx_ts,
+        poll->rx_timestamp, resp_tx_ts, resp_rx_ts, final_tx_ts,
+        final->rx_timestamp, final->clock_offset_valid,
+        final->clock_offset_raw, measurement);
     measurement->poll_rx_diagnostics = poll->diagnostics;
     measurement->final_rx_diagnostics = final->diagnostics;
     measurement->report_rx_diagnostics = report->diagnostics;
+}
+
+static void uwb_distance_build_report2(
+    const struct uwb_distance_measurement *measurement,
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN])
+{
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_REPORT2,
+                             measurement->initiator_id,
+                             measurement->sequence, payload);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_POLL_TX_TS_OFFSET,
+                          measurement->poll_tx_ts);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_POLL_RX_TS_OFFSET,
+                          measurement->poll_rx_ts);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_RESP_TX_TS_OFFSET,
+                          measurement->resp_tx_ts);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_RESP_RX_TS_OFFSET,
+                          measurement->resp_rx_ts);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET,
+                          measurement->final_tx_ts);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_FINAL_RX_TS_OFFSET,
+                          measurement->final_rx_ts);
+    uwb_distance_put_i32(payload, UWB_DISTANCE_FRAME_DISTANCE_MM_OFFSET,
+                         uwb_distance_meters_to_mm(measurement->distance_m));
+    uwb_distance_put_i32(payload, UWB_DISTANCE_FRAME_RAW_DISTANCE_MM_OFFSET,
+                         uwb_distance_meters_to_mm(measurement->raw_distance_m));
+}
+
+static void uwb_distance_fill_tag_measurement(
+    uint8_t peer_id, uint16_t sequence, uint64_t poll_tx_ts,
+    const struct uwb_distance_frame *response, uint64_t final_tx_ts,
+    const struct uwb_distance_frame *report2,
+    struct uwb_distance_measurement *measurement)
+{
+    const uint64_t poll_rx_ts = uwb_distance_get_ts40(
+        report2->payload, UWB_DISTANCE_FRAME_POLL_RX_TS_OFFSET);
+    const uint64_t resp_tx_ts = uwb_distance_get_ts40(
+        report2->payload, UWB_DISTANCE_FRAME_RESP_TX_TS_OFFSET);
+    const uint64_t final_rx_ts = uwb_distance_get_ts40(
+        report2->payload, UWB_DISTANCE_FRAME_FINAL_RX_TS_OFFSET);
+
+    uwb_distance_fill_measurement_from_timestamps(
+        s_source_id, peer_id, sequence, poll_tx_ts, poll_rx_ts, resp_tx_ts,
+        response->rx_timestamp, final_tx_ts, final_rx_ts,
+        response->clock_offset_valid, response->clock_offset_raw, measurement);
+    measurement->report_rx_diagnostics = report2->diagnostics;
+}
+
+static void
+uwb_distance_log_tag_verification(const struct uwb_distance_measurement *measurement,
+                                  const struct uwb_distance_frame *report2)
+{
+    const double anchor_distance_m =
+        (double)uwb_distance_get_i32(report2->payload,
+                                     UWB_DISTANCE_FRAME_DISTANCE_MM_OFFSET) /
+        1000.0;
+    const double anchor_raw_distance_m =
+        (double)uwb_distance_get_i32(report2->payload,
+                                     UWB_DISTANCE_FRAME_RAW_DISTANCE_MM_OFFSET) /
+        1000.0;
+    const double diff_cm =
+        (measurement->distance_m - anchor_distance_m) * 100.0;
+    const double raw_diff_cm =
+        (measurement->raw_distance_m - anchor_raw_distance_m) * 100.0;
+
+    ESP_LOGI(TAG,
+             "DS-TWR tag verify seq=%u peer=%u tag=%.3f m %.1f cm anchor=%.3f m %.1f cm diff=%.1f cm raw_tag=%.3f m raw_anchor=%.3f m raw_diff=%.1f cm clk_valid=%u",
+             (unsigned)measurement->sequence,
+             (unsigned)measurement->responder_id, measurement->distance_m,
+             measurement->distance_m * 100.0, anchor_distance_m,
+             anchor_distance_m * 100.0, diff_cm,
+             measurement->raw_distance_m, anchor_raw_distance_m, raw_diff_cm,
+             measurement->clock_offset_valid ? 1U : 0U);
+}
+
+static esp_err_t
+uwb_distance_send_report2(const struct uwb_distance_measurement *measurement)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+
+    uwb_dw3000_delay_ms(config->distance_test_report_delay_ms);
+    uwb_distance_build_report2(measurement, payload);
+    return uwb_dw3000_send_payload(payload, sizeof(payload), NULL);
 }
 
 static esp_err_t
@@ -2682,6 +2848,12 @@ uwb_distance_respond_to_poll(const struct uwb_distance_frame *poll,
 
     uwb_distance_fill_measurement(poll, &final, &report, resp_tx_ts,
                                   measurement);
+    const esp_err_t report2_err = uwb_distance_send_report2(measurement);
+    if (report2_err != ESP_OK) {
+        ESP_LOGW(TAG, "DS-TWR REPORT2 TX failed seq=%u peer=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id,
+                 esp_err_to_name(report2_err));
+    }
     return ESP_OK;
 }
 
