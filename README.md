@@ -15,6 +15,7 @@ Current step:
 - DW3000 hardware RXOK/SFD/RX/TX LED blink configured once at radio init
 - first DS-TWR two-module distance test runtime
 - antenna delay calibration runtime for two-module and three-module setups
+- sequential 1-tag/4-anchor DS-TWR ranging runtime
 - optional wireless-log stress test via `components/stability_test_service`
 
 The board boot log confirms 16 MB QIO flash, 8 MB octal PSRAM at 80 MHz, and
@@ -34,10 +35,11 @@ components/wifi_service/      Wi-Fi STA connection
 components/ota_service/       local authenticated HTTP OTA
 components/wireless_log_service/  TCP wireless mirror for ESP-IDF logs
 components/uwb_dw3000/        DW3000 bring-up, beacon smoke test, DS-TWR loop
-components/uwb_calibration_service/  antenna delay calibration workflow skeleton
+components/uwb_calibration_service/  antenna delay calibration entry point
 components/uwb_distance_test_service/  two-module distance test entry point
-components/uwb_ranging_service/  anchor/tag ranging workflow skeleton
+components/uwb_ranging_service/  anchor/tag ranging entry point
 components/stability_test_service/  optional wireless-log stress generator
+docs/                         protocol notes and operator documentation
 reference/                    migration notes and legacy headers kept in-tree
 reference/external/           optional local clones of third-party references
 ```
@@ -67,21 +69,24 @@ The expected UWB workflow split is:
 
 1. `APP_RUNTIME_MODE_UWB_BEACON_SMOKE`: current random beacon TX/RX smoke test
    in `components/uwb_dw3000`.
-2. `APP_RUNTIME_MODE_UWB_ANTENNA_DELAY_CALIBRATION`: future antenna delay
+2. `APP_RUNTIME_MODE_UWB_ANTENNA_DELAY_CALIBRATION`: antenna delay
    calibration entry point in `components/uwb_calibration_service`.
 3. `APP_RUNTIME_MODE_UWB_DISTANCE_TEST`: current two-module DS-TWR ruler check
    entry point in `components/uwb_distance_test_service`.
-4. `APP_RUNTIME_MODE_UWB_RANGING`: future 4-anchor plus 1-tag positioning
-   runtime in `components/uwb_ranging_service`.
+4. `APP_RUNTIME_MODE_UWB_RANGING`: current sequential 4-anchor plus 1-tag
+   DS-TWR ranging runtime in `components/uwb_ranging_service`.
 
-The beacon smoke mode and first distance-test mode are implemented. Calibration
-and multi-anchor ranging still intentionally log their selected configuration
-and return success, so we can switch modes while the project structure is
-taking shape.
+The beacon smoke mode, distance-test mode, antenna-delay calibration workflows,
+anchor survey, and multi-anchor ranging runtime are implemented for the current
+lab workflow.
 
 `APP_RUNTIME_MODE` remains the firmware default. The effective runtime mode and
 common test parameters can be overridden at runtime through NVS using the
 authenticated `/config/runtime` HTTP endpoint.
+
+For a step-by-step explanation of the current DS-TWR ranging protocol,
+including the message diagram, timing table, and distance formula, see
+[`docs/uwb-ranging-protocol/README.md`](docs/uwb-ranging-protocol/README.md).
 
 The board identity is stored in NVS, which plays the role of persistent EEPROM
 storage on ESP32. Normal firmware reads `module_id` from NVS and builds the
