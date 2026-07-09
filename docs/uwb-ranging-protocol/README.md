@@ -380,6 +380,119 @@ tof_dtu = (round_a * round_b - reply_a * reply_b)
 distance_m = tof_dtu * 15.650040064 ps * 299702547 m/s
 ```
 
+### Where the Formula Comes From
+
+In the ideal model, `tof` is the real one-way time of flight between the tag
+and the anchor. If both sides shared the same perfect clock, the two round-trip
+intervals would be:
+
+```text
+round_a = T4 - T1 = tof + reply_b + tof
+round_a = 2 * tof + reply_b
+
+round_b = T6 - T3 = tof + reply_a + tof
+round_b = 2 * tof + reply_a
+```
+
+So:
+
+```text
+round_a = 2 * tof + reply_b
+round_b = 2 * tof + reply_a
+```
+
+The DS-TWR expression is chosen so the internal reply delays cancel out. Start
+with the numerator:
+
+```text
+round_a * round_b - reply_a * reply_b
+```
+
+Substitute the ideal expressions:
+
+```text
+(2 * tof + reply_b) * (2 * tof + reply_a) - reply_a * reply_b
+```
+
+Expand:
+
+```text
+4 * tof^2
++ 2 * tof * reply_a
++ 2 * tof * reply_b
++ reply_a * reply_b
+- reply_a * reply_b
+```
+
+The `reply_a * reply_b` terms cancel:
+
+```text
+4 * tof^2 + 2 * tof * reply_a + 2 * tof * reply_b
+```
+
+Factor out `2 * tof`:
+
+```text
+2 * tof * (2 * tof + reply_a + reply_b)
+```
+
+Now look at the denominator:
+
+```text
+round_a + round_b + reply_a + reply_b
+```
+
+Substitute again:
+
+```text
+(2 * tof + reply_b) + (2 * tof + reply_a) + reply_a + reply_b
+```
+
+which becomes:
+
+```text
+4 * tof + 2 * reply_a + 2 * reply_b
+```
+
+and factors to:
+
+```text
+2 * (2 * tof + reply_a + reply_b)
+```
+
+The full fraction is therefore:
+
+```text
+2 * tof * (2 * tof + reply_a + reply_b)
+----------------------------------------
+2       * (2 * tof + reply_a + reply_b)
+```
+
+After simplification, only `tof` remains.
+
+This is why the formula has this shape:
+
+```text
+tof = (round_a * round_b - reply_a * reply_b)
+      / (round_a + round_b + reply_a + reply_b)
+```
+
+It is built so that, under the DS-TWR timing model, the internal reply delays
+mathematically disappear and the remaining value is the one-way flight time.
+
+A simpler expression such as this would look tempting:
+
+```text
+tof = (round_a - reply_b) / 2
+```
+
+However, `round_a` is measured by the tag clock, while `reply_b` is measured by
+the anchor clock. Those clocks are close, but not identical. The DS-TWR formula
+uses both perspectives more symmetrically and reduces the error caused by clock
+differences between the boards. The optional DW3000 clock-offset correction then
+compensates the remaining measured drift before converting time of flight to
+distance.
+
 With `APP_UWB_DISTANCE_TEST_CLOCK_OFFSET_CORRECTION = 1`, the firmware uses the
 DW3000 clock offset measurement from the received frame to compensate some
 clock drift before converting time-of-flight to meters. The log line still
