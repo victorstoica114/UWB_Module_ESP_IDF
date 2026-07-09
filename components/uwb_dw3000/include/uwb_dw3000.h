@@ -22,6 +22,7 @@ esp_err_t uwb_dw3000_start(void);
 esp_err_t uwb_dw3000_start_distance_test(void);
 esp_err_t uwb_dw3000_start_calibration(void);
 esp_err_t uwb_dw3000_start_anchor_survey(void);
+esp_err_t uwb_dw3000_start_ranging(void);
 bool uwb_dw3000_is_ready(void);
 enum uwb_dw3000_status uwb_dw3000_get_status(void);
 const char *uwb_dw3000_status_to_string(enum uwb_dw3000_status status);

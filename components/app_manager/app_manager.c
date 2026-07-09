@@ -6,6 +6,7 @@
 #include "app_config.h"
 #include "app_identity.h"
 #include "app_led.h"
+#include "app_runtime_config.h"
 #include "board_config.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
@@ -124,24 +125,6 @@ static void status_led_init(void)
                                    status_led_level(false)));
 }
 
-static const char *runtime_mode_name(int mode)
-{
-    switch (mode) {
-    case APP_RUNTIME_MODE_UWB_BEACON_SMOKE:
-        return "uwb_beacon_smoke";
-    case APP_RUNTIME_MODE_UWB_DISTANCE_TEST:
-        return "uwb_distance_test";
-    case APP_RUNTIME_MODE_UWB_ANTENNA_DELAY_CALIBRATION:
-        return "uwb_antenna_delay_calibration";
-    case APP_RUNTIME_MODE_UWB_RANGING:
-        return "uwb_ranging";
-    case APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY:
-        return "uwb_anchor_survey";
-    default:
-        return "unknown";
-    }
-}
-
 static esp_err_t app_manager_start_selected_runtime(void)
 {
     if (!APP_UWB_ENABLED) {
@@ -150,15 +133,19 @@ static esp_err_t app_manager_start_selected_runtime(void)
     }
 
     const uint8_t runtime_uwb_role = app_identity_get_uwb_role();
+    const app_runtime_config_t *runtime_config = app_runtime_config_get();
+    const uint8_t runtime_mode = runtime_config->runtime_mode;
     ESP_LOGI(TAG, "Application runtime: mode=%s(%d), uwb_role=%s(%u), "
-                  "uwb_source_id=%u, hostname=%s, module_id=%u",
-             runtime_mode_name(APP_RUNTIME_MODE), APP_RUNTIME_MODE,
+                  "uwb_source_id=%u, hostname=%s, module_id=%u, config=%s",
+             app_runtime_config_runtime_mode_to_string(runtime_mode),
+             (int)runtime_mode,
              app_identity_uwb_role_to_string(runtime_uwb_role),
              (unsigned)runtime_uwb_role,
              (unsigned)APP_UWB_SOURCE_ID, app_identity_get_hostname(),
-             (unsigned)app_identity_get_module_id());
+             (unsigned)app_identity_get_module_id(),
+             runtime_config->from_nvs ? "nvs" : "firmware");
 
-    switch (APP_RUNTIME_MODE) {
+    switch (runtime_mode) {
     case APP_RUNTIME_MODE_UWB_BEACON_SMOKE:
         return uwb_dw3000_start();
     case APP_RUNTIME_MODE_UWB_ANTENNA_DELAY_CALIBRATION:
@@ -171,7 +158,7 @@ static esp_err_t app_manager_start_selected_runtime(void)
         return uwb_anchor_survey_service_start();
     default:
         ESP_LOGE(TAG, "Unsupported application runtime mode: %d",
-                 APP_RUNTIME_MODE);
+                 (int)runtime_mode);
         return ESP_ERR_INVALID_ARG;
     }
 }
@@ -204,6 +191,12 @@ void app_manager_start(void)
     if (identity_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize app identity: %s",
                  esp_err_to_name(identity_err));
+    }
+
+    const esp_err_t runtime_config_err = app_runtime_config_init();
+    if (runtime_config_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize runtime config: %s",
+                 esp_err_to_name(runtime_config_err));
     }
 
     const esp_err_t wifi_err = wifi_service_start();

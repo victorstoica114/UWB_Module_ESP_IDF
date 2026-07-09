@@ -10,6 +10,7 @@ Current step:
 - verified status LED blink on GPIO42 via `components/app_manager`
 - Wi-Fi STA connection via `components/wifi_service`
 - local HTTP OTA via `components/ota_service`
+- authenticated HTTP runtime configuration via `components/ota_service`
 - DW3000 UWB SPI/reset bring-up and random TX/RX beacon smoke test via `components/uwb_dw3000`
 - DW3000 hardware RXOK/SFD/RX/TX LED blink configured once at radio init
 - first DS-TWR two-module distance test runtime
@@ -47,12 +48,12 @@ The old PlatformIO project and cloned third-party repositories are kept local
 for inspiration/debugging and are intentionally ignored by Git.
 
 `components/config/include/app_config.h` holds versioned non-secret application
-settings: the selected runtime mode, persistent identity provisioning, Wi-Fi
+settings: the default runtime mode, persistent identity provisioning, Wi-Fi
 SSID and diagnostics/reconnect behavior, wireless-log defaults, OTA-adjacent
 service defaults, and stability test parameters. `components/config/include/uwb_config.h`
 holds UWB-only settings: role, source ID override, antenna delay, beacon
-smoke-test parameters, and ranging defaults. Keep passwords and OTA tokens in
-`secrets.h`.
+smoke-test parameters, and runtime defaults. Runtime overrides are stored in
+NVS through `/config/runtime`. Keep passwords and OTA tokens in `secrets.h`.
 
 Runtime ownership is intentionally narrow:
 
@@ -78,8 +79,9 @@ and multi-anchor ranging still intentionally log their selected configuration
 and return success, so we can switch modes while the project structure is
 taking shape.
 
-For now `APP_RUNTIME_MODE` is defined in `app_config.h`; later it can move to
-NVS or an OTA/API setting if we want to switch runtime modes without rebuilding.
+`APP_RUNTIME_MODE` remains the firmware default. The effective runtime mode and
+common test parameters can be overridden at runtime through NVS using the
+authenticated `/config/runtime` HTTP endpoint.
 
 The board identity is stored in NVS, which plays the role of persistent EEPROM
 storage on ESP32. Normal firmware reads `module_id` from NVS and builds the
@@ -240,6 +242,39 @@ python3 tools/ota_upload.py --target-list tools/ota_targets.local.txt --parallel
 ```
 
 In VS Code, use `Terminal > Run Task... > ESP-IDF OTA Upload All`.
+
+Runtime configuration can change the common test settings without rebuilding or
+uploading a new firmware image. The endpoint uses the same `X-OTA-Token` header
+as OTA and stores values in NVS:
+
+```sh
+python3 tools/runtime_config.py --target-list tools/ota_targets.local.txt \
+  --parallel 5 --mode ranging --tag 1 --anchors 2,3,4,5 \
+  --ranging-slot-ms 350 --ranging-gap-ms 500 --reboot
+```
+
+Useful mode names are `ranging`, `survey`, `calibration`, `distance`, and
+`beacon`. Runtime role changes such as `mode`, `tag`, `anchors`, and survey
+`coordinator` should be sent with `--reboot`; timing-only changes can be sent
+without reboot and will be picked up by the long-running loops where supported.
+
+Calibration examples:
+
+```sh
+python3 tools/runtime_config.py --target-list tools/ota_targets.local.txt \
+  --mode calibration --cal-method three --cal-three 1,2,3 \
+  --cal-d01-mm 2000 --cal-d02-mm 2000 --cal-d12-mm 2828 --reboot
+
+python3 tools/runtime_config.py --target-list tools/ota_targets.local.txt \
+  --mode survey --tag 1 --anchors 2,3,4,5 --coord 1 --reboot
+```
+
+`GET /status` exposes the active runtime config as `runtime_*` fields. To clear
+the override and return to firmware defaults:
+
+```sh
+python3 tools/runtime_config.py --target-list tools/ota_targets.local.txt --clear --reboot
+```
 
 Wireless logs are part of the normal multi-module workflow. With five modules
 spread out in a room, USB serial is only useful for bring-up. The wireless log

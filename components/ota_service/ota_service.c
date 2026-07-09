@@ -14,9 +14,11 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "app_identity.h"
+#include "app_runtime_config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "stability_test_service.h"
+#include "uwb_config.h"
 #include "uwb_dw3000.h"
 #include "wifi_service.h"
 #include "wireless_log_service.h"
@@ -40,7 +42,7 @@ enum {
     OTA_SERVICE_WIFI_WAIT_MS = 500,
     OTA_SERVICE_REBOOT_DELAY_MS = 1200,
     OTA_SERVICE_MAX_TOKEN_LEN = 128,
-    OTA_SERVICE_MAX_QUERY_LEN = 160,
+    OTA_SERVICE_MAX_QUERY_LEN = 768,
 };
 
 #define OTA_SERVICE_TOKEN_HEADER "X-OTA-Token"
@@ -138,11 +140,133 @@ static bool ota_parse_u16(const char *text, uint16_t *value)
     return true;
 }
 
+static bool ota_parse_u8(const char *text, uint8_t *value)
+{
+    if (text == NULL || text[0] == '\0' || value == NULL) {
+        return false;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    const unsigned long parsed = strtoul(text, &end, 0);
+    if (errno != 0 || end == text || *end != '\0' || parsed > 0xFFUL) {
+        return false;
+    }
+
+    *value = (uint8_t)parsed;
+    return true;
+}
+
+static bool ota_parse_u32(const char *text, uint32_t *value)
+{
+    if (text == NULL || text[0] == '\0' || value == NULL) {
+        return false;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    const unsigned long parsed = strtoul(text, &end, 0);
+    if (errno != 0 || end == text || *end != '\0' ||
+        parsed > 0xFFFFFFFFUL) {
+        return false;
+    }
+
+    *value = (uint32_t)parsed;
+    return true;
+}
+
+static bool ota_parse_u8_list(const char *text, uint8_t *values,
+                              size_t max_count, uint8_t *count)
+{
+    if (text == NULL || text[0] == '\0' || values == NULL ||
+        count == NULL || max_count == 0) {
+        return false;
+    }
+
+    const char *cursor = text;
+    uint8_t parsed_count = 0;
+
+    while (*cursor != '\0') {
+        while (*cursor == ' ') {
+            cursor++;
+        }
+
+        errno = 0;
+        char *end = NULL;
+        const unsigned long parsed = strtoul(cursor, &end, 0);
+        if (errno != 0 || end == cursor || parsed > 0xFFUL ||
+            parsed_count >= max_count) {
+            return false;
+        }
+
+        values[parsed_count++] = (uint8_t)parsed;
+        cursor = end;
+        while (*cursor == ' ') {
+            cursor++;
+        }
+
+        if (*cursor == '\0') {
+            break;
+        }
+        if (*cursor != ',' && *cursor != ';' && *cursor != ':') {
+            return false;
+        }
+        cursor++;
+    }
+
+    if (parsed_count == 0) {
+        return false;
+    }
+
+    *count = parsed_count;
+    return true;
+}
+
+static bool ota_parse_calibration_method(const char *text, uint8_t *value)
+{
+    uint8_t parsed = 0;
+    if (ota_parse_u8(text, &parsed) &&
+        (parsed == APP_UWB_CALIBRATION_METHOD_TWO_MODULE ||
+         parsed == APP_UWB_CALIBRATION_METHOD_THREE_MODULE)) {
+        *value = parsed;
+        return true;
+    }
+
+    if (strcmp(text, "two") == 0 || strcmp(text, "two_module") == 0) {
+        *value = APP_UWB_CALIBRATION_METHOD_TWO_MODULE;
+        return true;
+    }
+    if (strcmp(text, "three") == 0 || strcmp(text, "three_module") == 0 ||
+        strcmp(text, "three_module_edm") == 0 ||
+        strcmp(text, "edm") == 0) {
+        *value = APP_UWB_CALIBRATION_METHOD_THREE_MODULE;
+        return true;
+    }
+
+    return false;
+}
+
 static bool ota_query_option_enabled(const char *query, const char *key)
 {
     char value[8] = {0};
     return httpd_query_key_value(query, key, value, sizeof(value)) == ESP_OK &&
            strcmp(value, "1") == 0;
+}
+
+static bool runtime_config_reboot_recommended(
+    const app_runtime_config_t *before, const app_runtime_config_t *after)
+{
+    if (before == NULL || after == NULL) {
+        return true;
+    }
+
+    return before->runtime_mode != after->runtime_mode ||
+           before->tag_id != after->tag_id ||
+           before->anchor_count != after->anchor_count ||
+           memcmp(before->anchor_ids, after->anchor_ids,
+                  sizeof(before->anchor_ids)) != 0 ||
+           before->anchor_survey_coordinator_id !=
+               after->anchor_survey_coordinator_id;
 }
 
 static esp_err_t root_get_handler(httpd_req_t *req)
@@ -152,7 +276,9 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "GET  /status\n"
         "POST /ota    raw firmware image, requires X-OTA-Token header\n"
         "POST /config/antenna-delay?value=0x4018[&reboot=1]\n"
-        "POST /config/antenna-delay?clear=1[&reboot=1]\n";
+        "POST /config/antenna-delay?clear=1[&reboot=1]\n"
+        "POST /config/runtime?mode=ranging&tag=1&anchors=2,3,4,5[&reboot=1]\n"
+        "POST /config/runtime?clear=1[&reboot=1]\n";
 
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
@@ -167,8 +293,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     const uint16_t active_antenna_delay = uwb_dw3000_get_antenna_delay();
     const uint16_t configured_antenna_delay =
         app_identity_get_uwb_antenna_delay();
+    const app_runtime_config_t *runtime_config = app_runtime_config_get();
 
-    char response[2800];
+    char response[5600];
     const int len = snprintf(
         response, sizeof(response),
         "{"
@@ -201,6 +328,43 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"next_update_partition\":\"%s\","
         "\"ota_in_progress\":%s,"
         "\"ota_auth_configured\":%s,"
+        "\"runtime_config_from_nvs\":%s,"
+        "\"runtime_mode\":%u,"
+        "\"runtime_mode_name\":\"%s\","
+        "\"runtime_tag_id\":%u,"
+        "\"runtime_anchor_count\":%u,"
+        "\"runtime_anchor_ids\":[%u,%u,%u,%u],"
+        "\"runtime_anchor_survey_coordinator_id\":%u,"
+        "\"runtime_anchor_survey_rx_slice_ms\":%lu,"
+        "\"runtime_anchor_survey_command_delay_ms\":%lu,"
+        "\"runtime_anchor_survey_slot_ms\":%lu,"
+        "\"runtime_anchor_survey_round_gap_ms\":%lu,"
+        "\"runtime_anchor_survey_passive_tag_log_every\":%lu,"
+        "\"runtime_ranging_slot_ms\":%lu,"
+        "\"runtime_ranging_round_gap_ms\":%lu,"
+        "\"runtime_ranging_rx_slice_ms\":%lu,"
+        "\"runtime_distance_test_peer_id\":%u,"
+        "\"runtime_distance_test_initiator_id\":%u,"
+        "\"runtime_distance_test_responder_id\":%u,"
+        "\"runtime_distance_test_interval_ms\":%lu,"
+        "\"runtime_distance_test_rx_timeout_ms\":%lu,"
+        "\"runtime_distance_test_resp_delay_ms\":%lu,"
+        "\"runtime_distance_test_final_delay_ms\":%lu,"
+        "\"runtime_distance_test_report_delay_ms\":%lu,"
+        "\"runtime_distance_test_auto_rx_delay_uus\":%lu,"
+        "\"runtime_calibration_method\":%u,"
+        "\"runtime_calibration_reference_id\":%u,"
+        "\"runtime_calibration_dut_id\":%u,"
+        "\"runtime_calibration_three_ids\":[%u,%u,%u],"
+        "\"runtime_calibration_known_distance_mm\":%lu,"
+        "\"runtime_calibration_three_distance_0_1_mm\":%lu,"
+        "\"runtime_calibration_three_distance_0_2_mm\":%lu,"
+        "\"runtime_calibration_three_distance_1_2_mm\":%lu,"
+        "\"runtime_calibration_sample_count\":%lu,"
+        "\"runtime_calibration_summary_every\":%lu,"
+        "\"runtime_calibration_min_interval_ms\":%lu,"
+        "\"runtime_calibration_max_interval_ms\":%lu,"
+        "\"runtime_calibration_rx_slice_ms\":%lu,"
         "\"uwb_status\":\"%s\","
         "\"uwb_device_id\":\"0x%08lx\","
         "\"uwb_source_id\":%u,"
@@ -252,6 +416,49 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         partition_label_or_unknown(boot), partition_label_or_unknown(next),
         s_ota_in_progress ? "true" : "false",
         ota_token_configured() ? "true" : "false",
+        runtime_config->from_nvs ? "true" : "false",
+        (unsigned)runtime_config->runtime_mode,
+        app_runtime_config_runtime_mode_to_string(
+            runtime_config->runtime_mode),
+        (unsigned)runtime_config->tag_id,
+        (unsigned)runtime_config->anchor_count,
+        (unsigned)runtime_config->anchor_ids[0],
+        (unsigned)runtime_config->anchor_ids[1],
+        (unsigned)runtime_config->anchor_ids[2],
+        (unsigned)runtime_config->anchor_ids[3],
+        (unsigned)runtime_config->anchor_survey_coordinator_id,
+        (unsigned long)runtime_config->anchor_survey_rx_slice_ms,
+        (unsigned long)runtime_config->anchor_survey_command_delay_ms,
+        (unsigned long)runtime_config->anchor_survey_slot_ms,
+        (unsigned long)runtime_config->anchor_survey_round_gap_ms,
+        (unsigned long)runtime_config->anchor_survey_passive_tag_log_every,
+        (unsigned long)runtime_config->ranging_slot_ms,
+        (unsigned long)runtime_config->ranging_round_gap_ms,
+        (unsigned long)runtime_config->ranging_rx_slice_ms,
+        (unsigned)runtime_config->distance_test_peer_id,
+        (unsigned)runtime_config->distance_test_initiator_id,
+        (unsigned)runtime_config->distance_test_responder_id,
+        (unsigned long)runtime_config->distance_test_interval_ms,
+        (unsigned long)runtime_config->distance_test_rx_timeout_ms,
+        (unsigned long)runtime_config->distance_test_resp_delay_ms,
+        (unsigned long)runtime_config->distance_test_final_delay_ms,
+        (unsigned long)runtime_config->distance_test_report_delay_ms,
+        (unsigned long)runtime_config->distance_test_auto_rx_delay_uus,
+        (unsigned)runtime_config->calibration_method,
+        (unsigned)runtime_config->calibration_reference_id,
+        (unsigned)runtime_config->calibration_dut_id,
+        (unsigned)runtime_config->calibration_three_ids[0],
+        (unsigned)runtime_config->calibration_three_ids[1],
+        (unsigned)runtime_config->calibration_three_ids[2],
+        (unsigned long)runtime_config->calibration_known_distance_mm,
+        (unsigned long)runtime_config->calibration_three_distance_0_1_mm,
+        (unsigned long)runtime_config->calibration_three_distance_0_2_mm,
+        (unsigned long)runtime_config->calibration_three_distance_1_2_mm,
+        (unsigned long)runtime_config->calibration_sample_count,
+        (unsigned long)runtime_config->calibration_summary_every,
+        (unsigned long)runtime_config->calibration_min_interval_ms,
+        (unsigned long)runtime_config->calibration_max_interval_ms,
+        (unsigned long)runtime_config->calibration_rx_slice_ms,
         uwb_dw3000_status_to_string(uwb_dw3000_get_status()),
         (unsigned long)uwb_dw3000_get_device_id(),
         (unsigned)uwb_dw3000_get_source_id(),
@@ -385,6 +592,302 @@ static esp_err_t antenna_delay_post_handler(httpd_req_t *req)
 
     if (reboot_requested) {
         xTaskCreate(reboot_task, "cfg_reboot",
+                    OTA_SERVICE_RESTART_TASK_STACK_WORDS, NULL,
+                    OTA_SERVICE_RESTART_TASK_PRIORITY, NULL);
+    }
+
+    return response_err;
+}
+
+static esp_err_t runtime_config_post_handler(httpd_req_t *req)
+{
+    if (!ota_request_authorized(req)) {
+        ESP_LOGW(TAG, "Rejected runtime config: missing or invalid token");
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED,
+                                   "Missing or invalid OTA token");
+    }
+
+    if (s_ota_in_progress) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "OTA already in progress");
+    }
+
+    const size_t query_len = httpd_req_get_url_query_len(req);
+    if (query_len == 0 || query_len >= OTA_SERVICE_MAX_QUERY_LEN) {
+        return httpd_resp_send_err(
+            req, HTTPD_400_BAD_REQUEST,
+            "Use runtime config query parameters");
+    }
+
+    char query[OTA_SERVICE_MAX_QUERY_LEN] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid query string");
+    }
+
+    const app_runtime_config_t before_config = *app_runtime_config_get();
+    const bool clear_requested = ota_query_option_enabled(query, "clear");
+    const bool reboot_requested = ota_query_option_enabled(query, "reboot");
+    bool changed = false;
+    bool cleared = false;
+    esp_err_t err = ESP_OK;
+
+    if (clear_requested) {
+        err = app_runtime_config_clear();
+        changed = true;
+        cleared = true;
+    } else {
+        app_runtime_config_t config = before_config;
+
+        char mode_text[40] = {0};
+        esp_err_t query_err = httpd_query_key_value(
+            query, "mode", mode_text, sizeof(mode_text));
+        if (query_err == ESP_OK) {
+            bool mode_ok = false;
+            config.runtime_mode =
+                app_runtime_config_runtime_mode_from_string(mode_text,
+                                                            &mode_ok);
+            if (!mode_ok) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid mode");
+            }
+            changed = true;
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid mode");
+        }
+
+        char anchors_text[80] = {0};
+        query_err = httpd_query_key_value(query, "anchors", anchors_text,
+                                          sizeof(anchors_text));
+        if (query_err == ESP_OK) {
+            uint8_t ids[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+            uint8_t count = 0;
+            if (!ota_parse_u8_list(anchors_text, ids,
+                                   APP_RUNTIME_CONFIG_MAX_ANCHORS, &count)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid anchors");
+            }
+            memset(config.anchor_ids, 0, sizeof(config.anchor_ids));
+            memcpy(config.anchor_ids, ids, count);
+            config.anchor_count = count;
+            changed = true;
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid anchors");
+        }
+
+        char cal_three_text[64] = {0};
+        query_err = httpd_query_key_value(query, "cal_three",
+                                          cal_three_text,
+                                          sizeof(cal_three_text));
+        if (query_err == ESP_OK) {
+            uint8_t ids[APP_RUNTIME_CONFIG_CAL_THREE_COUNT] = {0};
+            uint8_t count = 0;
+            if (!ota_parse_u8_list(cal_three_text, ids,
+                                   APP_RUNTIME_CONFIG_CAL_THREE_COUNT,
+                                   &count) ||
+                count != APP_RUNTIME_CONFIG_CAL_THREE_COUNT) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid cal_three");
+            }
+            memcpy(config.calibration_three_ids, ids,
+                   sizeof(config.calibration_three_ids));
+            changed = true;
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid cal_three");
+        }
+
+        char cal_method_text[32] = {0};
+        query_err = httpd_query_key_value(query, "cal_method",
+                                          cal_method_text,
+                                          sizeof(cal_method_text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_calibration_method(cal_method_text,
+                                              &config.calibration_method)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid cal_method");
+            }
+            changed = true;
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid cal_method");
+        }
+
+#define APPLY_U8_PARAM(KEY, FIELD)                                      \
+        do {                                                            \
+            char value_text[32] = {0};                                  \
+            esp_err_t key_err = httpd_query_key_value(                  \
+                query, KEY, value_text, sizeof(value_text));            \
+            if (key_err == ESP_OK) {                                    \
+                uint8_t parsed = 0;                                     \
+                if (!ota_parse_u8(value_text, &parsed)) {               \
+                    return httpd_resp_send_err(req,                     \
+                                               HTTPD_400_BAD_REQUEST,   \
+                                               "Invalid " KEY);         \
+                }                                                       \
+                config.FIELD = parsed;                                  \
+                changed = true;                                         \
+            } else if (key_err != ESP_ERR_NOT_FOUND) {                  \
+                return httpd_resp_send_err(req,                         \
+                                           HTTPD_400_BAD_REQUEST,       \
+                                           "Invalid " KEY);             \
+            }                                                           \
+        } while (0)
+
+#define APPLY_U32_PARAM(KEY, FIELD)                                     \
+        do {                                                            \
+            char value_text[32] = {0};                                  \
+            esp_err_t key_err = httpd_query_key_value(                  \
+                query, KEY, value_text, sizeof(value_text));            \
+            if (key_err == ESP_OK) {                                    \
+                uint32_t parsed = 0;                                    \
+                if (!ota_parse_u32(value_text, &parsed)) {              \
+                    return httpd_resp_send_err(req,                     \
+                                               HTTPD_400_BAD_REQUEST,   \
+                                               "Invalid " KEY);         \
+                }                                                       \
+                config.FIELD = parsed;                                  \
+                changed = true;                                         \
+            } else if (key_err != ESP_ERR_NOT_FOUND) {                  \
+                return httpd_resp_send_err(req,                         \
+                                           HTTPD_400_BAD_REQUEST,       \
+                                           "Invalid " KEY);             \
+            }                                                           \
+        } while (0)
+
+        APPLY_U8_PARAM("tag", tag_id);
+        APPLY_U8_PARAM("anchor_count", anchor_count);
+        APPLY_U8_PARAM("coordinator", anchor_survey_coordinator_id);
+        APPLY_U8_PARAM("coord", anchor_survey_coordinator_id);
+        APPLY_U32_PARAM("survey_rx_ms", anchor_survey_rx_slice_ms);
+        APPLY_U32_PARAM("survey_delay_ms",
+                        anchor_survey_command_delay_ms);
+        APPLY_U32_PARAM("survey_slot_ms", anchor_survey_slot_ms);
+        APPLY_U32_PARAM("survey_gap_ms", anchor_survey_round_gap_ms);
+        APPLY_U32_PARAM("survey_log_every",
+                        anchor_survey_passive_tag_log_every);
+        APPLY_U32_PARAM("ranging_slot_ms", ranging_slot_ms);
+        APPLY_U32_PARAM("ranging_gap_ms", ranging_round_gap_ms);
+        APPLY_U32_PARAM("ranging_rx_ms", ranging_rx_slice_ms);
+        APPLY_U8_PARAM("dt_peer", distance_test_peer_id);
+        APPLY_U8_PARAM("dt_initiator", distance_test_initiator_id);
+        APPLY_U8_PARAM("dt_responder", distance_test_responder_id);
+        APPLY_U32_PARAM("dt_interval_ms", distance_test_interval_ms);
+        APPLY_U32_PARAM("dt_rx_timeout_ms", distance_test_rx_timeout_ms);
+        APPLY_U32_PARAM("dt_resp_delay_ms", distance_test_resp_delay_ms);
+        APPLY_U32_PARAM("dt_final_delay_ms", distance_test_final_delay_ms);
+        APPLY_U32_PARAM("dt_report_delay_ms", distance_test_report_delay_ms);
+        APPLY_U32_PARAM("dt_auto_rx_delay_uus",
+                        distance_test_auto_rx_delay_uus);
+        APPLY_U8_PARAM("cal_ref", calibration_reference_id);
+        APPLY_U8_PARAM("cal_dut", calibration_dut_id);
+        APPLY_U32_PARAM("cal_known_mm", calibration_known_distance_mm);
+        APPLY_U32_PARAM("cal_d01_mm", calibration_three_distance_0_1_mm);
+        APPLY_U32_PARAM("cal_d02_mm", calibration_three_distance_0_2_mm);
+        APPLY_U32_PARAM("cal_d12_mm", calibration_three_distance_1_2_mm);
+        APPLY_U32_PARAM("cal_samples", calibration_sample_count);
+        APPLY_U32_PARAM("cal_summary", calibration_summary_every);
+        APPLY_U32_PARAM("cal_min_ms", calibration_min_interval_ms);
+        APPLY_U32_PARAM("cal_max_ms", calibration_max_interval_ms);
+        APPLY_U32_PARAM("cal_rx_ms", calibration_rx_slice_ms);
+
+#undef APPLY_U32_PARAM
+#undef APPLY_U8_PARAM
+
+        if (!app_runtime_config_validate(&config)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid runtime config");
+        }
+
+        if (changed) {
+            err = app_runtime_config_save(&config);
+        }
+    }
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Runtime config failed: %s", esp_err_to_name(err));
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Runtime config failed");
+    }
+
+    const app_runtime_config_t *active_config = app_runtime_config_get();
+    const bool reboot_recommended =
+        runtime_config_reboot_recommended(&before_config, active_config);
+    ESP_LOGW(TAG,
+             "Runtime config: changed=%s cleared=%s mode=%s(%u) tag=%u anchors=[%u,%u,%u,%u] count=%u coord=%u reboot_recommended=%s reboot_requested=%s",
+             changed ? "true" : "false", cleared ? "true" : "false",
+             app_runtime_config_runtime_mode_to_string(
+                 active_config->runtime_mode),
+             (unsigned)active_config->runtime_mode,
+             (unsigned)active_config->tag_id,
+             (unsigned)active_config->anchor_ids[0],
+             (unsigned)active_config->anchor_ids[1],
+             (unsigned)active_config->anchor_ids[2],
+             (unsigned)active_config->anchor_ids[3],
+             (unsigned)active_config->anchor_count,
+             (unsigned)active_config->anchor_survey_coordinator_id,
+             reboot_recommended ? "true" : "false",
+             reboot_requested ? "true" : "false");
+
+    char response[1200];
+    const int len = snprintf(
+        response, sizeof(response),
+        "{"
+        "\"ok\":true,"
+        "\"changed\":%s,"
+        "\"cleared\":%s,"
+        "\"runtime_config_from_nvs\":%s,"
+        "\"runtime_mode\":%u,"
+        "\"runtime_mode_name\":\"%s\","
+        "\"runtime_tag_id\":%u,"
+        "\"runtime_anchor_count\":%u,"
+        "\"runtime_anchor_ids\":[%u,%u,%u,%u],"
+        "\"runtime_anchor_survey_coordinator_id\":%u,"
+        "\"runtime_ranging_slot_ms\":%lu,"
+        "\"runtime_ranging_round_gap_ms\":%lu,"
+        "\"runtime_anchor_survey_slot_ms\":%lu,"
+        "\"runtime_anchor_survey_round_gap_ms\":%lu,"
+        "\"runtime_calibration_method\":%u,"
+        "\"runtime_calibration_three_ids\":[%u,%u,%u],"
+        "\"reboot_recommended\":%s,"
+        "\"rebooting\":%s"
+        "}\n",
+        changed ? "true" : "false", cleared ? "true" : "false",
+        active_config->from_nvs ? "true" : "false",
+        (unsigned)active_config->runtime_mode,
+        app_runtime_config_runtime_mode_to_string(
+            active_config->runtime_mode),
+        (unsigned)active_config->tag_id,
+        (unsigned)active_config->anchor_count,
+        (unsigned)active_config->anchor_ids[0],
+        (unsigned)active_config->anchor_ids[1],
+        (unsigned)active_config->anchor_ids[2],
+        (unsigned)active_config->anchor_ids[3],
+        (unsigned)active_config->anchor_survey_coordinator_id,
+        (unsigned long)active_config->ranging_slot_ms,
+        (unsigned long)active_config->ranging_round_gap_ms,
+        (unsigned long)active_config->anchor_survey_slot_ms,
+        (unsigned long)active_config->anchor_survey_round_gap_ms,
+        (unsigned)active_config->calibration_method,
+        (unsigned)active_config->calibration_three_ids[0],
+        (unsigned)active_config->calibration_three_ids[1],
+        (unsigned)active_config->calibration_three_ids[2],
+        reboot_recommended ? "true" : "false",
+        reboot_requested ? "true" : "false");
+
+    if (len < 0 || len >= (int)sizeof(response)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "response too long");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    const esp_err_t response_err = httpd_resp_send(req, response, len);
+
+    if (reboot_requested) {
+        s_status = OTA_SERVICE_STATUS_REBOOTING;
+        xTaskCreate(reboot_task, "runtime_reboot",
                     OTA_SERVICE_RESTART_TASK_STACK_WORDS, NULL,
                     OTA_SERVICE_RESTART_TASK_PRIORITY, NULL);
     }
@@ -541,7 +1044,7 @@ static esp_err_t start_http_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 8192;
-    config.max_uri_handlers = 4;
+    config.max_uri_handlers = 5;
 
     esp_err_t err = httpd_start(&s_http_server, &config);
     if (err != ESP_OK) {
@@ -573,12 +1076,20 @@ static esp_err_t start_http_server(void)
         .handler = antenna_delay_post_handler,
         .user_ctx = NULL,
     };
+    const httpd_uri_t runtime_config_uri = {
+        .uri = "/config/runtime",
+        .method = HTTP_POST,
+        .handler = runtime_config_post_handler,
+        .user_ctx = NULL,
+    };
 
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &root_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &status_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &ota_uri));
     ESP_ERROR_CHECK(
         httpd_register_uri_handler(s_http_server, &antenna_delay_uri));
+    ESP_ERROR_CHECK(
+        httpd_register_uri_handler(s_http_server, &runtime_config_uri));
 
     s_running = true;
     s_status = OTA_SERVICE_STATUS_RUNNING;

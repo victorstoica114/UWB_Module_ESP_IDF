@@ -6,10 +6,12 @@ another PC or in a fresh Codex session.
 ## Current State
 
 - Repository: `https://github.com/victorstoica114/UWB_Module_ESP_IDF`
-- Last pushed commit at handoff time: `5ba94d8 Add DS-TWR anchor survey skeleton`
+- Last pushed commit before the runtime-config work: `5325d58`
 - Target board: `ESP32-S3-WROOM-1-N16R8`
 - ESP-IDF version used successfully: `v6.0.2`
-- Current default runtime is still `APP_RUNTIME_MODE_UWB_DISTANCE_TEST`.
+- Current default runtime is `APP_RUNTIME_MODE_UWB_RANGING`.
+- Runtime mode and common UWB test parameters can now be overridden over Wi-Fi
+  with authenticated `/config/runtime` commands stored in NVS.
 - The DS-TWR two-module flow works and is the chosen base for the project.
 - TDoA was investigated conceptually, but we decided to stay on DS-TWR because
   precise anchor clock sync is the hard part.
@@ -22,6 +24,8 @@ another PC or in a fresh Codex session.
   defaults, provisioning flags, wireless log target, and stability-test knobs.
 - `components/config/include/uwb_config.h` owns UWB IDs, roles, antenna delay,
   DS-TWR timing, radio profile, diagnostics, and anchor survey settings.
+- `components/config/include/app_runtime_config.h` defines the NVS-backed
+  runtime override schema.
 - `components/config/include/board_config.h` owns board wiring.
 - `components/app_manager/app_manager.c` decides what runtime starts.
 - `components/uwb_dw3000/uwb_dw3000.c` contains DW3000 bring-up, DS-TWR,
@@ -95,12 +99,28 @@ Defined in `components/config/include/app_config.h`:
 
 To activate anchor survey later:
 
-```c
-#define APP_RUNTIME_MODE APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY
+```sh
+python3 tools/runtime_config.py --target-list tools/ota_targets.local.txt \
+  --mode survey --tag 1 --anchors 2,3,4,5 --coord 1 --reboot
 ```
 
-Do not switch the default casually before validating the new AP/OTA setup,
-because `APP_RUNTIME_MODE_UWB_DISTANCE_TEST` is the known working runtime.
+Use `--reboot` when changing `mode`, `tag`, `anchors`, or survey
+`coordinator`. Timing-only settings can be updated without reboot where the
+running loop reads them dynamically.
+
+Other useful examples:
+
+```sh
+python3 tools/runtime_config.py --target-list tools/ota_targets.local.txt \
+  --mode ranging --tag 1 --anchors 2,3,4,5 --reboot
+
+python3 tools/runtime_config.py --target-list tools/ota_targets.local.txt \
+  --mode calibration --cal-method three --cal-three 1,2,3 \
+  --cal-d01-mm 2000 --cal-d02-mm 2000 --cal-d12-mm 2828 --reboot
+
+python3 tools/runtime_config.py --target-list tools/ota_targets.local.txt \
+  --clear --reboot
+```
 
 ## DS-TWR Status
 

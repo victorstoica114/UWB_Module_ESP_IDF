@@ -19,6 +19,7 @@
 #include "sdkconfig.h"
 
 #include "app_identity.h"
+#include "app_runtime_config.h"
 #include "uwb_config.h"
 
 static const char *TAG = "uwb_dw3000";
@@ -252,6 +253,7 @@ enum uwb_dw3000_runtime_mode {
     UWB_DW3000_RUNTIME_DISTANCE_TEST,
     UWB_DW3000_RUNTIME_CALIBRATION,
     UWB_DW3000_RUNTIME_ANCHOR_SURVEY,
+    UWB_DW3000_RUNTIME_RANGING,
 };
 
 struct uwb_rx_diagnostics {
@@ -2403,13 +2405,13 @@ static double uwb_distance_tof_to_meters(double tof_dtu)
 
 static uint8_t uwb_distance_peer_id(bool initiator)
 {
-    if (APP_UWB_DISTANCE_TEST_PEER_ID > 0 &&
-        APP_UWB_DISTANCE_TEST_PEER_ID <= 255) {
-        return (uint8_t)APP_UWB_DISTANCE_TEST_PEER_ID;
+    const app_runtime_config_t *config = app_runtime_config_get();
+    if (config->distance_test_peer_id > 0) {
+        return config->distance_test_peer_id;
     }
 
-    return initiator ? (uint8_t)APP_UWB_DISTANCE_TEST_RESPONDER_ID
-                     : (uint8_t)APP_UWB_DISTANCE_TEST_INITIATOR_ID;
+    return initiator ? config->distance_test_responder_id
+                     : config->distance_test_initiator_id;
 }
 
 static bool uwb_distance_should_log_diagnostics(uint16_t sequence)
@@ -2456,6 +2458,14 @@ uwb_distance_log_rx_diagnostics(uint16_t sequence, const char *label,
 static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
                                             bool log_success)
 {
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint32_t rx_timeout_ms = config->distance_test_rx_timeout_ms;
+    const uint32_t final_delay_ms = config->distance_test_final_delay_ms;
+    const uint32_t report_delay_ms = config->distance_test_report_delay_ms;
+#if APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX
+    const uint32_t auto_rx_delay_uus =
+        config->distance_test_auto_rx_delay_uus;
+#endif
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
     uint64_t poll_tx_ts = 0;
     uint64_t resp_rx_ts = 0;
@@ -2465,8 +2475,8 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
                              payload);
 #if APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX
     esp_err_t err = uwb_dw3000_send_payload_expect_rx(
-        payload, sizeof(payload), APP_UWB_DISTANCE_TEST_AUTO_RX_DELAY_UUS,
-        APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS, &poll_tx_ts);
+        payload, sizeof(payload), auto_rx_delay_uus, rx_timeout_ms,
+        &poll_tx_ts);
 #else
     esp_err_t err =
         uwb_dw3000_send_payload(payload, sizeof(payload), &poll_tx_ts);
@@ -2479,8 +2489,7 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
 
     struct uwb_distance_frame response = {0};
     err = uwb_distance_receive_matching(UWB_DISTANCE_FRAME_RESP, peer_id, true,
-                                        sequence, &response,
-                                        APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS);
+                                        sequence, &response, rx_timeout_ms);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "DS-TWR RESP wait failed seq=%u peer=%u: %s",
                  (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
@@ -2496,7 +2505,7 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
                              payload);
 #if APP_UWB_DISTANCE_TEST_USE_DELAYED_TX
     const uint64_t final_tx_due = uwb_dw3000_add_timestamp_delta(
-        resp_rx_ts, uwb_dw3000_ms_to_dtu(APP_UWB_DISTANCE_TEST_FINAL_DELAY_MS));
+        resp_rx_ts, uwb_dw3000_ms_to_dtu(final_delay_ms));
     uint64_t final_tx_actual_ts = 0;
     err = uwb_dw3000_send_payload_delayed(payload, sizeof(payload),
                                           final_tx_due, &final_tx_ts,
@@ -2508,7 +2517,7 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
              (unsigned long long)final_tx_ts,
              (unsigned long long)final_tx_actual_ts);
 #else
-    uwb_dw3000_delay_ms(APP_UWB_DISTANCE_TEST_FINAL_DELAY_MS);
+    uwb_dw3000_delay_ms(final_delay_ms);
     err = uwb_dw3000_send_payload(payload, sizeof(payload), &final_tx_ts);
 #endif
     if (err != ESP_OK) {
@@ -2517,7 +2526,7 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
         return err;
     }
 
-    uwb_dw3000_delay_ms(APP_UWB_DISTANCE_TEST_REPORT_DELAY_MS);
+    uwb_dw3000_delay_ms(report_delay_ms);
     uwb_distance_build_frame(UWB_DISTANCE_FRAME_REPORT, peer_id, sequence,
                              payload);
     uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_POLL_TX_TS_OFFSET,
@@ -2609,6 +2618,13 @@ uwb_distance_respond_to_poll(const struct uwb_distance_frame *poll,
         return ESP_ERR_INVALID_ARG;
     }
 
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint32_t rx_timeout_ms = config->distance_test_rx_timeout_ms;
+    const uint32_t resp_delay_ms = config->distance_test_resp_delay_ms;
+#if APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX
+    const uint32_t auto_rx_delay_uus =
+        config->distance_test_auto_rx_delay_uus;
+#endif
     const uint8_t peer_id = poll->source_id;
     const uint16_t sequence = poll->sequence;
     uint64_t resp_tx_ts = 0;
@@ -2618,15 +2634,12 @@ uwb_distance_respond_to_poll(const struct uwb_distance_frame *poll,
                              payload);
 #if APP_UWB_DISTANCE_TEST_USE_DELAYED_TX
     const uint64_t resp_tx_due = uwb_dw3000_add_timestamp_delta(
-        poll->rx_timestamp,
-        uwb_dw3000_ms_to_dtu(APP_UWB_DISTANCE_TEST_RESP_DELAY_MS));
+        poll->rx_timestamp, uwb_dw3000_ms_to_dtu(resp_delay_ms));
     uint64_t resp_tx_actual_ts = 0;
 #if APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX
     esp_err_t err = uwb_dw3000_send_payload_delayed_expect_rx(
-        payload, sizeof(payload), resp_tx_due,
-        APP_UWB_DISTANCE_TEST_AUTO_RX_DELAY_UUS,
-        APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS, &resp_tx_ts,
-        &resp_tx_actual_ts);
+        payload, sizeof(payload), resp_tx_due, auto_rx_delay_uus,
+        rx_timeout_ms, &resp_tx_ts, &resp_tx_actual_ts);
 #else
     esp_err_t err = uwb_dw3000_send_payload_delayed(
         payload, sizeof(payload), resp_tx_due, &resp_tx_ts,
@@ -2639,7 +2652,7 @@ uwb_distance_respond_to_poll(const struct uwb_distance_frame *poll,
              (unsigned long long)resp_tx_ts,
              (unsigned long long)resp_tx_actual_ts);
 #else
-    uwb_dw3000_delay_ms(APP_UWB_DISTANCE_TEST_RESP_DELAY_MS);
+    uwb_dw3000_delay_ms(resp_delay_ms);
     esp_err_t err =
         uwb_dw3000_send_payload(payload, sizeof(payload), &resp_tx_ts);
 #endif
@@ -2651,8 +2664,7 @@ uwb_distance_respond_to_poll(const struct uwb_distance_frame *poll,
 
     struct uwb_distance_frame final = {0};
     err = uwb_distance_receive_matching(UWB_DISTANCE_FRAME_FINAL, peer_id, true,
-                                        sequence, &final,
-                                        APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS);
+                                        sequence, &final, rx_timeout_ms);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "DS-TWR FINAL wait failed seq=%u peer=%u: %s",
                  (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
@@ -2661,8 +2673,7 @@ uwb_distance_respond_to_poll(const struct uwb_distance_frame *poll,
 
     struct uwb_distance_frame report = {0};
     err = uwb_distance_receive_matching(UWB_DISTANCE_FRAME_REPORT, peer_id, true,
-                                        sequence, &report,
-                                        APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS);
+                                        sequence, &report, rx_timeout_ms);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "DS-TWR REPORT wait failed seq=%u peer=%u: %s",
                  (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
@@ -2707,16 +2718,17 @@ uwb_distance_log_measurement(const struct uwb_distance_measurement *measurement)
 
 static bool uwb_distance_is_initiator(void)
 {
-    if (s_source_id == (uint8_t)APP_UWB_DISTANCE_TEST_INITIATOR_ID) {
+    const app_runtime_config_t *config = app_runtime_config_get();
+    if (s_source_id == config->distance_test_initiator_id) {
         return true;
     }
-    if (s_source_id == (uint8_t)APP_UWB_DISTANCE_TEST_RESPONDER_ID) {
+    if (s_source_id == config->distance_test_responder_id) {
         return false;
     }
 
-#if APP_UWB_DISTANCE_TEST_PEER_ID > 0 && APP_UWB_DISTANCE_TEST_PEER_ID <= 255
-    return s_source_id < (uint8_t)APP_UWB_DISTANCE_TEST_PEER_ID;
-#endif
+    if (config->distance_test_peer_id > 0) {
+        return s_source_id < config->distance_test_peer_id;
+    }
 
     return (s_source_id & 1U) != 0;
 }
@@ -2724,32 +2736,35 @@ static bool uwb_distance_is_initiator(void)
 static void uwb_distance_initiator_loop(uint8_t peer_id)
 {
     uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
+    const app_runtime_config_t *config = app_runtime_config_get();
 
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
              "DS-TWR distance test active as initiator: source_id=%u peer_id=%u interval=%u ms timeout=%u ms auto_rx=%u delay=%u uus",
              (unsigned)s_source_id, (unsigned)peer_id,
-             (unsigned)APP_UWB_DISTANCE_TEST_INTERVAL_MS,
-             (unsigned)APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS,
+             (unsigned)config->distance_test_interval_ms,
+             (unsigned)config->distance_test_rx_timeout_ms,
              (unsigned)APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX,
-             (unsigned)APP_UWB_DISTANCE_TEST_AUTO_RX_DELAY_UUS);
+             (unsigned)config->distance_test_auto_rx_delay_uus);
 
     while (true) {
         (void)uwb_distance_initiate_once(peer_id, sequence, true);
         sequence++;
-        uwb_dw3000_delay_ms(APP_UWB_DISTANCE_TEST_INTERVAL_MS);
+        uwb_dw3000_delay_ms(
+            app_runtime_config_get()->distance_test_interval_ms);
     }
 }
 
 static void uwb_distance_responder_loop(uint8_t peer_id)
 {
+    const app_runtime_config_t *config = app_runtime_config_get();
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
              "DS-TWR distance test active as responder: source_id=%u peer_id=%u timeout=%u ms auto_rx=%u delay=%u uus",
              (unsigned)s_source_id, (unsigned)peer_id,
-             (unsigned)APP_UWB_DISTANCE_TEST_RX_TIMEOUT_MS,
+             (unsigned)config->distance_test_rx_timeout_ms,
              (unsigned)APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX,
-             (unsigned)APP_UWB_DISTANCE_TEST_AUTO_RX_DELAY_UUS);
+             (unsigned)config->distance_test_auto_rx_delay_uus);
 
     while (true) {
         struct uwb_distance_frame poll = {0};
@@ -2777,14 +2792,15 @@ static void uwb_dw3000_distance_test_loop(void)
 {
     const bool initiator = uwb_distance_is_initiator();
     const uint8_t peer_id = uwb_distance_peer_id(initiator);
+    const app_runtime_config_t *config = app_runtime_config_get();
 
     if (peer_id == 0 || peer_id == s_source_id) {
         s_status = UWB_DW3000_STATUS_FAILED;
         ESP_LOGE(TAG,
                  "Invalid DS-TWR IDs: source_id=%u peer_id=%u initiator_id=%u responder_id=%u",
                  (unsigned)s_source_id, (unsigned)peer_id,
-                 (unsigned)APP_UWB_DISTANCE_TEST_INITIATOR_ID,
-                 (unsigned)APP_UWB_DISTANCE_TEST_RESPONDER_ID);
+                 (unsigned)config->distance_test_initiator_id,
+                 (unsigned)config->distance_test_responder_id);
         vTaskDelete(NULL);
         return;
     }
@@ -2799,24 +2815,10 @@ static void uwb_dw3000_distance_test_loop(void)
 static size_t uwb_anchor_survey_anchor_ids(
     uint8_t ids[UWB_ANCHOR_SURVEY_MAX_ANCHORS])
 {
-    const uint8_t configured[UWB_ANCHOR_SURVEY_MAX_ANCHORS] = {
-        (uint8_t)APP_UWB_ANCHOR_0_ID,
-        (uint8_t)APP_UWB_ANCHOR_1_ID,
-        (uint8_t)APP_UWB_ANCHOR_2_ID,
-        (uint8_t)APP_UWB_ANCHOR_3_ID,
-    };
-    const size_t configured_count =
-        APP_UWB_ANCHOR_COUNT < UWB_ANCHOR_SURVEY_MAX_ANCHORS
-            ? APP_UWB_ANCHOR_COUNT
-            : UWB_ANCHOR_SURVEY_MAX_ANCHORS;
-    size_t count = 0;
-
-    for (size_t i = 0; i < configured_count; ++i) {
-        if (configured[i] != 0) {
-            ids[count++] = configured[i];
-        }
+    const size_t count = app_runtime_config_get_anchor_ids(ids);
+    if (count > UWB_ANCHOR_SURVEY_MAX_ANCHORS) {
+        return UWB_ANCHOR_SURVEY_MAX_ANCHORS;
     }
-
     return count;
 }
 
@@ -2836,10 +2838,6 @@ static bool uwb_anchor_survey_ids_valid(const uint8_t *ids, size_t count,
 {
     if (count < 2 || count > UWB_ANCHOR_SURVEY_MAX_ANCHORS ||
         coordinator_id == 0) {
-        return false;
-    }
-
-    if (!uwb_anchor_survey_id_in_set(ids, count, coordinator_id)) {
         return false;
     }
 
@@ -3011,8 +3009,10 @@ static void uwb_anchor_survey_handle_command(
              "ANCHOR_SURVEY command accepted slot=%u seq=%u peer=%u delay=%u ms",
              (unsigned)slot_index, (unsigned)frame->sequence,
              (unsigned)pair.responder_id,
-             (unsigned)APP_UWB_ANCHOR_SURVEY_COMMAND_DELAY_MS);
-    uwb_dw3000_delay_ms(APP_UWB_ANCHOR_SURVEY_COMMAND_DELAY_MS);
+             (unsigned)app_runtime_config_get()
+                 ->anchor_survey_command_delay_ms);
+    uwb_dw3000_delay_ms(
+        app_runtime_config_get()->anchor_survey_command_delay_ms);
     const esp_err_t err = uwb_distance_initiate_once(
         pair.responder_id, frame->sequence, false);
     if (err != ESP_OK) {
@@ -3052,7 +3052,8 @@ static void uwb_anchor_survey_listen_until(TickType_t end_tick,
         const TickType_t now = xTaskGetTickCount();
         const uint32_t remaining_ms =
             (uint32_t)(end_tick - now) * portTICK_PERIOD_MS;
-        uint32_t slice_ms = APP_UWB_ANCHOR_SURVEY_RX_SLICE_MS;
+        uint32_t slice_ms =
+            app_runtime_config_get()->anchor_survey_rx_slice_ms;
         if (remaining_ms < slice_ms) {
             slice_ms = remaining_ms;
         }
@@ -3076,19 +3077,25 @@ static void uwb_anchor_survey_listen_until(TickType_t end_tick,
 static void uwb_anchor_survey_passive_tag_loop(uint8_t coordinator_id)
 {
     uint32_t frame_count = 0;
+    const app_runtime_config_t *config = app_runtime_config_get();
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
-             "ANCHOR_SURVEY passive tag active: source_id=%u coordinator=%u",
-             (unsigned)s_source_id, (unsigned)coordinator_id);
+             "ANCHOR_SURVEY passive tag active: source_id=%u coordinator=%u rx_slice=%u ms log_every=%u",
+             (unsigned)s_source_id, (unsigned)coordinator_id,
+             (unsigned)config->anchor_survey_rx_slice_ms,
+             (unsigned)config->anchor_survey_passive_tag_log_every);
 
     while (true) {
+        config = app_runtime_config_get();
         struct uwb_distance_frame frame = {0};
         const esp_err_t err =
-            uwb_distance_receive_next(&frame, APP_UWB_ANCHOR_SURVEY_RX_SLICE_MS);
+            uwb_distance_receive_next(
+                &frame, config->anchor_survey_rx_slice_ms);
         if (err == ESP_OK) {
             frame_count++;
-            if (APP_UWB_ANCHOR_SURVEY_PASSIVE_TAG_LOG_EVERY > 0 &&
-                (frame_count % APP_UWB_ANCHOR_SURVEY_PASSIVE_TAG_LOG_EVERY) ==
+            if (config->anchor_survey_passive_tag_log_every > 0 &&
+                (frame_count %
+                 config->anchor_survey_passive_tag_log_every) ==
                     1U) {
                 ESP_LOGI(TAG,
                          "ANCHOR_SURVEY passive frame type=%s src=%u dst=%u seq=%u total=%lu",
@@ -3110,16 +3117,19 @@ static void uwb_anchor_survey_anchor_loop(uint8_t coordinator_id,
                                           const uint8_t *anchor_ids,
                                           size_t anchor_count)
 {
+    const app_runtime_config_t *config = app_runtime_config_get();
     s_status = UWB_DW3000_STATUS_READY;
 
     if (s_source_id != coordinator_id) {
         ESP_LOGI(TAG,
-                 "ANCHOR_SURVEY anchor follower active: source_id=%u coordinator=%u",
-                 (unsigned)s_source_id, (unsigned)coordinator_id);
+                 "ANCHOR_SURVEY anchor follower active: source_id=%u coordinator=%u rx_slice=%u ms",
+                 (unsigned)s_source_id, (unsigned)coordinator_id,
+                 (unsigned)config->anchor_survey_rx_slice_ms);
         while (true) {
+            config = app_runtime_config_get();
             struct uwb_distance_frame frame = {0};
             const esp_err_t err = uwb_distance_receive_next(
-                &frame, APP_UWB_ANCHOR_SURVEY_RX_SLICE_MS);
+                &frame, config->anchor_survey_rx_slice_ms);
             if (err == ESP_OK) {
                 uwb_anchor_survey_process_frame(&frame, coordinator_id,
                                                 anchor_ids, anchor_count);
@@ -3140,17 +3150,18 @@ static void uwb_anchor_survey_anchor_loop(uint8_t coordinator_id,
     ESP_LOGI(TAG,
              "ANCHOR_SURVEY coordinator active: source_id=%u pair_count=%u slot=%u ms round_gap=%u ms",
              (unsigned)s_source_id, (unsigned)pair_count,
-             (unsigned)APP_UWB_ANCHOR_SURVEY_SLOT_MS,
-             (unsigned)APP_UWB_ANCHOR_SURVEY_ROUND_GAP_MS);
+             (unsigned)config->anchor_survey_slot_ms,
+             (unsigned)config->anchor_survey_round_gap_ms);
 
     while (true) {
         ESP_LOGI(TAG, "ANCHOR_SURVEY round=%lu start",
                  (unsigned long)round);
         for (size_t i = 0; i < pair_count; ++i) {
+            config = app_runtime_config_get();
             const struct uwb_anchor_survey_pair *pair = &pairs[i];
             const TickType_t slot_end =
                 xTaskGetTickCount() +
-                pdMS_TO_TICKS(APP_UWB_ANCHOR_SURVEY_SLOT_MS);
+                pdMS_TO_TICKS(config->anchor_survey_slot_ms);
 
             if (pair->initiator_id == s_source_id) {
                 ESP_LOGI(TAG,
@@ -3180,7 +3191,8 @@ static void uwb_anchor_survey_anchor_loop(uint8_t coordinator_id,
         round++;
         ESP_LOGI(TAG, "ANCHOR_SURVEY round=%lu complete",
                  (unsigned long)(round - 1UL));
-        uwb_dw3000_delay_ms(APP_UWB_ANCHOR_SURVEY_ROUND_GAP_MS);
+        uwb_dw3000_delay_ms(
+            app_runtime_config_get()->anchor_survey_round_gap_ms);
     }
 }
 
@@ -3188,13 +3200,13 @@ static void uwb_dw3000_anchor_survey_loop(void)
 {
     uint8_t anchor_ids[UWB_ANCHOR_SURVEY_MAX_ANCHORS] = {0};
     const size_t anchor_count = uwb_anchor_survey_anchor_ids(anchor_ids);
-    const uint8_t coordinator_id =
-        (uint8_t)APP_UWB_ANCHOR_SURVEY_COORDINATOR_ID;
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint8_t coordinator_id = config->anchor_survey_coordinator_id;
+    const uint8_t tag_id = config->tag_id;
 
     ESP_LOGI(TAG,
              "ANCHOR_SURVEY runtime start: source_id=%u tag_id=%u coordinator=%u anchors=[%u,%u,%u,%u]",
-             (unsigned)s_source_id, (unsigned)APP_UWB_TAG_ID,
-             (unsigned)coordinator_id,
+             (unsigned)s_source_id, (unsigned)tag_id, (unsigned)coordinator_id,
              (unsigned)anchor_ids[0], (unsigned)anchor_ids[1],
              (unsigned)anchor_ids[2], (unsigned)anchor_ids[3]);
 
@@ -3206,7 +3218,12 @@ static void uwb_dw3000_anchor_survey_loop(void)
         return;
     }
 
-    if (s_source_id == (uint8_t)APP_UWB_TAG_ID) {
+    if (s_source_id == coordinator_id) {
+        uwb_anchor_survey_anchor_loop(coordinator_id, anchor_ids, anchor_count);
+        return;
+    }
+
+    if (s_source_id == tag_id) {
         uwb_anchor_survey_passive_tag_loop(coordinator_id);
         return;
     }
@@ -3224,9 +3241,137 @@ static void uwb_dw3000_anchor_survey_loop(void)
     uwb_anchor_survey_anchor_loop(coordinator_id, anchor_ids, anchor_count);
 }
 
-static const char *uwb_calibration_method_name(void)
+static void uwb_ranging_tag_loop(const uint8_t *anchor_ids, size_t anchor_count)
 {
-    switch (APP_UWB_CALIBRATION_METHOD) {
+    uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
+    uint32_t round = 0;
+    const app_runtime_config_t *config = app_runtime_config_get();
+
+    s_status = UWB_DW3000_STATUS_READY;
+    ESP_LOGI(TAG,
+             "UWB_RANGING tag active: source_id=%u anchors=[%u,%u,%u,%u] slot=%u ms round_gap=%u ms",
+             (unsigned)s_source_id, (unsigned)anchor_ids[0],
+             (unsigned)anchor_ids[1], (unsigned)anchor_ids[2],
+             (unsigned)anchor_ids[3], (unsigned)config->ranging_slot_ms,
+             (unsigned)config->ranging_round_gap_ms);
+
+    while (true) {
+        ESP_LOGI(TAG, "UWB_RANGING round=%lu start", (unsigned long)round);
+        for (size_t i = 0; i < anchor_count; ++i) {
+            const uint8_t anchor_id = anchor_ids[i];
+            ESP_LOGI(TAG, "UWB_RANGING tag poll anchor=%u seq=%u",
+                     (unsigned)anchor_id, (unsigned)sequence);
+            const esp_err_t err =
+                uwb_distance_initiate_once(anchor_id, sequence, false);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG,
+                         "UWB_RANGING tag anchor=%u seq=%u failed: %s",
+                         (unsigned)anchor_id, (unsigned)sequence,
+                         esp_err_to_name(err));
+            }
+            sequence++;
+            uwb_dw3000_delay_ms(
+                app_runtime_config_get()->ranging_slot_ms);
+        }
+        round++;
+        ESP_LOGI(TAG, "UWB_RANGING round=%lu complete",
+                 (unsigned long)(round - 1UL));
+        uwb_dw3000_delay_ms(
+            app_runtime_config_get()->ranging_round_gap_ms);
+    }
+}
+
+static void uwb_ranging_anchor_loop(void)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    s_status = UWB_DW3000_STATUS_READY;
+    ESP_LOGI(TAG,
+             "UWB_RANGING anchor active: source_id=%u tag_id=%u rx_slice=%u ms",
+             (unsigned)s_source_id, (unsigned)config->tag_id,
+             (unsigned)config->ranging_rx_slice_ms);
+
+    while (true) {
+        config = app_runtime_config_get();
+        struct uwb_distance_frame frame = {0};
+        const esp_err_t rx_err =
+            uwb_distance_receive_next(&frame, config->ranging_rx_slice_ms);
+        if (rx_err == ESP_ERR_TIMEOUT) {
+            continue;
+        }
+        if (rx_err != ESP_OK) {
+            ESP_LOGW(TAG, "UWB_RANGING anchor RX failed: %s",
+                     esp_err_to_name(rx_err));
+            uwb_dw3000_delay_ms(20);
+            continue;
+        }
+        if (frame.type != UWB_DISTANCE_FRAME_POLL ||
+            frame.source_id != config->tag_id ||
+            !uwb_distance_destination_matches(frame.destination_id)) {
+            continue;
+        }
+
+        struct uwb_distance_measurement measurement = {0};
+        const esp_err_t err =
+            uwb_distance_respond_to_poll(&frame, &measurement);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "UWB_RANGING anchor respond failed tag=%u seq=%u: %s",
+                     (unsigned)frame.source_id, (unsigned)frame.sequence,
+                     esp_err_to_name(err));
+            continue;
+        }
+
+        uwb_distance_log_measurement(&measurement);
+        ESP_LOGI(TAG,
+                 "UWB_RANGING result tag=%u anchor=%u seq=%u distance=%.3f m %.1f cm raw=%.3f m clk_valid=%u",
+                 (unsigned)measurement.initiator_id, (unsigned)s_source_id,
+                 (unsigned)measurement.sequence, measurement.distance_m,
+                 measurement.distance_m * 100.0, measurement.raw_distance_m,
+                 measurement.clock_offset_valid ? 1U : 0U);
+    }
+}
+
+static void uwb_dw3000_ranging_loop(void)
+{
+    uint8_t anchor_ids[UWB_ANCHOR_SURVEY_MAX_ANCHORS] = {0};
+    const size_t anchor_count = uwb_anchor_survey_anchor_ids(anchor_ids);
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint8_t tag_id = config->tag_id;
+
+    ESP_LOGI(TAG,
+             "UWB_RANGING runtime start: source_id=%u tag_id=%u anchors=[%u,%u,%u,%u]",
+             (unsigned)s_source_id, (unsigned)tag_id,
+             (unsigned)anchor_ids[0], (unsigned)anchor_ids[1],
+             (unsigned)anchor_ids[2], (unsigned)anchor_ids[3]);
+
+    if (anchor_count == 0 || anchor_count > UWB_ANCHOR_SURVEY_MAX_ANCHORS) {
+        s_status = UWB_DW3000_STATUS_FAILED;
+        ESP_LOGE(TAG, "UWB_RANGING invalid anchor configuration");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    if (s_source_id == tag_id) {
+        uwb_ranging_tag_loop(anchor_ids, anchor_count);
+        return;
+    }
+
+    if (uwb_anchor_survey_id_in_set(anchor_ids, anchor_count, s_source_id)) {
+        uwb_ranging_anchor_loop();
+        return;
+    }
+
+    s_status = UWB_DW3000_STATUS_READY;
+    ESP_LOGW(TAG,
+             "UWB_RANGING idle: source_id=%u is neither tag nor configured anchor",
+             (unsigned)s_source_id);
+    while (true) {
+        uwb_dw3000_delay_ms(1000);
+    }
+}
+
+static const char *uwb_calibration_method_name(uint8_t method)
+{
+    switch (method) {
     case APP_UWB_CALIBRATION_METHOD_TWO_MODULE:
         return "two_module";
     case APP_UWB_CALIBRATION_METHOD_THREE_MODULE:
@@ -3239,21 +3384,22 @@ static const char *uwb_calibration_method_name(void)
 static double uwb_calibration_known_distance_for_pair_m(uint8_t first_id,
                                                        uint8_t second_id)
 {
-    const uint8_t id0 = (uint8_t)APP_UWB_CALIBRATION_THREE_ID_0;
-    const uint8_t id1 = (uint8_t)APP_UWB_CALIBRATION_THREE_ID_1;
-    const uint8_t id2 = (uint8_t)APP_UWB_CALIBRATION_THREE_ID_2;
-    const uint32_t fallback_mm = APP_UWB_CALIBRATION_KNOWN_DISTANCE_MM;
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint8_t id0 = config->calibration_three_ids[0];
+    const uint8_t id1 = config->calibration_three_ids[1];
+    const uint8_t id2 = config->calibration_three_ids[2];
+    const uint32_t fallback_mm = config->calibration_known_distance_mm;
     uint32_t distance_mm = fallback_mm;
 
     if ((first_id == id0 && second_id == id1) ||
         (first_id == id1 && second_id == id0)) {
-        distance_mm = APP_UWB_CALIBRATION_THREE_DISTANCE_0_1_MM;
+        distance_mm = config->calibration_three_distance_0_1_mm;
     } else if ((first_id == id0 && second_id == id2) ||
                (first_id == id2 && second_id == id0)) {
-        distance_mm = APP_UWB_CALIBRATION_THREE_DISTANCE_0_2_MM;
+        distance_mm = config->calibration_three_distance_0_2_mm;
     } else if ((first_id == id1 && second_id == id2) ||
                (first_id == id2 && second_id == id1)) {
-        distance_mm = APP_UWB_CALIBRATION_THREE_DISTANCE_1_2_MM;
+        distance_mm = config->calibration_three_distance_1_2_mm;
     }
 
     return (double)distance_mm / 1000.0;
@@ -3272,8 +3418,9 @@ static int32_t uwb_calibration_round_to_i32(double value)
 
 static uint32_t uwb_calibration_random_interval_ms(void)
 {
-    const uint32_t min_ms = APP_UWB_CALIBRATION_MIN_INTERVAL_MS;
-    const uint32_t max_ms = APP_UWB_CALIBRATION_MAX_INTERVAL_MS;
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint32_t min_ms = config->calibration_min_interval_ms;
+    const uint32_t max_ms = config->calibration_max_interval_ms;
     if (max_ms <= min_ms) {
         return min_ms;
     }
@@ -3321,16 +3468,17 @@ uwb_calibration_stats_stddev_m(const struct uwb_calibration_stats *stats)
 
 static bool uwb_calibration_should_log_summary(uint32_t samples)
 {
+    const app_runtime_config_t *config = app_runtime_config_get();
     if (samples == 0) {
         return false;
     }
-    if (samples == 1 || samples == APP_UWB_CALIBRATION_SAMPLE_COUNT) {
+    if (samples == 1 || samples == config->calibration_sample_count) {
         return true;
     }
-    if (APP_UWB_CALIBRATION_SUMMARY_EVERY == 0) {
+    if (config->calibration_summary_every == 0) {
         return false;
     }
-    return (samples % APP_UWB_CALIBRATION_SUMMARY_EVERY) == 0;
+    return (samples % config->calibration_summary_every) == 0;
 }
 
 static void uwb_calibration_log_stats(
@@ -3381,8 +3529,9 @@ static void uwb_calibration_record_measurement(
 
 static void uwb_calibration_two_module_loop(void)
 {
-    const uint8_t reference_id = (uint8_t)APP_UWB_CALIBRATION_REFERENCE_ID;
-    const uint8_t dut_id = (uint8_t)APP_UWB_CALIBRATION_DUT_ID;
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint8_t reference_id = config->calibration_reference_id;
+    const uint8_t dut_id = config->calibration_dut_id;
     struct uwb_calibration_stats stats = {0};
     uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
 
@@ -3390,7 +3539,8 @@ static void uwb_calibration_two_module_loop(void)
     ESP_LOGI(TAG,
              "UWB CAL two-module active: source_id=%u reference_id=%u dut_id=%u known=%u mm delay=0x%04x",
              (unsigned)s_source_id, (unsigned)reference_id,
-             (unsigned)dut_id, (unsigned)APP_UWB_CALIBRATION_KNOWN_DISTANCE_MM,
+             (unsigned)dut_id,
+             (unsigned)config->calibration_known_distance_mm,
              (unsigned)s_antenna_delay);
 
     if (reference_id == 0 || dut_id == 0 || reference_id == dut_id) {
@@ -3446,21 +3596,20 @@ static void uwb_calibration_two_module_loop(void)
     }
 }
 
-static bool uwb_calibration_id_in_three_set(uint8_t id)
+static bool uwb_calibration_id_in_three_set(uint8_t id, const uint8_t ids[3])
 {
-    return id == (uint8_t)APP_UWB_CALIBRATION_THREE_ID_0 ||
-           id == (uint8_t)APP_UWB_CALIBRATION_THREE_ID_1 ||
-           id == (uint8_t)APP_UWB_CALIBRATION_THREE_ID_2;
+    return ids != NULL &&
+           (id == ids[0] || id == ids[1] || id == ids[2]);
 }
 
 static int uwb_calibration_pair_index(uint8_t initiator_id,
-                                      uint8_t responder_id)
+                                      uint8_t responder_id,
+                                      const uint8_t ids[3])
 {
-    const uint8_t ids[3] = {
-        (uint8_t)APP_UWB_CALIBRATION_THREE_ID_0,
-        (uint8_t)APP_UWB_CALIBRATION_THREE_ID_1,
-        (uint8_t)APP_UWB_CALIBRATION_THREE_ID_2,
-    };
+    if (ids == NULL) {
+        return -1;
+    }
+
     int index = 0;
     for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j) {
@@ -3479,10 +3628,11 @@ static int uwb_calibration_pair_index(uint8_t initiator_id,
 
 static void uwb_calibration_three_module_loop(void)
 {
+    const app_runtime_config_t *config = app_runtime_config_get();
     const uint8_t ids[3] = {
-        (uint8_t)APP_UWB_CALIBRATION_THREE_ID_0,
-        (uint8_t)APP_UWB_CALIBRATION_THREE_ID_1,
-        (uint8_t)APP_UWB_CALIBRATION_THREE_ID_2,
+        config->calibration_three_ids[0],
+        config->calibration_three_ids[1],
+        config->calibration_three_ids[2],
     };
     uint8_t peers[2] = {0};
     size_t peer_count = 0;
@@ -3498,7 +3648,7 @@ static void uwb_calibration_three_module_loop(void)
              "UWB CAL three-module EDM active: source_id=%u ids=[%u,%u,%u] known_edge=%u mm delay=0x%04x",
              (unsigned)s_source_id, (unsigned)ids[0], (unsigned)ids[1],
              (unsigned)ids[2],
-             (unsigned)APP_UWB_CALIBRATION_KNOWN_DISTANCE_MM,
+             (unsigned)config->calibration_known_distance_mm,
              (unsigned)s_antenna_delay);
 
     if (ids[0] == 0 || ids[1] == 0 || ids[2] == 0 || ids[0] == ids[1] ||
@@ -3509,7 +3659,7 @@ static void uwb_calibration_three_module_loop(void)
         return;
     }
 
-    if (!uwb_calibration_id_in_three_set(s_source_id)) {
+    if (!uwb_calibration_id_in_three_set(s_source_id, ids)) {
         ESP_LOGW(TAG,
                  "UWB CAL three-module idle: source_id=%u is not in the configured set",
                  (unsigned)s_source_id);
@@ -3528,9 +3678,9 @@ static void uwb_calibration_three_module_loop(void)
         struct uwb_distance_frame poll = {0};
         esp_err_t err = uwb_distance_receive_matching(
             UWB_DISTANCE_FRAME_POLL, 0, false, 0, &poll,
-            APP_UWB_CALIBRATION_RX_SLICE_MS);
+            app_runtime_config_get()->calibration_rx_slice_ms);
         if (err == ESP_OK) {
-            if (!uwb_calibration_id_in_three_set(poll.source_id)) {
+            if (!uwb_calibration_id_in_three_set(poll.source_id, ids)) {
                 ESP_LOGD(TAG,
                          "Ignoring calibration poll from non-set source=%u",
                          (unsigned)poll.source_id);
@@ -3541,7 +3691,7 @@ static void uwb_calibration_three_module_loop(void)
             err = uwb_distance_respond_to_poll(&poll, &measurement);
             if (err == ESP_OK) {
                 const int pair_index = uwb_calibration_pair_index(
-                    measurement.initiator_id, measurement.responder_id);
+                    measurement.initiator_id, measurement.responder_id, ids);
                 if (pair_index >= 0 && pair_index < 6) {
                     uwb_calibration_record_measurement(
                         "three_module_edm", &measurement,
@@ -3567,11 +3717,11 @@ static void uwb_calibration_three_module_loop(void)
 
 static void uwb_dw3000_calibration_loop(void)
 {
+    const uint8_t method = app_runtime_config_get()->calibration_method;
     ESP_LOGI(TAG, "UWB calibration runtime start: method=%s(%u)",
-             uwb_calibration_method_name(),
-             (unsigned)APP_UWB_CALIBRATION_METHOD);
+             uwb_calibration_method_name(method), (unsigned)method);
 
-    switch (APP_UWB_CALIBRATION_METHOD) {
+    switch (method) {
     case APP_UWB_CALIBRATION_METHOD_TWO_MODULE:
         uwb_calibration_two_module_loop();
         break;
@@ -3581,7 +3731,7 @@ static void uwb_dw3000_calibration_loop(void)
     default:
         s_status = UWB_DW3000_STATUS_FAILED;
         ESP_LOGE(TAG, "Unsupported UWB calibration method: %u",
-                 (unsigned)APP_UWB_CALIBRATION_METHOD);
+                 (unsigned)method);
         vTaskDelete(NULL);
         break;
     }
@@ -3917,6 +4067,8 @@ static void uwb_dw3000_task(void *arg)
         uwb_dw3000_calibration_loop();
     } else if (s_runtime_mode == UWB_DW3000_RUNTIME_ANCHOR_SURVEY) {
         uwb_dw3000_anchor_survey_loop();
+    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_RANGING) {
+        uwb_dw3000_ranging_loop();
     } else {
         uwb_dw3000_radio_loop();
     }
@@ -3964,6 +4116,11 @@ esp_err_t uwb_dw3000_start_calibration(void)
 esp_err_t uwb_dw3000_start_anchor_survey(void)
 {
     return uwb_dw3000_start_runtime(UWB_DW3000_RUNTIME_ANCHOR_SURVEY);
+}
+
+esp_err_t uwb_dw3000_start_ranging(void)
+{
+    return uwb_dw3000_start_runtime(UWB_DW3000_RUNTIME_RANGING);
 }
 
 bool uwb_dw3000_is_ready(void)
