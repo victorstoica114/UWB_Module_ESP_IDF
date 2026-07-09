@@ -15,6 +15,11 @@ This firmware adds two verification frames:
 The anchor still calculates and logs the normal ranging result. The tag then
 recalculates the same distance locally and logs a verification comparison.
 
+When looking only at the anchor-calculated result, the firmware uses four UWB
+transmissions: `POLL`, `RESP`, `FINAL`, and `REPORT`. `REPORT2` is an extra
+fifth transmission added so the tag can run the same calculation and verify the
+anchor result.
+
 ## Current Runtime Shape
 
 The same firmware image runs on every module. At boot, each board reads its
@@ -137,6 +142,190 @@ The critical `RESP` and `FINAL` instants are owned by the DW3000 radio through
 delayed TX. The firmware computes the target timestamp, writes `DX_TIME`, and
 issues `DTX` or `DTX_W4R`. That keeps the timing stable even if FreeRTOS has
 scheduler jitter.
+
+## Step-by-Step Timestamp Ownership
+
+The easiest way to reason about the protocol is to track which side knows which
+timestamp after every UWB frame. The timestamps are hardware timestamps captured
+or scheduled by the DW3000.
+
+### 1. POLL
+
+The tag, module `1`, starts one measurement:
+
+```text
+Tag 1                                      Anchor N
+
+T1: transmit POLL  ---------------------->
+                                            T2: receive POLL
+```
+
+After `POLL`:
+
+| Side | What it knows |
+| --- | --- |
+| Tag | `T1`, the local timestamp when it transmitted `POLL` |
+| Anchor | `T2`, the local timestamp when it received `POLL` |
+
+`T1` is in the tag clock domain. `T2` is in the anchor clock domain. The two
+values cannot be compared directly as absolute timestamps.
+
+### 2. RESP
+
+After the anchor receives `POLL`, it programs a delayed TX for the response:
+
+```text
+T3 = T2 + dt_resp_delay_ms
+```
+
+With the current defaults, `dt_resp_delay_ms` is `20 ms`. The firmware converts
+that delay to DW3000 device time units and asks the radio to transmit exactly at
+the scheduled timestamp:
+
+```text
+Tag 1                                      Anchor N
+
+                         <--------------  T3: transmit RESP
+T4: receive RESP
+```
+
+After `RESP`:
+
+| Side | What it knows |
+| --- | --- |
+| Tag | `T1`, `T4` |
+| Anchor | `T2`, `T3` |
+
+The tag can now compute one interval in its own clock domain:
+
+```text
+round_a = T4 - T1
+```
+
+The anchor can compute one interval in its own clock domain:
+
+```text
+reply_b = T3 - T2
+```
+
+The tag still cannot calculate a correct distance from only those two numbers,
+because `reply_b` was measured by the anchor clock.
+
+### 3. FINAL
+
+After the tag receives `RESP`, it also programs a delayed TX:
+
+```text
+T5 = T4 + dt_final_delay_ms
+```
+
+With the current defaults, `dt_final_delay_ms` is also `20 ms`.
+
+```text
+Tag 1                                      Anchor N
+
+T5: transmit FINAL ---------------------->
+                                            T6: receive FINAL
+```
+
+After `FINAL`:
+
+| Side | What it knows |
+| --- | --- |
+| Tag | `T1`, `T4`, `T5` |
+| Anchor | `T2`, `T3`, `T6` |
+
+The tag knows the tag-side intervals:
+
+```text
+round_a = T4 - T1
+reply_a = T5 - T4
+```
+
+The anchor knows the anchor-side intervals:
+
+```text
+reply_b = T3 - T2
+round_b = T6 - T3
+```
+
+At this point all pieces needed for DS-TWR exist, but they are split between
+the two modules.
+
+### 4. REPORT
+
+The tag sends a final report packet to the anchor:
+
+```text
+Tag 1                                      Anchor N
+
+REPORT: T1, T4, T5 ---------------------> receive REPORT
+                                            calculate distance
+```
+
+`REPORT` contains the tag timestamps:
+
+| Timestamp | Meaning |
+| --- | --- |
+| `T1` | `POLL` transmitted on the tag |
+| `T4` | `RESP` received on the tag |
+| `T5` | `FINAL` transmitted on the tag |
+
+The anchor already has its own timestamps:
+
+| Timestamp | Meaning |
+| --- | --- |
+| `T2` | `POLL` received on the anchor |
+| `T3` | `RESP` transmitted on the anchor |
+| `T6` | `FINAL` received on the anchor |
+
+After receiving `REPORT`, the anchor has all six timestamps and can calculate:
+
+```text
+round_a = T4 - T1
+reply_a = T5 - T4
+reply_b = T3 - T2
+round_b = T6 - T3
+```
+
+Then it applies the DS-TWR equation:
+
+```text
+tof = (round_a * round_b - reply_a * reply_b)
+      / (round_a + round_b + reply_a + reply_b)
+```
+
+and converts time of flight to distance:
+
+```text
+distance = tof * speed_of_light
+```
+
+In short: `POLL`, `RESP`, and `FINAL` create the measurement. `REPORT` moves
+the tag timestamps to the anchor so the anchor has the complete picture.
+
+The reason a simple `POLL -> RESP` exchange is not enough is that each module
+has its own clock. DS-TWR compares the tag perspective and the anchor
+perspective, reducing the error caused by clock differences between the boards.
+
+### 5. REPORT2
+
+`REPORT2` is not needed for the classic anchor-side DS-TWR result. It is a
+firmware verification frame:
+
+```text
+Tag 1                                      Anchor N
+
+                         <--------------  REPORT2: T2, T3, T6,
+                                            anchor distance
+receive REPORT2
+calculate distance again on tag
+compare tag result with anchor result
+```
+
+The tag still has `T1`, `T4`, and `T5` from the exchange it initiated. After
+`REPORT2`, it also has the anchor timestamps `T2`, `T3`, and `T6`, so it can
+run the same calculation locally and compare the two answers.
 
 ## Frame Table
 
