@@ -296,6 +296,27 @@ The listener uses ANSI colors when the terminal supports them. Use
 
 In VS Code, use `Terminal > Run Task... > Wireless Logs`.
 
+The same wireless-log stream can drive a first live 2D view of the tag. The
+viewer has no Python package dependencies; it listens on the wireless-log TCP
+port and serves a browser UI locally:
+
+```sh
+python3 tools/uwb_live_view.py --log-port 6055 --http-port 8765
+```
+
+Then open `http://127.0.0.1:8765/`. The default geometry matches the current
+2 m square lab setup:
+
+```text
+3 ----------- 2
+|             |
+|      1      |
+|             |
+4 ----------- 5
+```
+
+Use `--anchor ID=X,Y` to override anchor coordinates in meters.
+
 For a UWB plus wireless-log stability run, enable this in
 `components/config/include/app_config.h`:
 
