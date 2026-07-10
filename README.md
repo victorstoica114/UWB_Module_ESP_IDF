@@ -17,6 +17,7 @@ Current step:
 - antenna delay calibration runtime for two-module and three-module setups
 - sequential 1-tag/4-anchor DS-TWR ranging runtime
 - optional wireless-log stress test via `components/stability_test_service`
+- optional BNO085 accelerometer hardware test via `components/bno085_service`
 
 The board boot log confirms 16 MB QIO flash, 8 MB octal PSRAM at 80 MHz, and
 the app running from the `ota_0` partition.
@@ -47,6 +48,7 @@ Active pin mapping lives in `components/config/include/board_config.h`.
 | --- | --- |
 | Status LED | `42` |
 | I2C SDA / SCL | `9` / `10` |
+| BNO085 reset / interrupt | `40` / `15` |
 | UWB reset / IRQ / CS / wakeup | `8` / `6` / `48` / `7` |
 | SPI MOSI / SCK / MISO | `11` / `12` / `13` |
 | GPS enable / RX / TX | `47` / `18` / `17` |
@@ -61,6 +63,7 @@ components/app_manager/       app startup and status LED behavior
 components/wifi_service/      Wi-Fi STA connection
 components/ota_service/       local authenticated HTTP OTA
 components/wireless_log_service/  TCP wireless mirror for ESP-IDF logs
+components/bno085_service/    optional BNO085 accelerometer hardware test
 components/uwb_dw3000/        DW3000 bring-up, beacon smoke test, DS-TWR loop
 components/uwb_calibration_service/  antenna delay calibration entry point
 components/uwb_distance_test_service/  two-module distance test entry point
@@ -94,6 +97,25 @@ Runtime ownership is intentionally narrow:
   what order.
 - Long-lived workflows live in separate services/components, then are selected
   or sequenced by `app_manager`.
+
+The application task/core split is kept simple so the UWB loop is isolated from
+most Wi-Fi and TCP work:
+
+| Task / service | Core | Notes |
+| --- | --- | --- |
+| `uwb_dw3000` | 1 | Owns DW3000 init, SPI access, RX/TX, ranging, survey, and calibration loops. |
+| `status_led` | 1 | Lightweight GPIO blink task. |
+| `wifi_service` | 0 | Owns Wi-Fi STA connect/reconnect management. |
+| `ota_service` | 0 | Starts authenticated OTA and runtime-config HTTP handling. |
+| `stability_test` | 0 | Optional wireless-log stress generator when enabled. |
+| `bno085` | 0 | Optional BNO085 accelerometer test when enabled. |
+| `wireless_log` | unpinned | Drains the log queue and mirrors logs over TCP; FreeRTOS may run it on either core. |
+| short-lived reboot tasks | unpinned | Temporary restart helpers after OTA or runtime-config changes. |
+
+ESP-IDF also creates internal Wi-Fi, TCP/IP, event-loop, and HTTP-server tasks.
+Those are managed by the framework. The timing-critical UWB transmit instants
+are still programmed into the DW3000 with delayed TX, so the radio owns the
+sub-microsecond timing rather than the FreeRTOS scheduler.
 
 The expected UWB workflow split is:
 
@@ -243,6 +265,30 @@ with `APP_UWB_DW_RXOK_LED_ENABLED`, `APP_UWB_DW_SFD_LED_ENABLED`,
 
 The configured antenna delay is applied to both DW3000 RX and TX antenna delay
 registers during radio init.
+
+The BNO085 accelerometer test is controlled from
+`components/config/include/app_config.h`:
+
+```c
+#define APP_BNO085_ACCEL_TEST_ENABLED 0
+#define APP_BNO085_I2C_ADDRESS 0x4A
+#define APP_BNO085_I2C_CLOCK_HZ 100000
+#define APP_BNO085_ACCEL_INTERVAL_MS 50
+#define APP_BNO085_LOG_INTERVAL_MS 1000
+#define APP_BNO085_INT_WAIT_TIMEOUT_MS 250
+```
+
+Keep `APP_BNO085_ACCEL_TEST_ENABLED` at `0` for normal ranging builds. Set it
+to `1` only while verifying the accelerometer hardware. When enabled, the task
+runs on core 0, pulses BNO085 reset on GPIO40, enables
+the calibrated accelerometer report over I2C/SHTP, then waits on the BNO085
+active-low interrupt on GPIO15. The GPIO interrupt is configured as active-level,
+not edge-only: on I2C the BNO08X deasserts `H_INTN` as soon as the I2C address
+is recognized, so the ISR masks the GPIO interrupt and the task rearms it after
+draining the pending SHTP packet. The timeout is only a fallback if an interrupt
+is missed. It logs lines like
+`BNO085 accel x=... y=... z=... m/s^2 accuracy=... irqs=... wait_timeouts=...`.
+Leaving it disabled avoids the extra I2C and CPU work.
 
 Recommended workflow from this folder, in the ESP-IDF v6.0.2 terminal:
 

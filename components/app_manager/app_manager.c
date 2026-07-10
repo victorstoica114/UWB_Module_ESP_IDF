@@ -7,6 +7,7 @@
 #include "app_identity.h"
 #include "app_led.h"
 #include "app_runtime_config.h"
+#include "bno085_service.h"
 #include "board_config.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
@@ -227,5 +228,11 @@ void app_manager_start(void)
     if (stability_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start stability test service: %s",
                  esp_err_to_name(stability_err));
+    }
+
+    const esp_err_t bno085_err = bno085_service_start();
+    if (bno085_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start BNO085 service: %s",
+                 esp_err_to_name(bno085_err));
     }
 }
