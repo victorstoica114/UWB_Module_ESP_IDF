@@ -915,7 +915,7 @@ th { color: var(--muted); font-weight: 700; }
     <section id="info" class="page">
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Module</th><th>Wi-Fi</th><th>Runtime</th><th>Components</th><th>UWB</th><th>Antenna</th><th>Logs</th><th>Battery</th></tr></thead>
+          <thead><tr><th>Module</th><th>Wi-Fi</th><th>Runtime</th><th>Components</th><th>GPS</th><th>UWB</th><th>Antenna</th><th>Logs</th><th>Battery</th></tr></thead>
           <tbody id="infoRows"></tbody>
         </table>
       </div>
@@ -1059,7 +1059,7 @@ th { color: var(--muted); font-weight: 700; }
                 <label for="runtimeBno085">Accelerometer</label>
                 <div class="checkbox-row"><input id="runtimeBno085" type="checkbox"><span>BNO085 enabled</span></div>
                 <label for="runtimeGps">GPS</label>
-                <div class="checkbox-row"><input id="runtimeGps" type="checkbox"><span>GPS enable pin</span></div>
+                <div class="checkbox-row"><input id="runtimeGps" type="checkbox"><span>GPS UART parser</span></div>
               </div>
               <div class="form-actions">
                 <button class="primary" id="applyRuntime">Apply Runtime</button>
@@ -1665,6 +1665,46 @@ async function fetchAccel() {
   }
 }
 
+function fmtMaybeNumber(value, digits = 2) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : "-";
+}
+
+function fmtMaybeCoord(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && Math.abs(number) > 0.00000001
+    ? number.toFixed(7)
+    : "-";
+}
+
+function fmtAgeMs(ageMs) {
+  const number = Number(ageMs);
+  if (!Number.isFinite(number) || number < 0 || number >= 0xffffffff) return "-";
+  return `${(number / 1000).toFixed(1)}s`;
+}
+
+function renderGpsCell(item) {
+  const enabled = Boolean(item.runtime_gps_enabled);
+  const powered = Boolean(item.gps_powered);
+  const uart = Boolean(item.gps_uart_ready);
+  const sentences = Number(item.gps_sentence_count || 0);
+  const fixText = item.gps_fix_quality_text || "unknown";
+  const fixClass = item.gps_fix_valid ? "ok" : (enabled ? "warn" : "muted");
+  const statusText = enabled
+    ? `${powered ? "powered" : "off"} / ${uart ? "uart" : "no uart"}`
+    : "disabled";
+  const location = item.gps_fix_valid
+    ? `${fmtMaybeCoord(item.gps_latitude_deg)}<br>${fmtMaybeCoord(item.gps_longitude_deg)}`
+    : `<span class="muted">no fix</span>`;
+  return `
+    <span class="${enabled ? "ok" : "muted"}">${esc(statusText)}</span><br>
+    <span class="${fixClass}">${esc(fixText)}</span>
+    <span class="muted">q${esc(item.gps_fix_quality ?? "-")} type ${esc(item.gps_fix_type ?? "-")}</span><br>
+    sats ${esc(item.gps_satellites ?? "-")} · hdop ${fmtMaybeNumber(item.gps_hdop, 2)}<br>
+    ${location}<br>
+    <span class="muted">rx ${fmtAgeMs(item.gps_last_rx_age_ms)} · sent ${esc(sentences)} · err ${esc(item.gps_checksum_errors ?? "-")}/${esc(item.gps_parse_errors ?? "-")}</span>`;
+}
+
 function renderInfo(snapshot) {
   state.statuses = snapshot.statuses || [];
   mergeAccelHistory(snapshot.accel_history || {});
@@ -1710,6 +1750,7 @@ function renderInfo(snapshot) {
       <td><span class="${item.wifi_connected ? "ok" : "bad"}">${item.wifi_connected ? "connected" : "offline"}</span><br>RSSI ${esc(item.wifi_connected_rssi)} dBm<br>disc ${esc(item.wifi_disconnect_count)}</td>
       <td>${esc(item.runtime_mode_name)}<br>tag ${esc(item.runtime_tag_id)} anchors ${(item.runtime_anchor_ids || []).join(",")}</td>
       <td>UWB <span class="${item.runtime_uwb_enabled ? "ok" : "muted"}">${item.runtime_uwb_enabled ? "on" : "off"}</span><br>BNO085 <span class="${item.runtime_bno085_accel_enabled ? "ok" : "muted"}">${item.runtime_bno085_accel_enabled ? "on" : "off"}</span><br><span class="muted">${esc(item.runtime_bno085_accel_interval_ms || "-")}/${esc(item.runtime_bno085_log_interval_ms || "-")} ms</span><br>GPS <span class="${item.runtime_gps_enabled ? "ok" : "muted"}">${item.runtime_gps_enabled ? "on" : "off"}</span></td>
+      <td>${renderGpsCell(item)}</td>
       <td>${esc(item.uwb_status)}<br>tx ${esc(item.uwb_tx_count)} / rx ${esc(item.uwb_rx_count)}<br>err ${esc(item.uwb_tx_error_count)}/${esc(item.uwb_rx_error_count)}</td>
       <td>${esc(item.uwb_active_antenna_delay_hex)}<br><span class="muted">NVS ${item.uwb_antenna_delay_from_nvs ? "yes" : "no"}</span></td>
       <td>log ${esc(item.wireless_log_status)}<br>dropped ${esc(item.wireless_log_dropped)}<br>tel ${esc(item.wireless_telemetry_status || "-")}<br>port ${esc(item.wireless_telemetry_port ?? item.runtime_wireless_telemetry_port ?? "-")}<br>tel drop ${esc(item.wireless_telemetry_dropped ?? "-")}<br>tel err ${esc(item.wireless_telemetry_last_error ?? "-")}<br>age ${fmtAge(item.status_updated_at)}</td>

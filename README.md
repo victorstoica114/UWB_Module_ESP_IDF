@@ -297,6 +297,19 @@ so no reboot is needed for rate-only changes. The BNO08X datasheet lists
 `Accelerometer` at a maximum configurable rate of 500 Hz, although I2C bandwidth
 and wireless log throughput still need to be considered in practice.
 
+The GPS/GNSS path is disabled by default and can be enabled live with runtime
+config (`gps=1`) or from the dashboard Settings tab. When disabled, GPIO47 is
+held inactive and the ESP32 GPS UART pins are returned to inputs so the receiver
+does not waste current through idle-high UART lines. When enabled, the
+`gps_service` task powers the receiver, opens UART1 on GPIO18/GPIO17 at 115200
+8N1, validates NMEA checksums, and parses GGA, RMC, GSA, and SkyTraq
+`$PSTI,030` summary sentences. `/status` exposes GPS power/UART state, fix
+quality, mode, satellites, HDOP, position, altitude, RTK age/ratio when present,
+and parser counters. The dashboard Info tab shows the same GPS status per
+module. NTRIP/RTCM correction forwarding is intentionally not enabled yet; the
+current implementation is a passive GNSS diagnostic suitable for testing
+modules with antennas, currently modules 3 and 5 near the window.
+
 Recommended workflow from this folder, in the ESP-IDF v6.0.2 terminal:
 
 ```bat

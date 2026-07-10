@@ -17,6 +17,7 @@
 #include "app_runtime_config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "gps_service.h"
 #include "uwb_config.h"
 #include "uwb_dw3000.h"
 #include "wifi_service.h"
@@ -43,7 +44,7 @@ enum {
     OTA_SERVICE_REBOOT_DELAY_MS = 1200,
     OTA_SERVICE_MAX_TOKEN_LEN = 128,
     OTA_SERVICE_MAX_QUERY_LEN = 768,
-    OTA_SERVICE_STATUS_RESPONSE_SIZE = 7200,
+    OTA_SERVICE_STATUS_RESPONSE_SIZE = 9200,
 };
 
 #define OTA_SERVICE_TOKEN_HEADER "X-OTA-Token"
@@ -286,7 +287,6 @@ static bool runtime_config_reboot_recommended(
                after->anchor_survey_coordinator_id ||
            before->uwb_enabled != after->uwb_enabled ||
            before->bno085_accel_enabled != after->bno085_accel_enabled ||
-           before->gps_enabled != after->gps_enabled ||
            before->radio_channel != after->radio_channel;
 }
 
@@ -346,6 +346,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     const uint16_t configured_antenna_delay =
         app_identity_get_uwb_antenna_delay();
     const app_runtime_config_t *runtime_config = app_runtime_config_get();
+    gps_service_snapshot_t gps_snapshot = {0};
+    gps_service_get_snapshot(&gps_snapshot);
 
     char *response = malloc(OTA_SERVICE_STATUS_RESPONSE_SIZE);
     if (response == NULL) {
@@ -427,6 +429,39 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_bno085_accel_interval_ms\":%lu,"
         "\"runtime_bno085_log_interval_ms\":%lu,"
         "\"runtime_gps_enabled\":%s,"
+        "\"gps_powered\":%s,"
+        "\"gps_task_running\":%s,"
+        "\"gps_uart_ready\":%s,"
+        "\"gps_last_error\":%d,"
+        "\"gps_last_error_name\":\"%s\","
+        "\"gps_fix_valid\":%s,"
+        "\"gps_fix_quality\":%d,"
+        "\"gps_fix_quality_text\":\"%s\","
+        "\"gps_fix_type\":%u,"
+        "\"gps_satellites\":%u,"
+        "\"gps_hdop\":%.2f,"
+        "\"gps_latitude_deg\":%.8f,"
+        "\"gps_longitude_deg\":%.8f,"
+        "\"gps_altitude_m\":%.2f,"
+        "\"gps_speed_mps\":%.2f,"
+        "\"gps_course_deg\":%.1f,"
+        "\"gps_rmc_status\":\"%c\","
+        "\"gps_rmc_mode\":\"%c\","
+        "\"gps_utc_time\":\"%s\","
+        "\"gps_utc_date\":\"%s\","
+        "\"gps_last_sentence\":\"%s\","
+        "\"gps_last_rx_age_ms\":%lu,"
+        "\"gps_last_fix_age_ms\":%lu,"
+        "\"gps_byte_count\":%lu,"
+        "\"gps_sentence_count\":%lu,"
+        "\"gps_gga_count\":%lu,"
+        "\"gps_rmc_count\":%lu,"
+        "\"gps_gsa_count\":%lu,"
+        "\"gps_psti030_count\":%lu,"
+        "\"gps_rtk_age_s\":%.2f,"
+        "\"gps_rtk_ratio\":%.2f,"
+        "\"gps_checksum_errors\":%lu,"
+        "\"gps_parse_errors\":%lu,"
         "\"runtime_radio_channel\":%u,"
         "\"runtime_wireless_telemetry_port\":%lu,"
         "\"uwb_status\":\"%s\","
@@ -550,6 +585,39 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)runtime_config->bno085_accel_interval_ms,
         (unsigned long)runtime_config->bno085_log_interval_ms,
         runtime_config->gps_enabled ? "true" : "false",
+        gps_snapshot.powered ? "true" : "false",
+        gps_snapshot.task_running ? "true" : "false",
+        gps_snapshot.uart_ready ? "true" : "false",
+        gps_snapshot.last_error,
+        esp_err_to_name((esp_err_t)gps_snapshot.last_error),
+        gps_snapshot.fix_valid ? "true" : "false",
+        gps_snapshot.fix_quality,
+        gps_service_fix_quality_to_string(gps_snapshot.fix_quality),
+        (unsigned)gps_snapshot.fix_type,
+        (unsigned)gps_snapshot.satellites,
+        gps_snapshot.hdop,
+        gps_snapshot.latitude_deg,
+        gps_snapshot.longitude_deg,
+        gps_snapshot.altitude_m,
+        gps_snapshot.speed_mps,
+        gps_snapshot.course_deg,
+        gps_snapshot.rmc_status != '\0' ? gps_snapshot.rmc_status : '-',
+        gps_snapshot.rmc_mode != '\0' ? gps_snapshot.rmc_mode : '-',
+        gps_snapshot.utc_time,
+        gps_snapshot.utc_date,
+        gps_snapshot.last_sentence_id,
+        (unsigned long)gps_snapshot.last_rx_age_ms,
+        (unsigned long)gps_snapshot.last_fix_age_ms,
+        (unsigned long)gps_snapshot.byte_count,
+        (unsigned long)gps_snapshot.sentence_count,
+        (unsigned long)gps_snapshot.gga_count,
+        (unsigned long)gps_snapshot.rmc_count,
+        (unsigned long)gps_snapshot.gsa_count,
+        (unsigned long)gps_snapshot.psti030_count,
+        gps_snapshot.rtk_age_s,
+        gps_snapshot.rtk_ratio,
+        (unsigned long)gps_snapshot.checksum_error_count,
+        (unsigned long)gps_snapshot.parse_error_count,
         (unsigned)runtime_radio_channel(runtime_config),
         (unsigned long)runtime_config->wireless_telemetry_port,
         uwb_dw3000_status_to_string(uwb_dw3000_get_status()),
@@ -1004,6 +1072,14 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
     }
 
     const app_runtime_config_t *active_config = app_runtime_config_get();
+    if (changed && before_config.gps_enabled != active_config->gps_enabled) {
+        const esp_err_t gps_err = gps_service_apply_runtime_config();
+        if (gps_err != ESP_OK) {
+            ESP_LOGW(TAG, "GPS runtime apply failed: %s",
+                     esp_err_to_name(gps_err));
+        }
+    }
+
     const bool reboot_recommended =
         runtime_config_reboot_recommended(&before_config, active_config);
     ESP_LOGW(TAG,

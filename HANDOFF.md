@@ -12,6 +12,11 @@ another PC or in a fresh Codex session.
 - Current default runtime is `APP_RUNTIME_MODE_UWB_RANGING`.
 - Runtime mode and common UWB test parameters can now be overridden over Wi-Fi
   with authenticated `/config/runtime` commands stored in NVS.
+- GPS/GNSS support is implemented as a disabled-by-default runtime service.
+  `gps=1` powers the PX1105R/PX1125R-class receiver, reads NMEA on UART1
+  GPIO18/GPIO17 at 115200 8N1, parses GGA/RMC/GSA/`$PSTI,030`, and exposes fix
+  status in `/status` and the dashboard Info tab. NTRIP/RTCM correction
+  forwarding is not enabled yet.
 - The DS-TWR two-module flow works and is the chosen base for the project.
 - TDoA was investigated conceptually, but we decided to stay on DS-TWR because
   precise anchor clock sync is the hard part.
@@ -30,6 +35,9 @@ another PC or in a fresh Codex session.
 - `components/app_manager/app_manager.c` decides what runtime starts.
 - `components/uwb_dw3000/uwb_dw3000.c` contains DW3000 bring-up, DS-TWR,
   calibration, and the anchor survey skeleton.
+- `components/gps_service/gps_service.c` contains the optional passive GPS/NMEA
+  reader. Modules `3` and `5` currently have GPS antennas and are the expected
+  first live test targets.
 
 ## Bring-Up On A New PC
 
