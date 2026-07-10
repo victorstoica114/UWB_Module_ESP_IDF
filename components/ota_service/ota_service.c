@@ -439,6 +439,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"gps_fix_quality_text\":\"%s\","
         "\"gps_fix_type\":%u,"
         "\"gps_satellites\":%u,"
+        "\"gps_satellites_in_view\":%u,"
         "\"gps_hdop\":%.2f,"
         "\"gps_latitude_deg\":%.8f,"
         "\"gps_longitude_deg\":%.8f,"
@@ -457,6 +458,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"gps_gga_count\":%lu,"
         "\"gps_rmc_count\":%lu,"
         "\"gps_gsa_count\":%lu,"
+        "\"gps_gsv_count\":%lu,"
         "\"gps_psti030_count\":%lu,"
         "\"gps_rtk_age_s\":%.2f,"
         "\"gps_rtk_ratio\":%.2f,"
@@ -595,6 +597,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         gps_service_fix_quality_to_string(gps_snapshot.fix_quality),
         (unsigned)gps_snapshot.fix_type,
         (unsigned)gps_snapshot.satellites,
+        (unsigned)gps_snapshot.satellites_in_view,
         gps_snapshot.hdop,
         gps_snapshot.latitude_deg,
         gps_snapshot.longitude_deg,
@@ -613,6 +616,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)gps_snapshot.gga_count,
         (unsigned long)gps_snapshot.rmc_count,
         (unsigned long)gps_snapshot.gsa_count,
+        (unsigned long)gps_snapshot.gsv_count,
         (unsigned long)gps_snapshot.psti030_count,
         gps_snapshot.rtk_age_s,
         gps_snapshot.rtk_ratio,

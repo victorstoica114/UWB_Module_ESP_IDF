@@ -34,6 +34,8 @@ enum {
     GPS_STOP_POLL_MS = 20,
     GPS_NMEA_LINE_MAX = 160,
     GPS_NMEA_FIELD_MAX = 24,
+    GPS_GSV_TALKER_SLOTS = 8,
+    GPS_GSV_WINDOW_MS = 1500,
     GPS_LOG_INTERVAL_MS = 1000,
     GPS_NO_DATA_LOG_INTERVAL_MS = 5000,
 };
@@ -53,6 +55,14 @@ static uint32_t s_last_no_data_log_ms;
 static uint32_t s_last_rx_timestamp_ms;
 static uint32_t s_last_fix_timestamp_ms;
 static gps_service_snapshot_t s_snapshot;
+
+typedef struct {
+    char talker[3];
+    uint8_t satellites_in_view;
+} gps_gsv_talker_t;
+
+static gps_gsv_talker_t s_gsv_talkers[GPS_GSV_TALKER_SLOTS];
+static uint32_t s_gsv_window_start_ms;
 
 static uint32_t ticks_to_ms(void)
 {
@@ -337,6 +347,82 @@ static void copy_sentence_id(char *destination, size_t destination_size,
     copy_field(destination, destination_size, source);
 }
 
+static bool gsv_talker_is_used(const gps_gsv_talker_t *talker)
+{
+    return talker != NULL && talker->talker[0] != '\0' &&
+           talker->talker[1] != '\0';
+}
+
+static void gsv_reset_window(uint32_t now_ms)
+{
+    memset(s_gsv_talkers, 0, sizeof(s_gsv_talkers));
+    s_gsv_window_start_ms = now_ms;
+}
+
+static uint8_t gsv_update_view_count(const char *sentence_id,
+                                     uint8_t satellites_in_view,
+                                     uint32_t now_ms)
+{
+    if (s_gsv_window_start_ms == 0 ||
+        (uint32_t)(now_ms - s_gsv_window_start_ms) > GPS_GSV_WINDOW_MS) {
+        gsv_reset_window(now_ms);
+    }
+
+    const char talker0 =
+        sentence_id != NULL && sentence_id[0] == '$' ? sentence_id[1] : '\0';
+    const char talker1 =
+        sentence_id != NULL && sentence_id[0] == '$' ? sentence_id[2] : '\0';
+    if (talker0 == '\0' || talker1 == '\0') {
+        return satellites_in_view;
+    }
+
+    gps_gsv_talker_t *slot = NULL;
+    for (size_t i = 0; i < GPS_GSV_TALKER_SLOTS; ++i) {
+        if (gsv_talker_is_used(&s_gsv_talkers[i]) &&
+            s_gsv_talkers[i].talker[0] == talker0 &&
+            s_gsv_talkers[i].talker[1] == talker1) {
+            slot = &s_gsv_talkers[i];
+            break;
+        }
+        if (slot == NULL && !gsv_talker_is_used(&s_gsv_talkers[i])) {
+            slot = &s_gsv_talkers[i];
+        }
+    }
+
+    if (slot == NULL) {
+        gsv_reset_window(now_ms);
+        slot = &s_gsv_talkers[0];
+    }
+
+    slot->talker[0] = talker0;
+    slot->talker[1] = talker1;
+    slot->talker[2] = '\0';
+    slot->satellites_in_view = satellites_in_view;
+
+    uint16_t split_talker_sum = 0;
+    uint8_t gn_aggregate = 0;
+    for (size_t i = 0; i < GPS_GSV_TALKER_SLOTS; ++i) {
+        if (!gsv_talker_is_used(&s_gsv_talkers[i])) {
+            continue;
+        }
+        if (s_gsv_talkers[i].talker[0] == 'G' &&
+            s_gsv_talkers[i].talker[1] == 'N') {
+            gn_aggregate = s_gsv_talkers[i].satellites_in_view;
+            continue;
+        }
+        split_talker_sum += s_gsv_talkers[i].satellites_in_view;
+    }
+
+    uint16_t total = split_talker_sum;
+    if (gn_aggregate > total) {
+        total = gn_aggregate;
+    }
+    if (total > UINT8_MAX) {
+        total = UINT8_MAX;
+    }
+    return (uint8_t)total;
+}
+
 static void gps_note_bytes(size_t len)
 {
     if (gps_lock(pdMS_TO_TICKS(20))) {
@@ -383,6 +469,9 @@ static void parse_gga(char *fields[], size_t count, uint32_t now_ms)
         }
         if (have_sats) {
             s_snapshot.satellites = satellites;
+            if (s_snapshot.satellites_in_view < satellites) {
+                s_snapshot.satellites_in_view = satellites;
+            }
         }
         if (have_hdop) {
             s_snapshot.hdop = hdop;
@@ -490,6 +579,32 @@ static void parse_gsa(char *fields[], size_t count)
     }
 }
 
+static void parse_gsv(char *fields[], size_t count, uint32_t now_ms)
+{
+    if (count < 4) {
+        gps_note_parse_error();
+        return;
+    }
+
+    uint8_t satellites_in_view = 0;
+    if (!parse_u8_field(fields[3], &satellites_in_view)) {
+        gps_note_parse_error();
+        return;
+    }
+
+    const uint8_t window_view_count =
+        gsv_update_view_count(fields[0], satellites_in_view, now_ms);
+
+    if (gps_lock(pdMS_TO_TICKS(20))) {
+        s_snapshot.gsv_count++;
+        s_snapshot.satellites_in_view = window_view_count;
+        if (s_snapshot.satellites_in_view < s_snapshot.satellites) {
+            s_snapshot.satellites_in_view = s_snapshot.satellites;
+        }
+        gps_unlock();
+    }
+}
+
 static void parse_psti030(char *fields[], size_t count)
 {
     if (count < 14 || strcmp(fields[1], "030") != 0) {
@@ -577,6 +692,8 @@ static void gps_handle_nmea_line(const char *line)
         parse_rmc(fields, count, now_ms);
     } else if (sentence_type_is(fields[0], "GSA")) {
         parse_gsa(fields, count);
+    } else if (sentence_type_is(fields[0], "GSV")) {
+        parse_gsv(fields, count, now_ms);
     } else if (strcmp(fields[0], "$PSTI") == 0) {
         parse_psti030(fields, count);
     }
@@ -639,17 +756,19 @@ static void gps_log_summary_if_needed(void)
     s_last_log_ms = now_ms;
 
     ESP_LOGI(TAG,
-             "GPS summary fix=%s q=%d type=%u sats=%u hdop=%.2f lat=%.7f lon=%.7f alt=%.2f speed=%.2f mode=%c age_rx=%lu age_fix=%lu sent=%lu gga=%lu rmc=%lu psti030=%lu csum=%lu parse=%lu",
+             "GPS summary fix=%s q=%d type=%u sats=%u view=%u hdop=%.2f lat=%.7f lon=%.7f alt=%.2f speed=%.2f mode=%c age_rx=%lu age_fix=%lu sent=%lu gga=%lu rmc=%lu gsv=%lu psti030=%lu csum=%lu parse=%lu",
              snapshot.fix_valid ? "valid" : "invalid", snapshot.fix_quality,
              (unsigned)snapshot.fix_type, (unsigned)snapshot.satellites,
-             snapshot.hdop, snapshot.latitude_deg, snapshot.longitude_deg,
-             snapshot.altitude_m, snapshot.speed_mps,
+             (unsigned)snapshot.satellites_in_view, snapshot.hdop,
+             snapshot.latitude_deg, snapshot.longitude_deg, snapshot.altitude_m,
+             snapshot.speed_mps,
              snapshot.rmc_mode != '\0' ? snapshot.rmc_mode : '-',
              (unsigned long)snapshot.last_rx_age_ms,
              (unsigned long)snapshot.last_fix_age_ms,
              (unsigned long)snapshot.sentence_count,
              (unsigned long)snapshot.gga_count,
              (unsigned long)snapshot.rmc_count,
+             (unsigned long)snapshot.gsv_count,
              (unsigned long)snapshot.psti030_count,
              (unsigned long)snapshot.checksum_error_count,
              (unsigned long)snapshot.parse_error_count);
@@ -707,6 +826,7 @@ static void gps_task(void *arg)
     s_stop_requested = false;
     s_last_log_ms = 0;
     s_last_no_data_log_ms = ticks_to_ms();
+    gsv_reset_window(s_last_no_data_log_ms);
 
     if (gps_lock(pdMS_TO_TICKS(50))) {
         memset(&s_snapshot, 0, sizeof(s_snapshot));

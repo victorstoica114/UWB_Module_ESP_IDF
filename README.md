@@ -302,11 +302,11 @@ config (`gps=1`) or from the dashboard Settings tab. When disabled, GPIO47 is
 held inactive and the ESP32 GPS UART pins are returned to inputs so the receiver
 does not waste current through idle-high UART lines. When enabled, the
 `gps_service` task powers the receiver, opens UART1 on GPIO18/GPIO17 at 115200
-8N1, validates NMEA checksums, and parses GGA, RMC, GSA, and SkyTraq
+8N1, validates NMEA checksums, and parses GGA, RMC, GSA, GSV, and SkyTraq
 `$PSTI,030` summary sentences. `/status` exposes GPS power/UART state, fix
-quality, mode, satellites, HDOP, position, altitude, RTK age/ratio when present,
-and parser counters. The dashboard Info tab shows the same GPS status per
-module. NTRIP/RTCM correction forwarding is intentionally not enabled yet; the
+quality, mode, satellites used/in view, HDOP, position, altitude, RTK age/ratio
+when present, and parser counters. The dashboard Info tab shows the same GPS
+status per module. NTRIP/RTCM correction forwarding is intentionally not enabled yet; the
 current implementation is a passive GNSS diagnostic suitable for testing
 modules with antennas, currently modules 3 and 5 near the window.
 

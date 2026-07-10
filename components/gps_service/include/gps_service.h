@@ -22,6 +22,7 @@ typedef struct {
     uint32_t gga_count;
     uint32_t rmc_count;
     uint32_t gsa_count;
+    uint32_t gsv_count;
     uint32_t psti030_count;
     uint32_t checksum_error_count;
     uint32_t parse_error_count;
@@ -29,6 +30,7 @@ typedef struct {
     int fix_quality;
     uint8_t fix_type;
     uint8_t satellites;
+    uint8_t satellites_in_view;
     double hdop;
     double latitude_deg;
     double longitude_deg;

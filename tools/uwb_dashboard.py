@@ -1693,6 +1693,8 @@ function renderGpsCell(item) {
   const statusText = enabled
     ? `${powered ? "powered" : "off"} / ${uart ? "uart" : "no uart"}`
     : "disabled";
+  const satsUsed = item.gps_satellites ?? "-";
+  const satsView = item.gps_satellites_in_view ?? "-";
   const location = item.gps_fix_valid
     ? `${fmtMaybeCoord(item.gps_latitude_deg)}<br>${fmtMaybeCoord(item.gps_longitude_deg)}`
     : `<span class="muted">no fix</span>`;
@@ -1700,7 +1702,7 @@ function renderGpsCell(item) {
     <span class="${enabled ? "ok" : "muted"}">${esc(statusText)}</span><br>
     <span class="${fixClass}">${esc(fixText)}</span>
     <span class="muted">q${esc(item.gps_fix_quality ?? "-")} type ${esc(item.gps_fix_type ?? "-")}</span><br>
-    sats ${esc(item.gps_satellites ?? "-")} · hdop ${fmtMaybeNumber(item.gps_hdop, 2)}<br>
+    sats ${esc(satsUsed)}/${esc(satsView)} · hdop ${fmtMaybeNumber(item.gps_hdop, 2)}<br>
     ${location}<br>
     <span class="muted">rx ${fmtAgeMs(item.gps_last_rx_age_ms)} · sent ${esc(sentences)} · err ${esc(item.gps_checksum_errors ?? "-")}/${esc(item.gps_parse_errors ?? "-")}</span>`;
 }

@@ -14,8 +14,8 @@ another PC or in a fresh Codex session.
   with authenticated `/config/runtime` commands stored in NVS.
 - GPS/GNSS support is implemented as a disabled-by-default runtime service.
   `gps=1` powers the PX1105R/PX1125R-class receiver, reads NMEA on UART1
-  GPIO18/GPIO17 at 115200 8N1, parses GGA/RMC/GSA/`$PSTI,030`, and exposes fix
-  status in `/status` and the dashboard Info tab. NTRIP/RTCM correction
+  GPIO18/GPIO17 at 115200 8N1, parses GGA/RMC/GSA/GSV/`$PSTI,030`, and exposes
+  fix status in `/status` and the dashboard Info tab. NTRIP/RTCM correction
   forwarding is not enabled yet.
 - The DS-TWR two-module flow works and is the chosen base for the project.
 - TDoA was investigated conceptually, but we decided to stay on DS-TWR because
@@ -37,7 +37,9 @@ another PC or in a fresh Codex session.
   calibration, and the anchor survey skeleton.
 - `components/gps_service/gps_service.c` contains the optional passive GPS/NMEA
   reader. Modules `3` and `5` currently have GPS antennas and are the expected
-  first live test targets.
+  first live test targets. It reports satellites used and satellites in view
+  separately, which helps diagnose a receiver that sees sky but does not have a
+  fix yet.
 
 ## Bring-Up On A New PC
 
