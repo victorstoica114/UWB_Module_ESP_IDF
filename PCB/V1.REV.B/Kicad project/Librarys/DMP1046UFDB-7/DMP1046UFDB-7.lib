@@ -1,0 +1,29 @@
+EESchema-LIBRARY Version 2.3
+#encoding utf-8
+#SamacSys ECAD Model DMP1046UFDB-7
+#/732683/121426/2.50/8/2/MOSFET (P-Channel)
+DEF DMP1046UFDB-7 Q 0 30 Y Y 1 F N
+F0 "Q" 950 300 50 H V L CNN
+F1 "DMP1046UFDB-7" 950 200 50 H V L CNN
+F2 "DMP1046UFDB7" 950 100 50 H I L CNN
+F3 "https://www.diodes.com/assets/Datasheets/DMP1046UFDB.pdf" 950 0 50 H I L CNN
+F4 "DUAL P-CHANNEL ENHANCEMENT MODE MOSFET, Mosfet Array 12V 3.8A 1.4W Surface Mount U-DFN2020-6 (Type B)" 950 -100 50 H I L CNN "Description"
+F5 "0.605" 950 -200 50 H I L CNN "Height"
+F6 "621-DMP1046UFDB-7" 950 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Diodes-Incorporated/DMP1046UFDB-7?qs=BvpHGKeVh3ojFifJartrZQ%3D%3D" 950 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Diodes Incorporated" 950 -500 50 H I L CNN "Manufacturer_Name"
+F9 "DMP1046UFDB-7" 950 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X S1 1 0 0 200 R 50 50 0 0 P
+X G1 2 0 -100 200 R 50 50 0 0 P
+X D2_1 3 0 -200 200 R 50 50 0 0 P
+X S2 4 0 -300 200 R 50 50 0 0 P
+X G2 5 1100 0 200 L 50 50 0 0 P
+X D1_1 6 1100 -100 200 L 50 50 0 0 P
+X D1_2 7 1100 -200 200 L 50 50 0 0 P
+X D2_2 8 1100 -300 200 L 50 50 0 0 P
+P 5 0 1 6 200 100 900 100 900 -400 200 -400 200 100 N
+ENDDRAW
+ENDDEF
+#
+#End Library

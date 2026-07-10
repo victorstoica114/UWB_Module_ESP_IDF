@@ -1,0 +1,10 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "ESP32-WROVER-E-N4R8")(type "KiCad")(uri "${KIPRJMOD}/Librarys/ESP32-WROVER-E-N4R8/ESP32-WROVER-E-N4R8.kicad_sym")(options "")(descr ""))
+  (lib (name "BNO085")(type "KiCad")(uri "${KIPRJMOD}/Librarys/BNO085/BNO085.kicad_sym")(options "")(descr ""))
+  (lib (name "BQ25792RQMR")(type "KiCad")(uri "${KIPRJMOD}/Librarys/BQ25792RQMR/BQ25792RQMR.kicad_sym")(options "")(descr ""))
+  (lib (name "PX1125R")(type "KiCad")(uri "${KIPRJMOD}/Librarys/PX1125R/PX1125R.kicad_sym")(options "")(descr ""))
+  (lib (name "TPS630702RNMT")(type "KiCad")(uri "${KIPRJMOD}/Librarys/TPS630702RNMT/TPS630702RNMT.kicad_sym")(options "")(descr ""))
+  (lib (name "B39162B2651P810")(type "KiCad")(uri "${KIPRJMOD}/Librarys/B39162B2651P810/B39162B2651P810.kicad_sym")(options "")(descr ""))
+  (lib (name "MAX77958EWV")(type "KiCad")(uri "${KIPRJMOD}/Librarys/MAX77958EWV/MAX77958EWV.kicad_sym")(options "")(descr ""))
+)

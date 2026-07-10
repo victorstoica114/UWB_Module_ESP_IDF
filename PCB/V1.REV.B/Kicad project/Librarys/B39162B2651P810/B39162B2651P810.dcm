@@ -1,0 +1,9 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP B39162B2651P810
+D Signal Conditioning Band Pass Filter, GNSS, 1210, -, Size=1.5x1.1 , 50 Ohms , 1.21 GHz, 1.5775 GHz , -40C ~ +105C
+K
+F 
+$ENDCMP
+#
+#End Doc Library

@@ -1,0 +1,9 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP DMP1046UFDB-7
+D DUAL P-CHANNEL ENHANCEMENT MODE MOSFET, Mosfet Array 12V 3.8A 1.4W Surface Mount U-DFN2020-6 (Type B)
+K
+F https://www.diodes.com/assets/Datasheets/DMP1046UFDB.pdf
+$ENDCMP
+#
+#End Doc Library

@@ -1,0 +1,13 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "ESP32-WROVER-E-N4R8")(type "KiCad")(uri "${KIPRJMOD}/Librarys/ESP32-WROVER-E-N4R8")(options "")(descr ""))
+  (lib (name "BNO085")(type "KiCad")(uri "${KIPRJMOD}/Librarys/BNO085")(options "")(descr ""))
+  (lib (name "PX1125R")(type "KiCad")(uri "${KIPRJMOD}/Librarys/PX1125R/PX1125R.pretty")(options "")(descr ""))
+  (lib (name "TPS630702RNMT")(type "KiCad")(uri "${KIPRJMOD}/Librarys/TPS630702RNMT")(options "")(descr ""))
+  (lib (name "B39162B2651P810")(type "KiCad")(uri "${KIPRJMOD}/Librarys/B39162B2651P810")(options "")(descr ""))
+  (lib (name "BQ25792RQMR")(type "KiCad")(uri "${KIPRJMOD}/Librarys/BQ25792RQMR")(options "")(descr ""))
+  (lib (name "DMP1046UFDB-7")(type "KiCad")(uri "${KIPRJMOD}/Librarys/DMP1046UFDB-7")(options "")(descr ""))
+  (lib (name "B39162B3520U410")(type "KiCad")(uri "${KIPRJMOD}/Librarys/B39162B3520U410")(options "")(descr ""))
+  (lib (name "MAX77958EWV")(type "KiCad")(uri "${KIPRJMOD}/Librarys/MAX77958EWV")(options "")(descr ""))
+  (lib (name "MPM3612GLQ-33-P")(type "KiCad")(uri "${KIPRJMOD}/Librarys/MPM3612GLQ-33-P")(options "")(descr ""))
+)

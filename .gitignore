@@ -13,3 +13,6 @@ reference/external/
 **/.secrets/
 __pycache__/
 *.pyc
+*.bak
+*.kicad_prl
+fp-info-cache

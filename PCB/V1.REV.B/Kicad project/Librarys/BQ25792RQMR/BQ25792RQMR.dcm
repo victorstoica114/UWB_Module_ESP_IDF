@@ -1,0 +1,9 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP BQ25792RQMR
+D BQ25792 I 2C Controlled, 1-4 Cell, 5-A Buck-Boost Battery Charger with Dual-Input Selector and USB PD 3.0 OTG Output
+K
+F 
+$ENDCMP
+#
+#End Doc Library
