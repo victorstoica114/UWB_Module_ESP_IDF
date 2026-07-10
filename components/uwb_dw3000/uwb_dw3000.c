@@ -407,6 +407,57 @@ static int gpio_level_inactive(int active_high)
     return active_high ? 0 : 1;
 }
 
+static uint8_t uwb_dw3000_runtime_radio_channel(void)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    return config->radio_channel == 9U ? 9U : 5U;
+}
+
+static uint8_t uwb_dw3000_runtime_radio_rf_channel_bit(void)
+{
+    return uwb_dw3000_runtime_radio_channel() == 9U ? 1U : 0U;
+}
+
+static uint8_t uwb_dw3000_runtime_radio_profile(void)
+{
+    return uwb_dw3000_runtime_radio_channel() == 9U
+               ? APP_UWB_RADIO_PROFILE_LEGACY_CH9_6M8_PLEN128
+               : APP_UWB_RADIO_PROFILE_LEGACY_CH5_6M8_PLEN128;
+}
+
+static uint32_t uwb_dw3000_runtime_rf_tx_ctrl_2(void)
+{
+    return uwb_dw3000_runtime_radio_channel() == 9U
+               ? APP_UWB_RADIO_RF_TX_CTRL_2_CH9
+               : APP_UWB_RADIO_RF_TX_CTRL_2_CH5;
+}
+
+static uint32_t uwb_dw3000_runtime_pll_cfg_final(void)
+{
+    return uwb_dw3000_runtime_radio_channel() == 9U
+               ? APP_UWB_RADIO_PLL_CFG_FINAL_CH9
+               : APP_UWB_RADIO_PLL_CFG_FINAL_CH5;
+}
+
+static uint32_t uwb_dw3000_runtime_dgc_lut(size_t index)
+{
+    static const uint32_t ch5[] = {
+        APP_UWB_DGC_LUT_CH5_0, APP_UWB_DGC_LUT_CH5_1,
+        APP_UWB_DGC_LUT_CH5_2, APP_UWB_DGC_LUT_CH5_3,
+        APP_UWB_DGC_LUT_CH5_4, APP_UWB_DGC_LUT_CH5_5,
+        APP_UWB_DGC_LUT_CH5_6,
+    };
+    static const uint32_t ch9[] = {
+        APP_UWB_DGC_LUT_CH9_0, APP_UWB_DGC_LUT_CH9_1,
+        APP_UWB_DGC_LUT_CH9_2, APP_UWB_DGC_LUT_CH9_3,
+        APP_UWB_DGC_LUT_CH9_4, APP_UWB_DGC_LUT_CH9_5,
+        APP_UWB_DGC_LUT_CH9_6,
+    };
+    const uint32_t *lut =
+        uwb_dw3000_runtime_radio_channel() == 9U ? ch9 : ch5;
+    return index < 7U ? lut[index] : lut[0];
+}
+
 static void uwb_dw3000_delay_ms(uint32_t delay_ms)
 {
     TickType_t ticks = pdMS_TO_TICKS(delay_ms);
@@ -557,6 +608,38 @@ static esp_err_t uwb_dw3000_configure_host_irq(void)
     ESP_LOGI(TAG, "DW3000 host IRQ disabled by config");
     return ESP_OK;
 #endif
+}
+
+esp_err_t uwb_dw3000_hold_in_reset(void)
+{
+    const uint64_t output_pin_mask =
+        (1ULL << BOARD_CONFIG_UWB_CS_GPIO) |
+        (1ULL << BOARD_CONFIG_UWB_WAKEUP_GPIO) |
+        (1ULL << BOARD_CONFIG_UWB_RST_GPIO);
+
+    const gpio_config_t output_config = {
+        .pin_bit_mask = output_pin_mask,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&output_config), TAG,
+                        "configure UWB reset GPIOs failed");
+    ESP_RETURN_ON_ERROR(gpio_set_level(BOARD_CONFIG_UWB_CS_GPIO, 1), TAG,
+                        "set UWB CS high failed");
+    ESP_RETURN_ON_ERROR(
+        gpio_set_level(BOARD_CONFIG_UWB_WAKEUP_GPIO,
+                       gpio_level_inactive(BOARD_CONFIG_UWB_WAKEUP_ACTIVE_HIGH)),
+        TAG, "set UWB WAKEUP inactive failed");
+    ESP_RETURN_ON_ERROR(
+        gpio_set_level(BOARD_CONFIG_UWB_RST_GPIO,
+                       gpio_level_active(BOARD_CONFIG_UWB_RST_ACTIVE_HIGH)),
+        TAG, "hold UWB RST active failed");
+
+    s_status = UWB_DW3000_STATUS_IDLE;
+    ESP_LOGW(TAG, "DW3000 held in reset for low-power/component-disable mode");
+    return ESP_OK;
 }
 
 static esp_err_t uwb_dw3000_hardware_reset(void)
@@ -793,7 +876,7 @@ static esp_err_t uwb_dw3000_read_clock_offset_raw(int32_t *clock_offset_raw)
 
 static double uwb_dw3000_clock_offset_ratio(int32_t clock_offset_raw)
 {
-    const double factor = APP_UWB_RADIO_RF_CHANNEL_BIT == 0
+    const double factor = uwb_dw3000_runtime_radio_rf_channel_bit() == 0
                               ? DW3000_CLOCK_OFFSET_CH5_FACTOR
                               : DW3000_CLOCK_OFFSET_CH9_FACTOR;
     return (double)clock_offset_raw * factor;
@@ -1449,7 +1532,7 @@ static uint16_t uwb_dw3000_preamble_len_symbols(uint8_t preamble_len_code)
 
 static esp_err_t uwb_dw3000_validate_radio_profile(void)
 {
-    if (APP_UWB_RADIO_RF_CHANNEL_BIT > 1 ||
+    if (uwb_dw3000_runtime_radio_rf_channel_bit() > 1 ||
         APP_UWB_RADIO_SFD_TYPE > 3 ||
         APP_UWB_RADIO_PREAMBLE_CODE > 31 ||
         APP_UWB_RADIO_PREAMBLE_LEN_CODE > 0x0F ||
@@ -1482,7 +1565,8 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
     ESP_RETURN_ON_ERROR(uwb_dw3000_validate_radio_profile(), TAG,
                         "invalid radio profile");
 
-    const uint8_t channel = APP_UWB_RADIO_RF_CHANNEL_BIT;
+    const uint8_t channel = uwb_dw3000_runtime_radio_rf_channel_bit();
+    const uint8_t channel_number = uwb_dw3000_runtime_radio_channel();
     const uint8_t preamble_len = APP_UWB_RADIO_PREAMBLE_LEN_CODE;
     const uint8_t preamble_code = APP_UWB_RADIO_PREAMBLE_CODE;
     const uint8_t pac = APP_UWB_RADIO_PAC;
@@ -1493,8 +1577,8 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
 
     ESP_LOGI(TAG,
              "DW3000 radio profile: profile=%u channel=%u rf_bit=%u plen=%u(code=0x%02x) pcode=%u pac=%u br=%s phr_mode=%u phr_rate=%u sfd=%u",
-             (unsigned)APP_UWB_RADIO_PROFILE,
-             (unsigned)APP_UWB_RADIO_CHANNEL, (unsigned)channel,
+             (unsigned)uwb_dw3000_runtime_radio_profile(),
+             (unsigned)channel_number, (unsigned)channel,
              (unsigned)uwb_dw3000_preamble_len_symbols(preamble_len),
              (unsigned)preamble_len, (unsigned)preamble_code, (unsigned)pac,
              uwb_dw3000_radio_data_rate_name(datarate), (unsigned)phr_mode,
@@ -1503,9 +1587,9 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
              "DW3000 RF profile: pg=0x%02x power=0x%08lx rf_tx2=0x%08lx pll=0x%04x pll_final=0x%04x",
              (unsigned)APP_UWB_RADIO_TX_PG_DELAY,
              (unsigned long)APP_UWB_RADIO_TX_POWER,
-             (unsigned long)APP_UWB_RADIO_RF_TX_CTRL_2,
+             (unsigned long)uwb_dw3000_runtime_rf_tx_ctrl_2(),
              (unsigned)APP_UWB_RADIO_PLL_CFG,
-             (unsigned)APP_UWB_RADIO_PLL_CFG_FINAL);
+             (unsigned)uwb_dw3000_runtime_pll_cfg_final());
 
     const uint32_t usr_cfg = (0x188U & 0xFFFU) |
                              ((uint32_t)phr_mode << 3) |
@@ -1575,7 +1659,7 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
                         TAG, "DRX 0x02 write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1C,
-                                  APP_UWB_RADIO_RF_TX_CTRL_2),
+                                  uwb_dw3000_runtime_rf_tx_ctrl_2()),
         TAG, "RF_TX_CTRL_2 write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_FS_CTRL, 0x00,
@@ -1841,31 +1925,31 @@ static esp_err_t uwb_dw3000_radio_init(void)
         "DGC_CFG1 write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x38,
-                                  APP_UWB_DGC_LUT_0), TAG,
+                                  uwb_dw3000_runtime_dgc_lut(0)), TAG,
         "DGC_LUT_0 write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x3C,
-                                  APP_UWB_DGC_LUT_1), TAG,
+                                  uwb_dw3000_runtime_dgc_lut(1)), TAG,
         "DGC_LUT_1 write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x40,
-                                  APP_UWB_DGC_LUT_2), TAG,
+                                  uwb_dw3000_runtime_dgc_lut(2)), TAG,
         "DGC_LUT_2 write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x44,
-                                  APP_UWB_DGC_LUT_3), TAG,
+                                  uwb_dw3000_runtime_dgc_lut(3)), TAG,
         "DGC_LUT_3 write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x48,
-                                  APP_UWB_DGC_LUT_4), TAG,
+                                  uwb_dw3000_runtime_dgc_lut(4)), TAG,
         "DGC_LUT_4 write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x4C,
-                                  APP_UWB_DGC_LUT_5), TAG,
+                                  uwb_dw3000_runtime_dgc_lut(5)), TAG,
         "DGC_LUT_5 write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x50,
-                                  APP_UWB_DGC_LUT_6), TAG,
+                                  uwb_dw3000_runtime_dgc_lut(6)), TAG,
         "DGC_LUT_6 write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x18, 0xE5E5), TAG,
@@ -1885,11 +1969,11 @@ static esp_err_t uwb_dw3000_radio_init(void)
         TAG, "RF_TX_CTRL_1 final write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1C,
-                                  APP_UWB_RADIO_RF_TX_CTRL_2),
+                                  uwb_dw3000_runtime_rf_tx_ctrl_2()),
         TAG, "RF_TX_CTRL_2 final write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_FS_CTRL, 0x00,
-                                  APP_UWB_RADIO_PLL_CFG_FINAL),
+                                  uwb_dw3000_runtime_pll_cfg_final()),
         TAG,
         "PLL_CFG final write failed");
     ESP_RETURN_ON_ERROR(

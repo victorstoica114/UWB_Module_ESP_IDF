@@ -5,6 +5,7 @@ import re
 import select
 import socket
 import sys
+import time
 
 
 class Ansi:
@@ -128,6 +129,17 @@ def close_client(sock, clients, buffers):
     buffers.pop(sock, None)
 
 
+def open_output_file(path):
+    if not path:
+        return None
+
+    absolute = os.path.abspath(path)
+    parent = os.path.dirname(absolute)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    return open(absolute, "a", encoding="utf-8", buffering=1024 * 1024)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Listen for ESP32 TCP logs")
     parser.add_argument("--host", default="0.0.0.0", help="Local bind host")
@@ -142,11 +154,28 @@ def main():
         action="store_true",
         help="Force ANSI colors even when terminal auto-detection fails",
     )
+    parser.add_argument(
+        "--output",
+        default="",
+        help="Append all received log lines to this file",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Do not print every log line to the terminal",
+    )
+    parser.add_argument(
+        "--summary-interval",
+        type=float,
+        default=5.0,
+        help="Seconds between quiet-mode progress summaries; 0 disables them",
+    )
     args = parser.parse_args()
     enable_windows_vt_mode()
     color_enabled = supports_color(
         no_color=args.no_color, force_color=args.force_color
     )
+    output_file = open_output_file(args.output)
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -160,9 +189,56 @@ def main():
         return 1
 
     print(f"Listening for wireless logs on {args.host}:{args.port}", flush=True)
+    if output_file is not None:
+        print(f"Writing wireless logs to {os.path.abspath(args.output)}", flush=True)
 
     clients = {}
     buffers = {}
+    received_lines = 0
+    received_bytes = 0
+    last_summary = time.monotonic()
+
+    def write_output(line):
+        if output_file is not None:
+            output_file.write(line + "\n")
+
+    def emit_event(message):
+        print(message, flush=True)
+        write_output(message)
+
+    def emit_log_line(addr, text):
+        nonlocal received_lines, received_bytes
+        received_lines += 1
+        received_bytes += len(text) + 1
+
+        source_plain = f"{addr[0]}:{addr[1]}"
+        file_line = f"{source_plain} | {format_payload(text, False)}"
+        write_output(file_line)
+
+        if not args.quiet:
+            source = paint(source_plain, Ansi.DIM, color_enabled)
+            payload = format_payload(text, color_enabled)
+            print(f"{source} | {payload}", flush=True)
+
+    def maybe_emit_summary():
+        nonlocal last_summary
+        if not args.quiet or args.summary_interval <= 0:
+            return
+
+        now = time.monotonic()
+        if now - last_summary < args.summary_interval:
+            return
+
+        last_summary = now
+        if output_file is not None:
+            output_file.flush()
+        print(
+            "summary: "
+            f"clients={len(clients)} lines={received_lines} "
+            f"bytes={received_bytes}",
+            flush=True,
+        )
+
     try:
         while True:
             read_list = [server]
@@ -175,7 +251,7 @@ def main():
                     conn.setblocking(False)
                     clients[conn] = addr
                     buffers[conn] = b""
-                    print(f"Client connected: {addr[0]}:{addr[1]}", flush=True)
+                    emit_event(f"Client connected: {addr[0]}:{addr[1]}")
                     continue
 
                 addr = clients.get(ready, ("unknown", 0))
@@ -190,11 +266,9 @@ def main():
                     if pending:
                         text = pending.decode("utf-8", errors="replace").strip()
                         if text:
-                            source = paint(f"{addr[0]}:{addr[1]}", Ansi.DIM, color_enabled)
-                            payload = format_payload(text, color_enabled)
-                            print(f"{source} | {payload}", flush=True)
+                            emit_log_line(addr, text)
                     close_client(ready, clients, buffers)
-                    print(f"Client disconnected: {addr[0]}:{addr[1]}", flush=True)
+                    emit_event(f"Client disconnected: {addr[0]}:{addr[1]}")
                     continue
 
                 buf = buffers.get(ready, b"") + data
@@ -206,13 +280,15 @@ def main():
                     buf = buf[newline + 1 :]
                     text = raw_line.decode("utf-8", errors="replace").strip("\r")
                     if text:
-                        source = paint(f"{addr[0]}:{addr[1]}", Ansi.DIM, color_enabled)
-                        payload = format_payload(text, color_enabled)
-                        print(f"{source} | {payload}", flush=True)
+                        emit_log_line(addr, text)
                 buffers[ready] = buf
+            maybe_emit_summary()
     except KeyboardInterrupt:
         print("\nStopped.", flush=True)
     finally:
+        if output_file is not None:
+            output_file.flush()
+            output_file.close()
         for client in list(clients.keys()):
             close_client(client, clients, buffers)
         server.close()

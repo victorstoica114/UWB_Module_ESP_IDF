@@ -6,13 +6,16 @@
 #include <string.h>
 
 #include "app_config.h"
+#include "app_runtime_config.h"
 #include "board_config.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "wireless_telemetry_service.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "bno085_service";
@@ -20,10 +23,9 @@ static const char *TAG = "bno085_service";
 enum {
     BNO085_I2C_PORT = 0,
     BNO085_TASK_STACK_WORDS = 4096,
-    BNO085_TASK_PRIORITY = 4,
+    BNO085_TASK_PRIORITY = 5,
     BNO085_SHTP_HEADER_LEN = 4,
-    BNO085_MAX_PACKET_LEN = 256,
-    BNO085_I2C_PAYLOAD_CHUNK_LEN = 28,
+    BNO085_MAX_PACKET_LEN = 512,
     BNO085_READ_TIMEOUT_MS = 20,
     BNO085_WRITE_TIMEOUT_MS = 100,
     BNO085_STARTUP_DRAIN_MS = 500,
@@ -31,6 +33,7 @@ enum {
     BNO085_RESET_PULSE_MS = 20,
     BNO085_BOOT_AFTER_RESET_MS = 800,
     BNO085_MAX_PACKETS_PER_WAKE = 16,
+    BNO085_STALL_RECOVERY_MS = 5000,
     BNO085_ACCEL_REPORT_LEN = 10,
     BNO085_TIMEBASE_REPORT_LEN = 5,
     BNO085_CHANNEL_CONTROL = 2,
@@ -68,6 +71,13 @@ static float s_last_z_mps2;
 static uint8_t s_last_accuracy;
 static uint32_t s_last_log_ms;
 static uint32_t s_last_read_warning_ms;
+static uint32_t s_configured_accel_interval_ms;
+static uint32_t s_last_reconfigure_warning_ms;
+static uint32_t s_last_progress_ms;
+static uint32_t s_last_progress_report_count;
+static uint32_t s_last_stall_recovery_ms;
+
+static void bno085_drain_startup_packets(void);
 
 static uint16_t read_le_u16(const uint8_t *data)
 {
@@ -90,6 +100,11 @@ static float q_to_float(int16_t raw, uint8_t q_point)
     return (float)raw / (float)(1U << q_point);
 }
 
+static int32_t float_to_milli(float value)
+{
+    return (int32_t)(value * 1000.0f + (value >= 0.0f ? 0.5f : -0.5f));
+}
+
 static uint32_t ticks_to_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
@@ -107,6 +122,45 @@ static TickType_t ms_to_ticks_min_1(uint32_t delay_ms)
 static int bno085_reset_release_level(void)
 {
     return BOARD_CONFIG_BNO085_RST_ACTIVE_LEVEL ? 0 : 1;
+}
+
+static uint32_t bno085_accel_interval_ms(void)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    if (config != NULL && config->bno085_accel_interval_ms > 0) {
+        return config->bno085_accel_interval_ms;
+    }
+    return APP_BNO085_ACCEL_INTERVAL_MS;
+}
+
+static uint32_t bno085_log_interval_ms(void)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    if (config != NULL && config->bno085_log_interval_ms > 0) {
+        return config->bno085_log_interval_ms;
+    }
+    return APP_BNO085_LOG_INTERVAL_MS;
+}
+
+static esp_err_t bno085_hold_in_reset(void)
+{
+    const gpio_config_t reset_config = {
+        .pin_bit_mask = 1ULL << BOARD_CONFIG_BNO085_RST_GPIO,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&reset_config), TAG,
+                        "BNO085 reset GPIO init failed");
+    ESP_RETURN_ON_ERROR(
+        gpio_set_level(BOARD_CONFIG_BNO085_RST_GPIO,
+                       BOARD_CONFIG_BNO085_RST_ACTIVE_LEVEL),
+        TAG, "BNO085 reset hold failed");
+    ESP_LOGI(TAG, "BNO085 held in reset on GPIO%d active-%s",
+             BOARD_CONFIG_BNO085_RST_GPIO,
+             BOARD_CONFIG_BNO085_RST_ACTIVE_LEVEL ? "high" : "low");
+    return ESP_OK;
 }
 
 static bool bno085_int_active(void)
@@ -275,34 +329,21 @@ static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
         memcpy(packet, header, sizeof(header));
     }
 
-    size_t copied = 0;
-    size_t remaining = payload_len;
-    while (remaining > 0) {
-        const size_t chunk_payload_len =
-            remaining > BNO085_I2C_PAYLOAD_CHUNK_LEN
-                ? BNO085_I2C_PAYLOAD_CHUNK_LEN
-                : remaining;
-        uint8_t chunk[BNO085_SHTP_HEADER_LEN + BNO085_I2C_PAYLOAD_CHUNK_LEN] =
-            {0};
+    if (total_len > packet_size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
 
+    if (payload_len > 0) {
+        uint8_t chunk[BNO085_MAX_PACKET_LEN] = {0};
         err = i2c_master_receive(s_i2c_dev, chunk,
-                                 chunk_payload_len + BNO085_SHTP_HEADER_LEN,
+                                 payload_len + BNO085_SHTP_HEADER_LEN,
                                  BNO085_READ_TIMEOUT_MS);
         if (err != ESP_OK) {
             return err;
         }
 
-        if (total_len <= packet_size) {
-            memcpy(&packet[BNO085_SHTP_HEADER_LEN + copied],
-                   &chunk[BNO085_SHTP_HEADER_LEN], chunk_payload_len);
-        }
-
-        copied += chunk_payload_len;
-        remaining -= chunk_payload_len;
-    }
-
-    if (total_len > packet_size) {
-        return ESP_ERR_INVALID_SIZE;
+        memcpy(&packet[BNO085_SHTP_HEADER_LEN],
+               &chunk[BNO085_SHTP_HEADER_LEN], payload_len);
     }
 
     *packet_len = total_len;
@@ -331,7 +372,8 @@ static esp_err_t bno085_send_packet(uint8_t channel, const uint8_t *payload,
 
 static esp_err_t bno085_enable_accelerometer(void)
 {
-    const uint32_t interval_us = APP_BNO085_ACCEL_INTERVAL_MS * 1000U;
+    const uint32_t interval_ms = bno085_accel_interval_ms();
+    const uint32_t interval_us = interval_ms * 1000U;
     const uint8_t payload[] = {
         BNO085_REPORT_SET_FEATURE,
         BNO085_REPORT_ACCELEROMETER,
@@ -352,8 +394,37 @@ static esp_err_t bno085_enable_accelerometer(void)
         0x00,
     };
 
-    return bno085_send_packet(BNO085_CHANNEL_CONTROL, payload,
-                              sizeof(payload));
+    const esp_err_t err =
+        bno085_send_packet(BNO085_CHANNEL_CONTROL, payload, sizeof(payload));
+    if (err == ESP_OK) {
+        s_configured_accel_interval_ms = interval_ms;
+    }
+    return err;
+}
+
+static void bno085_reconfigure_accelerometer_if_needed(void)
+{
+    const uint32_t desired_interval_ms = bno085_accel_interval_ms();
+    if (desired_interval_ms == s_configured_accel_interval_ms) {
+        return;
+    }
+
+    const uint32_t previous_interval_ms = s_configured_accel_interval_ms;
+    const esp_err_t err = bno085_enable_accelerometer();
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "BNO085 accelerometer interval updated: %u ms -> %u ms",
+                 (unsigned)previous_interval_ms,
+                 (unsigned)s_configured_accel_interval_ms);
+        return;
+    }
+
+    const uint32_t now_ms = ticks_to_ms();
+    if ((uint32_t)(now_ms - s_last_reconfigure_warning_ms) >=
+        bno085_log_interval_ms()) {
+        s_last_reconfigure_warning_ms = now_ms;
+        ESP_LOGW(TAG, "BNO085 accelerometer interval update failed: %s",
+                 esp_err_to_name(err));
+    }
 }
 
 static esp_err_t bno085_soft_reset(void)
@@ -361,6 +432,15 @@ static esp_err_t bno085_soft_reset(void)
     const uint8_t payload[] = {BNO085_EXECUTABLE_RESET};
     return bno085_send_packet(BNO085_CHANNEL_EXECUTABLE, payload,
                               sizeof(payload));
+}
+
+static void bno085_emit_telemetry(void)
+{
+    return;
+
+    (void)wireless_telemetry_service_submit_bno085_accel(
+        float_to_milli(s_last_x_mps2), float_to_milli(s_last_y_mps2),
+        float_to_milli(s_last_z_mps2), s_last_accuracy, s_report_count);
 }
 
 static void bno085_parse_input_reports(const uint8_t *payload, size_t len)
@@ -394,6 +474,7 @@ static void bno085_parse_input_reports(const uint8_t *payload, size_t len)
             s_last_z_mps2 = q_to_float(raw_z, BNO085_ACCEL_Q_POINT);
             s_last_accuracy = status;
             s_report_count++;
+            bno085_emit_telemetry();
             pos += BNO085_ACCEL_REPORT_LEN;
             continue;
         }
@@ -430,16 +511,18 @@ static void bno085_parse_packet(const uint8_t *packet, size_t packet_len)
 static void bno085_log_status(void)
 {
     const uint32_t now_ms = ticks_to_ms();
-    if ((uint32_t)(now_ms - s_last_log_ms) < APP_BNO085_LOG_INTERVAL_MS) {
+    if ((uint32_t)(now_ms - s_last_log_ms) <
+        APP_BNO085_SUMMARY_LOG_INTERVAL_MS) {
         return;
     }
     s_last_log_ms = now_ms;
 
     ESP_LOGI(TAG,
-             "BNO085 accel x=%.2f y=%.2f z=%.2f m/s^2 accuracy=%u reports=%u read_errors=%u parse_errors=%u irqs=%u wait_timeouts=%u",
+             "BNO085 accel summary x=%.2f y=%.2f z=%.2f m/s^2 accuracy=%u reports=%u sample_ms=%u read_errors=%u parse_errors=%u irqs=%u wait_timeouts=%u",
              (double)s_last_x_mps2, (double)s_last_y_mps2,
              (double)s_last_z_mps2, (unsigned)s_last_accuracy,
-             (unsigned)s_report_count, (unsigned)s_read_error_count,
+             (unsigned)s_report_count, (unsigned)bno085_accel_interval_ms(),
+             (unsigned)s_read_error_count,
              (unsigned)s_parse_error_count, (unsigned)s_int_irq_count,
              (unsigned)s_int_wait_timeout_count);
 }
@@ -453,13 +536,61 @@ static void bno085_log_read_error(esp_err_t err)
     s_read_error_count++;
     const uint32_t now_ms = ticks_to_ms();
     if ((uint32_t)(now_ms - s_last_read_warning_ms) <
-        APP_BNO085_LOG_INTERVAL_MS) {
+        APP_BNO085_SUMMARY_LOG_INTERVAL_MS) {
         return;
     }
 
     s_last_read_warning_ms = now_ms;
     ESP_LOGW(TAG, "BNO085 read issues: last=%s read_errors=%u",
              esp_err_to_name(err), (unsigned)s_read_error_count);
+}
+
+static void bno085_recover_if_stalled(void)
+{
+    const uint32_t now_ms = ticks_to_ms();
+    if (s_report_count != s_last_progress_report_count) {
+        s_last_progress_report_count = s_report_count;
+        s_last_progress_ms = now_ms;
+        return;
+    }
+
+    if (s_last_progress_ms == 0) {
+        s_last_progress_ms = now_ms;
+        return;
+    }
+
+    if ((uint32_t)(now_ms - s_last_progress_ms) < BNO085_STALL_RECOVERY_MS ||
+        (uint32_t)(now_ms - s_last_stall_recovery_ms) <
+            BNO085_STALL_RECOVERY_MS) {
+        return;
+    }
+    s_last_stall_recovery_ms = now_ms;
+
+    ESP_LOGW(TAG, "BNO085 stalled for %u ms at reports=%u; resetting",
+             (unsigned)(now_ms - s_last_progress_ms),
+             (unsigned)s_report_count);
+
+    esp_err_t err = bno085_soft_reset();
+    if (err == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        bno085_drain_startup_packets();
+        vTaskDelay(pdMS_TO_TICKS(50));
+        bno085_drain_startup_packets();
+    } else {
+        ESP_LOGW(TAG, "BNO085 stall soft reset failed: %s",
+                 esp_err_to_name(err));
+    }
+
+    err = bno085_enable_accelerometer();
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "BNO085 accelerometer re-enabled after stall");
+    } else {
+        ESP_LOGW(TAG, "BNO085 stall recovery enable failed: %s",
+                 esp_err_to_name(err));
+    }
+
+    s_last_progress_report_count = s_report_count;
+    s_last_progress_ms = ticks_to_ms();
 }
 
 static esp_err_t bno085_i2c_init(void)
@@ -581,14 +712,16 @@ static void bno085_task(void *arg)
 {
     (void)arg;
     s_task_handle = xTaskGetCurrentTaskHandle();
+    const uint32_t accel_interval_ms = bno085_accel_interval_ms();
+    const uint32_t log_interval_ms = bno085_log_interval_ms();
 
     ESP_LOGI(TAG,
              "BNO085 accelerometer test enabled: SDA=%d SCL=%d RST=%d INT=%d addr=0x%02X clock=%u Hz sample=%u ms log=%u ms int_timeout=%u ms core=%d",
              BOARD_CONFIG_BNO085_SDA_GPIO, BOARD_CONFIG_BNO085_SCL_GPIO,
              BOARD_CONFIG_BNO085_RST_GPIO, BOARD_CONFIG_BNO085_INT_GPIO,
              APP_BNO085_I2C_ADDRESS, (unsigned)APP_BNO085_I2C_CLOCK_HZ,
-             (unsigned)APP_BNO085_ACCEL_INTERVAL_MS,
-             (unsigned)APP_BNO085_LOG_INTERVAL_MS,
+             (unsigned)accel_interval_ms,
+             (unsigned)log_interval_ms,
              (unsigned)APP_BNO085_INT_WAIT_TIMEOUT_MS, BNO085_TASK_CORE);
 
     esp_err_t err = bno085_configure_host_gpios();
@@ -638,6 +771,8 @@ static void bno085_task(void *arg)
         return;
     }
     ESP_LOGI(TAG, "BNO085 accelerometer enable command sent");
+    s_last_progress_ms = ticks_to_ms();
+    s_last_progress_report_count = s_report_count;
 
     uint8_t packet[BNO085_MAX_PACKET_LEN] = {0};
     while (true) {
@@ -645,15 +780,18 @@ static void bno085_task(void *arg)
             bno085_drain_ready_packets(packet, sizeof(packet));
         }
 
+        bno085_reconfigure_accelerometer_if_needed();
+        bno085_recover_if_stalled();
         bno085_log_status();
     }
 }
 
 esp_err_t bno085_service_start(void)
 {
-    if (!APP_BNO085_ACCEL_TEST_ENABLED) {
-        ESP_LOGI(TAG, "BNO085 accelerometer test disabled");
-        return ESP_OK;
+    const app_runtime_config_t *runtime_config = app_runtime_config_get();
+    if (!runtime_config->bno085_accel_enabled) {
+        ESP_LOGI(TAG, "BNO085 accelerometer disabled by runtime config");
+        return bno085_hold_in_reset();
     }
 
     if (s_service_started) {

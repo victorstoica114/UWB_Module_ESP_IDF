@@ -17,11 +17,11 @@
 #include "app_runtime_config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "stability_test_service.h"
 #include "uwb_config.h"
 #include "uwb_dw3000.h"
 #include "wifi_service.h"
 #include "wireless_log_service.h"
+#include "wireless_telemetry_service.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -43,6 +43,7 @@ enum {
     OTA_SERVICE_REBOOT_DELAY_MS = 1200,
     OTA_SERVICE_MAX_TOKEN_LEN = 128,
     OTA_SERVICE_MAX_QUERY_LEN = 768,
+    OTA_SERVICE_STATUS_RESPONSE_SIZE = 7200,
 };
 
 #define OTA_SERVICE_TOKEN_HEADER "X-OTA-Token"
@@ -175,6 +176,22 @@ static bool ota_parse_u32(const char *text, uint32_t *value)
     return true;
 }
 
+static bool ota_parse_bno085_sample_hz(const char *text, uint32_t *interval_ms)
+{
+    uint32_t hz = 0;
+    if (!ota_parse_u32(text, &hz) || hz == 0 || hz > 500U ||
+        interval_ms == NULL) {
+        return false;
+    }
+
+    uint32_t ms = (1000U + (hz / 2U)) / hz;
+    if (ms < 2U) {
+        ms = 2U;
+    }
+    *interval_ms = ms;
+    return true;
+}
+
 static bool ota_parse_u8_list(const char *text, uint8_t *values,
                               size_t max_count, uint8_t *count)
 {
@@ -266,7 +283,42 @@ static bool runtime_config_reboot_recommended(
            memcmp(before->anchor_ids, after->anchor_ids,
                   sizeof(before->anchor_ids)) != 0 ||
            before->anchor_survey_coordinator_id !=
-               after->anchor_survey_coordinator_id;
+               after->anchor_survey_coordinator_id ||
+           before->uwb_enabled != after->uwb_enabled ||
+           before->bno085_accel_enabled != after->bno085_accel_enabled ||
+           before->gps_enabled != after->gps_enabled ||
+           before->radio_channel != after->radio_channel;
+}
+
+static uint8_t runtime_radio_channel(const app_runtime_config_t *config)
+{
+    return config != NULL && config->radio_channel == 9U ? 9U : 5U;
+}
+
+static uint8_t runtime_radio_rf_channel_bit(const app_runtime_config_t *config)
+{
+    return runtime_radio_channel(config) == 9U ? 1U : 0U;
+}
+
+static uint8_t runtime_radio_profile(const app_runtime_config_t *config)
+{
+    return runtime_radio_channel(config) == 9U
+               ? APP_UWB_RADIO_PROFILE_LEGACY_CH9_6M8_PLEN128
+               : APP_UWB_RADIO_PROFILE_LEGACY_CH5_6M8_PLEN128;
+}
+
+static uint32_t runtime_radio_rf_tx_ctrl_2(const app_runtime_config_t *config)
+{
+    return runtime_radio_channel(config) == 9U
+               ? APP_UWB_RADIO_RF_TX_CTRL_2_CH9
+               : APP_UWB_RADIO_RF_TX_CTRL_2_CH5;
+}
+
+static uint32_t runtime_radio_pll_cfg_final(const app_runtime_config_t *config)
+{
+    return runtime_radio_channel(config) == 9U
+               ? APP_UWB_RADIO_PLL_CFG_FINAL_CH9
+               : APP_UWB_RADIO_PLL_CFG_FINAL_CH5;
 }
 
 static esp_err_t root_get_handler(httpd_req_t *req)
@@ -295,9 +347,14 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         app_identity_get_uwb_antenna_delay();
     const app_runtime_config_t *runtime_config = app_runtime_config_get();
 
-    char response[5600];
+    char *response = malloc(OTA_SERVICE_STATUS_RESPONSE_SIZE);
+    if (response == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "status allocation failed");
+    }
+
     const int len = snprintf(
-        response, sizeof(response),
+        response, OTA_SERVICE_STATUS_RESPONSE_SIZE,
         "{"
         "\"project\":\"%s\","
         "\"version\":\"%s\","
@@ -365,7 +422,33 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_calibration_min_interval_ms\":%lu,"
         "\"runtime_calibration_max_interval_ms\":%lu,"
         "\"runtime_calibration_rx_slice_ms\":%lu,"
+        "\"runtime_uwb_enabled\":%s,"
+        "\"runtime_bno085_accel_enabled\":%s,"
+        "\"runtime_bno085_accel_interval_ms\":%lu,"
+        "\"runtime_bno085_log_interval_ms\":%lu,"
+        "\"runtime_gps_enabled\":%s,"
+        "\"runtime_radio_channel\":%u,"
         "\"uwb_status\":\"%s\","
+        "\"uwb_radio_profile\":%u,"
+        "\"uwb_radio_channel\":%u,"
+        "\"uwb_radio_rf_channel_bit\":%u,"
+        "\"uwb_radio_preamble_len_code\":%u,"
+        "\"uwb_radio_preamble_code\":%u,"
+        "\"uwb_radio_pac\":%u,"
+        "\"uwb_radio_data_rate\":%u,"
+        "\"uwb_radio_phr_mode\":%u,"
+        "\"uwb_radio_phr_rate\":%u,"
+        "\"uwb_radio_sfd_type\":%u,"
+        "\"uwb_radio_tx_pg_delay\":\"0x%02x\","
+        "\"uwb_radio_tx_power\":\"0x%08lx\","
+        "\"uwb_radio_rf_tx_ctrl_2\":\"0x%08lx\","
+        "\"uwb_radio_pll_cfg_final\":\"0x%04lx\","
+        "\"uwb_sts_mode\":%u,"
+        "\"uwb_sts_length_symbols\":%u,"
+        "\"uwb_diagnostics_enabled\":%s,"
+        "\"uwb_diagnostics_log_every\":%u,"
+        "\"uwb_event_counters_enabled\":%s,"
+        "\"uwb_event_counters_log_every\":%u,"
         "\"uwb_device_id\":\"0x%08lx\","
         "\"uwb_source_id\":%u,"
         "\"uwb_active_antenna_delay\":%u,"
@@ -386,10 +469,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"wireless_log_target\":\"%s\","
         "\"wireless_log_port\":%u,"
         "\"wireless_log_dropped\":%lu,"
-        "\"stability_log_stress_enabled\":%s,"
-        "\"stability_log_stress_status\":\"%s\","
-        "\"stability_log_stress_generated\":%lu,"
-        "\"stability_log_stress_enqueue_failed\":%lu"
+        "\"wireless_telemetry_status\":\"%s\","
+        "\"wireless_telemetry_connected\":%s,"
+        "\"wireless_telemetry_target\":\"%s\","
+        "\"wireless_telemetry_port\":%u,"
+        "\"wireless_telemetry_dropped\":%lu,"
+        "\"wireless_telemetry_last_error\":%d"
         "}\n",
         app->project_name, app->version, app->idf_ver,
         app_identity_get_hostname(), (unsigned)app_identity_get_module_id(),
@@ -459,7 +544,33 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)runtime_config->calibration_min_interval_ms,
         (unsigned long)runtime_config->calibration_max_interval_ms,
         (unsigned long)runtime_config->calibration_rx_slice_ms,
+        runtime_config->uwb_enabled ? "true" : "false",
+        runtime_config->bno085_accel_enabled ? "true" : "false",
+        (unsigned long)runtime_config->bno085_accel_interval_ms,
+        (unsigned long)runtime_config->bno085_log_interval_ms,
+        runtime_config->gps_enabled ? "true" : "false",
+        (unsigned)runtime_radio_channel(runtime_config),
         uwb_dw3000_status_to_string(uwb_dw3000_get_status()),
+        (unsigned)runtime_radio_profile(runtime_config),
+        (unsigned)runtime_radio_channel(runtime_config),
+        (unsigned)runtime_radio_rf_channel_bit(runtime_config),
+        (unsigned)APP_UWB_RADIO_PREAMBLE_LEN_CODE,
+        (unsigned)APP_UWB_RADIO_PREAMBLE_CODE,
+        (unsigned)APP_UWB_RADIO_PAC,
+        (unsigned)APP_UWB_RADIO_DATA_RATE,
+        (unsigned)APP_UWB_RADIO_PHR_MODE,
+        (unsigned)APP_UWB_RADIO_PHR_RATE,
+        (unsigned)APP_UWB_RADIO_SFD_TYPE,
+        (unsigned)APP_UWB_RADIO_TX_PG_DELAY,
+        (unsigned long)APP_UWB_RADIO_TX_POWER,
+        (unsigned long)runtime_radio_rf_tx_ctrl_2(runtime_config),
+        (unsigned long)runtime_radio_pll_cfg_final(runtime_config),
+        (unsigned)APP_UWB_STS_MODE,
+        (unsigned)APP_UWB_STS_LENGTH_SYMBOLS,
+        APP_UWB_DIAGNOSTICS_ENABLED ? "true" : "false",
+        (unsigned)APP_UWB_DIAGNOSTICS_LOG_EVERY,
+        APP_UWB_EVENT_COUNTERS_ENABLED ? "true" : "false",
+        (unsigned)APP_UWB_EVENT_COUNTERS_LOG_EVERY,
         (unsigned long)uwb_dw3000_get_device_id(),
         (unsigned)uwb_dw3000_get_source_id(),
         (unsigned)active_antenna_delay, (unsigned)active_antenna_delay,
@@ -480,19 +591,24 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         wireless_log_service_get_target(),
         (unsigned)wireless_log_service_get_port(),
         (unsigned long)wireless_log_service_get_dropped_count(),
-        stability_test_service_is_enabled() ? "true" : "false",
-        stability_test_service_status_to_string(
-            stability_test_service_get_status()),
-        (unsigned long)stability_test_service_get_log_generated_count(),
-        (unsigned long)stability_test_service_get_log_enqueue_failed_count());
+        wireless_telemetry_service_status_to_string(
+            wireless_telemetry_service_get_status()),
+        wireless_telemetry_service_is_connected() ? "true" : "false",
+        wireless_telemetry_service_get_target(),
+        (unsigned)wireless_telemetry_service_get_port(),
+        (unsigned long)wireless_telemetry_service_get_dropped_count(),
+        wireless_telemetry_service_get_last_error());
 
-    if (len < 0 || len >= (int)sizeof(response)) {
+    if (len < 0 || len >= OTA_SERVICE_STATUS_RESPONSE_SIZE) {
+        free(response);
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                                    "status too long");
     }
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, response, (ssize_t)len);
+    const esp_err_t response_err = httpd_resp_send(req, response, (ssize_t)len);
+    free(response);
+    return response_err;
 }
 
 static esp_err_t antenna_delay_post_handler(httpd_req_t *req)
@@ -757,6 +873,33 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
             }                                                           \
         } while (0)
 
+#define APPLY_BOOL_PARAM(KEY, FIELD)                                    \
+        do {                                                            \
+            char value_text[8] = {0};                                   \
+            esp_err_t key_err = httpd_query_key_value(                  \
+                query, KEY, value_text, sizeof(value_text));            \
+            if (key_err == ESP_OK) {                                    \
+                if (strcmp(value_text, "1") == 0 ||                    \
+                    strcmp(value_text, "true") == 0 ||                 \
+                    strcmp(value_text, "on") == 0) {                   \
+                    config.FIELD = true;                                \
+                } else if (strcmp(value_text, "0") == 0 ||             \
+                           strcmp(value_text, "false") == 0 ||         \
+                           strcmp(value_text, "off") == 0) {           \
+                    config.FIELD = false;                               \
+                } else {                                                \
+                    return httpd_resp_send_err(req,                     \
+                                               HTTPD_400_BAD_REQUEST,   \
+                                               "Invalid " KEY);         \
+                }                                                       \
+                changed = true;                                         \
+            } else if (key_err != ESP_ERR_NOT_FOUND) {                  \
+                return httpd_resp_send_err(req,                         \
+                                           HTTPD_400_BAD_REQUEST,       \
+                                           "Invalid " KEY);             \
+            }                                                           \
+        } while (0)
+
         APPLY_U8_PARAM("tag", tag_id);
         APPLY_U8_PARAM("anchor_count", anchor_count);
         APPLY_U8_PARAM("coordinator", anchor_survey_coordinator_id);
@@ -792,7 +935,53 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         APPLY_U32_PARAM("cal_min_ms", calibration_min_interval_ms);
         APPLY_U32_PARAM("cal_max_ms", calibration_max_interval_ms);
         APPLY_U32_PARAM("cal_rx_ms", calibration_rx_slice_ms);
+        APPLY_BOOL_PARAM("uwb", uwb_enabled);
+        APPLY_BOOL_PARAM("bno085", bno085_accel_enabled);
+        APPLY_BOOL_PARAM("bno085_accel", bno085_accel_enabled);
+        APPLY_U32_PARAM("bno085_accel_interval_ms",
+                        bno085_accel_interval_ms);
+        APPLY_U32_PARAM("bno085_log_interval_ms", bno085_log_interval_ms);
+        {
+            char value_text[32] = {0};
+            esp_err_t key_err = httpd_query_key_value(
+                query, "bno085_sample_hz", value_text, sizeof(value_text));
+            if (key_err == ESP_OK) {
+                uint32_t interval_ms = 0;
+                if (!ota_parse_bno085_sample_hz(value_text, &interval_ms)) {
+                    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                               "Invalid bno085_sample_hz");
+                }
+                config.bno085_accel_interval_ms = interval_ms;
+                config.bno085_log_interval_ms = interval_ms;
+                changed = true;
+            } else if (key_err != ESP_ERR_NOT_FOUND) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid bno085_sample_hz");
+            }
+        }
+        {
+            char value_text[32] = {0};
+            esp_err_t key_err = httpd_query_key_value(
+                query, "bno085_sample_ms", value_text, sizeof(value_text));
+            if (key_err == ESP_OK) {
+                uint32_t parsed = 0;
+                if (!ota_parse_u32(value_text, &parsed)) {
+                    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                               "Invalid bno085_sample_ms");
+                }
+                config.bno085_accel_interval_ms = parsed;
+                config.bno085_log_interval_ms = parsed;
+                changed = true;
+            } else if (key_err != ESP_ERR_NOT_FOUND) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid bno085_sample_ms");
+            }
+        }
+        APPLY_BOOL_PARAM("gps", gps_enabled);
+        APPLY_U8_PARAM("radio_channel", radio_channel);
+        APPLY_U8_PARAM("uwb_channel", radio_channel);
 
+#undef APPLY_BOOL_PARAM
 #undef APPLY_U32_PARAM
 #undef APPLY_U8_PARAM
 
@@ -831,7 +1020,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
              reboot_recommended ? "true" : "false",
              reboot_requested ? "true" : "false");
 
-    char response[1200];
+    char response[1600];
     const int len = snprintf(
         response, sizeof(response),
         "{"
@@ -851,6 +1040,12 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         "\"runtime_anchor_survey_round_gap_ms\":%lu,"
         "\"runtime_calibration_method\":%u,"
         "\"runtime_calibration_three_ids\":[%u,%u,%u],"
+        "\"runtime_uwb_enabled\":%s,"
+        "\"runtime_bno085_accel_enabled\":%s,"
+        "\"runtime_bno085_accel_interval_ms\":%lu,"
+        "\"runtime_bno085_log_interval_ms\":%lu,"
+        "\"runtime_gps_enabled\":%s,"
+        "\"runtime_radio_channel\":%u,"
         "\"reboot_recommended\":%s,"
         "\"rebooting\":%s"
         "}\n",
@@ -874,6 +1069,12 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         (unsigned)active_config->calibration_three_ids[0],
         (unsigned)active_config->calibration_three_ids[1],
         (unsigned)active_config->calibration_three_ids[2],
+        active_config->uwb_enabled ? "true" : "false",
+        active_config->bno085_accel_enabled ? "true" : "false",
+        (unsigned long)active_config->bno085_accel_interval_ms,
+        (unsigned long)active_config->bno085_log_interval_ms,
+        active_config->gps_enabled ? "true" : "false",
+        (unsigned)runtime_radio_channel(active_config),
         reboot_recommended ? "true" : "false",
         reboot_requested ? "true" : "false");
 

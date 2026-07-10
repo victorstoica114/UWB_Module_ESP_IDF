@@ -25,11 +25,12 @@
 enum {
     WIRELESS_LOG_TASK_STACK_WORDS = 4096,
     WIRELESS_LOG_TASK_PRIORITY = 4,
-    WIRELESS_LOG_QUEUE_LEN = 64,
+    WIRELESS_LOG_QUEUE_LEN = 512,
+    WIRELESS_LOG_PRIORITY_QUEUE_LEN = 64,
     WIRELESS_LOG_LINE_MAX = 256,
     WIRELESS_LOG_RECONNECT_MS = 2000,
     WIRELESS_LOG_WIFI_WAIT_MS = 500,
-    WIRELESS_LOG_QUEUE_WAIT_MS = 500,
+    WIRELESS_LOG_QUEUE_WAIT_MS = 50,
     WIRELESS_LOG_SEND_TIMEOUT_MS = 1000,
 };
 
@@ -38,6 +39,7 @@ typedef struct {
 } wireless_log_line_t;
 
 static QueueHandle_t s_log_queue;
+static QueueHandle_t s_priority_log_queue;
 static TaskHandle_t s_task_handle;
 static vprintf_like_t s_previous_vprintf;
 static bool s_started;
@@ -89,7 +91,7 @@ static void wireless_log_strip_ansi(char *line)
 }
 
 static bool wireless_log_parse_idf_line(const char *raw, char *out,
-                                        size_t out_size)
+                                        size_t out_size, char *level_out)
 {
     char level = '\0';
     unsigned long uptime_ms = 0;
@@ -112,7 +114,15 @@ static bool wireless_log_parse_idf_line(const char *raw, char *out,
 
     snprintf(out, out_size, "[%s] [%10lu ms] [%c][%s] %s",
              app_identity_get_hostname(), uptime_ms, level, tag, message);
+    if (level_out != NULL) {
+        *level_out = level;
+    }
     return true;
+}
+
+static bool wireless_log_is_priority_level(char level)
+{
+    return level == 'W' || level == 'E';
 }
 
 static bool wireless_log_should_skip_idf_tag(const char *raw)
@@ -132,14 +142,42 @@ static bool wireless_log_should_skip_idf_tag(const char *raw)
            strcmp(tag, "phy_init") == 0;
 }
 
+static bool wireless_log_enqueue_item(QueueHandle_t queue,
+                                      const wireless_log_line_t *item,
+                                      bool evict_oldest_when_full)
+{
+    if (xQueueSend(queue, item, 0) == pdTRUE) {
+        return true;
+    }
+
+    if (!evict_oldest_when_full) {
+        s_dropped_count++;
+        return false;
+    }
+
+    wireless_log_line_t discarded = {0};
+    if (xQueueReceive(queue, &discarded, 0) == pdTRUE) {
+        s_dropped_count++;
+    }
+
+    if (xQueueSend(queue, item, 0) == pdTRUE) {
+        return true;
+    }
+
+    s_dropped_count++;
+    return false;
+}
+
 static bool wireless_log_enqueue_raw(const char *raw)
 {
-    if (s_log_queue == NULL || !wireless_log_target_configured()) {
+    if (s_log_queue == NULL || s_priority_log_queue == NULL ||
+        !wireless_log_target_configured()) {
         return false;
     }
 
     wireless_log_line_t item = {0};
     char normalized[WIRELESS_LOG_LINE_MAX] = {0};
+    char level = '\0';
 
     snprintf(normalized, sizeof(normalized), "%s", raw);
     wireless_log_strip_line(normalized);
@@ -152,17 +190,16 @@ static bool wireless_log_enqueue_raw(const char *raw)
         return false;
     }
 
-    if (!wireless_log_parse_idf_line(normalized, item.line,
-                                     sizeof(item.line))) {
+    if (!wireless_log_parse_idf_line(normalized, item.line, sizeof(item.line),
+                                     &level)) {
         return false;
     }
 
-    if (xQueueSend(s_log_queue, &item, 0) != pdTRUE) {
-        s_dropped_count++;
-        return false;
+    if (wireless_log_is_priority_level(level)) {
+        return wireless_log_enqueue_item(s_priority_log_queue, &item, true);
     }
 
-    return true;
+    return wireless_log_enqueue_item(s_log_queue, &item, false);
 }
 
 static int wireless_log_vprintf(const char *format, va_list args)
@@ -333,9 +370,10 @@ static void wireless_log_task(void *arg)
         }
 
         wireless_log_line_t item;
-        if (xQueueReceive(s_log_queue, &item,
+        if (xQueueReceive(s_priority_log_queue, &item, 0) != pdTRUE &&
+            xQueueReceive(s_log_queue, &item,
                           pdMS_TO_TICKS(WIRELESS_LOG_QUEUE_WAIT_MS)) !=
-            pdTRUE) {
+                pdTRUE) {
             if (!wireless_log_socket_alive(sock)) {
                 wireless_log_close_socket(&sock);
                 s_status = WIRELESS_LOG_STATUS_FAILED;
@@ -364,7 +402,17 @@ esp_err_t wireless_log_service_start(void)
 
     s_log_queue = xQueueCreate(WIRELESS_LOG_QUEUE_LEN,
                                sizeof(wireless_log_line_t));
-    if (s_log_queue == NULL) {
+    s_priority_log_queue = xQueueCreate(WIRELESS_LOG_PRIORITY_QUEUE_LEN,
+                                        sizeof(wireless_log_line_t));
+    if (s_log_queue == NULL || s_priority_log_queue == NULL) {
+        if (s_log_queue != NULL) {
+            vQueueDelete(s_log_queue);
+            s_log_queue = NULL;
+        }
+        if (s_priority_log_queue != NULL) {
+            vQueueDelete(s_priority_log_queue);
+            s_priority_log_queue = NULL;
+        }
         s_status = WIRELESS_LOG_STATUS_FAILED;
         return ESP_ERR_NO_MEM;
     }
@@ -383,6 +431,8 @@ esp_err_t wireless_log_service_start(void)
         }
         vQueueDelete(s_log_queue);
         s_log_queue = NULL;
+        vQueueDelete(s_priority_log_queue);
+        s_priority_log_queue = NULL;
         s_status = WIRELESS_LOG_STATUS_FAILED;
         return ESP_ERR_NO_MEM;
     }

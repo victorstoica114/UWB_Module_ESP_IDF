@@ -54,6 +54,12 @@ static const char *TAG = "app_runtime_config";
 #define KEY_CAL_MIN "cal_min"
 #define KEY_CAL_MAX "cal_max"
 #define KEY_CAL_RX "cal_rx"
+#define KEY_UWB_ENABLED "uwb_enabled"
+#define KEY_BNO085_ACCEL "bno085_accel"
+#define KEY_BNO085_RATE "bno_rate"
+#define KEY_BNO085_LOG "bno_log"
+#define KEY_GPS_ENABLED "gps_enabled"
+#define KEY_RADIO_CH "radio_ch"
 
 static bool s_initialized;
 static app_runtime_config_t s_config;
@@ -68,9 +74,19 @@ static bool ms_valid(uint32_t value)
     return value > 0 && value <= 60000U;
 }
 
+static bool bno085_ms_valid(uint32_t value)
+{
+    return value >= 2U && value <= 60000U;
+}
+
 static bool count_valid(uint8_t count)
 {
     return count > 0 && count <= APP_RUNTIME_CONFIG_MAX_ANCHORS;
+}
+
+static bool radio_channel_valid(uint8_t channel)
+{
+    return channel == 5U || channel == 9U;
 }
 
 static bool anchor_ids_valid(const app_runtime_config_t *config)
@@ -243,6 +259,12 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->calibration_min_interval_ms = APP_UWB_CALIBRATION_MIN_INTERVAL_MS;
     config->calibration_max_interval_ms = APP_UWB_CALIBRATION_MAX_INTERVAL_MS;
     config->calibration_rx_slice_ms = APP_UWB_CALIBRATION_RX_SLICE_MS;
+    config->uwb_enabled = APP_UWB_ENABLED != 0;
+    config->bno085_accel_enabled = APP_BNO085_ACCEL_ENABLED_DEFAULT != 0;
+    config->bno085_accel_interval_ms = APP_BNO085_ACCEL_INTERVAL_MS;
+    config->bno085_log_interval_ms = APP_BNO085_LOG_INTERVAL_MS;
+    config->gps_enabled = APP_GPS_ENABLED_DEFAULT != 0;
+    config->radio_channel = (uint8_t)APP_UWB_RADIO_CHANNEL;
     config->from_nvs = false;
 }
 
@@ -273,7 +295,10 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         config->calibration_summary_every == 0 ||
         !ms_valid(config->calibration_min_interval_ms) ||
         !ms_valid(config->calibration_max_interval_ms) ||
-        !ms_valid(config->calibration_rx_slice_ms)) {
+        !ms_valid(config->calibration_rx_slice_ms) ||
+        !bno085_ms_valid(config->bno085_accel_interval_ms) ||
+        !bno085_ms_valid(config->bno085_log_interval_ms) ||
+        !radio_channel_valid(config->radio_channel)) {
         return false;
     }
 
@@ -320,6 +345,17 @@ static bool read_u32(nvs_handle_t handle, const char *key, uint32_t *value)
     const esp_err_t err = nvs_get_u32(handle, key, &stored);
     if (err == ESP_OK) {
         *value = stored;
+        return true;
+    }
+    return false;
+}
+
+static bool read_bool(nvs_handle_t handle, const char *key, bool *value)
+{
+    uint8_t stored = 0;
+    const esp_err_t err = nvs_get_u8(handle, key, &stored);
+    if (err == ESP_OK) {
+        *value = stored != 0;
         return true;
     }
     return false;
@@ -389,6 +425,15 @@ static void read_config_from_nvs(app_runtime_config_t *config)
     found |= read_u32(handle, KEY_CAL_MAX,
                       &config->calibration_max_interval_ms);
     found |= read_u32(handle, KEY_CAL_RX, &config->calibration_rx_slice_ms);
+    found |= read_bool(handle, KEY_UWB_ENABLED, &config->uwb_enabled);
+    found |= read_bool(handle, KEY_BNO085_ACCEL,
+                       &config->bno085_accel_enabled);
+    found |= read_u32(handle, KEY_BNO085_RATE,
+                      &config->bno085_accel_interval_ms);
+    found |= read_u32(handle, KEY_BNO085_LOG,
+                      &config->bno085_log_interval_ms);
+    found |= read_bool(handle, KEY_GPS_ENABLED, &config->gps_enabled);
+    found |= read_u8(handle, KEY_RADIO_CH, &config->radio_channel);
     config->from_nvs = found;
 
     nvs_close(handle);
@@ -408,7 +453,7 @@ esp_err_t app_runtime_config_reload(void)
     s_config = loaded;
     s_initialized = true;
     ESP_LOGI(TAG,
-             "Runtime config ready: mode=%s(%u) tag=%u anchors=[%u,%u,%u,%u] count=%u coord=%u source=%s",
+             "Runtime config ready: mode=%s(%u) tag=%u anchors=[%u,%u,%u,%u] count=%u coord=%u uwb=%s bno085=%s bno_rate=%lu ms bno_log=%lu ms gps=%s radio_ch=%u source=%s",
              app_runtime_config_runtime_mode_to_string(s_config.runtime_mode),
              (unsigned)s_config.runtime_mode, (unsigned)s_config.tag_id,
              (unsigned)s_config.anchor_ids[0],
@@ -417,6 +462,12 @@ esp_err_t app_runtime_config_reload(void)
              (unsigned)s_config.anchor_ids[3],
              (unsigned)s_config.anchor_count,
              (unsigned)s_config.anchor_survey_coordinator_id,
+             s_config.uwb_enabled ? "on" : "off",
+             s_config.bno085_accel_enabled ? "on" : "off",
+             (unsigned long)s_config.bno085_accel_interval_ms,
+             (unsigned long)s_config.bno085_log_interval_ms,
+             s_config.gps_enabled ? "on" : "off",
+             (unsigned)s_config.radio_channel,
              s_config.from_nvs ? "nvs" : "firmware");
     return ESP_OK;
 }
@@ -445,6 +496,11 @@ static esp_err_t write_u8(nvs_handle_t handle, const char *key, uint8_t value)
 static esp_err_t write_u32(nvs_handle_t handle, const char *key, uint32_t value)
 {
     return nvs_set_u32(handle, key, value);
+}
+
+static esp_err_t write_bool(nvs_handle_t handle, const char *key, bool value)
+{
+    return nvs_set_u8(handle, key, value ? 1U : 0U);
 }
 
 esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
@@ -537,6 +593,15 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
                             config->calibration_max_interval_ms));
     WRITE_OR_GOTO(write_u32(handle, KEY_CAL_RX,
                             config->calibration_rx_slice_ms));
+    WRITE_OR_GOTO(write_bool(handle, KEY_UWB_ENABLED, config->uwb_enabled));
+    WRITE_OR_GOTO(write_bool(handle, KEY_BNO085_ACCEL,
+                             config->bno085_accel_enabled));
+    WRITE_OR_GOTO(write_u32(handle, KEY_BNO085_RATE,
+                            config->bno085_accel_interval_ms));
+    WRITE_OR_GOTO(write_u32(handle, KEY_BNO085_LOG,
+                            config->bno085_log_interval_ms));
+    WRITE_OR_GOTO(write_bool(handle, KEY_GPS_ENABLED, config->gps_enabled));
+    WRITE_OR_GOTO(write_u8(handle, KEY_RADIO_CH, config->radio_channel));
 
     err = nvs_commit(handle);
 

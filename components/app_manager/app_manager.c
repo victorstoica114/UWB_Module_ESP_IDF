@@ -14,9 +14,9 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "gps_service.h"
 #include "ota_service.h"
 #include "sdkconfig.h"
-#include "stability_test_service.h"
 #include "uwb_anchor_survey_service.h"
 #include "uwb_calibration_service.h"
 #include "uwb_config.h"
@@ -25,6 +25,7 @@
 #include "uwb_ranging_service.h"
 #include "wifi_service.h"
 #include "wireless_log_service.h"
+#include "wireless_telemetry_service.h"
 
 static const char *TAG = "app_manager";
 
@@ -128,13 +129,19 @@ static void status_led_init(void)
 
 static esp_err_t app_manager_start_selected_runtime(void)
 {
+    const app_runtime_config_t *runtime_config = app_runtime_config_get();
+
+    if (!runtime_config->uwb_enabled) {
+        ESP_LOGW(TAG, "UWB disabled by runtime config; holding DW3000 in reset");
+        return uwb_dw3000_hold_in_reset();
+    }
+
     if (!APP_UWB_ENABLED) {
         ESP_LOGW(TAG, "Selected runtime uses UWB, but APP_UWB_ENABLED is 0");
-        return ESP_OK;
+        return uwb_dw3000_hold_in_reset();
     }
 
     const uint8_t runtime_uwb_role = app_identity_get_uwb_role();
-    const app_runtime_config_t *runtime_config = app_runtime_config_get();
     const uint8_t runtime_mode = runtime_config->runtime_mode;
     ESP_LOGI(TAG, "Application runtime: mode=%s(%d), uwb_role=%s(%u), "
                   "uwb_source_id=%u, hostname=%s, module_id=%u, config=%s",
@@ -200,6 +207,12 @@ void app_manager_start(void)
                  esp_err_to_name(runtime_config_err));
     }
 
+    const esp_err_t gps_err = gps_service_start();
+    if (gps_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start GPS service: %s",
+                 esp_err_to_name(gps_err));
+    }
+
     const esp_err_t wifi_err = wifi_service_start();
     if (wifi_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start Wi-Fi service: %s",
@@ -212,6 +225,12 @@ void app_manager_start(void)
                  esp_err_to_name(wireless_log_err));
     }
 
+    const esp_err_t wireless_telemetry_err = wireless_telemetry_service_start();
+    if (wireless_telemetry_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start wireless telemetry service: %s",
+                 esp_err_to_name(wireless_telemetry_err));
+    }
+
     const esp_err_t runtime_err = app_manager_start_selected_runtime();
     if (runtime_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start selected runtime: %s",
@@ -222,12 +241,6 @@ void app_manager_start(void)
     if (ota_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start OTA service: %s",
                  esp_err_to_name(ota_err));
-    }
-
-    const esp_err_t stability_err = stability_test_service_start();
-    if (stability_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start stability test service: %s",
-                 esp_err_to_name(stability_err));
     }
 
     const esp_err_t bno085_err = bno085_service_start();

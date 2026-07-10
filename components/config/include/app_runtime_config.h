@@ -50,6 +50,12 @@ typedef struct {
     uint32_t calibration_min_interval_ms;
     uint32_t calibration_max_interval_ms;
     uint32_t calibration_rx_slice_ms;
+    bool uwb_enabled;
+    bool bno085_accel_enabled;
+    uint32_t bno085_accel_interval_ms;
+    uint32_t bno085_log_interval_ms;
+    bool gps_enabled;
+    uint8_t radio_channel;
     bool from_nvs;
 } app_runtime_config_t;
 

@@ -16,7 +16,6 @@ Current step:
 - first DS-TWR two-module distance test runtime
 - antenna delay calibration runtime for two-module and three-module setups
 - sequential 1-tag/4-anchor DS-TWR ranging runtime
-- optional wireless-log stress test via `components/stability_test_service`
 - optional BNO085 accelerometer hardware test via `components/bno085_service`
 
 The board boot log confirms 16 MB QIO flash, 8 MB octal PSRAM at 80 MHz, and
@@ -68,7 +67,6 @@ components/uwb_dw3000/        DW3000 bring-up, beacon smoke test, DS-TWR loop
 components/uwb_calibration_service/  antenna delay calibration entry point
 components/uwb_distance_test_service/  two-module distance test entry point
 components/uwb_ranging_service/  anchor/tag ranging entry point
-components/stability_test_service/  optional wireless-log stress generator
 docs/                         protocol notes and operator documentation
 PCB/V1.REV.B/                 KiCad source, fabrication, BOM, and placement package
 Schematic/                    exported schematic PDF
@@ -85,7 +83,7 @@ for inspiration/debugging and are intentionally ignored by Git.
 `components/config/include/app_config.h` holds versioned non-secret application
 settings: the default runtime mode, persistent identity provisioning, Wi-Fi
 SSID and diagnostics/reconnect behavior, wireless-log defaults, OTA-adjacent
-service defaults, and stability test parameters. `components/config/include/uwb_config.h`
+service defaults, and optional sensor-test parameters. `components/config/include/uwb_config.h`
 holds UWB-only settings: role, source ID override, antenna delay, beacon
 smoke-test parameters, and runtime defaults. Runtime overrides are stored in
 NVS through `/config/runtime`. Keep passwords and OTA tokens in `secrets.h`.
@@ -107,7 +105,6 @@ most Wi-Fi and TCP work:
 | `status_led` | 1 | Lightweight GPIO blink task. |
 | `wifi_service` | 0 | Owns Wi-Fi STA connect/reconnect management. |
 | `ota_service` | 0 | Starts authenticated OTA and runtime-config HTTP handling. |
-| `stability_test` | 0 | Optional wireless-log stress generator when enabled. |
 | `bno085` | 0 | Optional BNO085 accelerometer test when enabled. |
 | `wireless_log` | unpinned | Drains the log queue and mirrors logs over TCP; FreeRTOS may run it on either core. |
 | short-lived reboot tasks | unpinned | Temporary restart helpers after OTA or runtime-config changes. |
@@ -290,6 +287,16 @@ is missed. It logs lines like
 `BNO085 accel x=... y=... z=... m/s^2 accuracy=... irqs=... wait_timeouts=...`.
 Leaving it disabled avoids the extra I2C and CPU work.
 
+The dashboard Graphs tab plots accelerometer samples as soon as their wireless
+log lines arrive. Its `Timebase` control only changes the visible time window,
+oscilloscope-style. `Samples/s` is the actual BNO085/report export rate; the
+dashboard applies it as `bno085_sample_hz`, which updates runtime config and
+sets both `bno085_accel_interval_ms` and `bno085_log_interval_ms`. The running
+BNO085 task picks up rate changes live by sending a new `Set Feature` command,
+so no reboot is needed for rate-only changes. The BNO08X datasheet lists
+`Accelerometer` at a maximum configurable rate of 500 Hz, although I2C bandwidth
+and wireless log throughput still need to be considered in practice.
+
 Recommended workflow from this folder, in the ESP-IDF v6.0.2 terminal:
 
 ```bat
@@ -358,6 +365,9 @@ Useful mode names are `ranging`, `survey`, `calibration`, `distance`, and
 `beacon`. Runtime role changes such as `mode`, `tag`, `anchors`, and survey
 `coordinator` should be sent with `--reboot`; timing-only changes can be sent
 without reboot and will be picked up by the long-running loops where supported.
+The UWB radio channel is also runtime-configurable as `--radio-channel 5` or
+`--radio-channel 9`. Send it to all active modules together and reboot so every
+DW3000 is reinitialized with the same RF profile.
 
 Calibration examples:
 
@@ -388,9 +398,26 @@ python -u tools/wireless_log_listener.py --port 6055
 ```
 
 The listener uses ANSI colors when the terminal supports them. Use
-`--force-color` to force colors or `--no-color` for plain text.
+`--force-color` to force colors or `--no-color` for plain text. Use
+`--output logs/session.log --quiet` to write the full stream to disk while
+printing only connection and progress summaries.
 
 In VS Code, use `Terminal > Run Task... > Wireless Logs`.
+
+The local dashboard combines the wireless log stream, module status polling, and
+runtime configuration controls in a browser UI:
+
+```sh
+python3 tools/uwb_dashboard.py --log-port 6055 --http-port 8780 --open
+```
+
+Open `http://127.0.0.1:8780/`. The dashboard has separate log tabs for module
+pairs, a combined log view, a status page, and runtime/calibration controls.
+Log filters and settings are persisted in the browser. Calibration distances are
+entered in centimeters and rounded to the nearest millimeter before being sent
+to `/config/runtime`.
+Only one program can listen on TCP port 6055 at a time, so stop
+`wireless_log_listener.py` before starting the dashboard.
 
 The same wireless-log stream can drive a first live 2D view of the tag. The
 viewer has no Python package dependencies; it listens on the wireless-log TCP
@@ -412,15 +439,3 @@ Then open `http://127.0.0.1:8765/`. The default geometry matches the current
 ```
 
 Use `--anchor ID=X,Y` to override anchor coordinates in meters.
-
-For a UWB plus wireless-log stability run, enable this in
-`components/config/include/app_config.h`:
-
-```c
-#define APP_STABILITY_LOG_STRESS_ENABLED 1
-```
-
-The stress task runs on core 0 and injects wireless-log bursts while the UWB
-task keeps running on core 1. Watch `/status` for
-`stability_log_stress_generated`, `stability_log_stress_enqueue_failed`,
-`wireless_log_dropped`, `uwb_tx_count`, and `uwb_rx_count`.
