@@ -428,6 +428,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_bno085_log_interval_ms\":%lu,"
         "\"runtime_gps_enabled\":%s,"
         "\"runtime_radio_channel\":%u,"
+        "\"runtime_wireless_telemetry_port\":%lu,"
         "\"uwb_status\":\"%s\","
         "\"uwb_radio_profile\":%u,"
         "\"uwb_radio_channel\":%u,"
@@ -550,6 +551,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)runtime_config->bno085_log_interval_ms,
         runtime_config->gps_enabled ? "true" : "false",
         (unsigned)runtime_radio_channel(runtime_config),
+        (unsigned long)runtime_config->wireless_telemetry_port,
         uwb_dw3000_status_to_string(uwb_dw3000_get_status()),
         (unsigned)runtime_radio_profile(runtime_config),
         (unsigned)runtime_radio_channel(runtime_config),
@@ -952,7 +954,6 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
                                                "Invalid bno085_sample_hz");
                 }
                 config.bno085_accel_interval_ms = interval_ms;
-                config.bno085_log_interval_ms = interval_ms;
                 changed = true;
             } else if (key_err != ESP_ERR_NOT_FOUND) {
                 return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
@@ -970,7 +971,6 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
                                                "Invalid bno085_sample_ms");
                 }
                 config.bno085_accel_interval_ms = parsed;
-                config.bno085_log_interval_ms = parsed;
                 changed = true;
             } else if (key_err != ESP_ERR_NOT_FOUND) {
                 return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
@@ -980,6 +980,8 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         APPLY_BOOL_PARAM("gps", gps_enabled);
         APPLY_U8_PARAM("radio_channel", radio_channel);
         APPLY_U8_PARAM("uwb_channel", radio_channel);
+        APPLY_U32_PARAM("telemetry_port", wireless_telemetry_port);
+        APPLY_U32_PARAM("tel_port", wireless_telemetry_port);
 
 #undef APPLY_BOOL_PARAM
 #undef APPLY_U32_PARAM
@@ -1046,6 +1048,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         "\"runtime_bno085_log_interval_ms\":%lu,"
         "\"runtime_gps_enabled\":%s,"
         "\"runtime_radio_channel\":%u,"
+        "\"runtime_wireless_telemetry_port\":%lu,"
         "\"reboot_recommended\":%s,"
         "\"rebooting\":%s"
         "}\n",
@@ -1075,6 +1078,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         (unsigned long)active_config->bno085_log_interval_ms,
         active_config->gps_enabled ? "true" : "false",
         (unsigned)runtime_radio_channel(active_config),
+        (unsigned long)active_config->wireless_telemetry_port,
         reboot_recommended ? "true" : "false",
         reboot_requested ? "true" : "false");
 

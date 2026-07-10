@@ -10,15 +10,18 @@
 #include <sys/select.h>
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "wifi_service.h"
 
 #include "app_config.h"
 #include "app_identity.h"
+#include "app_runtime_config.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "wireless_telemetry";
 
@@ -27,16 +30,22 @@ static const char *TAG = "wireless_telemetry";
 #endif
 
 enum {
-    WIRELESS_TELEMETRY_TASK_STACK_WORDS = 4096,
+    WIRELESS_TELEMETRY_TASK_STACK_BYTES = 4096,
     WIRELESS_TELEMETRY_TASK_PRIORITY = 4,
-    WIRELESS_TELEMETRY_QUEUE_LEN = 256,
+    WIRELESS_TELEMETRY_QUEUE_LEN = 512,
     WIRELESS_TELEMETRY_LINE_MAX = 96,
-    WIRELESS_TELEMETRY_BATCH_MAX = 1400,
+    WIRELESS_TELEMETRY_BATCH_MAX = 2048,
     WIRELESS_TELEMETRY_RECONNECT_MS = 2000,
     WIRELESS_TELEMETRY_WIFI_WAIT_MS = 500,
     WIRELESS_TELEMETRY_QUEUE_WAIT_MS = 20,
     WIRELESS_TELEMETRY_SEND_TIMEOUT_MS = 1000,
 };
+
+#if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
+#define WIRELESS_TELEMETRY_TASK_CORE 1
+#else
+#define WIRELESS_TELEMETRY_TASK_CORE 0
+#endif
 
 typedef enum {
     WIRELESS_TELEMETRY_ITEM_TEXT = 0,
@@ -60,7 +69,13 @@ typedef struct {
     } data;
 } wireless_telemetry_item_t;
 
-static QueueHandle_t s_queue;
+static wireless_telemetry_item_t *s_ring_items;
+static size_t s_ring_capacity;
+static size_t s_ring_head;
+static size_t s_ring_count;
+static SemaphoreHandle_t s_ring_mutex;
+static SemaphoreHandle_t s_ring_items_ready;
+static char *s_batch_buffer;
 static TaskHandle_t s_task_handle;
 static bool s_started;
 static volatile enum wireless_telemetry_status s_status =
@@ -75,34 +90,139 @@ static bool wireless_telemetry_target_configured(void)
            strlen(APP_WIRELESS_TELEMETRY_TARGET) > 0;
 }
 
+static uint16_t wireless_telemetry_active_port(void)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    if (config != NULL && config->wireless_telemetry_port > 0U &&
+        config->wireless_telemetry_port <= 65535U) {
+        return (uint16_t)config->wireless_telemetry_port;
+    }
+    return APP_WIRELESS_TELEMETRY_PORT;
+}
+
+static bool wireless_telemetry_create_ring(size_t capacity, uint32_t caps)
+{
+    s_ring_items = (wireless_telemetry_item_t *)heap_caps_calloc(
+        capacity, sizeof(wireless_telemetry_item_t), caps | MALLOC_CAP_8BIT);
+    s_ring_mutex = xSemaphoreCreateMutex();
+    s_ring_items_ready = xSemaphoreCreateCounting(capacity, 0);
+
+    if (s_ring_items == NULL || s_ring_mutex == NULL ||
+        s_ring_items_ready == NULL) {
+        if (s_ring_items_ready != NULL) {
+            vSemaphoreDelete(s_ring_items_ready);
+            s_ring_items_ready = NULL;
+        }
+        if (s_ring_mutex != NULL) {
+            vSemaphoreDelete(s_ring_mutex);
+            s_ring_mutex = NULL;
+        }
+        if (s_ring_items != NULL) {
+            heap_caps_free(s_ring_items);
+            s_ring_items = NULL;
+        }
+        return false;
+    }
+
+    s_ring_capacity = capacity;
+    s_ring_head = 0;
+    s_ring_count = 0;
+    return true;
+}
+
+static void wireless_telemetry_delete_ring(void)
+{
+    if (s_ring_items_ready != NULL) {
+        vSemaphoreDelete(s_ring_items_ready);
+        s_ring_items_ready = NULL;
+    }
+    if (s_ring_mutex != NULL) {
+        vSemaphoreDelete(s_ring_mutex);
+        s_ring_mutex = NULL;
+    }
+    if (s_ring_items != NULL) {
+        heap_caps_free(s_ring_items);
+        s_ring_items = NULL;
+    }
+    s_ring_capacity = 0;
+    s_ring_head = 0;
+    s_ring_count = 0;
+}
+
+static void wireless_telemetry_delete_batch_buffer(void)
+{
+    if (s_batch_buffer != NULL) {
+        heap_caps_free(s_batch_buffer);
+        s_batch_buffer = NULL;
+    }
+}
+
 static bool wireless_telemetry_enqueue(const wireless_telemetry_item_t *item)
 {
-    if (s_queue == NULL || item == NULL ||
+    if (s_ring_items == NULL || s_ring_mutex == NULL ||
+        s_ring_items_ready == NULL || item == NULL ||
         !wireless_telemetry_target_configured()) {
         return false;
     }
 
-    if (xQueueSend(s_queue, item, 0) == pdTRUE) {
-        return true;
+    if (xSemaphoreTake(s_ring_mutex, 0) != pdTRUE) {
+        s_dropped_count++;
+        return false;
     }
 
-    wireless_telemetry_item_t discarded = {0};
-    if (xQueueReceive(s_queue, &discarded, 0) == pdTRUE) {
+    const bool was_full = s_ring_count >= s_ring_capacity;
+    if (was_full) {
+        s_ring_head = (s_ring_head + 1U) % s_ring_capacity;
+        s_ring_count--;
         s_dropped_count++;
     }
 
-    if (xQueueSend(s_queue, item, 0) == pdTRUE) {
-        return true;
+    const size_t tail = (s_ring_head + s_ring_count) % s_ring_capacity;
+    s_ring_items[tail] = *item;
+    s_ring_count++;
+
+    xSemaphoreGive(s_ring_mutex);
+
+    if (!was_full) {
+        (void)xSemaphoreGive(s_ring_items_ready);
+    }
+    return true;
+}
+
+static bool wireless_telemetry_dequeue(wireless_telemetry_item_t *item,
+                                       TickType_t wait_ticks)
+{
+    if (s_ring_items == NULL || s_ring_mutex == NULL ||
+        s_ring_items_ready == NULL || item == NULL) {
+        return false;
     }
 
-    s_dropped_count++;
-    return false;
+    if (xSemaphoreTake(s_ring_items_ready, wait_ticks) != pdTRUE) {
+        return false;
+    }
+
+    if (xSemaphoreTake(s_ring_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+
+    if (s_ring_count == 0) {
+        xSemaphoreGive(s_ring_mutex);
+        return false;
+    }
+
+    *item = s_ring_items[s_ring_head];
+    s_ring_head = (s_ring_head + 1U) % s_ring_capacity;
+    s_ring_count--;
+
+    xSemaphoreGive(s_ring_mutex);
+    return true;
 }
 
 static int wireless_telemetry_connect_socket(void)
 {
     char port[8];
-    snprintf(port, sizeof(port), "%u", APP_WIRELESS_TELEMETRY_PORT);
+    const uint16_t active_port = wireless_telemetry_active_port();
+    snprintf(port, sizeof(port), "%u", active_port);
 
     struct addrinfo hints = {
         .ai_family = AF_INET,
@@ -271,9 +391,8 @@ static bool wireless_telemetry_take_batch(char *batch, size_t batch_size,
                                           size_t *batch_len)
 {
     wireless_telemetry_item_t item = {0};
-    if (xQueueReceive(s_queue, &item,
-                      pdMS_TO_TICKS(WIRELESS_TELEMETRY_QUEUE_WAIT_MS)) !=
-        pdTRUE) {
+    if (!wireless_telemetry_dequeue(
+            &item, pdMS_TO_TICKS(WIRELESS_TELEMETRY_QUEUE_WAIT_MS))) {
         return false;
     }
 
@@ -298,7 +417,7 @@ static bool wireless_telemetry_take_batch(char *batch, size_t batch_size,
             break;
         }
 
-        if (xQueueReceive(s_queue, &item, 0) != pdTRUE) {
+        if (!wireless_telemetry_dequeue(&item, 0)) {
             break;
         }
     }
@@ -313,12 +432,15 @@ static void wireless_telemetry_task(void *arg)
 
     int sock = -1;
     TickType_t last_connect_attempt = 0;
-    char batch[WIRELESS_TELEMETRY_BATCH_MAX] = {0};
+    uint16_t connected_port = 0;
 
     while (true) {
+        const uint16_t active_port = wireless_telemetry_active_port();
+
         if (!wireless_telemetry_target_configured()) {
             s_status = WIRELESS_TELEMETRY_STATUS_DISABLED;
             wireless_telemetry_close_socket(&sock);
+            connected_port = 0;
             vTaskDelay(pdMS_TO_TICKS(WIRELESS_TELEMETRY_WIFI_WAIT_MS));
             continue;
         }
@@ -326,8 +448,17 @@ static void wireless_telemetry_task(void *arg)
         if (!wifi_service_is_connected()) {
             s_status = WIRELESS_TELEMETRY_STATUS_WAITING_FOR_WIFI;
             wireless_telemetry_close_socket(&sock);
+            connected_port = 0;
             vTaskDelay(pdMS_TO_TICKS(WIRELESS_TELEMETRY_WIFI_WAIT_MS));
             continue;
+        }
+
+        if (sock >= 0 && connected_port != active_port) {
+            ESP_LOGI(TAG, "telemetry port changed %u -> %u, reconnecting",
+                     (unsigned)connected_port, (unsigned)active_port);
+            wireless_telemetry_close_socket(&sock);
+            connected_port = 0;
+            last_connect_attempt = 0;
         }
 
         if (sock < 0) {
@@ -346,20 +477,21 @@ static void wireless_telemetry_task(void *arg)
                 s_status = WIRELESS_TELEMETRY_STATUS_FAILED;
                 ESP_LOGW(TAG, "connect failed target=%s port=%u err=%d",
                          APP_WIRELESS_TELEMETRY_TARGET,
-                         (unsigned)APP_WIRELESS_TELEMETRY_PORT,
-                         s_last_error);
+                         (unsigned)active_port, s_last_error);
                 continue;
             }
 
             s_connected = true;
+            connected_port = active_port;
             s_status = WIRELESS_TELEMETRY_STATUS_CONNECTED;
             ESP_LOGI(TAG, "connected target=%s port=%u",
                      APP_WIRELESS_TELEMETRY_TARGET,
-                     (unsigned)APP_WIRELESS_TELEMETRY_PORT);
+                     (unsigned)active_port);
         }
 
         size_t batch_len = 0;
-        if (!wireless_telemetry_take_batch(batch, sizeof(batch),
+        if (!wireless_telemetry_take_batch(s_batch_buffer,
+                                           WIRELESS_TELEMETRY_BATCH_MAX,
                                            &batch_len)) {
             if (!wireless_telemetry_socket_alive(sock)) {
                 wireless_telemetry_close_socket(&sock);
@@ -368,8 +500,9 @@ static void wireless_telemetry_task(void *arg)
             continue;
         }
 
-        if (!wireless_telemetry_send_all(sock, batch, batch_len)) {
+        if (!wireless_telemetry_send_all(sock, s_batch_buffer, batch_len)) {
             wireless_telemetry_close_socket(&sock);
+            connected_port = 0;
             s_status = WIRELESS_TELEMETRY_STATUS_FAILED;
         }
     }
@@ -387,21 +520,43 @@ esp_err_t wireless_telemetry_service_start(void)
         return ESP_OK;
     }
 
-    s_queue = xQueueCreate(WIRELESS_TELEMETRY_QUEUE_LEN,
-                           sizeof(wireless_telemetry_item_t));
-    if (s_queue == NULL) {
+    if (wireless_telemetry_create_ring(WIRELESS_TELEMETRY_QUEUE_LEN,
+                                       MALLOC_CAP_SPIRAM)) {
+        ESP_LOGI(TAG, "ring storage in PSRAM len=%u bytes=%u",
+                 (unsigned)WIRELESS_TELEMETRY_QUEUE_LEN,
+                 (unsigned)(WIRELESS_TELEMETRY_QUEUE_LEN *
+                            sizeof(wireless_telemetry_item_t)));
+    }
+    if (s_ring_items == NULL) {
+        wireless_telemetry_delete_ring();
         s_last_error = ENOMEM;
         s_status = WIRELESS_TELEMETRY_STATUS_FAILED;
+        ESP_LOGE(TAG, "PSRAM ring allocation failed len=%u bytes=%u",
+                 (unsigned)WIRELESS_TELEMETRY_QUEUE_LEN,
+                 (unsigned)(WIRELESS_TELEMETRY_QUEUE_LEN *
+                            sizeof(wireless_telemetry_item_t)));
         return ESP_ERR_NO_MEM;
     }
 
-    const BaseType_t created =
-        xTaskCreate(wireless_telemetry_task, "wireless_tel",
-                    WIRELESS_TELEMETRY_TASK_STACK_WORDS, NULL,
-                    WIRELESS_TELEMETRY_TASK_PRIORITY, &s_task_handle);
+    s_batch_buffer = (char *)heap_caps_malloc(
+        WIRELESS_TELEMETRY_BATCH_MAX, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (s_batch_buffer == NULL) {
+        wireless_telemetry_delete_ring();
+        s_last_error = ENOMEM;
+        s_status = WIRELESS_TELEMETRY_STATUS_FAILED;
+        ESP_LOGE(TAG, "batch buffer allocation failed bytes=%u",
+                 (unsigned)WIRELESS_TELEMETRY_BATCH_MAX);
+        return ESP_ERR_NO_MEM;
+    }
+
+    const BaseType_t created = xTaskCreatePinnedToCore(
+        wireless_telemetry_task, "wireless_tel",
+        WIRELESS_TELEMETRY_TASK_STACK_BYTES, NULL,
+        WIRELESS_TELEMETRY_TASK_PRIORITY, &s_task_handle,
+        WIRELESS_TELEMETRY_TASK_CORE);
     if (created != pdPASS) {
-        vQueueDelete(s_queue);
-        s_queue = NULL;
+        wireless_telemetry_delete_ring();
+        wireless_telemetry_delete_batch_buffer();
         s_last_error = ENOMEM;
         s_status = WIRELESS_TELEMETRY_STATUS_FAILED;
         return ESP_ERR_NO_MEM;
@@ -450,7 +605,7 @@ const char *wireless_telemetry_service_get_target(void)
 
 uint16_t wireless_telemetry_service_get_port(void)
 {
-    return APP_WIRELESS_TELEMETRY_PORT;
+    return wireless_telemetry_active_port();
 }
 
 uint32_t wireless_telemetry_service_get_dropped_count(void)

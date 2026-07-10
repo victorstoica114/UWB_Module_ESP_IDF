@@ -60,6 +60,7 @@ static const char *TAG = "app_runtime_config";
 #define KEY_BNO085_LOG "bno_log"
 #define KEY_GPS_ENABLED "gps_enabled"
 #define KEY_RADIO_CH "radio_ch"
+#define KEY_TEL_PORT "tel_port"
 
 static bool s_initialized;
 static app_runtime_config_t s_config;
@@ -87,6 +88,11 @@ static bool count_valid(uint8_t count)
 static bool radio_channel_valid(uint8_t channel)
 {
     return channel == 5U || channel == 9U;
+}
+
+static bool tcp_port_valid(uint32_t port)
+{
+    return port > 0U && port <= 65535U;
 }
 
 static bool anchor_ids_valid(const app_runtime_config_t *config)
@@ -265,6 +271,7 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->bno085_log_interval_ms = APP_BNO085_LOG_INTERVAL_MS;
     config->gps_enabled = APP_GPS_ENABLED_DEFAULT != 0;
     config->radio_channel = (uint8_t)APP_UWB_RADIO_CHANNEL;
+    config->wireless_telemetry_port = APP_WIRELESS_TELEMETRY_PORT;
     config->from_nvs = false;
 }
 
@@ -298,7 +305,8 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         !ms_valid(config->calibration_rx_slice_ms) ||
         !bno085_ms_valid(config->bno085_accel_interval_ms) ||
         !bno085_ms_valid(config->bno085_log_interval_ms) ||
-        !radio_channel_valid(config->radio_channel)) {
+        !radio_channel_valid(config->radio_channel) ||
+        !tcp_port_valid(config->wireless_telemetry_port)) {
         return false;
     }
 
@@ -434,6 +442,8 @@ static void read_config_from_nvs(app_runtime_config_t *config)
                       &config->bno085_log_interval_ms);
     found |= read_bool(handle, KEY_GPS_ENABLED, &config->gps_enabled);
     found |= read_u8(handle, KEY_RADIO_CH, &config->radio_channel);
+    found |= read_u32(handle, KEY_TEL_PORT,
+                      &config->wireless_telemetry_port);
     config->from_nvs = found;
 
     nvs_close(handle);
@@ -453,7 +463,7 @@ esp_err_t app_runtime_config_reload(void)
     s_config = loaded;
     s_initialized = true;
     ESP_LOGI(TAG,
-             "Runtime config ready: mode=%s(%u) tag=%u anchors=[%u,%u,%u,%u] count=%u coord=%u uwb=%s bno085=%s bno_rate=%lu ms bno_log=%lu ms gps=%s radio_ch=%u source=%s",
+             "Runtime config ready: mode=%s(%u) tag=%u anchors=[%u,%u,%u,%u] count=%u coord=%u uwb=%s bno085=%s bno_rate=%lu ms bno_log=%lu ms gps=%s radio_ch=%u tel_port=%lu source=%s",
              app_runtime_config_runtime_mode_to_string(s_config.runtime_mode),
              (unsigned)s_config.runtime_mode, (unsigned)s_config.tag_id,
              (unsigned)s_config.anchor_ids[0],
@@ -468,6 +478,7 @@ esp_err_t app_runtime_config_reload(void)
              (unsigned long)s_config.bno085_log_interval_ms,
              s_config.gps_enabled ? "on" : "off",
              (unsigned)s_config.radio_channel,
+             (unsigned long)s_config.wireless_telemetry_port,
              s_config.from_nvs ? "nvs" : "firmware");
     return ESP_OK;
 }
@@ -602,6 +613,8 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
                             config->bno085_log_interval_ms));
     WRITE_OR_GOTO(write_bool(handle, KEY_GPS_ENABLED, config->gps_enabled));
     WRITE_OR_GOTO(write_u8(handle, KEY_RADIO_CH, config->radio_channel));
+    WRITE_OR_GOTO(write_u32(handle, KEY_TEL_PORT,
+                            config->wireless_telemetry_port));
 
     err = nvs_commit(handle);
 

@@ -33,6 +33,8 @@ enum {
     BNO085_RESET_PULSE_MS = 20,
     BNO085_BOOT_AFTER_RESET_MS = 800,
     BNO085_MAX_PACKETS_PER_WAKE = 16,
+    BNO085_HIGH_RATE_INTERVAL_MS = 10,
+    BNO085_HIGH_RATE_DRAIN_BUDGET_MS = 8,
     BNO085_STALL_RECOVERY_MS = 5000,
     BNO085_ACCEL_REPORT_LEN = 10,
     BNO085_TIMEBASE_REPORT_LEN = 5,
@@ -61,6 +63,18 @@ static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_i2c_dev;
 static uint8_t s_shtp_sequence[6];
 static uint32_t s_report_count;
+static uint32_t s_packet_count;
+static uint32_t s_input_packet_count;
+static uint32_t s_timebase_count;
+static uint32_t s_max_reports_per_packet;
+static uint32_t s_continuation_packet_count;
+static uint32_t s_continuation_transfer_count;
+static uint32_t s_continuation_header_error_count;
+static uint32_t s_high_rate_poll_count;
+static uint32_t s_wait_immediate_count;
+static uint32_t s_wait_notify_count;
+static uint32_t s_wait_late_active_count;
+static uint32_t s_null_header_count;
 static uint32_t s_read_error_count;
 static uint32_t s_parse_error_count;
 static volatile uint32_t s_int_irq_count;
@@ -76,6 +90,8 @@ static uint32_t s_last_reconfigure_warning_ms;
 static uint32_t s_last_progress_ms;
 static uint32_t s_last_progress_report_count;
 static uint32_t s_last_stall_recovery_ms;
+static size_t s_last_packet_len;
+static size_t s_last_input_payload_len;
 
 static void bno085_drain_startup_packets(void);
 
@@ -140,6 +156,24 @@ static uint32_t bno085_log_interval_ms(void)
         return config->bno085_log_interval_ms;
     }
     return APP_BNO085_LOG_INTERVAL_MS;
+}
+
+static bool bno085_high_rate_mode(void)
+{
+    return bno085_accel_interval_ms() <= BNO085_HIGH_RATE_INTERVAL_MS;
+}
+
+static uint32_t bno085_int_wait_timeout_ms(void)
+{
+    uint32_t timeout_ms = APP_BNO085_INT_WAIT_TIMEOUT_MS;
+    if (bno085_high_rate_mode()) {
+        const uint32_t interval_ms = bno085_accel_interval_ms();
+        const uint32_t high_rate_timeout_ms = interval_ms + 2U;
+        if (timeout_ms > high_rate_timeout_ms) {
+            timeout_ms = high_rate_timeout_ms;
+        }
+    }
+    return timeout_ms;
 }
 
 static esp_err_t bno085_hold_in_reset(void)
@@ -315,6 +349,9 @@ static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
 
     const uint16_t raw_len = read_le_u16(header);
     if (raw_len == 0 || raw_len == 0xFFFFU) {
+        if (raw_len == 0) {
+            s_null_header_count++;
+        }
         return ESP_ERR_TIMEOUT;
     }
 
@@ -333,6 +370,10 @@ static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
         return ESP_ERR_INVALID_SIZE;
     }
 
+    if ((raw_len & 0x8000U) != 0) {
+        s_continuation_packet_count++;
+    }
+
     if (payload_len > 0) {
         uint8_t chunk[BNO085_MAX_PACKET_LEN] = {0};
         err = i2c_master_receive(s_i2c_dev, chunk,
@@ -342,10 +383,20 @@ static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
             return err;
         }
 
+        s_continuation_transfer_count++;
+        const uint16_t continuation_raw_len = read_le_u16(chunk);
+        const size_t continuation_len = continuation_raw_len & 0x7FFFU;
+        if ((continuation_raw_len & 0x8000U) == 0 ||
+            continuation_len != payload_len + BNO085_SHTP_HEADER_LEN ||
+            chunk[2] != header[2]) {
+            s_continuation_header_error_count++;
+        }
+
         memcpy(&packet[BNO085_SHTP_HEADER_LEN],
                &chunk[BNO085_SHTP_HEADER_LEN], payload_len);
     }
 
+    s_last_packet_len = total_len;
     *packet_len = total_len;
     return ESP_OK;
 }
@@ -436,8 +487,6 @@ static esp_err_t bno085_soft_reset(void)
 
 static void bno085_emit_telemetry(void)
 {
-    return;
-
     (void)wireless_telemetry_service_submit_bno085_accel(
         float_to_milli(s_last_x_mps2), float_to_milli(s_last_y_mps2),
         float_to_milli(s_last_z_mps2), s_last_accuracy, s_report_count);
@@ -454,6 +503,7 @@ static void bno085_parse_input_reports(const uint8_t *payload, size_t len)
                 s_parse_error_count++;
                 return;
             }
+            s_timebase_count++;
             pos += BNO085_TIMEBASE_REPORT_LEN;
             continue;
         }
@@ -490,12 +540,20 @@ static void bno085_parse_packet(const uint8_t *packet, size_t packet_len)
         return;
     }
 
+    s_packet_count++;
     const uint8_t channel = packet[2];
     const uint8_t *payload = &packet[BNO085_SHTP_HEADER_LEN];
     const size_t payload_len = packet_len - BNO085_SHTP_HEADER_LEN;
 
     if (channel == BNO085_CHANNEL_INPUT_REPORTS) {
+        s_input_packet_count++;
+        s_last_input_payload_len = payload_len;
+        const uint32_t before = s_report_count;
         bno085_parse_input_reports(payload, payload_len);
+        const uint32_t reports_in_packet = s_report_count - before;
+        if (reports_in_packet > s_max_reports_per_packet) {
+            s_max_reports_per_packet = reports_in_packet;
+        }
         return;
     }
 
@@ -518,12 +576,19 @@ static void bno085_log_status(void)
     s_last_log_ms = now_ms;
 
     ESP_LOGI(TAG,
-             "BNO085 accel summary x=%.2f y=%.2f z=%.2f m/s^2 accuracy=%u reports=%u sample_ms=%u read_errors=%u parse_errors=%u irqs=%u wait_timeouts=%u",
+             "BNO085 summary x=%.2f y=%.2f z=%.2f acc=%u rep=%u ms=%u pkt=%u in=%u tb=%u max=%u len=%u cont=%u/%u cerr=%u hp=%u null=%u err=%u/%u irq=%u il=%d wt=%u",
              (double)s_last_x_mps2, (double)s_last_y_mps2,
              (double)s_last_z_mps2, (unsigned)s_last_accuracy,
              (unsigned)s_report_count, (unsigned)bno085_accel_interval_ms(),
-             (unsigned)s_read_error_count,
-             (unsigned)s_parse_error_count, (unsigned)s_int_irq_count,
+             (unsigned)s_packet_count, (unsigned)s_input_packet_count,
+             (unsigned)s_timebase_count, (unsigned)s_max_reports_per_packet,
+             (unsigned)s_last_packet_len, (unsigned)s_continuation_packet_count,
+             (unsigned)s_continuation_transfer_count,
+             (unsigned)s_continuation_header_error_count,
+             (unsigned)s_high_rate_poll_count, (unsigned)s_null_header_count,
+             (unsigned)s_read_error_count, (unsigned)s_parse_error_count,
+             (unsigned)s_int_irq_count,
+             gpio_get_level(BOARD_CONFIG_BNO085_INT_GPIO),
              (unsigned)s_int_wait_timeout_count);
 }
 
@@ -663,22 +728,25 @@ static void bno085_drain_startup_packets(void)
 static bool bno085_wait_for_interrupt_or_timeout(void)
 {
     if (bno085_int_active()) {
+        s_wait_immediate_count++;
         return true;
     }
 
     if (!s_int_irq_enabled) {
-        vTaskDelay(ms_to_ticks_min_1(APP_BNO085_INT_WAIT_TIMEOUT_MS));
+        vTaskDelay(ms_to_ticks_min_1(bno085_int_wait_timeout_ms()));
         return bno085_int_active();
     }
 
     bno085_arm_interrupt_if_needed();
 
     const uint32_t taken = ulTaskNotifyTake(
-        pdTRUE, ms_to_ticks_min_1(APP_BNO085_INT_WAIT_TIMEOUT_MS));
+        pdTRUE, ms_to_ticks_min_1(bno085_int_wait_timeout_ms()));
     if (taken > 0) {
+        s_wait_notify_count++;
         return bno085_int_active();
     }
     if (bno085_int_active()) {
+        s_wait_late_active_count++;
         return true;
     }
 
@@ -688,12 +756,21 @@ static bool bno085_wait_for_interrupt_or_timeout(void)
 
 static void bno085_drain_ready_packets(uint8_t *packet, size_t packet_size)
 {
+    const uint32_t start_ms = ticks_to_ms();
     for (uint32_t i = 0; i < BNO085_MAX_PACKETS_PER_WAKE; ++i) {
         size_t packet_len = 0;
         const esp_err_t err = bno085_read_packet(packet, packet_size,
                                                  &packet_len);
         if (err == ESP_OK) {
             bno085_parse_packet(packet, packet_len);
+
+            if (bno085_high_rate_mode() &&
+                (uint32_t)(ticks_to_ms() - start_ms) <
+                    BNO085_HIGH_RATE_DRAIN_BUDGET_MS) {
+                s_high_rate_poll_count++;
+                continue;
+            }
+
             if (!bno085_int_active()) {
                 return;
             }

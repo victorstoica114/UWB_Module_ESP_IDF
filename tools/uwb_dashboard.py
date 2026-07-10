@@ -115,6 +115,20 @@ def cm_to_mm_text(value: Any) -> str:
     return str(int(round(number * 10.0)))
 
 
+def parse_port_list(text: str) -> list[int]:
+    ports: list[int] = []
+    for raw in re.split(r"[\s,]+", str(text or "")):
+        item = raw.strip()
+        if not item:
+            continue
+        port = int(item)
+        if port < 1 or port > 65535:
+            raise argparse.ArgumentTypeError(f"invalid TCP port: {port}")
+        if port not in ports:
+            ports.append(port)
+    return ports
+
+
 class DashboardState:
     def __init__(self, *, max_logs: int) -> None:
         self.lock = threading.Lock()
@@ -122,12 +136,14 @@ class DashboardState:
         self.logs: deque[dict[str, Any]] = deque(maxlen=max_logs)
         self.accel_history: dict[int, deque[dict[str, Any]]] = {}
         self.max_accel_samples = 30000
+        self.accel_samples: deque[dict[str, Any]] = deque(maxlen=120000)
         self.next_log_id = 1
         self.next_accel_id = 1
         self.client_count = 0
         self.telemetry_client_count = 0
         self.client_counts: dict[str, int] = {}
         self.telemetry_client_counts: dict[str, int] = {}
+        self.listener_telemetry_ports: list[int] = []
         self.status_by_module: dict[int, dict[str, Any]] = {}
         self.status_errors: dict[str, str] = {}
 
@@ -242,6 +258,7 @@ class DashboardState:
             module_id, deque(maxlen=self.max_accel_samples)
         )
         history.append(sample)
+        self.accel_samples.append(sample)
 
     def set_client_count(self, count: int, source: str = "default") -> None:
         with self.lock:
@@ -256,6 +273,10 @@ class DashboardState:
             self.telemetry_client_count = sum(
                 self.telemetry_client_counts.values()
             )
+
+    def set_listener_telemetry_ports(self, ports: list[int]) -> None:
+        with self.lock:
+            self.listener_telemetry_ports = list(dict.fromkeys(ports))
 
     def set_status(self, module_id: int, status: dict[str, Any]) -> None:
         status["status_updated_at"] = time.time()
@@ -281,11 +302,9 @@ class DashboardState:
         with self.lock:
             samples = [
                 sample
-                for history in self.accel_history.values()
-                for sample in history
+                for sample in self.accel_samples
                 if int(sample.get("sample_id") or 0) > after_id
             ]
-            samples.sort(key=lambda item: int(item.get("sample_id") or 0))
             if len(samples) > limit:
                 samples = samples[-limit:]
             next_id = self.next_accel_id
@@ -302,12 +321,18 @@ class DashboardState:
             errors = dict(self.status_errors)
             client_count = self.client_count
             telemetry_client_count = self.telemetry_client_count
+            client_counts = dict(self.client_counts)
+            telemetry_client_counts = dict(self.telemetry_client_counts)
+            listener_telemetry_ports = list(self.listener_telemetry_ports)
             log_count = len(self.logs)
             next_log_id = self.next_log_id
         statuses.sort(key=lambda item: int(item.get("module_id") or 0))
         return {
             "client_count": client_count,
             "telemetry_client_count": telemetry_client_count,
+            "client_counts": client_counts,
+            "telemetry_client_counts": telemetry_client_counts,
+            "telemetry_ports": listener_telemetry_ports,
             "log_count": log_count,
             "next_log_id": next_log_id,
             "statuses": statuses,
@@ -323,6 +348,8 @@ class LogServer(socketserver.ThreadingTCPServer):
     def __init__(self, server_address: tuple[str, int], state: DashboardState):
         super().__init__(server_address, LogHandler)
         self.state = state
+        self.log_source = f"log:{server_address[1]}"
+        self.telemetry_source = f"telemetry:{server_address[1]}"
         self._client_lock = threading.Lock()
         self._log_clients = 0
         self._telemetry_clients = 0
@@ -330,25 +357,25 @@ class LogServer(socketserver.ThreadingTCPServer):
     def log_client_connected(self) -> None:
         with self._client_lock:
             self._log_clients += 1
-            self.state.set_client_count(self._log_clients, "log_server")
+            self.state.set_client_count(self._log_clients, self.log_source)
 
     def log_client_disconnected(self) -> None:
         with self._client_lock:
             self._log_clients = max(0, self._log_clients - 1)
-            self.state.set_client_count(self._log_clients, "log_server")
+            self.state.set_client_count(self._log_clients, self.log_source)
 
     def telemetry_client_connected(self) -> None:
         with self._client_lock:
             self._telemetry_clients += 1
             self.state.set_telemetry_client_count(
-                self._telemetry_clients, "log_server"
+                self._telemetry_clients, self.telemetry_source
             )
 
     def telemetry_client_disconnected(self) -> None:
         with self._client_lock:
             self._telemetry_clients = max(0, self._telemetry_clients - 1)
             self.state.set_telemetry_client_count(
-                self._telemetry_clients, "log_server"
+                self._telemetry_clients, self.telemetry_source
             )
 
 
@@ -356,21 +383,27 @@ class TelemetryServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, server_address: tuple[str, int], state: DashboardState):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        state: DashboardState,
+        source: str | None = None,
+    ):
         super().__init__(server_address, TelemetryHandler)
         self.state = state
+        self.source = source or f"telemetry:{server_address[1]}"
         self._client_lock = threading.Lock()
         self._clients = 0
 
     def client_connected(self) -> None:
         with self._client_lock:
             self._clients += 1
-            self.state.set_telemetry_client_count(self._clients, "telemetry_server")
+            self.state.set_telemetry_client_count(self._clients, self.source)
 
     def client_disconnected(self) -> None:
         with self._client_lock:
             self._clients = max(0, self._clients - 1)
-            self.state.set_telemetry_client_count(self._clients, "telemetry_server")
+            self.state.set_telemetry_client_count(self._clients, self.source)
 
 
 class LogHandler(socketserver.BaseRequestHandler):
@@ -1035,6 +1068,19 @@ th { color: var(--muted); font-weight: 700; }
               <div id="runtimeToast" class="toast"></div>
             </div>
             <div class="section">
+              <h2>Connectivity</h2>
+              <div class="form-grid">
+                <label for="runtimeTelemetryPort">Telemetry port</label>
+                <input id="runtimeTelemetryPort" value="6055" type="number" min="1" max="65535" step="1" list="telemetryPortOptions">
+                <datalist id="telemetryPortOptions"></datalist>
+              </div>
+              <div class="muted" id="telemetryPortHint"></div>
+              <div class="form-actions">
+                <button class="primary" id="applyTelemetryPort">Apply Telemetry Port</button>
+              </div>
+              <div id="telemetryPortToast" class="toast"></div>
+            </div>
+            <div class="section">
               <h2>Antenna Delay Calibration</h2>
               <div class="form-grid">
                 <label for="calTargets">Targets</label>
@@ -1259,9 +1305,11 @@ function mergeAccelSample(sample) {
   if (!state.accelHistory[key]) state.accelHistory[key] = [];
   const history = state.accelHistory[key];
   const previous = history[history.length - 1];
+  sample.uptime_ms = Number(sample.uptime_ms);
+  sample.received_at = Number(sample.received_at);
   history.push(sample);
-  if (previous && Number(previous.received_at || 0) > Number(sample.received_at || 0)) {
-    history.sort((a, b) => Number(a.received_at || 0) - Number(b.received_at || 0));
+  if (previous && Number(previous.uptime_ms || 0) > Number(sample.uptime_ms || 0)) {
+    history.sort((a, b) => Number(a.uptime_ms || 0) - Number(b.uptime_ms || 0));
   }
   if (history.length > maxAccelSamples) {
     history.splice(0, history.length - maxAccelSamples);
@@ -1314,10 +1362,42 @@ function intervalMsToHz(ms) {
   return String(Math.max(1, Math.min(500, Math.round(1000 / value))));
 }
 
-function visibleAccelSamples(samples, nowSec, windowSec) {
+function accelRate(samples, horizonSec = 1.0) {
+  if (samples.length < 2) return null;
+  const latest = samples[samples.length - 1];
+  const latestUptimeMs = Number(latest.uptime_ms);
+  if (!Number.isFinite(latestUptimeMs)) return null;
+  const cutoffMs = latestUptimeMs - horizonSec * 1000;
+  let first = null;
+  let count = 0;
+  for (let index = samples.length - 1; index >= 0; index--) {
+    const sample = samples[index];
+    const uptimeMs = Number(sample.uptime_ms);
+    if (!Number.isFinite(uptimeMs) || uptimeMs > latestUptimeMs) continue;
+    if (uptimeMs < cutoffMs) break;
+    first = sample;
+    count++;
+  }
+  if (!first || first === latest || count < 2) return null;
+  const dtSec = (latestUptimeMs - Number(first.uptime_ms)) / 1000;
+  if (!Number.isFinite(dtSec) || dtSec <= 0) return null;
+  const repDelta = Number(latest.reports) - Number(first.reports);
+  return {
+    rxHz: (count - 1) / dtSec,
+    repHz: Number.isFinite(repDelta) && repDelta >= 0 ? repDelta / dtSec : null,
+  };
+}
+
+function visibleAccelSamples(samples, latest, windowSec) {
+  if (!latest) return [];
+  const latestUptimeMs = Number(latest.uptime_ms);
+  if (!Number.isFinite(latestUptimeMs)) return [];
+  const windowMs = windowSec * 1000;
   return samples.filter(sample => {
-    const ts = Number(sample.received_at);
-    return Number.isFinite(ts) && ts >= nowSec - windowSec && ts <= nowSec + 0.5;
+    const uptimeMs = Number(sample.uptime_ms);
+    return Number.isFinite(uptimeMs) &&
+      uptimeMs <= latestUptimeMs &&
+      latestUptimeMs - uptimeMs <= windowMs;
   });
 }
 
@@ -1354,7 +1434,7 @@ function downsampleSeries(samples, key) {
     }
     if (minSample === maxSample) {
       result.push(minSample);
-    } else if (Number(minSample.received_at) <= Number(maxSample.received_at)) {
+    } else if (Number(minSample.uptime_ms) <= Number(maxSample.uptime_ms)) {
       result.push(minSample, maxSample);
     } else {
       result.push(maxSample, minSample);
@@ -1413,12 +1493,17 @@ function canvasY(value, scale, plotArea) {
   return plotArea.bottom - ratio * plotArea.height;
 }
 
-function canvasX(sample, nowSec, windowSec, plotArea) {
-  const age = Math.max(0, nowSec - Number(sample.received_at || nowSec));
-  return plotArea.right - Math.min(1, age / windowSec) * plotArea.width;
+function canvasX(sample, latest, windowSec, plotArea) {
+  const latestUptimeMs = Number(latest?.uptime_ms);
+  const sampleUptimeMs = Number(sample.uptime_ms);
+  if (!Number.isFinite(latestUptimeMs) || !Number.isFinite(sampleUptimeMs)) {
+    return plotArea.right;
+  }
+  const ageSec = Math.max(0, (latestUptimeMs - sampleUptimeMs) / 1000);
+  return plotArea.right - Math.min(1, ageSec / windowSec) * plotArea.width;
 }
 
-function drawSeries(ctx, samples, key, color, scale, nowSec, windowSec, plotArea) {
+function drawSeries(ctx, samples, key, color, scale, latest, windowSec, plotArea) {
   const points = downsampleSeries(samples, key);
   if (!points.length) return;
   ctx.beginPath();
@@ -1426,7 +1511,7 @@ function drawSeries(ctx, samples, key, color, scale, nowSec, windowSec, plotArea
   ctx.lineWidth = 1.2;
   for (let index = 0; index < points.length; index++) {
     const sample = points[index];
-    const x = canvasX(sample, nowSec, windowSec, plotArea);
+    const x = canvasX(sample, latest, windowSec, plotArea);
     const y = canvasY(sample[key], scale, plotArea);
     if (index === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
@@ -1434,7 +1519,7 @@ function drawSeries(ctx, samples, key, color, scale, nowSec, windowSec, plotArea
   ctx.stroke();
 }
 
-function drawAccelCanvas(canvas, samples, scale, nowSec, windowSec) {
+function drawAccelCanvas(canvas, samples, scale, latest, windowSec) {
   const {ctx, width, height} = fitCanvas(canvas);
   const plotArea = {
     left: 48,
@@ -1488,9 +1573,9 @@ function drawAccelCanvas(canvas, samples, scale, nowSec, windowSec) {
     return;
   }
 
-  drawSeries(ctx, samples, "x", "#2b64d8", scale, nowSec, windowSec, plotArea);
-  drawSeries(ctx, samples, "y", "#16833a", scale, nowSec, windowSec, plotArea);
-  drawSeries(ctx, samples, "z", "#b35b00", scale, nowSec, windowSec, plotArea);
+  drawSeries(ctx, samples, "x", "#2b64d8", scale, latest, windowSec, plotArea);
+  drawSeries(ctx, samples, "y", "#16833a", scale, latest, windowSec, plotArea);
+  drawSeries(ctx, samples, "z", "#b35b00", scale, latest, windowSec, plotArea);
 }
 
 function scheduleAccelRender() {
@@ -1508,17 +1593,20 @@ function renderAccelGraphs() {
   const timebaseSecPerDiv = Math.max(1, Number(timebaseEl?.value || state.timebaseSecPerDiv || 5));
   state.timebaseSecPerDiv = timebaseSecPerDiv;
   const windowSec = timebaseSecPerDiv * 10;
-  const nowSec = Date.now() / 1000;
 
   for (const moduleId of [1, 2, 3, 4, 5]) {
     const allSamples = accelSamples(moduleId);
     const latest = allSamples[allSamples.length - 1];
-    const samples = visibleAccelSamples(allSamples, nowSec, windowSec);
+    const samples = visibleAccelSamples(allSamples, latest, windowSec);
     const scale = accelScale(samples);
+    const rate = accelRate(allSamples, 1.0);
     const canvas = document.getElementById(`accelCanvas${moduleId}`);
-    if (canvas) drawAccelCanvas(canvas, samples, scale, nowSec, windowSec);
+    if (canvas) drawAccelCanvas(canvas, samples, scale, latest, windowSec);
     const ageEl = document.getElementById(`chartAge${moduleId}`);
-    if (ageEl) ageEl.textContent = latest ? `last ${fmtAge(latest.received_at)}` : "waiting";
+    if (ageEl) {
+      const rateText = rate?.rxHz ? ` · ${Math.round(rate.rxHz)} rx/s` : "";
+      ageEl.textContent = latest ? `last ${fmtAge(latest.received_at)}${rateText}` : "waiting";
+    }
     if (!latest) {
       continue;
     }
@@ -1526,8 +1614,11 @@ function renderAccelGraphs() {
     document.getElementById(`latestX${moduleId}`).textContent = fmtAccel(latest.x);
     document.getElementById(`latestY${moduleId}`).textContent = fmtAccel(latest.y);
     document.getElementById(`latestZ${moduleId}`).textContent = fmtAccel(latest.z);
+    const rateText = rate
+      ? ` · rx ${Math.round(rate.rxHz)} Hz${rate.repHz ? ` · sensor ${Math.round(rate.repHz)} Hz` : ""}`
+      : "";
     document.getElementById(`latestExtra${moduleId}`).textContent =
-      `|a| ${fmtAccel(magnitude)} m/s^2 · accuracy ${latest.accuracy} · ${fmtAge(latest.received_at)}`;
+      `|a| ${fmtAccel(magnitude)} m/s^2 · accuracy ${latest.accuracy} · ${fmtAge(latest.received_at)}${rateText}`;
   }
 }
 
@@ -1586,6 +1677,32 @@ function renderInfo(snapshot) {
   const statusPill = document.getElementById("statusPill");
   statusPill.textContent = `${online} modules online`;
   statusPill.className = `pill ${online >= 5 ? "good" : "warn"}`;
+  const telemetryPorts = snapshot.telemetry_ports || [];
+  const portOptions = document.getElementById("telemetryPortOptions");
+  if (portOptions && telemetryPorts.length) {
+    portOptions.innerHTML = telemetryPorts.map(port => `<option value="${esc(port)}"></option>`).join("");
+  }
+  const telemetryPortHint = document.getElementById("telemetryPortHint");
+  if (telemetryPortHint) {
+    const telemetryCounts = snapshot.telemetry_client_counts || {};
+    const activeTelemetry = Object.entries(telemetryCounts)
+      .filter(([, count]) => Number(count) > 0)
+      .map(([source, count]) => `${source.replace("telemetry:", "")}: ${count}`)
+      .join(", ");
+    const logCounts = snapshot.client_counts || {};
+    const activeLogs = Object.entries(logCounts)
+      .filter(([, count]) => Number(count) > 0)
+      .map(([source, count]) => `${source.replace("log:", "")}: ${count}`)
+      .join(", ");
+    const listenText = telemetryPorts.length
+      ? `listening: ${telemetryPorts.join(", ")}`
+      : "";
+    const activeText = [
+      activeTelemetry ? `telemetry clients: ${activeTelemetry}` : "",
+      activeLogs ? `log clients: ${activeLogs}` : "",
+    ].filter(Boolean).join(" | ");
+    telemetryPortHint.textContent = [listenText, activeText].filter(Boolean).join(" | ");
+  }
   const rows = document.getElementById("infoRows");
   rows.innerHTML = state.statuses.map(item => `
     <tr>
@@ -1595,7 +1712,7 @@ function renderInfo(snapshot) {
       <td>UWB <span class="${item.runtime_uwb_enabled ? "ok" : "muted"}">${item.runtime_uwb_enabled ? "on" : "off"}</span><br>BNO085 <span class="${item.runtime_bno085_accel_enabled ? "ok" : "muted"}">${item.runtime_bno085_accel_enabled ? "on" : "off"}</span><br><span class="muted">${esc(item.runtime_bno085_accel_interval_ms || "-")}/${esc(item.runtime_bno085_log_interval_ms || "-")} ms</span><br>GPS <span class="${item.runtime_gps_enabled ? "ok" : "muted"}">${item.runtime_gps_enabled ? "on" : "off"}</span></td>
       <td>${esc(item.uwb_status)}<br>tx ${esc(item.uwb_tx_count)} / rx ${esc(item.uwb_rx_count)}<br>err ${esc(item.uwb_tx_error_count)}/${esc(item.uwb_rx_error_count)}</td>
       <td>${esc(item.uwb_active_antenna_delay_hex)}<br><span class="muted">NVS ${item.uwb_antenna_delay_from_nvs ? "yes" : "no"}</span></td>
-      <td>log ${esc(item.wireless_log_status)}<br>dropped ${esc(item.wireless_log_dropped)}<br>tel ${esc(item.wireless_telemetry_status || "-")}<br>tel drop ${esc(item.wireless_telemetry_dropped ?? "-")}<br>tel err ${esc(item.wireless_telemetry_last_error ?? "-")}<br>age ${fmtAge(item.status_updated_at)}</td>
+      <td>log ${esc(item.wireless_log_status)}<br>dropped ${esc(item.wireless_log_dropped)}<br>tel ${esc(item.wireless_telemetry_status || "-")}<br>port ${esc(item.wireless_telemetry_port ?? item.runtime_wireless_telemetry_port ?? "-")}<br>tel drop ${esc(item.wireless_telemetry_dropped ?? "-")}<br>tel err ${esc(item.wireless_telemetry_last_error ?? "-")}<br>age ${fmtAge(item.status_updated_at)}</td>
       <td><span class="muted">not exposed yet</span></td>
     </tr>`).join("");
   renderUwbRadio(state.statuses[0] || {});
@@ -1617,7 +1734,7 @@ function hydrateSettingsFromStatus(item) {
   if (!item.module_id) return;
   setSettingIfFresh(
     "accelSampleHz",
-    intervalMsToHz(item.runtime_bno085_log_interval_ms || item.runtime_bno085_accel_interval_ms)
+    intervalMsToHz(item.runtime_bno085_accel_interval_ms)
   );
   if (state.hydratedSettings) return;
   state.hydratedSettings = true;
@@ -1627,6 +1744,7 @@ function hydrateSettingsFromStatus(item) {
   setSettingIfFresh("runtimeUwb", item.runtime_uwb_enabled);
   setSettingIfFresh("runtimeBno085", item.runtime_bno085_accel_enabled);
   setSettingIfFresh("runtimeGps", item.runtime_gps_enabled);
+  setSettingIfFresh("runtimeTelemetryPort", item.runtime_wireless_telemetry_port || item.wireless_telemetry_port);
   setSettingIfFresh("uwbRadioChannel", item.runtime_radio_channel || item.uwb_radio_channel);
   setSettingIfFresh("uwbSurveyRxMs", item.runtime_anchor_survey_rx_slice_ms);
   setSettingIfFresh("uwbSurveyDelayMs", item.runtime_anchor_survey_command_delay_ms);
@@ -1745,7 +1863,7 @@ function settingKey(id) { return `uwbDash.setting.${id}`; }
 function persistedSettingIds() {
   return [
     "runtimeTargets", "runtimeMode", "runtimeTag", "runtimeAnchors", "runtimeReboot",
-    "runtimeUwb", "runtimeBno085", "runtimeGps",
+    "runtimeUwb", "runtimeBno085", "runtimeGps", "runtimeTelemetryPort",
     "accelTimebase", "accelSampleHz", "accelTargets",
     "uwbTargets", "uwbRadioChannel", "uwbSurveyRxMs", "uwbSurveyDelayMs", "uwbSurveySlotMs",
     "uwbSurveyGapMs", "uwbSurveyLogEvery", "uwbRangingSlotMs",
@@ -1821,6 +1939,14 @@ function wireSettings() {
   });
   document.getElementById("clearRuntime").addEventListener("click", () => {
     postConfig({params: {clear: "1", reboot: "1"}}, "runtimeToast");
+  });
+  document.getElementById("applyTelemetryPort").addEventListener("click", () => {
+    postConfig({
+      target_modules: document.getElementById("runtimeTargets").value,
+      params: {
+        telemetry_port: document.getElementById("runtimeTelemetryPort").value,
+      }
+    }, "telemetryPortToast");
   });
   document.getElementById("applyAccelSample").addEventListener("click", () => {
     const sampleHz = document.getElementById("accelSampleHz").value;
@@ -1977,21 +2103,27 @@ class HttpHandler(BaseHTTPRequestHandler):
 
     def send_html(self, text: str) -> None:
         raw = text.encode("utf-8")
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
 
 def normalize_runtime_params(raw: dict[str, Any]) -> dict[str, str]:
@@ -2149,6 +2281,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-port", type=int, default=6055)
     parser.add_argument("--telemetry-host", default="0.0.0.0")
     parser.add_argument("--telemetry-port", type=int, default=6060)
+    parser.add_argument(
+        "--telemetry-ports",
+        default="6060,16060,55060",
+        help="Comma/space separated telemetry TCP ports to listen on.",
+    )
     parser.add_argument("--http-host", default="127.0.0.1")
     parser.add_argument("--http-port", type=int, default=8780)
     parser.add_argument("--target-list", default="tools/ota_targets.local.txt")
@@ -2171,13 +2308,26 @@ def main() -> int:
     log_thread = threading.Thread(target=log_server.serve_forever, daemon=True)
     log_thread.start()
 
-    telemetry_server = TelemetryServer(
-        (args.telemetry_host, args.telemetry_port), state
-    )
-    telemetry_thread = threading.Thread(
-        target=telemetry_server.serve_forever, daemon=True
-    )
-    telemetry_thread.start()
+    telemetry_ports = parse_port_list(args.telemetry_ports)
+    if args.telemetry_port not in telemetry_ports:
+        telemetry_ports.insert(0, args.telemetry_port)
+    listener_telemetry_ports = [args.log_port]
+    telemetry_servers: list[TelemetryServer] = []
+    telemetry_threads: list[threading.Thread] = []
+    for port in telemetry_ports:
+        if port == args.log_port:
+            continue
+        telemetry_server = TelemetryServer(
+            (args.telemetry_host, port), state, source=f"telemetry:{port}"
+        )
+        telemetry_thread = threading.Thread(
+            target=telemetry_server.serve_forever, daemon=True
+        )
+        telemetry_thread.start()
+        telemetry_servers.append(telemetry_server)
+        telemetry_threads.append(telemetry_thread)
+        listener_telemetry_ports.append(port)
+    state.set_listener_telemetry_ports(listener_telemetry_ports)
 
     poller = StatusPoller(state, targets, args.status_interval)
     poller.start()
@@ -2194,7 +2344,7 @@ def main() -> int:
     print(f"Listening for wireless logs on {args.log_host}:{args.log_port}")
     print(
         "Listening for wireless telemetry on "
-        f"{args.telemetry_host}:{args.telemetry_port}"
+        f"{args.telemetry_host}:{', '.join(str(port) for port in listener_telemetry_ports)}"
     )
     print(f"Serving UWB dashboard at {url}")
     if args.open:
@@ -2209,8 +2359,9 @@ def main() -> int:
         http_server.server_close()
         log_server.shutdown()
         log_server.server_close()
-        telemetry_server.shutdown()
-        telemetry_server.server_close()
+        for telemetry_server in telemetry_servers:
+            telemetry_server.shutdown()
+            telemetry_server.server_close()
     return 0
 
 
