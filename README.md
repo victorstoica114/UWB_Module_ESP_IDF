@@ -25,6 +25,33 @@ Credentials and tokens are read from `secrets.h`. Non-secret application
 settings, including provisioning switches, live in `components/config`.
 Use `secrets.example.h` as the template for local credentials.
 
+## Hardware
+
+This firmware targets the custom UWB Module V1.0 Rev.B hardware.
+
+| Area | Details |
+| --- | --- |
+| MCU | ESP32-S3-WROOM-1-N16R8 |
+| Flash / PSRAM | 16 MB flash, 8 MB PSRAM |
+| USB | Native USB CDC on boot |
+| UWB | DW3000/DWM3000 radio path |
+| IMU | BNO085 over shared I2C |
+| GPS | PX1105R/PX1125R-class GPS path |
+| USB-C / PD | MAX77958 |
+| Charger | BQ25792 |
+| Status LED | GPIO42, active-high |
+
+Active pin mapping lives in `components/config/include/board_config.h`.
+
+| Function | GPIO |
+| --- | --- |
+| Status LED | `42` |
+| I2C SDA / SCL | `9` / `10` |
+| UWB reset / IRQ / CS / wakeup | `8` / `6` / `48` / `7` |
+| SPI MOSI / SCK / MISO | `11` / `12` / `13` |
+| GPS enable / RX / TX | `47` / `18` / `17` |
+| RTCM TX | `1` |
+
 Project layout:
 
 ```text
@@ -40,6 +67,9 @@ components/uwb_distance_test_service/  two-module distance test entry point
 components/uwb_ranging_service/  anchor/tag ranging entry point
 components/stability_test_service/  optional wireless-log stress generator
 docs/                         protocol notes and operator documentation
+PCB/V1.REV.B/                 KiCad source, fabrication, BOM, and placement package
+Schematic/                    exported schematic PDF
+datasheets/                   local component/reference datasheets
 reference/                    migration notes and legacy headers kept in-tree
 reference/external/           optional local clones of third-party references
 ```
@@ -75,6 +105,8 @@ The expected UWB workflow split is:
    entry point in `components/uwb_distance_test_service`.
 4. `APP_RUNTIME_MODE_UWB_RANGING`: current sequential 4-anchor plus 1-tag
    DS-TWR ranging runtime in `components/uwb_ranging_service`.
+5. `APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY`: anchor-to-anchor survey/runtime
+   diagnostics in `components/uwb_anchor_survey_service`.
 
 The beacon smoke mode, distance-test mode, antenna-delay calibration workflows,
 anchor survey, and multi-anchor ranging runtime are implemented for the current
@@ -87,6 +119,23 @@ authenticated `/config/runtime` HTTP endpoint.
 For a step-by-step explanation of the current DS-TWR ranging protocol,
 including the message diagram, timing table, and distance formula, see
 [`docs/uwb-ranging-protocol/README.md`](docs/uwb-ranging-protocol/README.md).
+
+## PCB Package
+
+The hardware package is versioned with the firmware so the board definition and
+software assumptions stay together.
+
+| Path | Purpose |
+| --- | --- |
+| `PCB/V1.REV.B/Kicad project/` | Editable KiCad project and local symbols/footprints |
+| `PCB/V1.REV.B/Gerber/Gerber.zip` | Fabrication archive |
+| `PCB/V1.REV.B/BOM/` | BOM exports |
+| `PCB/V1.REV.B/PickAndPlace/` | Assembly placement files |
+| `Schematic/UWB_V1.0_Rev.B.pdf` | Exported schematic PDF |
+
+PCB preview:
+
+![UWB PCB Preview](PCB/V1.REV.B/Kicad%20project/Preview/UWB.png)
 
 The board identity is stored in NVS, which plays the role of persistent EEPROM
 storage on ESP32. Normal firmware reads `module_id` from NVS and builds the
@@ -180,9 +229,10 @@ or can hold the measured distance of each triangle edge. Use the final radio
 configuration and a known distance such as 2-5 m; 20 cm is useful for smoke
 testing, not for calibration.
 
-In the future `APP_RUNTIME_MODE_UWB_RANGING` runtime, the same firmware will use
-the persistent UWB role: `APP_UWB_ROLE_TAG` for the mobile point and
-`APP_UWB_ROLE_ANCHOR` for fixed anchors.
+`APP_RUNTIME_MODE_UWB_RANGING` is the current 1-tag/4-anchor runtime. The same
+firmware image runs on all modules; the runtime config selects tag ID and anchor
+IDs, while persistent NVS identity keeps each module's hostname, module ID, UWB
+role, and calibrated antenna delay.
 
 If `APP_UWB_DW_LEDS_ENABLED` is set, the DW3000 configures GPIO0 as RXOKLED,
 GPIO1 as SFDLED, GPIO2 as RXLED, and GPIO3 as TXLED once during radio init.
