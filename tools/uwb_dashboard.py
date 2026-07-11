@@ -3848,6 +3848,18 @@ class DashboardHttpServer(ThreadingHTTPServer):
             raise RuntimeError(f"No unique live target for module {module_id}")
         return target[0]
 
+    def calibration_setup_targets(
+        self, requested_targets: Any, participant_ids: list[int]
+    ) -> Any:
+        if requested_targets in (None, "", "all"):
+            return requested_targets
+        requested_ids = parse_module_ids(requested_targets)
+        merged_ids = requested_ids[:]
+        for module_id in participant_ids:
+            if module_id not in merged_ids:
+                merged_ids.append(module_id)
+        return merged_ids
+
     def collect_calibration_samples(
         self,
         *,
@@ -3974,6 +3986,20 @@ class DashboardHttpServer(ThreadingHTTPServer):
         timeout_sec = float(payload.get("timeout_sec") or 180)
         min_apply_dtu = max(0, int(payload.get("min_apply_dtu") or 2))
         apply_changes = parse_bool(payload.get("apply"), True)
+        if method in ("two", "two_module"):
+            participant_ids = [
+                int(params.get("cal_ref", 0)),
+                int(params.get("cal_dut", 0)),
+            ]
+        elif method in ("three", "three_module", "three_module_edm"):
+            participant_ids = parse_module_ids(params.get("cal_three"), expected=3)
+        else:
+            raise RuntimeError(f"unsupported calibration method: {method}")
+        if any(module_id <= 0 for module_id in participant_ids):
+            raise RuntimeError("invalid calibration module ID(s)")
+        setup_targets = self.calibration_setup_targets(
+            payload.get("target_modules"), participant_ids
+        )
 
         params["mode"] = "calibration"
         params["cal_method"] = method
@@ -3984,7 +4010,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
         if progress is not None:
             progress("configuring calibration mode...", {"method": method}, "configuring")
         config_results = self.apply_runtime_config(
-            params, payload.get("target_modules")
+            params, setup_targets
         )
         if not all(item.get("ok") for item in config_results):
             return {
