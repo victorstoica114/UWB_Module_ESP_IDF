@@ -3814,8 +3814,14 @@ class DashboardHttpServer(ThreadingHTTPServer):
             job["elapsed_sec"] = round(time.time() - float(job["started_sec"]), 1)
 
     def _run_calibration_auto_job(self, job_id: str, payload: dict[str, Any]) -> None:
-        def progress(summary: str, detail: dict[str, Any] | None = None) -> None:
-            self.update_calibration_job(job_id, summary=summary, detail=detail)
+        def progress(
+            summary: str,
+            detail: dict[str, Any] | None = None,
+            state: str | None = None,
+        ) -> None:
+            self.update_calibration_job(
+                job_id, state=state, summary=summary, detail=detail
+            )
 
         try:
             result = self.run_calibration_auto(payload, progress=progress)
@@ -3849,7 +3855,9 @@ class DashboardHttpServer(ThreadingHTTPServer):
         expected_pairs: list[tuple[int, int]],
         sample_count: int,
         timeout_sec: float,
-        progress: Callable[[str, dict[str, Any] | None], None] | None = None,
+        progress: (
+            Callable[[str, dict[str, Any] | None, str | None], None] | None
+        ) = None,
     ) -> tuple[dict[tuple[int, int], list[float]], bool, int]:
         samples = {pair: [] for pair in expected_pairs}
         expected_set = set(expected_pairs)
@@ -3880,6 +3888,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
                     f"collecting samples {min_count}/{sample_count} per pair "
                     f"({complete_pairs}/{len(samples)} pairs complete)",
                     {"counts": counts},
+                    "collecting",
                 )
                 next_progress = now + 1.0
             if all(len(values) >= sample_count for values in samples.values()):
@@ -3952,7 +3961,9 @@ class DashboardHttpServer(ThreadingHTTPServer):
         self,
         payload: dict[str, Any],
         *,
-        progress: Callable[[str, dict[str, Any] | None], None] | None = None,
+        progress: (
+            Callable[[str, dict[str, Any] | None, str | None], None] | None
+        ) = None,
     ) -> dict[str, Any]:
         raw_params = payload.get("params") or {}
         params = normalize_runtime_params(raw_params)
@@ -3971,7 +3982,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
         params["reboot"] = "1"
 
         if progress is not None:
-            progress("configuring calibration mode...", {"method": method})
+            progress("configuring calibration mode...", {"method": method}, "configuring")
         config_results = self.apply_runtime_config(
             params, payload.get("target_modules")
         )
@@ -3983,7 +3994,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
             }
 
         if progress is not None:
-            progress("waiting for modules to restart calibration...", None)
+            progress("waiting for modules to restart calibration...", None, "waiting")
         time.sleep(2.0)
         after_id = self.next_log_id_value() - 1
 
@@ -4012,7 +4023,11 @@ class DashboardHttpServer(ThreadingHTTPServer):
             corrections = {dut_id: correction}
             effective_apply = apply_changes and complete
             if progress is not None:
-                progress("applying antenna-delay correction...", {"corrections": corrections})
+                progress(
+                    "applying antenna-delay correction...",
+                    {"corrections": corrections},
+                    "applying",
+                )
             apply_results = self.apply_calibration_corrections(
                 corrections,
                 min_apply_dtu=min_apply_dtu,
@@ -4057,7 +4072,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
         )
 
         if progress is not None:
-            progress("computing antenna-delay corrections...", None)
+            progress("computing antenna-delay corrections...", None, "computing")
         pair_errors: dict[tuple[int, int], float] = {}
         pair_summary: dict[str, dict[str, Any]] = {}
         for raw_pair, distance_mm in edge_mm.items():
@@ -4118,7 +4133,11 @@ class DashboardHttpServer(ThreadingHTTPServer):
         }
         effective_apply = apply_changes and complete
         if progress is not None:
-            progress("applying antenna-delay corrections...", {"corrections": corrections})
+            progress(
+                "applying antenna-delay corrections...",
+                {"corrections": corrections},
+                "applying",
+            )
         apply_results = self.apply_calibration_corrections(
             corrections,
             min_apply_dtu=min_apply_dtu,
