@@ -140,7 +140,7 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
     )
     print(
         "pins: PG={pg} asserted={pg_asserted} PG_STAT={pg_stat} INT={int_level} "
-        "irq={irq} irq_age={irq_age}ms QON={qon}".format(
+        "irq={irq} irq_age={irq_age}ms QON_CMD={qon} asserted={qon_asserted}".format(
             pg=status.get("charger_pg_gpio_level"),
             pg_asserted=status.get("charger_pg_asserted"),
             pg_stat=status.get("charger_pg_stat"),
@@ -148,6 +148,7 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
             irq=status.get("charger_int_irq_count"),
             irq_age=status.get("charger_int_last_irq_age_ms"),
             qon=status.get("charger_qon_gpio_level"),
+            qon_asserted=status.get("charger_qon_asserted"),
         )
     )
     print("reg  value  name")

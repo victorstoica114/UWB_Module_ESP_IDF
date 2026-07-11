@@ -30,6 +30,7 @@ typedef struct {
     bool pg_asserted;
     bool pg_stat;
     int qon_gpio_level;
+    bool qon_asserted;
     uint8_t part_info;
     uint8_t part_number;
     uint8_t device_revision;

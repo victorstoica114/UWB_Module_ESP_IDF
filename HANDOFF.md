@@ -50,10 +50,10 @@ another PC or in a fresh Codex session.
   BNO085 and BQ25792 both use it; transactions are protected by a simple mutex.
 - `components/charger_service/` owns the BQ25792 monitor. Use
   `tools/bq25792_dump.py --target-list tools/ota_targets.local.txt` to inspect
-  every charger register byte after OTA. Side-band pins are `INT=GPIO4`,
-  `PG=GPIO5`, and `QON=GPIO38`; QON is kept high-Z/read-only because pulling it
-  low can wake from ship mode or trigger a system power reset depending on hold
-  time.
+  every charger register byte after OTA. Side-band signals are `INT=GPIO4`,
+  `PG=GPIO5`, and `QON_CMD=GPIO38`. `GPIO38` drives a BSS138 gate; idle low is
+  normal, and driving it high would pull the real BQ25792 `~QON` pin low. Keep
+  QON_CMD high-Z/read-only until an explicit guarded pulse command is needed.
 
 ## Bring-Up On A New PC
 

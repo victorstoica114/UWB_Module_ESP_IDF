@@ -488,6 +488,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_pg_asserted\":%s,"
         "\"charger_pg_stat\":%s,"
         "\"charger_qon_gpio_level\":%d,"
+        "\"charger_qon_asserted\":%s,"
         "\"charger_part_info\":\"0x%02x\","
         "\"charger_part_number\":%u,"
         "\"charger_device_revision\":%u,"
@@ -689,6 +690,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         charger_snapshot.pg_asserted ? "true" : "false",
         charger_snapshot.pg_stat ? "true" : "false",
         charger_snapshot.qon_gpio_level,
+        charger_snapshot.qon_asserted ? "true" : "false",
         (unsigned)charger_snapshot.part_info,
         (unsigned)charger_snapshot.part_number,
         (unsigned)charger_snapshot.device_revision,

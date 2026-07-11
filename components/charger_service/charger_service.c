@@ -300,6 +300,8 @@ static void update_snapshot_gpio_fields(charger_service_snapshot_t *snapshot,
         snapshot->pg_gpio_level, BOARD_CONFIG_BQ25792_PG_ACTIVE_LEVEL);
     snapshot->qon_gpio_level =
         read_gpio_level_or_invalid(BOARD_CONFIG_BQ25792_QON_GPIO);
+    snapshot->qon_asserted = gpio_level_is_active(
+        snapshot->qon_gpio_level, BOARD_CONFIG_BQ25792_QON_ACTIVE_LEVEL);
 }
 
 static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_MAP_SIZE],

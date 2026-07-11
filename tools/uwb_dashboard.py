@@ -1729,7 +1729,7 @@ function renderBatteryCell(item) {
   const pinLine = `PG ${fmtGpioLevel(item.charger_pg_gpio_level)}${item.charger_pg_asserted ? " asserted" : ""}
     · PG_STAT ${item.charger_pg_stat ? "1" : "0"}
     · INT ${fmtGpioLevel(item.charger_int_gpio_level)} / ${esc(item.charger_int_irq_count ?? "-")}
-    · QON ${fmtGpioLevel(item.charger_qon_gpio_level)}`;
+    · QON cmd ${fmtGpioLevel(item.charger_qon_gpio_level)}${item.charger_qon_asserted ? " asserted" : ""}`;
   if (!item.charger_present) {
     return `<span class="bad">BQ25792 not found</span><br><span class="muted">${esc(item.charger_last_error_name || "-")}</span><br><span class="muted">${pinLine}</span>`;
   }
