@@ -53,6 +53,11 @@ typedef struct {
     uint8_t fault_status[2];
     uint8_t charger_flag[4];
     uint8_t fault_flag[2];
+    uint8_t reg0d_iotg_regulation;
+    uint8_t reg0e_timer_control;
+    uint8_t reg16_temperature_control;
+    uint8_t reg17_ntc_control_0;
+    uint8_t reg18_ntc_control_1;
     uint8_t reg0f_charger_control_0;
     uint8_t reg10_charger_control_1;
     uint8_t reg14_charger_control_5;
@@ -65,8 +70,26 @@ typedef struct {
     uint16_t input_voltage_limit_mv;
     uint16_t input_current_limit_ma;
     bool charge_enabled;
+    uint8_t charge_status_code;
+    uint8_t vbus_status_code;
+    bool iindpm_active;
+    bool vindpm_active;
+    bool vsys_regulation_active;
+    bool battery_overvoltage_active;
+    bool charge_safety_timer_expired;
+    bool topoff_timer_flag;
+    bool trickle_timer_flag;
+    bool precharge_timer_flag;
+    bool fast_charge_timer_flag;
     uint8_t watchdog_setting;
     bool watchdog_disabled;
+    uint16_t topoff_timer_minutes;
+    bool trickle_timer_enabled;
+    bool precharge_timer_enabled;
+    bool fast_charge_timer_enabled;
+    uint8_t fast_charge_timer_hours;
+    bool timer_2x_enabled;
+    uint16_t precharge_timer_minutes;
     uint8_t adc_sample;
     bool adc_continuous;
     bool adc_running_average;
@@ -82,6 +105,15 @@ typedef struct {
     bool battery_soc_valid;
     uint8_t battery_soc_percent;
     double ts_percent;
+    bool ts_ignore;
+    bool ts_cold_active;
+    bool ts_cool_active;
+    bool ts_warm_active;
+    bool ts_hot_active;
+    bool ts_cold_flag;
+    bool ts_cool_flag;
+    bool ts_warm_flag;
+    bool ts_hot_flag;
     double tdie_c;
     uint16_t dp_mv;
     uint16_t dm_mv;
@@ -132,6 +164,12 @@ esp_err_t charger_service_set_input_voltage_limit_mv(
 esp_err_t charger_service_set_input_current_limit_ma(
     uint16_t ma, charger_service_write_result_t *results, size_t result_count,
     size_t *written_count);
+esp_err_t charger_service_set_safety_timers(
+    uint16_t topoff_timer_minutes, bool trickle_timer_enabled,
+    bool precharge_timer_enabled, bool fast_charge_timer_enabled,
+    uint8_t fast_charge_timer_hours, bool timer_2x_enabled,
+    uint16_t precharge_timer_minutes, charger_service_write_result_t *results,
+    size_t result_count, size_t *written_count);
 void charger_service_request_refresh(void);
 
 #ifdef __cplusplus

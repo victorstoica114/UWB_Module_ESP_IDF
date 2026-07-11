@@ -334,9 +334,18 @@ Firmware also publishes a simple 1S Li-Po state-of-charge estimate derived from
 `VBAT`; this is a
 voltage-based dashboard aid, not a coulomb-counting fuel gauge. The dashboard
 Info tab shows the decoded charger values in the Battery column, the Battery
-Charger tab shows a full live table plus raw register map, and
+Charger tab shows a full live table plus human controls for ADC, charge limits,
+and safety timers. Raw registers are still available from a service checkbox, and
 `tools/bq25792_dump.py --target-list tools/ota_targets.local.txt` prints every
 register byte with names.
+
+`TDIE` is the BQ25792 internal die-temperature ADC. The external/battery
+temperature input is the `TS` pin, exposed as `charger_ts_percent` in percent of
+`REGN`, plus decoded JEITA range bits (`cold`, `cool`, `normal`, `warm`,
+`hot`). The PCB connects `TS` to the thermistor network around `R93`, `R94`,
+`R96`, and optional connector `TH1`; the dashboard therefore shows the safe raw
+quantity `%REGN` and the charger's own range decision. Converting `TS` to degrees
+C requires confirming the actual assembled thermistor/resistor network.
 
 Three charger/power side-band signals are wired to the ESP32 and exposed in
 `/status`: `INT` on `GPIO4`, `QON_CMD` on `GPIO38`, and `PG` on `GPIO5`.
@@ -368,9 +377,9 @@ The firmware exposes an authenticated live endpoint at `/config/charger` for
 controlled writes. The endpoint disables the watchdog before charger
 configuration changes, can enable/disable the ADC, can choose continuous or
 one-shot ADC conversion and ADC sample speed, and can set `VSYSMIN`, charging
-enable state, charge voltage/current, and input voltage/current using human
-units (`mV`/`mA`). It
-also has a guarded raw register write path (`reg`, `value`, optional
+enable state, charge voltage/current, input voltage/current DPM, and charge
+safety timers using human units (`mV`/`mA`/minutes/hours). It also has a guarded
+raw register write path (`reg`, `value`, optional
 `mask`/`bits`, and `confirm=1`) for datasheet-level experiments.
 
 Dashboard charger ADC controls affect measurement behavior, not charging loops
@@ -396,8 +405,8 @@ Dashboard charger limit controls affect the charger and NVDC power path:
 | `VSYSMIN mV` | `VSYSMIN[5:0]` in `REG00` | `250 mV` | Minimum target for the `SYS` rail when the battery is below the configured system minimum. For our 1S Li-Po modules the datasheet POR/default is `3500 mV`; keep it below `VREG`. |
 | `Charge voltage mV` | `VREG[10:0]` in `REG01..REG02` | `10 mV` | Final battery regulation voltage. For a normal 1S Li-Po this is typically around `4200 mV`; setting this too high is unsafe for the cell. |
 | `Charge current mA` | `ICHG[8:0]` in `REG03..REG04` | `10 mA` | Maximum battery charge current. The actual current can still be reduced by thermal regulation, input limits, or system-load priority. |
-| `Input voltage mV` | `VINDPM[7:0]` in `REG05` | `100 mV` | Input voltage dynamic power management threshold. If `VBUS` droops below this threshold, the charger backs off to avoid collapsing the adapter/USB source. |
-| `Input current mA` | `IINDPM[8:0]` in `REG06..REG07` | `10 mA` | Maximum current drawn from the input source. System load is served first; the remaining budget is available for battery charging. |
+| `VINDPM mV` | `VINDPM[7:0]` in `REG05` | `100 mV` | Input voltage dynamic power management threshold. If `VBUS` droops below this threshold, the charger backs off to avoid collapsing the adapter/USB source. |
+| `IINDPM mA` | `IINDPM[8:0]` in `REG06..REG07` | `10 mA` | Maximum current drawn from the input source. System load is served first; the remaining budget is available for battery charging. |
 
 In short: `Charge voltage` and `Charge current` define the battery charge target.
 `Input voltage` and `Input current` define how aggressively the board may load
@@ -410,6 +419,18 @@ and `tools/bq25792_dump.py` warn when `VSYSMIN >= VREG` or when `VSYSMIN` looks
 too high for a 1S pack.
 All high-level charger policy values are stored in ESP32 NVS and reapplied once
 at charger startup.
+
+Dashboard charger safety-timer controls affect charge-cycle timeout behavior:
+
+| Control | BQ25792 field | Effect |
+| --- | --- | --- |
+| `Fast timer` | `EN_CHG_TMR` in `REG0E` | Enables/disables the fast-charge safety timer used during CC/CV charging. If this expires, `CHG_TMR_STAT`/`CHG_TMR_FLAG` can explain an early `terminated` state. |
+| `Fast duration` | `CHG_TMR[1:0]` in `REG0E` | Selects `5 h`, `8 h`, `12 h`, or `24 h`. Larger batteries or lower charge currents may need a longer timeout. |
+| `Pre-charge timer` | `EN_PRECHG_TMR` in `REG0E` | Enables/disables the timer for the low-voltage pre-charge phase. |
+| `Pre-charge duration` | `PRECHG_TMR` in `REG0D` | Selects `120 min` or `30 min`. |
+| `Trickle timer` | `EN_TRICHG_TMR` in `REG0E` | Enables/disables the fixed 1 h trickle-charge timer for deeply discharged cells. |
+| `Top-off timer` | `TOPOFF_TMR[1:0]` in `REG0E` | Optional extra `15/30/45 min` top-off after termination threshold; `0` disables it. |
+| `TMR2X` | `TMR2X_EN` in `REG0E` | Doubles active safety timers while input-current/input-voltage DPM or thermal regulation slows charging. |
 
 Recommended workflow from this folder, in the ESP-IDF v6.0.2 terminal:
 

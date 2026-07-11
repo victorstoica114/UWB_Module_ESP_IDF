@@ -691,6 +691,7 @@ th { color: var(--muted); font-weight: 700; }
 .charger-grid { grid-template-columns: minmax(620px, 1.25fr) minmax(360px, 0.75fr); }
 .section { border: 1px solid var(--line); padding: 12px; margin-bottom: 12px; background: #fff; }
 .section h2 { margin: 0 0 11px; font-size: 15px; }
+.hidden { display: none !important; }
 .form-grid { display: grid; grid-template-columns: 160px minmax(160px, 1fr); gap: 8px 10px; align-items: center; }
 .form-grid label { color: var(--muted); font-size: 13px; }
 .form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
@@ -992,7 +993,7 @@ th { color: var(--muted); font-weight: 700; }
                 <tbody id="chargerRows"></tbody>
               </table>
             </div>
-            <div class="section">
+            <div class="section charger-raw-tool hidden">
               <h2>Raw Registers</h2>
               <div class="form-grid">
                 <label for="chargerRawModule">Module</label>
@@ -1058,9 +1059,9 @@ th { color: var(--muted); font-weight: 700; }
                 <input id="chargerChargeVoltageMv" type="number" min="3000" max="18800" step="10">
                 <label for="chargerChargeCurrentMa">Charge current mA</label>
                 <input id="chargerChargeCurrentMa" type="number" min="50" max="5000" step="10">
-                <label for="chargerInputVoltageMv">Input voltage mV</label>
+                <label for="chargerInputVoltageMv">VINDPM mV</label>
                 <input id="chargerInputVoltageMv" type="number" min="3600" max="22000" step="100">
-	                <label for="chargerInputCurrentMa">Input current mA</label>
+	                <label for="chargerInputCurrentMa">IINDPM mA</label>
 	                <input id="chargerInputCurrentMa" type="number" min="100" max="3300" step="10">
               </div>
               <div class="param-legend">
@@ -1068,14 +1069,63 @@ th { color: var(--muted); font-weight: 700; }
                 <div><b>VSYSMIN</b><span>Minimum SYS rail target when the battery is low; step 250 mV.</span></div>
                 <div><b>Charge voltage</b><span>Battery final voltage limit; sensitive for Li-Po safety; step 10 mV.</span></div>
                 <div><b>Charge current</b><span>Maximum battery charge current before thermal/input limits intervene; step 10 mA.</span></div>
-	                <div><b>Input voltage</b><span>VINDPM threshold: reduce load if VBUS falls below this; step 100 mV.</span></div>
-	                <div><b>Input current</b><span>IINDPM limit: maximum current drawn from the adapter/USB source; step 10 mA.</span></div>
+	                <div><b>VINDPM</b><span>Input voltage DPM threshold: reduce load if VBUS falls below this; step 100 mV.</span></div>
+	                <div><b>IINDPM</b><span>Input current DPM limit: maximum current drawn from the adapter/USB source; step 10 mA.</span></div>
 	              </div>
 	              <div class="form-actions">
 	                <button class="primary" id="applyChargerLimits">Apply Limits</button>
 	              </div>
             </div>
             <div class="section">
+              <h2>Safety Timers</h2>
+              <div class="form-grid">
+                <label for="chargerFastTimerEnabled">Fast timer</label>
+                <div class="checkbox-row"><input id="chargerFastTimerEnabled" type="checkbox"><span>enabled</span></div>
+                <label for="chargerFastTimerHours">Fast duration</label>
+                <select id="chargerFastTimerHours">
+                  <option value="5">5 h</option>
+                  <option value="8">8 h</option>
+                  <option value="12" selected>12 h</option>
+                  <option value="24">24 h</option>
+                </select>
+                <label for="chargerPrechargeTimerEnabled">Pre-charge timer</label>
+                <div class="checkbox-row"><input id="chargerPrechargeTimerEnabled" type="checkbox"><span>enabled</span></div>
+                <label for="chargerPrechargeTimerMinutes">Pre-charge duration</label>
+                <select id="chargerPrechargeTimerMinutes">
+                  <option value="120" selected>120 min</option>
+                  <option value="30">30 min</option>
+                </select>
+                <label for="chargerTrickleTimerEnabled">Trickle timer</label>
+                <div class="checkbox-row"><input id="chargerTrickleTimerEnabled" type="checkbox"><span>enabled</span></div>
+                <label for="chargerTopoffTimerMinutes">Top-off timer</label>
+                <select id="chargerTopoffTimerMinutes">
+                  <option value="0" selected>disabled</option>
+                  <option value="15">15 min</option>
+                  <option value="30">30 min</option>
+                  <option value="45">45 min</option>
+                </select>
+                <label for="chargerTimer2xEnabled">TMR2X</label>
+                <div class="checkbox-row"><input id="chargerTimer2xEnabled" type="checkbox"><span>double during DPM/TREG</span></div>
+              </div>
+              <div class="param-legend">
+                <div><b>Fast timer</b><span>Safety timeout for fast CC/CV charging. If it expires, charging can terminate before the cell reaches VREG.</span></div>
+                <div><b>Pre-charge</b><span>Timeout for the low-voltage pre-charge phase before normal fast charge starts.</span></div>
+                <div><b>Trickle</b><span>Fixed 1 h timeout for a deeply discharged battery before pre-charge.</span></div>
+                <div><b>Top-off</b><span>Optional extra charging time after termination threshold is reached.</span></div>
+                <div><b>TMR2X</b><span>Doubles active safety timers while input-current, input-voltage, or thermal regulation slows charging.</span></div>
+              </div>
+              <div class="form-actions">
+                <button class="primary" id="applyChargerTimers">Apply Safety Timers</button>
+              </div>
+            </div>
+            <div class="section">
+              <h2>Service Tools</h2>
+              <div class="checkbox-row"><input id="chargerShowRawTools" type="checkbox"><span>show raw register tools</span></div>
+              <div class="param-legend">
+                <div><b>Raw tools</b><span>For datasheet-level experiments only. Normal charger setup should use the controls above.</span></div>
+              </div>
+            </div>
+            <div class="section charger-raw-tool hidden">
               <h2>Raw Register Write</h2>
               <div class="form-grid">
                 <label for="chargerRawReg">Register</label>
@@ -2019,6 +2069,19 @@ function chargerFaultByte(item, index) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function chargerFlagByte(item, index) {
+  const list = Array.isArray(item?.charger_flag) ? item.charger_flag : [];
+  const value = Number(list[index]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function chargerBoolField(item, key, fallback = false) {
+  if (item && Object.prototype.hasOwnProperty.call(item, key)) {
+    return item[key] === true || item[key] === "true" || item[key] === 1;
+  }
+  return Boolean(fallback);
+}
+
 function chargerChargePhase(item) {
   const code = (chargerStatusByte(item, 1) >> 5) & 0x07;
   return {code, text: CHARGER_CHG_STAT_NAMES[code] || `chg ${code}`};
@@ -2035,6 +2098,89 @@ function chargerVsysRegulating(item) {
 
 function chargerVbatOvp(item) {
   return (chargerFaultByte(item, 0) & 0x20) !== 0;
+}
+
+function chargerFastTimerExpired(item) {
+  return chargerBoolField(item, "charger_charge_safety_timer_expired", (chargerStatusByte(item, 3) & 0x08) !== 0);
+}
+
+function chargerTimerFlags(item) {
+  const flag2 = chargerFlagByte(item, 2);
+  return {
+    topoff: chargerBoolField(item, "charger_topoff_timer_flag", (flag2 & 0x01) !== 0),
+    precharge: chargerBoolField(item, "charger_precharge_timer_flag", (flag2 & 0x02) !== 0),
+    trickle: chargerBoolField(item, "charger_trickle_timer_flag", (flag2 & 0x04) !== 0),
+    fast: chargerBoolField(item, "charger_fast_charge_timer_flag", (flag2 & 0x08) !== 0),
+  };
+}
+
+function chargerTimerConfig(item) {
+  const bytes = chargerRawBytes(item);
+  const reg0d = bytes[0x0D];
+  const reg0e = bytes[0x0E];
+  const fastHoursByCode = [5, 8, 12, 24];
+  const fromRaw = Number.isFinite(reg0e);
+  return {
+    topoffMinutes: item.charger_topoff_timer_minutes ?? (fromRaw ? ((reg0e >> 6) & 0x03) * 15 : undefined),
+    trickleEnabled: item.charger_trickle_timer_enabled ?? (fromRaw ? (reg0e & 0x20) !== 0 : undefined),
+    prechargeEnabled: item.charger_precharge_timer_enabled ?? (fromRaw ? (reg0e & 0x10) !== 0 : undefined),
+    fastEnabled: item.charger_fast_charge_timer_enabled ?? (fromRaw ? (reg0e & 0x08) !== 0 : undefined),
+    fastHours: item.charger_fast_charge_timer_hours ?? (fromRaw ? fastHoursByCode[(reg0e >> 1) & 0x03] : undefined),
+    timer2xEnabled: item.charger_timer_2x_enabled ?? (fromRaw ? (reg0e & 0x01) !== 0 : undefined),
+    prechargeMinutes: item.charger_precharge_timer_minutes ?? (Number.isFinite(reg0d) ? ((reg0d & 0x80) !== 0 ? 30 : 120) : undefined),
+  };
+}
+
+function chargerTimerSummary(item) {
+  const flags = chargerTimerFlags(item);
+  const timer = chargerTimerConfig(item);
+  const fastExpired = chargerFastTimerExpired(item);
+  const activeFlags = [
+    fastExpired ? "fast status" : "",
+    flags.fast ? "fast flag" : "",
+    flags.precharge ? "pre flag" : "",
+    flags.trickle ? "trickle flag" : "",
+    flags.topoff ? "top-off flag" : "",
+  ].filter(Boolean);
+  const fast = timer.fastEnabled
+    ? `${esc(timer.fastHours ?? "-")} h`
+    : "off";
+  const pre = timer.prechargeEnabled
+    ? `${esc(timer.prechargeMinutes ?? "-")} min`
+    : "off";
+  const tri = timer.trickleEnabled ? "on" : "off";
+  const top = Number(timer.topoffMinutes || 0) > 0
+    ? `${esc(timer.topoffMinutes)} min`
+    : "off";
+  const flagText = activeFlags.length
+    ? `<br><span class="bad">timer ${activeFlags.join(", ")}</span>`
+    : "";
+  return `fast ${fast} · pre ${pre}<br>trickle ${tri} · top-off ${top} · TMR2X ${timer.timer2xEnabled ? "on" : "off"}${flagText}`;
+}
+
+function chargerTsRange(item) {
+  const status4 = chargerStatusByte(item, 4);
+  const tsIgnore = chargerBoolField(item, "charger_ts_ignore", false);
+  const cold = chargerBoolField(item, "charger_ts_cold_active", (status4 & 0x08) !== 0);
+  const cool = chargerBoolField(item, "charger_ts_cool_active", (status4 & 0x04) !== 0);
+  const warm = chargerBoolField(item, "charger_ts_warm_active", (status4 & 0x02) !== 0);
+  const hot = chargerBoolField(item, "charger_ts_hot_active", (status4 & 0x01) !== 0);
+  if (tsIgnore) return {className: "muted", text: "ignored"};
+  if (hot) return {className: "bad", text: "hot"};
+  if (cold) return {className: "bad", text: "cold"};
+  if (warm) return {className: "warn", text: "warm"};
+  if (cool) return {className: "warn", text: "cool"};
+  return {className: "ok", text: "normal"};
+}
+
+function chargerTsFlags(item) {
+  const flag3 = chargerFlagByte(item, 3);
+  return [
+    chargerBoolField(item, "charger_ts_cold_flag", (flag3 & 0x08) !== 0) ? "cold" : "",
+    chargerBoolField(item, "charger_ts_cool_flag", (flag3 & 0x04) !== 0) ? "cool" : "",
+    chargerBoolField(item, "charger_ts_warm_flag", (flag3 & 0x02) !== 0) ? "warm" : "",
+    chargerBoolField(item, "charger_ts_hot_flag", (flag3 & 0x01) !== 0) ? "hot" : "",
+  ].filter(Boolean);
 }
 
 function chargerLimitWarning(item) {
@@ -2070,6 +2216,9 @@ function renderBatteryCell(item) {
   const vbus = chargerVbusStatus(item);
   const vsysClass = chargerVsysRegulating(item) ? "warn" : "ok";
   const ovpClass = chargerVbatOvp(item) ? "bad" : "ok";
+  const ts = chargerTsRange(item);
+  const tsFlags = chargerTsFlags(item);
+  const tsFlagText = tsFlags.length ? ` · flags ${tsFlags.join(",")}` : "";
   return `
     <span class="${item.charger_read_ok ? "ok" : "bad"}">BQ25792</span>
     <span class="muted">PN ${esc(item.charger_part_number ?? "-")} rev ${esc(item.charger_device_revision ?? "-")}</span><br>
@@ -2079,10 +2228,12 @@ function renderBatteryCell(item) {
     phase ${esc(phase.text)} · input ${esc(vbus.text)}<br>
     <span class="${vsysClass}">VSYSMIN loop ${chargerVsysRegulating(item) ? "on" : "off"}</span>
     <span class="${ovpClass}">VBAT_OVP ${chargerVbatOvp(item) ? "on" : "off"}</span>${chargerLimitWarning(item)}<br>
+    ${chargerTimerSummary(item)}<br>
     VBAT ${fmtMv(item.charger_vbat_mv)} · SOC ${fmtSoc(item)}<br>
     VSYS ${fmtMv(item.charger_vsys_mv)} · VBUS ${fmtMv(item.charger_vbus_mv)}<br>
     IBUS ${fmtMa(item.charger_ibus_ma)}<br>
     IBAT ${fmtMa(item.charger_ibat_ma)} · TDIE ${fmtMaybeNumber(item.charger_tdie_c, 1)} C<br>
+    TS ext ${fmtMaybeNumber(item.charger_ts_percent, 2)}%REGN <span class="${ts.className}">${ts.text}</span>${esc(tsFlagText)}<br>
     <span class="muted">${pinLine}</span><br>
     <span class="muted">REG48 ${esc(item.charger_part_info || "-")}
       · reads ${esc(item.charger_read_count ?? "-")}
@@ -2124,6 +2275,10 @@ function renderChargerRows(statuses) {
     const vindpm = (status0 & 0x40) !== 0;
     const vsys = chargerVsysRegulating(item);
     const ovp = chargerVbatOvp(item);
+    const timerExpired = chargerFastTimerExpired(item);
+    const ts = chargerTsRange(item);
+    const tsFlags = chargerTsFlags(item);
+    const tsFlagText = tsFlags.length ? ` · flags ${tsFlags.join(",")}` : "";
     return `<tr>
       <td><b>${esc(item.hostname)}</b><br><span class="muted">${esc(item.ip || item.target || "")}</span></td>
       <td><span class="${powerClass}">${item.charger_present ? "BQ25792 present" : "not found"}</span><br>
@@ -2145,16 +2300,19 @@ function renderChargerRows(statuses) {
         <span class="${iindpm ? "warn" : "ok"}">IINDPM ${iindpm ? "on" : "off"}</span>
         <span class="${vindpm ? "warn" : "ok"}">VINDPM ${vindpm ? "on" : "off"}</span><br>
         <span class="${ovp ? "bad" : "ok"}">VBAT_OVP ${ovp ? "on" : "off"}</span>${chargerLimitWarning(item)}<br>
+        <span class="${timerExpired ? "bad" : "ok"}">CHG timer ${timerExpired ? "expired" : "ok"}</span><br>
         VSYSMIN ${fmtMv(item.charger_minimal_system_voltage_mv)}<br>
         VREG ${fmtMv(item.charger_charge_voltage_limit_mv)}<br>
         ICHG ${fmtMa(item.charger_charge_current_limit_ma)}<br>
         VINDPM ${fmtMv(item.charger_input_voltage_limit_mv)}<br>
-        IINDPM ${fmtMa(item.charger_input_current_limit_ma)}</td>
+        IINDPM ${fmtMa(item.charger_input_current_limit_ma)}<br>
+        ${chargerTimerSummary(item)}</td>
       <td>SOC ${fmtSoc(item)} · VBAT ${fmtMv(item.charger_vbat_mv)}<br>
         VBUS ${fmtMv(item.charger_vbus_mv)} · VSYS ${fmtMv(item.charger_vsys_mv)}<br>
         VAC1 ${fmtMv(item.charger_vac1_mv)}<br>
         IBUS ${fmtMa(item.charger_ibus_ma)} · IBAT ${fmtMa(item.charger_ibat_ma)}<br>
-        TS ${fmtMaybeNumber(item.charger_ts_percent, 2)}% · TDIE ${fmtMaybeNumber(item.charger_tdie_c, 1)} C</td>
+        TS ext ${fmtMaybeNumber(item.charger_ts_percent, 2)}%REGN <span class="${ts.className}">${ts.text}</span>${esc(tsFlagText)}<br>
+        TDIE ${fmtMaybeNumber(item.charger_tdie_c, 1)} C</td>
       <td>writes ${esc(item.charger_write_count ?? "-")} · err ${esc(item.charger_write_error_count ?? "-")}<br>
         reg ${esc(item.charger_last_write_reg || "-")} ${item.charger_last_write_mask_used ? `mask ${esc(item.charger_last_write_mask || "-")}` : ""}<br>
         ${esc(item.charger_last_write_before || "-")} -> ${esc(item.charger_last_write_after || "-")}<br>
@@ -2304,6 +2462,14 @@ function hydrateSettingsFromStatus(item) {
   setSettingIfFresh("chargerChargeCurrentMa", item.charger_charge_current_limit_ma);
   setSettingIfFresh("chargerInputVoltageMv", item.charger_input_voltage_limit_mv);
   setSettingIfFresh("chargerInputCurrentMa", item.charger_input_current_limit_ma);
+  const timer = chargerTimerConfig(item);
+  setSettingIfFresh("chargerFastTimerEnabled", timer.fastEnabled);
+  setSettingIfFresh("chargerFastTimerHours", timer.fastHours);
+  setSettingIfFresh("chargerPrechargeTimerEnabled", timer.prechargeEnabled);
+  setSettingIfFresh("chargerPrechargeTimerMinutes", timer.prechargeMinutes);
+  setSettingIfFresh("chargerTrickleTimerEnabled", timer.trickleEnabled);
+  setSettingIfFresh("chargerTopoffTimerMinutes", timer.topoffMinutes);
+  setSettingIfFresh("chargerTimer2xEnabled", timer.timer2xEnabled);
 }
 
 function renderUwbRadio(item) {
@@ -2492,7 +2658,11 @@ function persistedSettingIds() {
     "chargerAdcRate", "chargerAdcSample", "chargerAdcAvg",
     "chargerChargeEnabled", "chargerMinimalSystemMv", "chargerChargeVoltageMv",
     "chargerChargeCurrentMa", "chargerInputVoltageMv",
-    "chargerInputCurrentMa", "chargerRawReg", "chargerRawValue",
+    "chargerInputCurrentMa", "chargerFastTimerEnabled",
+    "chargerFastTimerHours", "chargerPrechargeTimerEnabled",
+    "chargerPrechargeTimerMinutes", "chargerTrickleTimerEnabled",
+    "chargerTopoffTimerMinutes", "chargerTimer2xEnabled",
+    "chargerShowRawTools", "chargerRawReg", "chargerRawValue",
     "chargerRawMask", "chargerRawBits",
     "calTargets", "calMethod", "calRef", "calDut", "calKnownCm", "calThree",
     "calD01Cm", "calD02Cm", "calD12Cm", "calSamples",
@@ -2527,9 +2697,21 @@ function formatCmInput(el) {
   if (Number.isFinite(number)) el.value = number.toFixed(2);
 }
 
+function updateChargerRawVisibility() {
+  const show = document.getElementById("chargerShowRawTools")?.checked;
+  document.querySelectorAll(".charger-raw-tool").forEach(el => {
+    el.classList.toggle("hidden", !show);
+  });
+}
+
 function wireSettings() {
   restoreSettings();
   wireSettingPersistence();
+  updateChargerRawVisibility();
+  const chargerShowRawTools = document.getElementById("chargerShowRawTools");
+  if (chargerShowRawTools) {
+    chargerShowRawTools.addEventListener("change", updateChargerRawVisibility);
+  }
   const accelTimebase = document.getElementById("accelTimebase");
   if (accelTimebase) {
     state.timebaseSecPerDiv = Math.max(1, Number(accelTimebase.value || 5));
@@ -2654,6 +2836,21 @@ function wireSettings() {
       charge_current_ma: document.getElementById("chargerChargeCurrentMa").value,
       input_voltage_mv: document.getElementById("chargerInputVoltageMv").value,
       input_current_ma: document.getElementById("chargerInputCurrentMa").value,
+    };
+    postChargerConfig({
+      target_modules: document.getElementById("chargerTargets").value,
+      params,
+    }, "chargerToast");
+  });
+  document.getElementById("applyChargerTimers").addEventListener("click", () => {
+    const params = {
+      fast_charge_timer_enabled: document.getElementById("chargerFastTimerEnabled").checked ? "1" : "0",
+      fast_charge_timer_hours: document.getElementById("chargerFastTimerHours").value,
+      precharge_timer_enabled: document.getElementById("chargerPrechargeTimerEnabled").checked ? "1" : "0",
+      precharge_timer_minutes: document.getElementById("chargerPrechargeTimerMinutes").value,
+      trickle_timer_enabled: document.getElementById("chargerTrickleTimerEnabled").checked ? "1" : "0",
+      topoff_timer_minutes: document.getElementById("chargerTopoffTimerMinutes").value,
+      timer_2x_enabled: document.getElementById("chargerTimer2xEnabled").checked ? "1" : "0",
     };
     postChargerConfig({
       target_modules: document.getElementById("chargerTargets").value,

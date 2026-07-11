@@ -137,10 +137,13 @@ VBUS_STAT_NAMES = {
 def decode_status(status: dict) -> dict[str, object]:
     charger_status = list(status.get("charger_status") or [])
     fault_status = list(status.get("charger_fault_status") or [])
+    charger_flag = list(status.get("charger_flag") or [])
     while len(charger_status) < 5:
         charger_status.append(0)
     while len(fault_status) < 2:
         fault_status.append(0)
+    while len(charger_flag) < 4:
+        charger_flag.append(0)
 
     chg_stat = (int(charger_status[1]) >> 5) & 0x07
     vbus_stat = (int(charger_status[1]) >> 1) & 0x0F
@@ -162,7 +165,20 @@ def decode_status(status: dict) -> dict[str, object]:
         "vbus_stat": vbus_stat,
         "vbus_name": VBUS_STAT_NAMES.get(vbus_stat, f"reserved_{vbus_stat:x}"),
         "vsys": bool(int(charger_status[3]) & 0x10),
+        "chg_tmr_stat": bool(int(charger_status[3]) & 0x08),
         "vbat_ovp": bool(int(fault_status[0]) & 0x20),
+        "topoff_tmr_flag": bool(int(charger_flag[2]) & 0x01),
+        "prechg_tmr_flag": bool(int(charger_flag[2]) & 0x02),
+        "trichg_tmr_flag": bool(int(charger_flag[2]) & 0x04),
+        "chg_tmr_flag": bool(int(charger_flag[2]) & 0x08),
+        "ts_cold": bool(int(charger_status[4]) & 0x08),
+        "ts_cool": bool(int(charger_status[4]) & 0x04),
+        "ts_warm": bool(int(charger_status[4]) & 0x02),
+        "ts_hot": bool(int(charger_status[4]) & 0x01),
+        "ts_cold_flag": bool(int(charger_flag[3]) & 0x08),
+        "ts_cool_flag": bool(int(charger_flag[3]) & 0x04),
+        "ts_warm_flag": bool(int(charger_flag[3]) & 0x02),
+        "ts_hot_flag": bool(int(charger_flag[3]) & 0x01),
         "warning": warning,
     }
 
@@ -192,7 +208,24 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
     print(
         "decoded: CHG_STAT={chg_stat}({chg_name}) VBUS_STAT={vbus_stat}({vbus_name}) "
         "VSYSMIN_LOOP={vsys} IINDPM={iindpm} VINDPM={vindpm} PG={pg} "
-        "VBAT_OVP={vbat_ovp} warning={warning}".format(**decoded)
+        "CHG_TMR_STAT={chg_tmr_stat} VBAT_OVP={vbat_ovp} warning={warning}".format(**decoded)
+    )
+    print(
+        "timers: fast={fast_en}/{fast_h}h pre={pre_en}/{pre_min}min "
+        "trickle={tri_en} topoff={top_min}min TMR2X={tmr2x} "
+        "flags fast/pre/trickle/topoff={chg_flag}/{pre_flag}/{tri_flag}/{top_flag}".format(
+            fast_en=status.get("charger_fast_charge_timer_enabled"),
+            fast_h=status.get("charger_fast_charge_timer_hours"),
+            pre_en=status.get("charger_precharge_timer_enabled"),
+            pre_min=status.get("charger_precharge_timer_minutes"),
+            tri_en=status.get("charger_trickle_timer_enabled"),
+            top_min=status.get("charger_topoff_timer_minutes"),
+            tmr2x=status.get("charger_timer_2x_enabled"),
+            chg_flag=decoded["chg_tmr_flag"],
+            pre_flag=decoded["prechg_tmr_flag"],
+            tri_flag=decoded["trichg_tmr_flag"],
+            top_flag=decoded["topoff_tmr_flag"],
+        )
     )
     print(
         "limits: VSYSMIN={vsysmin}mV VREG={vreg}mV ICHG={ichg}mA "
@@ -206,7 +239,9 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
     )
     print(
         "VBAT={vbat}mV SOC={soc} VSYS={vsys}mV VBUS={vbus}mV "
-        "IBUS={ibus}mA IBAT={ibat}mA TDIE={tdie}C".format(
+        "IBUS={ibus}mA IBAT={ibat}mA TS={ts}%REGN "
+        "TS_STATUS cold/cool/warm/hot={ts_cold}/{ts_cool}/{ts_warm}/{ts_hot} "
+        "TDIE={tdie}C".format(
             vbat=status.get("charger_vbat_mv"),
             soc=(
                 f"{status.get('charger_battery_soc_percent')}%"
@@ -217,6 +252,11 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
             vbus=status.get("charger_vbus_mv"),
             ibus=status.get("charger_ibus_ma"),
             ibat=status.get("charger_ibat_ma"),
+            ts=status.get("charger_ts_percent"),
+            ts_cold=decoded["ts_cold"],
+            ts_cool=decoded["ts_cool"],
+            ts_warm=decoded["ts_warm"],
+            ts_hot=decoded["ts_hot"],
             tdie=status.get("charger_tdie_c"),
         )
     )

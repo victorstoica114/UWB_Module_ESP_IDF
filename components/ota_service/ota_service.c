@@ -291,6 +291,12 @@ static bool ota_query_option_enabled(const char *query, const char *key)
            strcmp(value, "1") == 0;
 }
 
+static bool ota_query_has_key(const char *query, const char *key)
+{
+    char value[8] = {0};
+    return httpd_query_key_value(query, key, value, sizeof(value)) == ESP_OK;
+}
+
 static bool runtime_config_reboot_recommended(
     const app_runtime_config_t *before, const app_runtime_config_t *after)
 {
@@ -351,7 +357,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "POST /config/runtime?mode=ranging&tag=1&anchors=2,3,4,5[&reboot=1]\n"
         "POST /config/runtime?clear=1[&reboot=1]\n"
         "POST /config/charger?adc=1&adc_sample=2\n"
-        "POST /config/charger?charge_current_ma=500&charge_voltage_mv=4200\n";
+        "POST /config/charger?charge_current_ma=500&charge_voltage_mv=4200\n"
+        "POST /config/charger?fast_charge_timer_enabled=1&fast_charge_timer_hours=12\n";
 
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
@@ -517,6 +524,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_part_number\":%u,"
         "\"charger_device_revision\":%u,"
         "\"charger_adc_enabled\":%s,"
+        "\"charger_reg0d_iotg_regulation\":\"0x%02x\","
+        "\"charger_reg0e_timer_control\":\"0x%02x\","
+        "\"charger_reg16_temperature_control\":\"0x%02x\","
+        "\"charger_reg17_ntc_control_0\":\"0x%02x\","
+        "\"charger_reg18_ntc_control_1\":\"0x%02x\","
         "\"charger_reg0f_charger_control_0\":\"0x%02x\","
         "\"charger_reg10_charger_control_1\":\"0x%02x\","
         "\"charger_reg14_charger_control_5\":\"0x%02x\","
@@ -529,8 +541,26 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_input_voltage_limit_mv\":%u,"
         "\"charger_input_current_limit_ma\":%u,"
         "\"charger_charge_enabled\":%s,"
+        "\"charger_charge_status_code\":%u,"
+        "\"charger_vbus_status_code\":%u,"
+        "\"charger_iindpm_active\":%s,"
+        "\"charger_vindpm_active\":%s,"
+        "\"charger_vsys_regulation_active\":%s,"
+        "\"charger_battery_overvoltage_active\":%s,"
+        "\"charger_charge_safety_timer_expired\":%s,"
+        "\"charger_topoff_timer_flag\":%s,"
+        "\"charger_trickle_timer_flag\":%s,"
+        "\"charger_precharge_timer_flag\":%s,"
+        "\"charger_fast_charge_timer_flag\":%s,"
         "\"charger_watchdog_setting\":%u,"
         "\"charger_watchdog_disabled\":%s,"
+        "\"charger_topoff_timer_minutes\":%u,"
+        "\"charger_trickle_timer_enabled\":%s,"
+        "\"charger_precharge_timer_enabled\":%s,"
+        "\"charger_fast_charge_timer_enabled\":%s,"
+        "\"charger_fast_charge_timer_hours\":%u,"
+        "\"charger_timer_2x_enabled\":%s,"
+        "\"charger_precharge_timer_minutes\":%u,"
         "\"charger_adc_sample\":%u,"
         "\"charger_adc_continuous\":%s,"
         "\"charger_adc_running_average\":%s,"
@@ -549,6 +579,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_battery_soc_valid\":%s,"
         "\"charger_battery_soc_percent\":%u,"
         "\"charger_ts_percent\":%.4f,"
+        "\"charger_ts_ignore\":%s,"
+        "\"charger_ts_cold_active\":%s,"
+        "\"charger_ts_cool_active\":%s,"
+        "\"charger_ts_warm_active\":%s,"
+        "\"charger_ts_hot_active\":%s,"
+        "\"charger_ts_cold_flag\":%s,"
+        "\"charger_ts_cool_flag\":%s,"
+        "\"charger_ts_warm_flag\":%s,"
+        "\"charger_ts_hot_flag\":%s,"
         "\"charger_tdie_c\":%.1f,"
         "\"charger_dp_mv\":%u,"
         "\"charger_dm_mv\":%u,"
@@ -750,6 +789,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned)charger_snapshot.part_number,
         (unsigned)charger_snapshot.device_revision,
         charger_snapshot.adc_enabled ? "true" : "false",
+        (unsigned)charger_snapshot.reg0d_iotg_regulation,
+        (unsigned)charger_snapshot.reg0e_timer_control,
+        (unsigned)charger_snapshot.reg16_temperature_control,
+        (unsigned)charger_snapshot.reg17_ntc_control_0,
+        (unsigned)charger_snapshot.reg18_ntc_control_1,
         (unsigned)charger_snapshot.reg0f_charger_control_0,
         (unsigned)charger_snapshot.reg10_charger_control_1,
         (unsigned)charger_snapshot.reg14_charger_control_5,
@@ -762,8 +806,26 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned)charger_snapshot.input_voltage_limit_mv,
         (unsigned)charger_snapshot.input_current_limit_ma,
         charger_snapshot.charge_enabled ? "true" : "false",
+        (unsigned)charger_snapshot.charge_status_code,
+        (unsigned)charger_snapshot.vbus_status_code,
+        charger_snapshot.iindpm_active ? "true" : "false",
+        charger_snapshot.vindpm_active ? "true" : "false",
+        charger_snapshot.vsys_regulation_active ? "true" : "false",
+        charger_snapshot.battery_overvoltage_active ? "true" : "false",
+        charger_snapshot.charge_safety_timer_expired ? "true" : "false",
+        charger_snapshot.topoff_timer_flag ? "true" : "false",
+        charger_snapshot.trickle_timer_flag ? "true" : "false",
+        charger_snapshot.precharge_timer_flag ? "true" : "false",
+        charger_snapshot.fast_charge_timer_flag ? "true" : "false",
         (unsigned)charger_snapshot.watchdog_setting,
         charger_snapshot.watchdog_disabled ? "true" : "false",
+        (unsigned)charger_snapshot.topoff_timer_minutes,
+        charger_snapshot.trickle_timer_enabled ? "true" : "false",
+        charger_snapshot.precharge_timer_enabled ? "true" : "false",
+        charger_snapshot.fast_charge_timer_enabled ? "true" : "false",
+        (unsigned)charger_snapshot.fast_charge_timer_hours,
+        charger_snapshot.timer_2x_enabled ? "true" : "false",
+        (unsigned)charger_snapshot.precharge_timer_minutes,
         (unsigned)charger_snapshot.adc_sample,
         charger_snapshot.adc_continuous ? "true" : "false",
         charger_snapshot.adc_running_average ? "true" : "false",
@@ -791,6 +853,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         charger_snapshot.battery_soc_valid ? "true" : "false",
         (unsigned)charger_snapshot.battery_soc_percent,
         charger_snapshot.ts_percent,
+        charger_snapshot.ts_ignore ? "true" : "false",
+        charger_snapshot.ts_cold_active ? "true" : "false",
+        charger_snapshot.ts_cool_active ? "true" : "false",
+        charger_snapshot.ts_warm_active ? "true" : "false",
+        charger_snapshot.ts_hot_active ? "true" : "false",
+        charger_snapshot.ts_cold_flag ? "true" : "false",
+        charger_snapshot.ts_cool_flag ? "true" : "false",
+        charger_snapshot.ts_warm_flag ? "true" : "false",
+        charger_snapshot.ts_hot_flag ? "true" : "false",
         charger_snapshot.tdie_c,
         (unsigned)charger_snapshot.dp_mv,
         (unsigned)charger_snapshot.dm_mv,
@@ -1219,6 +1290,134 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
                                    "Invalid input_current_ma");
     }
 
+    apply_err = charger_config_apply_u16(
+        query, "iindpm_ma",
+        charger_service_set_input_current_limit_ma, &handled,
+        &operation_count, &first_error);
+    if (apply_err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid iindpm_ma");
+    }
+
+    const bool timer_requested =
+        ota_query_has_key(query, "topoff_timer_minutes") ||
+        ota_query_has_key(query, "trickle_timer_enabled") ||
+        ota_query_has_key(query, "precharge_timer_enabled") ||
+        ota_query_has_key(query, "fast_charge_timer_enabled") ||
+        ota_query_has_key(query, "fast_charge_timer_hours") ||
+        ota_query_has_key(query, "timer_2x_enabled") ||
+        ota_query_has_key(query, "precharge_timer_minutes");
+    if (timer_requested) {
+        charger_service_snapshot_t current = {0};
+        charger_service_get_snapshot(&current);
+
+        uint16_t topoff_timer_minutes = current.topoff_timer_minutes;
+        bool trickle_timer_enabled = current.trickle_timer_enabled;
+        bool precharge_timer_enabled = current.precharge_timer_enabled;
+        bool fast_charge_timer_enabled = current.fast_charge_timer_enabled;
+        uint8_t fast_charge_timer_hours = current.fast_charge_timer_hours;
+        bool timer_2x_enabled = current.timer_2x_enabled;
+        uint16_t precharge_timer_minutes = current.precharge_timer_minutes;
+
+        char text[32] = {0};
+        query_err = httpd_query_key_value(query, "topoff_timer_minutes", text,
+                                          sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_u16(text, &topoff_timer_minutes)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid topoff_timer_minutes");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid topoff_timer_minutes");
+        }
+
+        query_err = httpd_query_key_value(query, "trickle_timer_enabled", text,
+                                          sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_bool_text(text, &trickle_timer_enabled)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid trickle_timer_enabled");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid trickle_timer_enabled");
+        }
+
+        query_err = httpd_query_key_value(query, "precharge_timer_enabled",
+                                          text, sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_bool_text(text, &precharge_timer_enabled)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid precharge_timer_enabled");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid precharge_timer_enabled");
+        }
+
+        query_err = httpd_query_key_value(query, "fast_charge_timer_enabled",
+                                          text, sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_bool_text(text, &fast_charge_timer_enabled)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid fast_charge_timer_enabled");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid fast_charge_timer_enabled");
+        }
+
+        query_err = httpd_query_key_value(query, "fast_charge_timer_hours",
+                                          text, sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_u8(text, &fast_charge_timer_hours)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid fast_charge_timer_hours");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid fast_charge_timer_hours");
+        }
+
+        query_err = httpd_query_key_value(query, "timer_2x_enabled", text,
+                                          sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_bool_text(text, &timer_2x_enabled)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid timer_2x_enabled");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid timer_2x_enabled");
+        }
+
+        query_err = httpd_query_key_value(query, "precharge_timer_minutes",
+                                          text, sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_u16(text, &precharge_timer_minutes)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid precharge_timer_minutes");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid precharge_timer_minutes");
+        }
+
+        charger_service_write_result_t results[4] = {0};
+        size_t written_count = 0;
+        const esp_err_t err = charger_service_set_safety_timers(
+            topoff_timer_minutes, trickle_timer_enabled,
+            precharge_timer_enabled, fast_charge_timer_enabled,
+            fast_charge_timer_hours, timer_2x_enabled, precharge_timer_minutes,
+            results, 4, &written_count);
+        operation_count += (uint32_t)written_count;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    }
+
     char reg_text[16] = {0};
     query_err = httpd_query_key_value(query, "reg", reg_text,
                                       sizeof(reg_text));
@@ -1308,7 +1507,7 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
     charger_service_get_snapshot(&snapshot);
 
     ESP_LOGW(TAG,
-             "Charger config: ops=%lu err=%s ADC=%s CHG=%s REG0F=0x%02X VREG=%umV ICHG=%umA VINDPM=%umV IINDPM=%umA WD=%u",
+             "Charger config: ops=%lu err=%s ADC=%s CHG=%s REG0F=0x%02X VREG=%umV ICHG=%umA VINDPM=%umV IINDPM=%umA fast_tmr=%s/%uh pre_tmr=%s/%umin WD=%u",
              (unsigned long)operation_count, esp_err_to_name(first_error),
              snapshot.adc_enabled ? "on" : "off",
              snapshot.charge_enabled ? "on" : "off",
@@ -1317,9 +1516,13 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
              (unsigned)snapshot.charge_current_limit_ma,
              (unsigned)snapshot.input_voltage_limit_mv,
              (unsigned)snapshot.input_current_limit_ma,
+             snapshot.fast_charge_timer_enabled ? "on" : "off",
+             (unsigned)snapshot.fast_charge_timer_hours,
+             snapshot.precharge_timer_enabled ? "on" : "off",
+             (unsigned)snapshot.precharge_timer_minutes,
              (unsigned)snapshot.watchdog_setting);
 
-    char response[1500];
+    char response[2400];
     const int len = snprintf(
         response, sizeof(response),
         "{"
@@ -1334,8 +1537,25 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
         "\"charger_adc_running_average\":%s,"
         "\"charger_charge_enabled\":%s,"
         "\"charger_reg0f_charger_control_0\":\"0x%02x\","
+        "\"charger_reg0d_iotg_regulation\":\"0x%02x\","
+        "\"charger_reg0e_timer_control\":\"0x%02x\","
+        "\"charger_reg16_temperature_control\":\"0x%02x\","
+        "\"charger_reg17_ntc_control_0\":\"0x%02x\","
+        "\"charger_reg18_ntc_control_1\":\"0x%02x\","
         "\"charger_watchdog_setting\":%u,"
         "\"charger_watchdog_disabled\":%s,"
+        "\"charger_topoff_timer_minutes\":%u,"
+        "\"charger_trickle_timer_enabled\":%s,"
+        "\"charger_precharge_timer_enabled\":%s,"
+        "\"charger_fast_charge_timer_enabled\":%s,"
+        "\"charger_fast_charge_timer_hours\":%u,"
+        "\"charger_timer_2x_enabled\":%s,"
+        "\"charger_precharge_timer_minutes\":%u,"
+        "\"charger_charge_safety_timer_expired\":%s,"
+        "\"charger_topoff_timer_flag\":%s,"
+        "\"charger_trickle_timer_flag\":%s,"
+        "\"charger_precharge_timer_flag\":%s,"
+        "\"charger_fast_charge_timer_flag\":%s,"
         "\"charger_minimal_system_voltage_mv\":%u,"
         "\"charger_charge_voltage_limit_mv\":%u,"
         "\"charger_charge_current_limit_ma\":%u,"
@@ -1348,6 +1568,12 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
         "\"charger_battery_soc_percent\":%u,"
         "\"charger_ibus_ma\":%d,"
         "\"charger_ibat_ma\":%d,"
+        "\"charger_ts_percent\":%.4f,"
+        "\"charger_ts_ignore\":%s,"
+        "\"charger_ts_cold_active\":%s,"
+        "\"charger_ts_cool_active\":%s,"
+        "\"charger_ts_warm_active\":%s,"
+        "\"charger_ts_hot_active\":%s,"
         "\"charger_tdie_c\":%.1f,"
         "\"charger_write_count\":%lu,"
         "\"charger_write_error_count\":%lu,"
@@ -1366,8 +1592,25 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
         snapshot.adc_running_average ? "true" : "false",
         snapshot.charge_enabled ? "true" : "false",
         (unsigned)snapshot.reg0f_charger_control_0,
+        (unsigned)snapshot.reg0d_iotg_regulation,
+        (unsigned)snapshot.reg0e_timer_control,
+        (unsigned)snapshot.reg16_temperature_control,
+        (unsigned)snapshot.reg17_ntc_control_0,
+        (unsigned)snapshot.reg18_ntc_control_1,
         (unsigned)snapshot.watchdog_setting,
         snapshot.watchdog_disabled ? "true" : "false",
+        (unsigned)snapshot.topoff_timer_minutes,
+        snapshot.trickle_timer_enabled ? "true" : "false",
+        snapshot.precharge_timer_enabled ? "true" : "false",
+        snapshot.fast_charge_timer_enabled ? "true" : "false",
+        (unsigned)snapshot.fast_charge_timer_hours,
+        snapshot.timer_2x_enabled ? "true" : "false",
+        (unsigned)snapshot.precharge_timer_minutes,
+        snapshot.charge_safety_timer_expired ? "true" : "false",
+        snapshot.topoff_timer_flag ? "true" : "false",
+        snapshot.trickle_timer_flag ? "true" : "false",
+        snapshot.precharge_timer_flag ? "true" : "false",
+        snapshot.fast_charge_timer_flag ? "true" : "false",
         (unsigned)snapshot.minimal_system_voltage_mv,
         (unsigned)snapshot.charge_voltage_limit_mv,
         (unsigned)snapshot.charge_current_limit_ma,
@@ -1380,6 +1623,12 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
         (unsigned)snapshot.battery_soc_percent,
         (int)snapshot.ibus_ma,
         (int)snapshot.ibat_ma,
+        snapshot.ts_percent,
+        snapshot.ts_ignore ? "true" : "false",
+        snapshot.ts_cold_active ? "true" : "false",
+        snapshot.ts_cool_active ? "true" : "false",
+        snapshot.ts_warm_active ? "true" : "false",
+        snapshot.ts_hot_active ? "true" : "false",
         snapshot.tdie_c,
         (unsigned long)snapshot.write_count,
         (unsigned long)snapshot.write_error_count,

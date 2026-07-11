@@ -33,9 +33,14 @@ enum {
     REG03_CHARGE_CURRENT_LIMIT = 0x03,
     REG05_INPUT_VOLTAGE_LIMIT = 0x05,
     REG06_INPUT_CURRENT_LIMIT = 0x06,
+    REG0D_IOTG_REGULATION = 0x0D,
+    REG0E_TIMER_CONTROL = 0x0E,
     REG0F_CHARGER_CONTROL_0 = 0x0F,
     REG10_CHARGER_CONTROL_1 = 0x10,
     REG14_CHARGER_CONTROL_5 = 0x14,
+    REG16_TEMPERATURE_CONTROL = 0x16,
+    REG17_NTC_CONTROL_0 = 0x17,
+    REG18_NTC_CONTROL_1 = 0x18,
     REG1B_CHARGER_STATUS_0 = 0x1B,
     REG20_FAULT_STATUS_0 = 0x20,
     REG22_CHARGER_FLAG_0 = 0x22,
@@ -80,6 +85,13 @@ typedef enum {
 #define KEY_ICHG_MA "ichg"
 #define KEY_VINDPM_MV "vindpm"
 #define KEY_IINDPM_MA "iindpm"
+#define KEY_TOPOFF_TIMER_MIN "top_min"
+#define KEY_TRICKLE_TIMER_EN "tri_tmr"
+#define KEY_PRECHG_TIMER_EN "pre_en"
+#define KEY_FAST_TIMER_EN "chg_tmr"
+#define KEY_FAST_TIMER_HOURS "chg_hr"
+#define KEY_TIMER_2X_EN "tmr2x"
+#define KEY_PRECHG_TIMER_MIN "pre_min"
 
 typedef struct {
     bool has_watchdog_disabled;
@@ -101,6 +113,14 @@ typedef struct {
     uint16_t input_voltage_limit_mv;
     bool has_input_current_limit_ma;
     uint16_t input_current_limit_ma;
+    bool has_safety_timers;
+    uint16_t topoff_timer_minutes;
+    bool trickle_timer_enabled;
+    bool precharge_timer_enabled;
+    bool fast_charge_timer_enabled;
+    uint8_t fast_charge_timer_hours;
+    bool timer_2x_enabled;
+    uint16_t precharge_timer_minutes;
     uint32_t field_count;
 } charger_policy_t;
 
@@ -220,6 +240,58 @@ static uint16_t bq_vindpm_mv_from_raw(uint8_t raw)
 static uint16_t bq_iindpm_ma_from_raw(uint16_t raw)
 {
     return (uint16_t)((raw & 0x01FFU) * 10U);
+}
+
+static uint8_t bq_fast_charge_timer_hours_from_code(uint8_t code)
+{
+    static const uint8_t hours[] = {5U, 8U, 12U, 24U};
+    return hours[code & 0x03U];
+}
+
+static bool bq_fast_charge_timer_code_from_hours(uint8_t hours, uint8_t *code)
+{
+    if (code == NULL) {
+        return false;
+    }
+    switch (hours) {
+    case 5:
+        *code = 0U;
+        return true;
+    case 8:
+        *code = 1U;
+        return true;
+    case 12:
+        *code = 2U;
+        return true;
+    case 24:
+        *code = 3U;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool bq_topoff_timer_code_from_minutes(uint16_t minutes, uint8_t *code)
+{
+    if (code == NULL) {
+        return false;
+    }
+    switch (minutes) {
+    case 0:
+        *code = 0U;
+        return true;
+    case 15:
+        *code = 1U;
+        return true;
+    case 30:
+        *code = 2U;
+        return true;
+    case 45:
+        *code = 3U;
+        return true;
+    default:
+        return false;
+    }
 }
 
 static uint8_t bq_battery_soc_percent_from_mv(uint16_t mv)
@@ -343,6 +415,13 @@ static esp_err_t charger_policy_load(charger_policy_t *policy)
         return ESP_ERR_INVALID_ARG;
     }
     memset(policy, 0, sizeof(*policy));
+    policy->topoff_timer_minutes = 0U;
+    policy->trickle_timer_enabled = true;
+    policy->precharge_timer_enabled = true;
+    policy->fast_charge_timer_enabled = true;
+    policy->fast_charge_timer_hours = 12U;
+    policy->timer_2x_enabled = true;
+    policy->precharge_timer_minutes = 120U;
 
     nvs_handle_t handle = 0;
     const esp_err_t open_err =
@@ -406,10 +485,41 @@ static esp_err_t charger_policy_load(charger_policy_t *policy)
         policy->input_current_limit_ma = u16;
         policy->field_count++;
     }
+    if (charger_policy_read_u8(handle, KEY_TOPOFF_TIMER_MIN, &u8)) {
+        policy->has_safety_timers = true;
+        policy->topoff_timer_minutes = u8;
+        policy->field_count++;
+    }
+    if (charger_policy_read_u8(handle, KEY_TRICKLE_TIMER_EN, &u8)) {
+        policy->has_safety_timers = true;
+        policy->trickle_timer_enabled = u8 != 0U;
+    }
+    if (charger_policy_read_u8(handle, KEY_PRECHG_TIMER_EN, &u8)) {
+        policy->has_safety_timers = true;
+        policy->precharge_timer_enabled = u8 != 0U;
+    }
+    if (charger_policy_read_u8(handle, KEY_FAST_TIMER_EN, &u8)) {
+        policy->has_safety_timers = true;
+        policy->fast_charge_timer_enabled = u8 != 0U;
+    }
+    if (charger_policy_read_u8(handle, KEY_FAST_TIMER_HOURS, &u8)) {
+        policy->has_safety_timers = true;
+        policy->fast_charge_timer_hours = u8;
+    }
+    if (charger_policy_read_u8(handle, KEY_TIMER_2X_EN, &u8)) {
+        policy->has_safety_timers = true;
+        policy->timer_2x_enabled = u8 != 0U;
+    }
+    if (charger_policy_read_u8(handle, KEY_PRECHG_TIMER_MIN, &u8)) {
+        policy->has_safety_timers = true;
+        policy->precharge_timer_minutes = u8;
+    }
 
     nvs_close(handle);
-    return policy->field_count > 0U || policy->has_adc ? ESP_OK
-                                                       : ESP_ERR_NOT_FOUND;
+    return policy->field_count > 0U || policy->has_adc ||
+                   policy->has_safety_timers
+               ? ESP_OK
+               : ESP_ERR_NOT_FOUND;
 }
 
 static esp_err_t charger_policy_save_adc(bool enabled, bool continuous,
@@ -426,6 +536,40 @@ static esp_err_t charger_policy_save_adc(bool enabled, bool continuous,
                         "persist ADC sample failed");
     return charger_policy_write_u8(KEY_ADC_AVG,
                                    running_average ? 1U : 0U);
+}
+
+static esp_err_t charger_policy_save_safety_timers(
+    uint16_t topoff_timer_minutes, bool trickle_timer_enabled,
+    bool precharge_timer_enabled, bool fast_charge_timer_enabled,
+    uint8_t fast_charge_timer_hours, bool timer_2x_enabled,
+    uint16_t precharge_timer_minutes)
+{
+    ESP_RETURN_ON_ERROR(
+        charger_policy_write_u8(KEY_TOPOFF_TIMER_MIN,
+                                (uint8_t)topoff_timer_minutes),
+        TAG, "persist top-off timer failed");
+    ESP_RETURN_ON_ERROR(
+        charger_policy_write_u8(KEY_TRICKLE_TIMER_EN,
+                                trickle_timer_enabled ? 1U : 0U),
+        TAG, "persist trickle timer failed");
+    ESP_RETURN_ON_ERROR(
+        charger_policy_write_u8(KEY_PRECHG_TIMER_EN,
+                                precharge_timer_enabled ? 1U : 0U),
+        TAG, "persist precharge timer enable failed");
+    ESP_RETURN_ON_ERROR(
+        charger_policy_write_u8(KEY_FAST_TIMER_EN,
+                                fast_charge_timer_enabled ? 1U : 0U),
+        TAG, "persist fast timer enable failed");
+    ESP_RETURN_ON_ERROR(
+        charger_policy_write_u8(KEY_FAST_TIMER_HOURS,
+                                fast_charge_timer_hours),
+        TAG, "persist fast timer hours failed");
+    ESP_RETURN_ON_ERROR(
+        charger_policy_write_u8(KEY_TIMER_2X_EN,
+                                timer_2x_enabled ? 1U : 0U),
+        TAG, "persist timer 2x failed");
+    return charger_policy_write_u8(KEY_PRECHG_TIMER_MIN,
+                                   (uint8_t)precharge_timer_minutes);
 }
 
 static void charger_request_refresh_from_task_context(void)
@@ -740,6 +884,12 @@ static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_
                    sizeof(s_snapshot.charger_flag));
             memcpy(s_snapshot.fault_flag, &raw[REG26_FAULT_FLAG_0],
                    sizeof(s_snapshot.fault_flag));
+            s_snapshot.reg0d_iotg_regulation = raw[REG0D_IOTG_REGULATION];
+            s_snapshot.reg0e_timer_control = raw[REG0E_TIMER_CONTROL];
+            s_snapshot.reg16_temperature_control =
+                raw[REG16_TEMPERATURE_CONTROL];
+            s_snapshot.reg17_ntc_control_0 = raw[REG17_NTC_CONTROL_0];
+            s_snapshot.reg18_ntc_control_1 = raw[REG18_NTC_CONTROL_1];
             s_snapshot.reg0f_charger_control_0 = raw[REG0F_CHARGER_CONTROL_0];
             s_snapshot.reg10_charger_control_1 = raw[REG10_CHARGER_CONTROL_1];
             s_snapshot.reg14_charger_control_5 = raw[REG14_CHARGER_CONTROL_5];
@@ -758,9 +908,46 @@ static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_
                 bq_iindpm_ma_from_raw(read_be_u16(raw, REG06_INPUT_CURRENT_LIMIT));
             s_snapshot.charge_enabled =
                 (raw[REG0F_CHARGER_CONTROL_0] & 0x20U) != 0U;
+            s_snapshot.iindpm_active =
+                (raw[REG1B_CHARGER_STATUS_0] & 0x80U) != 0U;
+            s_snapshot.vindpm_active =
+                (raw[REG1B_CHARGER_STATUS_0] & 0x40U) != 0U;
+            s_snapshot.charge_status_code =
+                (uint8_t)((raw[REG1B_CHARGER_STATUS_0 + 1U] >> 5U) & 0x07U);
+            s_snapshot.vbus_status_code =
+                (uint8_t)((raw[REG1B_CHARGER_STATUS_0 + 1U] >> 1U) & 0x0FU);
+            s_snapshot.vsys_regulation_active =
+                (raw[REG1B_CHARGER_STATUS_0 + 3U] & 0x10U) != 0U;
+            s_snapshot.charge_safety_timer_expired =
+                (raw[REG1B_CHARGER_STATUS_0 + 3U] & 0x08U) != 0U;
+            s_snapshot.battery_overvoltage_active =
+                (raw[REG20_FAULT_STATUS_0] & 0x20U) != 0U;
+            s_snapshot.topoff_timer_flag =
+                (raw[REG22_CHARGER_FLAG_0 + 2U] & 0x01U) != 0U;
+            s_snapshot.precharge_timer_flag =
+                (raw[REG22_CHARGER_FLAG_0 + 2U] & 0x02U) != 0U;
+            s_snapshot.trickle_timer_flag =
+                (raw[REG22_CHARGER_FLAG_0 + 2U] & 0x04U) != 0U;
+            s_snapshot.fast_charge_timer_flag =
+                (raw[REG22_CHARGER_FLAG_0 + 2U] & 0x08U) != 0U;
             s_snapshot.watchdog_setting =
                 (uint8_t)(raw[REG10_CHARGER_CONTROL_1] & 0x07U);
             s_snapshot.watchdog_disabled = s_snapshot.watchdog_setting == 0U;
+            s_snapshot.topoff_timer_minutes =
+                (uint16_t)(((raw[REG0E_TIMER_CONTROL] >> 6U) & 0x03U) * 15U);
+            s_snapshot.trickle_timer_enabled =
+                (raw[REG0E_TIMER_CONTROL] & 0x20U) != 0U;
+            s_snapshot.precharge_timer_enabled =
+                (raw[REG0E_TIMER_CONTROL] & 0x10U) != 0U;
+            s_snapshot.fast_charge_timer_enabled =
+                (raw[REG0E_TIMER_CONTROL] & 0x08U) != 0U;
+            s_snapshot.fast_charge_timer_hours =
+                bq_fast_charge_timer_hours_from_code(
+                    (uint8_t)((raw[REG0E_TIMER_CONTROL] >> 1U) & 0x03U));
+            s_snapshot.timer_2x_enabled =
+                (raw[REG0E_TIMER_CONTROL] & 0x01U) != 0U;
+            s_snapshot.precharge_timer_minutes =
+                (raw[REG0D_IOTG_REGULATION] & 0x80U) != 0U ? 30U : 120U;
             s_snapshot.adc_sample =
                 (uint8_t)((raw[REG2E_ADC_CONTROL] >> 4U) & 0x03U);
             s_snapshot.adc_continuous =
@@ -784,6 +971,23 @@ static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_
                     : 0U;
             s_snapshot.ts_percent =
                 (double)read_be_u16(raw, REG3F_TS_ADC) * 0.0976563;
+            s_snapshot.ts_ignore = (raw[REG18_NTC_CONTROL_1] & 0x01U) != 0U;
+            s_snapshot.ts_cold_active =
+                (raw[REG1B_CHARGER_STATUS_0 + 4U] & 0x08U) != 0U;
+            s_snapshot.ts_cool_active =
+                (raw[REG1B_CHARGER_STATUS_0 + 4U] & 0x04U) != 0U;
+            s_snapshot.ts_warm_active =
+                (raw[REG1B_CHARGER_STATUS_0 + 4U] & 0x02U) != 0U;
+            s_snapshot.ts_hot_active =
+                (raw[REG1B_CHARGER_STATUS_0 + 4U] & 0x01U) != 0U;
+            s_snapshot.ts_cold_flag =
+                (raw[REG22_CHARGER_FLAG_0 + 3U] & 0x08U) != 0U;
+            s_snapshot.ts_cool_flag =
+                (raw[REG22_CHARGER_FLAG_0 + 3U] & 0x04U) != 0U;
+            s_snapshot.ts_warm_flag =
+                (raw[REG22_CHARGER_FLAG_0 + 3U] & 0x02U) != 0U;
+            s_snapshot.ts_hot_flag =
+                (raw[REG22_CHARGER_FLAG_0 + 3U] & 0x01U) != 0U;
             s_snapshot.tdie_c =
                 (double)read_be_i16(raw, REG41_TDIE_ADC) * 0.5;
             s_snapshot.dp_mv = read_be_u16(raw, REG43_DP_ADC);
@@ -918,6 +1122,20 @@ static esp_err_t charger_apply_saved_policy(void)
             "IINDPM",
             charger_service_set_input_current_limit_ma(
                 policy.input_current_limit_ma, results, 4, &written_count),
+            &first_err, &applied_count);
+    }
+    if (policy.has_safety_timers) {
+        charger_service_write_result_t results[4] = {0};
+        size_t written_count = 0;
+        charger_note_policy_result(
+            "safety timers",
+            charger_service_set_safety_timers(
+                policy.topoff_timer_minutes, policy.trickle_timer_enabled,
+                policy.precharge_timer_enabled,
+                policy.fast_charge_timer_enabled,
+                policy.fast_charge_timer_hours, policy.timer_2x_enabled,
+                policy.precharge_timer_minutes, results, 4,
+                &written_count),
             &first_err, &applied_count);
     }
     if (policy.has_charge_enabled) {
@@ -1448,6 +1666,72 @@ esp_err_t charger_service_set_input_current_limit_ma(
         return err;
     }
     return charger_policy_write_u16(KEY_IINDPM_MA, ma);
+}
+
+esp_err_t charger_service_set_safety_timers(
+    uint16_t topoff_timer_minutes, bool trickle_timer_enabled,
+    bool precharge_timer_enabled, bool fast_charge_timer_enabled,
+    uint8_t fast_charge_timer_hours, bool timer_2x_enabled,
+    uint16_t precharge_timer_minutes, charger_service_write_result_t *results,
+    size_t result_count, size_t *written_count)
+{
+    if (written_count == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *written_count = 0;
+
+    uint8_t topoff_code = 0;
+    uint8_t fast_code = 0;
+    if (!bq_topoff_timer_code_from_minutes(topoff_timer_minutes,
+                                           &topoff_code) ||
+        !bq_fast_charge_timer_code_from_hours(fast_charge_timer_hours,
+                                              &fast_code) ||
+        (precharge_timer_minutes != 30U && precharge_timer_minutes != 120U)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    charger_service_write_result_t item = {0};
+    esp_err_t err = charger_service_set_watchdog_disabled(&item);
+    append_result(results, result_count, written_count, &item);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    const uint8_t precharge_short_bit =
+        precharge_timer_minutes == 30U ? 0x80U : 0x00U;
+    err = charger_service_update_register_bits(REG0D_IOTG_REGULATION, 0x80U,
+                                               precharge_short_bit, &item);
+    append_result(results, result_count, written_count, &item);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    uint8_t timer_control = (uint8_t)((topoff_code & 0x03U) << 6U);
+    if (trickle_timer_enabled) {
+        timer_control |= 0x20U;
+    }
+    if (precharge_timer_enabled) {
+        timer_control |= 0x10U;
+    }
+    if (fast_charge_timer_enabled) {
+        timer_control |= 0x08U;
+    }
+    timer_control |= (uint8_t)((fast_code & 0x03U) << 1U);
+    if (timer_2x_enabled) {
+        timer_control |= 0x01U;
+    }
+
+    err = charger_service_write_register(REG0E_TIMER_CONTROL, timer_control,
+                                         &item);
+    append_result(results, result_count, written_count, &item);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    return charger_policy_save_safety_timers(
+        topoff_timer_minutes, trickle_timer_enabled, precharge_timer_enabled,
+        fast_charge_timer_enabled, fast_charge_timer_hours, timer_2x_enabled,
+        precharge_timer_minutes);
 }
 
 void charger_service_request_refresh(void)
