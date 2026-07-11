@@ -209,6 +209,55 @@ def stddev(values: list[float]) -> float:
     return math.sqrt(sum((value - avg) ** 2 for value in values) / (len(values) - 1))
 
 
+def calibration_result_labels(results: list[dict[str, Any]]) -> list[str]:
+    labels: list[str] = []
+    for item in sorted(results, key=lambda row: int(row.get("module_id") or 0)):
+        module_id = item.get("module_id")
+        correction = item.get("correction_dtu")
+        if module_id is None or correction is None:
+            continue
+        labels.append(f"M{int(module_id)} {int(correction):+d}")
+    return labels
+
+
+def calibration_reason_label(reason: Any) -> str | None:
+    text = str(reason or "")
+    if not text:
+        return None
+    if text == "dry_run":
+        return "dry run"
+    if text.startswith("below_min_apply_dtu"):
+        return "below min apply"
+    if text == "reference_guard":
+        return "reference guard"
+    return text.replace("_", " ")
+
+
+def calibration_write_summary(results: list[dict[str, Any]]) -> str:
+    applied = [item for item in results if item.get("applied")]
+    skipped = [item for item in results if not item.get("applied")]
+    applied_labels = calibration_result_labels(applied)
+    skipped_labels = calibration_result_labels(skipped)
+    parts: list[str] = []
+    if applied_labels:
+        parts.append("applied " + ", ".join(applied_labels))
+    if skipped_labels:
+        prefix = "no write" if applied_labels else "no writes; computed"
+        reason_labels = sorted(
+            {
+                label
+                for label in (
+                    calibration_reason_label(item.get("reason"))
+                    for item in skipped
+                )
+                if label
+            }
+        )
+        reason_text = f" ({', '.join(reason_labels)})" if reason_labels else ""
+        parts.append(f"{prefix} {', '.join(skipped_labels)}{reason_text}")
+    return "; ".join(parts) if parts else "no writes"
+
+
 def solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float]:
     size = len(vector)
     rows = [list(matrix[i]) + [vector[i]] for i in range(size)]
@@ -4124,7 +4173,10 @@ class DashboardHttpServer(ThreadingHTTPServer):
             )
             return {
                 "ok": complete and write_ok,
-                "summary": f"auto calibration {'applied' if effective_apply else 'computed'} M{dut_id} {correction:+d} DTU",
+                "summary": (
+                    "auto calibration complete: "
+                    + calibration_write_summary(apply_results)
+                ),
                 "method": "two",
                 "complete": complete,
                 "sample_count": sample_count,
@@ -4283,23 +4335,17 @@ class DashboardHttpServer(ThreadingHTTPServer):
         write_ok = all(
             item.get("applied") or item.get("reason") for item in apply_results
         )
-        applied_labels = [
-            f"M{item['module_id']} {item['correction_dtu']:+d}"
-            for item in apply_results
-            if item.get("applied")
-        ]
         if reference_guard_failures:
             failed_labels = ", ".join(
                 f"{pair} {data['error_cm']:+.2f} cm"
                 for pair, data in sorted(reference_guard_failures.items())
             )
-            summary_action = f"reference guard blocked writes: {failed_labels}"
-        else:
             summary_action = (
-                "applied " + ", ".join(applied_labels)
-                if applied_labels
-                else "no writes"
+                f"reference guard blocked writes: {failed_labels}; "
+                + calibration_write_summary(apply_results)
             )
+        else:
+            summary_action = calibration_write_summary(apply_results)
         return {
             "ok": complete and write_ok and reference_guard_ok,
             "summary": f"auto calibration complete: {summary_action}",
