@@ -1975,7 +1975,11 @@ function renderBatteryCell(item) {
     IBUS ${fmtMa(item.charger_ibus_ma)}<br>
     IBAT ${fmtMa(item.charger_ibat_ma)} · TDIE ${fmtMaybeNumber(item.charger_tdie_c, 1)} C<br>
     <span class="muted">${pinLine}</span><br>
-    <span class="muted">REG48 ${esc(item.charger_part_info || "-")} · reads ${esc(item.charger_read_count ?? "-")} · age ${fmtAgeMs(item.charger_last_update_age_ms)}</span>`;
+    <span class="muted">REG48 ${esc(item.charger_part_info || "-")}
+      · reads ${esc(item.charger_read_count ?? "-")}
+      (${esc(item.charger_full_read_count ?? "-")}/${esc(item.charger_quick_read_count ?? "-")} full/quick)
+      · ${esc(item.charger_last_read_duration_ms ?? "-")} ms
+      · age ${fmtAgeMs(item.charger_last_update_age_ms)}</span>`;
 }
 
 function hexByte(value) {
@@ -2008,7 +2012,11 @@ function renderChargerRows(statuses) {
       <td><span class="${powerClass}">${item.charger_present ? "BQ25792 present" : "not found"}</span><br>
         Board PG ${fmtGpioLevel(item.charger_pg_gpio_level)} ${item.charger_pg_asserted ? "asserted" : ""}<br>
         BQ PG_STAT ${item.charger_pg_stat ? "1" : "0"} · INT ${fmtGpioLevel(item.charger_int_gpio_level)} / ${esc(item.charger_int_irq_count ?? "-")}<br>
-        <span class="muted">REG48 ${esc(item.charger_part_info || "-")} · age ${fmtAgeMs(item.charger_last_update_age_ms)}</span></td>
+        <span class="muted">REG48 ${esc(item.charger_part_info || "-")}
+          · reads ${esc(item.charger_read_count ?? "-")}
+          (${esc(item.charger_full_read_count ?? "-")}/${esc(item.charger_quick_read_count ?? "-")} full/quick)
+          · ${esc(item.charger_last_read_duration_ms ?? "-")} ms
+          · age ${fmtAgeMs(item.charger_last_update_age_ms)}</span></td>
       <td><span class="${adcClass}">ADC ${item.charger_adc_enabled ? "on" : "off"}</span><br>
         sample ${esc(item.charger_adc_sample ?? "-")} · ${item.charger_adc_continuous ? "continuous" : "one shot"}<br>
         avg ${item.charger_adc_running_average ? "on" : "off"} · EN_IBAT ${item.charger_ibat_discharge_sense_enabled ? "on" : "off"}<br>

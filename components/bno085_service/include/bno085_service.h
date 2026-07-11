@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 esp_err_t bno085_service_start(void);
+esp_err_t bno085_service_apply_runtime_config(void);
 
 #ifdef __cplusplus
 }

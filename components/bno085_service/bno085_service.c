@@ -48,6 +48,9 @@ enum {
     BNO085_REPORT_TIMEBASE = 0xFB,
     BNO085_REPORT_ACCELEROMETER = 0x01,
     BNO085_ACCEL_Q_POINT = 8,
+    BNO085_NOTIFY_INT = 1U << 0,
+    BNO085_NOTIFY_CONFIG = 1U << 1,
+    BNO085_NOTIFY_STOP = 1U << 2,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -94,7 +97,46 @@ static uint32_t s_last_stall_recovery_ms;
 static size_t s_last_packet_len;
 static size_t s_last_input_payload_len;
 
-static void bno085_drain_startup_packets(void);
+static esp_err_t bno085_hold_in_reset(void);
+static bool bno085_drain_startup_packets(void);
+
+static void bno085_notify_task(uint32_t bits)
+{
+    const TaskHandle_t task = s_task_handle;
+    if (task != NULL) {
+        (void)xTaskNotify(task, bits, eSetBits);
+    }
+}
+
+static void bno085_release_i2c_device(void)
+{
+    if (s_i2c_dev != NULL) {
+        (void)i2c_master_bus_rm_device(s_i2c_dev);
+        s_i2c_dev = NULL;
+    }
+}
+
+static void bno085_stop_interrupt(void)
+{
+    if (BOARD_CONFIG_BNO085_INT_GPIO != BOARD_CONFIG_GPIO_UNUSED) {
+        (void)gpio_intr_disable(BOARD_CONFIG_BNO085_INT_GPIO);
+        (void)gpio_isr_handler_remove(BOARD_CONFIG_BNO085_INT_GPIO);
+    }
+    s_int_irq_enabled = false;
+    s_int_irq_armed = false;
+}
+
+static void bno085_task_finish(bool hold_reset)
+{
+    bno085_stop_interrupt();
+    bno085_release_i2c_device();
+    if (hold_reset) {
+        (void)bno085_hold_in_reset();
+    }
+    s_task_handle = NULL;
+    s_service_started = false;
+    vTaskDelete(NULL);
+}
 
 static uint16_t read_le_u16(const uint8_t *data)
 {
@@ -214,7 +256,8 @@ static void IRAM_ATTR bno085_int_isr_handler(void *arg)
     s_int_irq_armed = false;
     (void)gpio_intr_disable(BOARD_CONFIG_BNO085_INT_GPIO);
     if (s_task_handle != NULL) {
-        vTaskNotifyGiveFromISR(s_task_handle, &higher_priority_task_woken);
+        (void)xTaskNotifyFromISR(s_task_handle, BNO085_NOTIFY_INT, eSetBits,
+                                 &higher_priority_task_woken);
     }
     if (higher_priority_task_woken == pdTRUE) {
         portYIELD_FROM_ISR();
@@ -259,6 +302,9 @@ static esp_err_t bno085_configure_host_interrupt(void)
                  esp_err_to_name(err));
         return err;
     }
+
+    (void)gpio_intr_disable(BOARD_CONFIG_BNO085_INT_GPIO);
+    (void)gpio_isr_handler_remove(BOARD_CONFIG_BNO085_INT_GPIO);
 
     err = gpio_set_intr_type(BOARD_CONFIG_BNO085_INT_GPIO,
                              BOARD_CONFIG_BNO085_INT_ACTIVE_LEVEL
@@ -627,24 +673,24 @@ static void bno085_log_read_error(esp_err_t err)
              esp_err_to_name(err), (unsigned)s_read_error_count);
 }
 
-static void bno085_recover_if_stalled(void)
+static bool bno085_recover_if_stalled(void)
 {
     const uint32_t now_ms = ticks_to_ms();
     if (s_report_count != s_last_progress_report_count) {
         s_last_progress_report_count = s_report_count;
         s_last_progress_ms = now_ms;
-        return;
+        return true;
     }
 
     if (s_last_progress_ms == 0) {
         s_last_progress_ms = now_ms;
-        return;
+        return true;
     }
 
     if ((uint32_t)(now_ms - s_last_progress_ms) < BNO085_STALL_RECOVERY_MS ||
         (uint32_t)(now_ms - s_last_stall_recovery_ms) <
             BNO085_STALL_RECOVERY_MS) {
-        return;
+        return true;
     }
     s_last_stall_recovery_ms = now_ms;
 
@@ -655,9 +701,13 @@ static void bno085_recover_if_stalled(void)
     esp_err_t err = bno085_soft_reset();
     if (err == ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(50));
-        bno085_drain_startup_packets();
+        if (!bno085_drain_startup_packets()) {
+            return false;
+        }
         vTaskDelay(pdMS_TO_TICKS(50));
-        bno085_drain_startup_packets();
+        if (!bno085_drain_startup_packets()) {
+            return false;
+        }
     } else {
         ESP_LOGW(TAG, "BNO085 stall soft reset failed: %s",
                  esp_err_to_name(err));
@@ -673,6 +723,7 @@ static void bno085_recover_if_stalled(void)
 
     s_last_progress_report_count = s_report_count;
     s_last_progress_ms = ticks_to_ms();
+    return true;
 }
 
 static esp_err_t bno085_i2c_init(void)
@@ -701,15 +752,41 @@ static esp_err_t bno085_i2c_init(void)
     return ESP_OK;
 }
 
-static void bno085_drain_startup_packets(void)
+static uint32_t bno085_wait_notify_bits(uint32_t timeout_ms)
+{
+    uint32_t notification = 0;
+    if (xTaskNotifyWait(0, UINT32_MAX, &notification,
+                        ms_to_ticks_min_1(timeout_ms)) == pdTRUE) {
+        return notification;
+    }
+    return 0;
+}
+
+static uint32_t bno085_take_notify_bits_now(void)
+{
+    uint32_t notification = 0;
+    if (xTaskNotifyWait(0, UINT32_MAX, &notification, 0) == pdTRUE) {
+        return notification;
+    }
+    return 0;
+}
+
+static bool bno085_drain_startup_packets(void)
 {
     const uint32_t start_ms = ticks_to_ms();
     uint8_t packet[BNO085_MAX_PACKET_LEN] = {0};
 
     while ((uint32_t)(ticks_to_ms() - start_ms) < BNO085_STARTUP_DRAIN_MS) {
+        if ((bno085_take_notify_bits_now() & BNO085_NOTIFY_STOP) != 0) {
+            return false;
+        }
+
         if (s_int_irq_enabled && !bno085_int_active()) {
             bno085_arm_interrupt_if_needed();
-            (void)ulTaskNotifyTake(pdTRUE, ms_to_ticks_min_1(50));
+            const uint32_t notify_bits = bno085_wait_notify_bits(50);
+            if ((notify_bits & BNO085_NOTIFY_STOP) != 0) {
+                return false;
+            }
             if (!bno085_int_active()) {
                 continue;
             }
@@ -723,31 +800,42 @@ static void bno085_drain_startup_packets(void)
             continue;
         }
         if (s_int_irq_enabled) {
-            (void)ulTaskNotifyTake(pdTRUE, ms_to_ticks_min_1(50));
+            const uint32_t notify_bits = bno085_wait_notify_bits(50);
+            if ((notify_bits & BNO085_NOTIFY_STOP) != 0) {
+                return false;
+            }
         } else {
             vTaskDelay(ms_to_ticks_min_1(50));
         }
     }
+    return true;
 }
 
-static bool bno085_wait_for_interrupt_or_timeout(void)
+static bool bno085_wait_for_interrupt_or_timeout(uint32_t *notify_bits)
 {
+    *notify_bits = bno085_take_notify_bits_now();
+    if ((*notify_bits & BNO085_NOTIFY_STOP) != 0) {
+        return false;
+    }
+
     if (bno085_int_active()) {
         s_wait_immediate_count++;
         return true;
     }
 
+    const uint32_t timeout_ms = bno085_int_wait_timeout_ms();
     if (!s_int_irq_enabled) {
-        vTaskDelay(ms_to_ticks_min_1(bno085_int_wait_timeout_ms()));
+        *notify_bits = bno085_wait_notify_bits(timeout_ms);
         return bno085_int_active();
     }
 
     bno085_arm_interrupt_if_needed();
 
-    const uint32_t taken = ulTaskNotifyTake(
-        pdTRUE, ms_to_ticks_min_1(bno085_int_wait_timeout_ms()));
-    if (taken > 0) {
-        s_wait_notify_count++;
+    *notify_bits = bno085_wait_notify_bits(timeout_ms);
+    if (*notify_bits != 0) {
+        if ((*notify_bits & BNO085_NOTIFY_INT) != 0) {
+            s_wait_notify_count++;
+        }
         return bno085_int_active();
     }
     if (bno085_int_active()) {
@@ -809,7 +897,7 @@ static void bno085_task(void *arg)
     esp_err_t err = bno085_configure_host_gpios();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "BNO085 GPIO init failed: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
+        bno085_task_finish(true);
         return;
     }
 
@@ -823,14 +911,14 @@ static void bno085_task(void *arg)
     err = bno085_hard_reset();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "BNO085 hard reset failed: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
+        bno085_task_finish(true);
         return;
     }
 
     err = bno085_i2c_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "BNO085 I2C init failed: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
+        bno085_task_finish(true);
         return;
     }
 
@@ -838,9 +926,17 @@ static void bno085_task(void *arg)
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "BNO085 soft reset command sent");
         vTaskDelay(pdMS_TO_TICKS(50));
-        bno085_drain_startup_packets();
+        if (!bno085_drain_startup_packets()) {
+            ESP_LOGI(TAG, "BNO085 stop requested during startup");
+            bno085_task_finish(true);
+            return;
+        }
         vTaskDelay(pdMS_TO_TICKS(50));
-        bno085_drain_startup_packets();
+        if (!bno085_drain_startup_packets()) {
+            ESP_LOGI(TAG, "BNO085 stop requested during startup");
+            bno085_task_finish(true);
+            return;
+        }
     } else {
         ESP_LOGW(TAG, "BNO085 soft reset failed: %s", esp_err_to_name(err));
     }
@@ -849,7 +945,7 @@ static void bno085_task(void *arg)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "BNO085 accelerometer enable failed: %s",
                  esp_err_to_name(err));
-        vTaskDelete(NULL);
+        bno085_task_finish(true);
         return;
     }
     ESP_LOGI(TAG, "BNO085 accelerometer enable command sent");
@@ -858,14 +954,25 @@ static void bno085_task(void *arg)
 
     uint8_t packet[BNO085_MAX_PACKET_LEN] = {0};
     while (true) {
-        if (bno085_wait_for_interrupt_or_timeout()) {
+        uint32_t notify_bits = 0;
+        const bool packet_ready =
+            bno085_wait_for_interrupt_or_timeout(&notify_bits);
+        if ((notify_bits & BNO085_NOTIFY_STOP) != 0) {
+            break;
+        }
+        if (packet_ready) {
             bno085_drain_ready_packets(packet, sizeof(packet));
         }
 
         bno085_reconfigure_accelerometer_if_needed();
-        bno085_recover_if_stalled();
+        if (!bno085_recover_if_stalled()) {
+            break;
+        }
         bno085_log_status();
     }
+
+    ESP_LOGI(TAG, "BNO085 stop requested; holding accelerometer in reset");
+    bno085_task_finish(true);
 }
 
 esp_err_t bno085_service_start(void)
@@ -873,25 +980,36 @@ esp_err_t bno085_service_start(void)
     const app_runtime_config_t *runtime_config = app_runtime_config_get();
     if (!runtime_config->bno085_accel_enabled) {
         ESP_LOGI(TAG, "BNO085 accelerometer disabled by runtime config");
+        if (s_service_started && s_task_handle != NULL) {
+            bno085_notify_task(BNO085_NOTIFY_STOP);
+            return ESP_OK;
+        }
         return bno085_hold_in_reset();
     }
 
     if (s_service_started) {
+        bno085_notify_task(BNO085_NOTIFY_CONFIG);
         return ESP_OK;
     }
 
+    s_service_started = true;
     const BaseType_t created = xTaskCreatePinnedToCore(bno085_task,
                                                        "bno085",
                                                        BNO085_TASK_STACK_WORDS,
                                                        NULL,
                                                        BNO085_TASK_PRIORITY,
-                                                       NULL,
+                                                       &s_task_handle,
                                                        BNO085_TASK_CORE);
     if (created != pdPASS) {
+        s_service_started = false;
         ESP_LOGE(TAG, "Failed to create BNO085 task");
         return ESP_ERR_NO_MEM;
     }
 
-    s_service_started = true;
     return ESP_OK;
+}
+
+esp_err_t bno085_service_apply_runtime_config(void)
+{
+    return bno085_service_start();
 }

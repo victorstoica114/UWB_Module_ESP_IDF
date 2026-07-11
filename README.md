@@ -269,7 +269,7 @@ The BNO085 accelerometer test is controlled from
 ```c
 #define APP_BNO085_ACCEL_TEST_ENABLED 0
 #define APP_BNO085_I2C_ADDRESS 0x4A
-#define APP_BNO085_I2C_CLOCK_HZ 100000
+#define APP_BNO085_I2C_CLOCK_HZ 400000
 #define APP_BNO085_ACCEL_INTERVAL_MS 50
 #define APP_BNO085_LOG_INTERVAL_MS 1000
 #define APP_BNO085_INT_WAIT_TIMEOUT_MS 250
@@ -287,13 +287,20 @@ is missed. It logs lines like
 `BNO085 accel x=... y=... z=... m/s^2 accuracy=... irqs=... wait_timeouts=...`.
 Leaving it disabled avoids the extra I2C and CPU work.
 
+Runtime enable/disable is applied live through `/config/runtime` and the
+dashboard Settings tab. If BNO085 is disabled, firmware does not keep an
+accelerometer task polling a variable; it holds GPIO40 reset active. When BNO085
+is enabled, the runtime endpoint starts the task directly. While the task is
+running, GPIO15 interrupts, rate changes, and stop requests all wake it with
+FreeRTOS task notifications (`INT`, `CONFIG`, `STOP`).
+
 The dashboard Graphs tab plots accelerometer samples as soon as their wireless
 log lines arrive. Its `Timebase` control only changes the visible time window,
 oscilloscope-style. `Samples/s` is the actual BNO085/report export rate; the
 dashboard applies it as `bno085_sample_hz`, which updates runtime config and
 sets both `bno085_accel_interval_ms` and `bno085_log_interval_ms`. The running
 BNO085 task picks up rate changes live by sending a new `Set Feature` command,
-so no reboot is needed for rate-only changes. The BNO08X datasheet lists
+so no reboot is needed. The BNO08X datasheet lists
 `Accelerometer` at a maximum configurable rate of 500 Hz, although I2C bandwidth
 and wireless log throughput still need to be considered in practice.
 
@@ -311,16 +318,20 @@ current implementation is a passive GNSS diagnostic suitable for testing
 modules with antennas, currently modules 3 and 5 near the window.
 
 The BQ25792 Li-Po charger monitor runs on the shared I2C bus
-(`GPIO9/GPIO10`, address `0x6B`) and dumps the complete register window
-`0x00..0x48` every `APP_BQ25792_READ_INTERVAL_MS` (`10s` by default). The dump
-is intentionally split into small register chunks
+(`GPIO9/GPIO10`, address `0x6B`) at 400 kHz. A complete register-window dump
+`0x00..0x48` runs at startup, on explicit refresh/configuration changes, and
+then every `APP_BQ25792_READ_INTERVAL_MS` (`10s` by default). The full dump is
+intentionally split into small register chunks
 (`APP_BQ25792_REGISTER_READ_CHUNK_BYTES`, default `8`) with a short gap between
 chunks so the charger monitor stays lower priority than the BNO085
-accelerometer. `/status` exposes the raw register bytes as `charger_raw_hex`
-plus decoded summary fields for part information, status/fault bytes, ADC
-control, watchdog state, charge/input limits, `VBAT`, `VSYS`, `VBUS`, `VAC1`,
-`VAC2`, `IBUS`, `IBAT`, `TS`, `TDIE`, `D+`, and `D-`. Firmware also publishes a
-simple 1S Li-Po state-of-charge estimate derived from `VBAT`; this is a
+accelerometer. BQ25792 `INT` wakes the task for a shorter status/ADC refresh
+instead of a full raw-map dump, so charger events can be handled while the
+BNO085 is running at high sample rates. `/status` exposes the raw register bytes
+as `charger_raw_hex` plus decoded summary fields for part information,
+status/fault bytes, ADC control, watchdog state, charge/input limits, `VBAT`,
+`VSYS`, `VBUS`, `VAC1`, `VAC2`, `IBUS`, `IBAT`, `TS`, `TDIE`, `D+`, and `D-`.
+Firmware also publishes a simple 1S Li-Po state-of-charge estimate derived from
+`VBAT`; this is a
 voltage-based dashboard aid, not a coulomb-counting fuel gauge. The dashboard
 Info tab shows the decoded charger values in the Battery column, the Battery
 Charger tab shows a full live table plus raw register map, and
@@ -344,15 +355,22 @@ if held long enough, trigger a system power reset. Firmware currently leaves
 The datasheet confirms that the BQ25792 is not read-only: many configuration
 registers are `R/W`, and any I2C write moves the charger from default mode into
 host mode and starts/resets the watchdog unless the watchdog is disabled. The
-firmware exposes an authenticated live endpoint at `/config/charger` for
+charger does not provide a user NVM profile for these host-side settings: after
+POR it starts from defaults derived mainly from the `PROG` pin, and watchdog or
+register reset can restore defaults. Firmware must therefore reapply any
+required charger policy at startup if we want it guaranteed after reboot.
+Firmware stores the dashboard charger policy in ESP32 NVS and reapplies it once
+at BQ25792 startup. Refreshes only read status; they do not rewrite charger
+configuration. Raw register writes remain live experiments and are not persisted
+as policy.
+
+The firmware exposes an authenticated live endpoint at `/config/charger` for
 controlled writes. The endpoint disables the watchdog before charger
 configuration changes, can enable/disable the ADC, can choose continuous or
 one-shot ADC conversion and ADC sample speed, and can set `VSYSMIN`, charge
 voltage/current, and input voltage/current using human units (`mV`/`mA`). It
 also has a guarded raw register write path (`reg`, `value`, optional
-`mask`/`bits`, and `confirm=1`) for datasheet-level experiments. These settings
-are live BQ registers, not NVS-backed firmware configuration; reboot or power
-cycling the charger can return BQ-controlled values to defaults.
+`mask`/`bits`, and `confirm=1`) for datasheet-level experiments.
 
 Recommended workflow from this folder, in the ESP-IDF v6.0.2 terminal:
 

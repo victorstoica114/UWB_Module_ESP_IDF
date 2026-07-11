@@ -15,6 +15,7 @@
 #include "esp_system.h"
 #include "app_identity.h"
 #include "app_runtime_config.h"
+#include "bno085_service.h"
 #include "charger_service.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -305,7 +306,6 @@ static bool runtime_config_reboot_recommended(
            before->anchor_survey_coordinator_id !=
                after->anchor_survey_coordinator_id ||
            before->uwb_enabled != after->uwb_enabled ||
-           before->bno085_accel_enabled != after->bno085_accel_enabled ||
            before->radio_channel != after->radio_channel;
 }
 
@@ -499,7 +499,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_last_error\":%d,"
         "\"charger_last_error_name\":\"%s\","
         "\"charger_read_count\":%lu,"
+        "\"charger_full_read_count\":%lu,"
+        "\"charger_quick_read_count\":%lu,"
         "\"charger_error_count\":%lu,"
+        "\"charger_last_read_duration_ms\":%lu,"
+        "\"charger_last_read_full\":%s,"
         "\"charger_last_update_age_ms\":%lu,"
         "\"charger_int_gpio_level\":%d,"
         "\"charger_int_irq_count\":%lu,"
@@ -726,7 +730,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         charger_snapshot.last_error,
         esp_err_to_name((esp_err_t)charger_snapshot.last_error),
         (unsigned long)charger_snapshot.read_count,
+        (unsigned long)charger_snapshot.full_read_count,
+        (unsigned long)charger_snapshot.quick_read_count,
         (unsigned long)charger_snapshot.error_count,
+        (unsigned long)charger_snapshot.last_read_duration_ms,
+        charger_snapshot.last_read_full ? "true" : "false",
         (unsigned long)charger_snapshot.last_update_age_ms,
         charger_snapshot.int_gpio_level,
         (unsigned long)charger_snapshot.int_irq_count,
@@ -1639,6 +1647,20 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         if (gps_err != ESP_OK) {
             ESP_LOGW(TAG, "GPS runtime apply failed: %s",
                      esp_err_to_name(gps_err));
+        }
+    }
+
+    if (changed &&
+        (before_config.bno085_accel_enabled !=
+             active_config->bno085_accel_enabled ||
+         before_config.bno085_accel_interval_ms !=
+             active_config->bno085_accel_interval_ms ||
+         before_config.bno085_log_interval_ms !=
+             active_config->bno085_log_interval_ms)) {
+        const esp_err_t bno_err = bno085_service_apply_runtime_config();
+        if (bno_err != ESP_OK) {
+            ESP_LOGW(TAG, "BNO085 runtime apply failed: %s",
+                     esp_err_to_name(bno_err));
         }
     }
 

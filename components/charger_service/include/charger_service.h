@@ -32,7 +32,11 @@ typedef struct {
     bool config_writes_enabled;
     int last_error;
     uint32_t read_count;
+    uint32_t full_read_count;
+    uint32_t quick_read_count;
     uint32_t error_count;
+    uint32_t last_read_duration_ms;
+    bool last_read_full;
     uint32_t last_update_age_ms;
     int int_gpio_level;
     uint32_t int_irq_count;

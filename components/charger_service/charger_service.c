@@ -16,6 +16,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "i2c_bus_service.h"
+#include "nvs.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "charger_service";
@@ -55,11 +56,49 @@ enum {
     REG48_PART_INFO = 0x48,
 };
 
+typedef enum {
+    CHARGER_READ_KIND_FULL,
+    CHARGER_READ_KIND_QUICK,
+} charger_read_kind_t;
+
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
 #define CHARGER_TASK_CORE 0
 #else
 #define CHARGER_TASK_CORE 0
 #endif
+
+#define CHARGER_NVS_NAMESPACE "charger"
+#define KEY_WATCHDOG_DISABLED "wd_dis"
+#define KEY_ADC_ENABLED "adc_en"
+#define KEY_ADC_CONTINUOUS "adc_cont"
+#define KEY_ADC_SAMPLE "adc_samp"
+#define KEY_ADC_AVG "adc_avg"
+#define KEY_VSYSMIN_MV "vsysmin"
+#define KEY_VREG_MV "vreg"
+#define KEY_ICHG_MA "ichg"
+#define KEY_VINDPM_MV "vindpm"
+#define KEY_IINDPM_MA "iindpm"
+
+typedef struct {
+    bool has_watchdog_disabled;
+    bool watchdog_disabled;
+    bool has_adc;
+    bool adc_enabled;
+    bool adc_continuous;
+    uint8_t adc_sample;
+    bool adc_running_average;
+    bool has_minimal_system_voltage_mv;
+    uint16_t minimal_system_voltage_mv;
+    bool has_charge_voltage_limit_mv;
+    uint16_t charge_voltage_limit_mv;
+    bool has_charge_current_limit_ma;
+    uint16_t charge_current_limit_ma;
+    bool has_input_voltage_limit_mv;
+    uint16_t input_voltage_limit_mv;
+    bool has_input_current_limit_ma;
+    uint16_t input_current_limit_ma;
+    uint32_t field_count;
+} charger_policy_t;
 
 static bool s_started;
 static i2c_master_bus_handle_t s_i2c_bus;
@@ -69,8 +108,10 @@ static TaskHandle_t s_task_handle;
 static uint32_t s_last_update_ms;
 static volatile uint32_t s_int_irq_count;
 static volatile uint32_t s_last_int_irq_ms;
+static volatile bool s_full_refresh_requested;
 static charger_service_snapshot_t s_snapshot;
 static uint32_t s_last_write_ms;
+static bool s_applying_saved_policy;
 
 static uint32_t ticks_to_ms(void)
 {
@@ -224,12 +265,176 @@ static bool ma_in_range(uint16_t ma, uint16_t min_ma, uint16_t max_ma)
     return ma >= min_ma && ma <= max_ma;
 }
 
+static esp_err_t charger_policy_write_u8(const char *key, uint8_t value)
+{
+    if (s_applying_saved_policy) {
+        return ESP_OK;
+    }
+
+    nvs_handle_t handle = 0;
+    ESP_RETURN_ON_ERROR(nvs_open(CHARGER_NVS_NAMESPACE, NVS_READWRITE,
+                                 &handle),
+                        TAG, "open charger NVS failed");
+
+    esp_err_t err = nvs_set_u8(handle, key, value);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "charger NVS write %s failed: %s", key,
+                 esp_err_to_name(err));
+    }
+    return err;
+}
+
+static esp_err_t charger_policy_write_u16(const char *key, uint16_t value)
+{
+    if (s_applying_saved_policy) {
+        return ESP_OK;
+    }
+
+    nvs_handle_t handle = 0;
+    ESP_RETURN_ON_ERROR(nvs_open(CHARGER_NVS_NAMESPACE, NVS_READWRITE,
+                                 &handle),
+                        TAG, "open charger NVS failed");
+
+    esp_err_t err = nvs_set_u16(handle, key, value);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "charger NVS write %s failed: %s", key,
+                 esp_err_to_name(err));
+    }
+    return err;
+}
+
+static bool charger_policy_read_u8(nvs_handle_t handle, const char *key,
+                                   uint8_t *value)
+{
+    const esp_err_t err = nvs_get_u8(handle, key, value);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "charger NVS read %s failed: %s", key,
+                 esp_err_to_name(err));
+    }
+    return err == ESP_OK;
+}
+
+static bool charger_policy_read_u16(nvs_handle_t handle, const char *key,
+                                    uint16_t *value)
+{
+    const esp_err_t err = nvs_get_u16(handle, key, value);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "charger NVS read %s failed: %s", key,
+                 esp_err_to_name(err));
+    }
+    return err == ESP_OK;
+}
+
+static esp_err_t charger_policy_load(charger_policy_t *policy)
+{
+    if (policy == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(policy, 0, sizeof(*policy));
+
+    nvs_handle_t handle = 0;
+    const esp_err_t open_err =
+        nvs_open(CHARGER_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (open_err == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    ESP_RETURN_ON_ERROR(open_err, TAG, "open charger NVS failed");
+
+    uint8_t u8 = 0;
+    uint16_t u16 = 0;
+    if (charger_policy_read_u8(handle, KEY_WATCHDOG_DISABLED, &u8)) {
+        policy->has_watchdog_disabled = true;
+        policy->watchdog_disabled = u8 != 0U;
+        policy->field_count++;
+    }
+    if (charger_policy_read_u8(handle, KEY_ADC_ENABLED, &u8)) {
+        policy->has_adc = true;
+        policy->adc_enabled = u8 != 0U;
+        policy->field_count++;
+    }
+    if (charger_policy_read_u8(handle, KEY_ADC_CONTINUOUS, &u8)) {
+        policy->has_adc = true;
+        policy->adc_continuous = u8 != 0U;
+    }
+    if (charger_policy_read_u8(handle, KEY_ADC_SAMPLE, &u8)) {
+        policy->has_adc = true;
+        policy->adc_sample = u8 <= 3U ? u8 : 2U;
+    }
+    if (charger_policy_read_u8(handle, KEY_ADC_AVG, &u8)) {
+        policy->has_adc = true;
+        policy->adc_running_average = u8 != 0U;
+    }
+    if (charger_policy_read_u16(handle, KEY_VSYSMIN_MV, &u16)) {
+        policy->has_minimal_system_voltage_mv = true;
+        policy->minimal_system_voltage_mv = u16;
+        policy->field_count++;
+    }
+    if (charger_policy_read_u16(handle, KEY_VREG_MV, &u16)) {
+        policy->has_charge_voltage_limit_mv = true;
+        policy->charge_voltage_limit_mv = u16;
+        policy->field_count++;
+    }
+    if (charger_policy_read_u16(handle, KEY_ICHG_MA, &u16)) {
+        policy->has_charge_current_limit_ma = true;
+        policy->charge_current_limit_ma = u16;
+        policy->field_count++;
+    }
+    if (charger_policy_read_u16(handle, KEY_VINDPM_MV, &u16)) {
+        policy->has_input_voltage_limit_mv = true;
+        policy->input_voltage_limit_mv = u16;
+        policy->field_count++;
+    }
+    if (charger_policy_read_u16(handle, KEY_IINDPM_MA, &u16)) {
+        policy->has_input_current_limit_ma = true;
+        policy->input_current_limit_ma = u16;
+        policy->field_count++;
+    }
+
+    nvs_close(handle);
+    return policy->field_count > 0U || policy->has_adc ? ESP_OK
+                                                       : ESP_ERR_NOT_FOUND;
+}
+
+static esp_err_t charger_policy_save_adc(bool enabled, bool continuous,
+                                         uint8_t sample,
+                                         bool running_average)
+{
+    ESP_RETURN_ON_ERROR(charger_policy_write_u8(KEY_ADC_ENABLED,
+                                                enabled ? 1U : 0U),
+                        TAG, "persist ADC enable failed");
+    ESP_RETURN_ON_ERROR(charger_policy_write_u8(KEY_ADC_CONTINUOUS,
+                                                continuous ? 1U : 0U),
+                        TAG, "persist ADC mode failed");
+    ESP_RETURN_ON_ERROR(charger_policy_write_u8(KEY_ADC_SAMPLE, sample), TAG,
+                        "persist ADC sample failed");
+    return charger_policy_write_u8(KEY_ADC_AVG,
+                                   running_average ? 1U : 0U);
+}
+
 static void charger_request_refresh_from_task_context(void)
 {
+    s_full_refresh_requested = true;
     const TaskHandle_t task = s_task_handle;
     if (task != NULL) {
         xTaskNotifyGive(task);
     }
+}
+
+static bool charger_take_full_refresh_request(void)
+{
+    if (!s_full_refresh_requested) {
+        return false;
+    }
+    s_full_refresh_requested = false;
+    return true;
 }
 
 static void charger_record_write_result(
@@ -452,6 +657,15 @@ static esp_err_t charger_read_register_map(uint8_t raw[CHARGER_SERVICE_REGISTER_
     return ESP_OK;
 }
 
+static esp_err_t charger_read_quick_registers(
+    uint8_t raw[CHARGER_SERVICE_REGISTER_MAP_SIZE])
+{
+    const uint8_t start_reg = REG1B_CHARGER_STATUS_0;
+    const uint8_t end_reg = REG45_DM_ADC + 1U;
+    const size_t read_len = (size_t)(end_reg - start_reg + 1U);
+    return charger_read_bytes(start_reg, &raw[start_reg], read_len);
+}
+
 static void update_snapshot_gpio_fields(charger_service_snapshot_t *snapshot,
                                         uint32_t now_ms)
 {
@@ -475,7 +689,9 @@ static void update_snapshot_gpio_fields(charger_service_snapshot_t *snapshot,
 }
 
 static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_MAP_SIZE],
-                                     esp_err_t read_err)
+                                     esp_err_t read_err,
+                                     charger_read_kind_t read_kind,
+                                     uint32_t read_duration_ms)
 {
     const uint32_t now_ms = ticks_to_ms();
 
@@ -492,6 +708,14 @@ static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_
             s_snapshot.read_ok = true;
             s_snapshot.raw_valid = true;
             s_snapshot.read_count++;
+            if (read_kind == CHARGER_READ_KIND_FULL) {
+                s_snapshot.full_read_count++;
+                s_snapshot.last_read_full = true;
+            } else {
+                s_snapshot.quick_read_count++;
+                s_snapshot.last_read_full = false;
+            }
+            s_snapshot.last_read_duration_ms = read_duration_ms;
             s_last_update_ms = now_ms;
             s_snapshot.last_update_age_ms = 0;
 
@@ -556,9 +780,144 @@ static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_
             s_snapshot.present = false;
             s_snapshot.read_ok = false;
             s_snapshot.error_count++;
+            s_snapshot.last_read_full = read_kind == CHARGER_READ_KIND_FULL;
+            s_snapshot.last_read_duration_ms = read_duration_ms;
         }
         state_unlock();
     }
+}
+
+static esp_err_t charger_perform_read(charger_read_kind_t read_kind)
+{
+    uint8_t raw[CHARGER_SERVICE_REGISTER_MAP_SIZE] = {0};
+
+    if (read_kind == CHARGER_READ_KIND_QUICK && state_lock(pdMS_TO_TICKS(50))) {
+        if (!s_snapshot.raw_valid) {
+            read_kind = CHARGER_READ_KIND_FULL;
+        }
+        memcpy(raw, s_snapshot.raw, CHARGER_SERVICE_REGISTER_MAP_SIZE);
+        state_unlock();
+    }
+
+    const uint32_t start_ms = ticks_to_ms();
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (s_i2c_dev != NULL) {
+        err = read_kind == CHARGER_READ_KIND_FULL
+                  ? charger_read_register_map(raw)
+                  : charger_read_quick_registers(raw);
+    }
+    const uint32_t duration_ms = ticks_to_ms() - start_ms;
+    update_snapshot_from_raw(raw, err, read_kind, duration_ms);
+    return err;
+}
+
+static void charger_note_policy_result(const char *name, esp_err_t err,
+                                       esp_err_t *first_err,
+                                       uint32_t *applied_count)
+{
+    if (err == ESP_OK) {
+        if (applied_count != NULL) {
+            (*applied_count)++;
+        }
+        return;
+    }
+    ESP_LOGW(TAG, "BQ25792 saved policy apply failed for %s: %s", name,
+             esp_err_to_name(err));
+    if (first_err != NULL && *first_err == ESP_OK) {
+        *first_err = err;
+    }
+}
+
+static esp_err_t charger_apply_saved_policy(void)
+{
+    charger_policy_t policy = {0};
+    const esp_err_t load_err = charger_policy_load(&policy);
+    if (load_err == ESP_ERR_NOT_FOUND) {
+        ESP_LOGI(TAG, "BQ25792 has no saved charger policy in NVS");
+        return ESP_OK;
+    }
+    if (load_err != ESP_OK) {
+        ESP_LOGW(TAG, "BQ25792 saved policy load failed: %s",
+                 esp_err_to_name(load_err));
+        return load_err;
+    }
+
+    s_applying_saved_policy = true;
+    esp_err_t first_err = ESP_OK;
+    uint32_t applied_count = 0;
+
+    if (policy.has_watchdog_disabled && policy.watchdog_disabled) {
+        charger_service_write_result_t result = {0};
+        charger_note_policy_result(
+            "watchdog", charger_service_set_watchdog_disabled(&result),
+            &first_err, &applied_count);
+    }
+    if (policy.has_adc) {
+        charger_service_write_result_t results[6] = {0};
+        size_t written_count = 0;
+        (void)written_count;
+        charger_note_policy_result(
+            "adc", charger_service_set_adc(policy.adc_enabled,
+                                            policy.adc_continuous,
+                                            policy.adc_sample,
+                                            policy.adc_running_average,
+                                            results, 6, &written_count),
+            &first_err, &applied_count);
+    }
+    if (policy.has_minimal_system_voltage_mv) {
+        charger_service_write_result_t results[4] = {0};
+        size_t written_count = 0;
+        charger_note_policy_result(
+            "VSYSMIN",
+            charger_service_set_minimal_system_voltage_mv(
+                policy.minimal_system_voltage_mv, results, 4, &written_count),
+            &first_err, &applied_count);
+    }
+    if (policy.has_charge_voltage_limit_mv) {
+        charger_service_write_result_t results[4] = {0};
+        size_t written_count = 0;
+        charger_note_policy_result(
+            "VREG",
+            charger_service_set_charge_voltage_limit_mv(
+                policy.charge_voltage_limit_mv, results, 4, &written_count),
+            &first_err, &applied_count);
+    }
+    if (policy.has_charge_current_limit_ma) {
+        charger_service_write_result_t results[4] = {0};
+        size_t written_count = 0;
+        charger_note_policy_result(
+            "ICHG",
+            charger_service_set_charge_current_limit_ma(
+                policy.charge_current_limit_ma, results, 4, &written_count),
+            &first_err, &applied_count);
+    }
+    if (policy.has_input_voltage_limit_mv) {
+        charger_service_write_result_t result = {0};
+        charger_note_policy_result(
+            "VINDPM",
+            charger_service_set_input_voltage_limit_mv(
+                policy.input_voltage_limit_mv, &result),
+            &first_err, &applied_count);
+    }
+    if (policy.has_input_current_limit_ma) {
+        charger_service_write_result_t results[4] = {0};
+        size_t written_count = 0;
+        charger_note_policy_result(
+            "IINDPM",
+            charger_service_set_input_current_limit_ma(
+                policy.input_current_limit_ma, results, 4, &written_count),
+            &first_err, &applied_count);
+    }
+
+    s_applying_saved_policy = false;
+    s_full_refresh_requested = false;
+    (void)ulTaskNotifyTake(pdTRUE, 0);
+
+    ESP_LOGI(TAG, "BQ25792 saved policy applied: fields=%lu applied=%lu err=%s",
+             (unsigned long)policy.field_count,
+             (unsigned long)applied_count,
+             esp_err_to_name(first_err));
+    return first_err;
 }
 
 static void charger_log_summary_if_needed(void)
@@ -625,19 +984,24 @@ static void charger_task(void *arg)
         ESP_LOGW(TAG, "BQ25792 I2C init/probe failed: %s",
                  esp_err_to_name(init_err));
         update_snapshot_from_raw((uint8_t[CHARGER_SERVICE_REGISTER_MAP_SIZE]){0},
-                                 init_err);
+                                 init_err, CHARGER_READ_KIND_FULL, 0);
+    }
+
+    if (s_i2c_dev != NULL) {
+        (void)charger_apply_saved_policy();
+        (void)charger_perform_read(CHARGER_READ_KIND_FULL);
+        charger_log_summary_if_needed();
     }
 
     while (true) {
-        uint8_t raw[CHARGER_SERVICE_REGISTER_MAP_SIZE] = {0};
-        esp_err_t err = ESP_ERR_INVALID_STATE;
-        if (s_i2c_dev != NULL) {
-            err = charger_read_register_map(raw);
-        }
-        update_snapshot_from_raw(raw, err);
+        const uint32_t notified = ulTaskNotifyTake(
+            pdTRUE, pdMS_TO_TICKS(APP_BQ25792_READ_INTERVAL_MS));
+        const bool full_requested = charger_take_full_refresh_request();
+        const charger_read_kind_t read_kind =
+            (notified == 0U || full_requested) ? CHARGER_READ_KIND_FULL
+                                               : CHARGER_READ_KIND_QUICK;
+        (void)charger_perform_read(read_kind);
         charger_log_summary_if_needed();
-        (void)ulTaskNotifyTake(pdTRUE,
-                               pdMS_TO_TICKS(APP_BQ25792_READ_INTERVAL_MS));
     }
 }
 
@@ -822,8 +1186,12 @@ esp_err_t charger_service_update_register_bits(
 esp_err_t charger_service_set_watchdog_disabled(
     charger_service_write_result_t *result)
 {
-    return charger_service_update_register_bits(REG10_CHARGER_CONTROL_1, 0x07U,
-                                                0x00U, result);
+    const esp_err_t err = charger_service_update_register_bits(
+        REG10_CHARGER_CONTROL_1, 0x07U, 0x00U, result);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return charger_policy_write_u8(KEY_WATCHDOG_DISABLED, 1U);
 }
 
 esp_err_t charger_service_set_adc(bool enabled, bool continuous,
@@ -848,7 +1216,11 @@ esp_err_t charger_service_set_adc(bool enabled, bool continuous,
         first_err = charger_service_update_register_bits(REG2E_ADC_CONTROL,
                                                          0x80U, 0x00U, &item);
         append_result(results, result_count, written_count, &item);
-        return first_err;
+        if (first_err != ESP_OK) {
+            return first_err;
+        }
+        return charger_policy_save_adc(false, continuous, sample,
+                                       running_average);
     }
 
     first_err = charger_service_write_register(REG2F_ADC_DISABLE_0, 0x00U,
@@ -882,7 +1254,11 @@ esp_err_t charger_service_set_adc(bool enabled, bool continuous,
     first_err = charger_service_write_register(REG2E_ADC_CONTROL, adc_control,
                                                &item);
     append_result(results, result_count, written_count, &item);
-    return first_err;
+    if (first_err != ESP_OK) {
+        return first_err;
+    }
+    return charger_policy_save_adc(enabled, continuous, sample,
+                                   running_average);
 }
 
 esp_err_t charger_service_set_minimal_system_voltage_mv(
@@ -905,7 +1281,10 @@ esp_err_t charger_service_set_minimal_system_voltage_mv(
     err = charger_service_update_register_bits(REG00_MINIMAL_SYSTEM_VOLTAGE,
                                                0x3FU, raw, &item);
     append_result(results, result_count, written_count, &item);
-    return err;
+    if (err != ESP_OK) {
+        return err;
+    }
+    return charger_policy_write_u16(KEY_VSYSMIN_MV, mv);
 }
 
 esp_err_t charger_service_set_charge_voltage_limit_mv(
@@ -936,7 +1315,10 @@ esp_err_t charger_service_set_charge_voltage_limit_mv(
     err = charger_service_write_register(REG01_CHARGE_VOLTAGE_LIMIT + 1U,
                                          (uint8_t)(raw & 0xFFU), &item);
     append_result(results, result_count, written_count, &item);
-    return err;
+    if (err != ESP_OK) {
+        return err;
+    }
+    return charger_policy_write_u16(KEY_VREG_MV, mv);
 }
 
 esp_err_t charger_service_set_charge_current_limit_ma(
@@ -967,7 +1349,10 @@ esp_err_t charger_service_set_charge_current_limit_ma(
     err = charger_service_write_register(REG03_CHARGE_CURRENT_LIMIT + 1U,
                                          (uint8_t)(raw & 0xFFU), &item);
     append_result(results, result_count, written_count, &item);
-    return err;
+    if (err != ESP_OK) {
+        return err;
+    }
+    return charger_policy_write_u16(KEY_ICHG_MA, ma);
 }
 
 esp_err_t charger_service_set_input_voltage_limit_mv(
@@ -987,8 +1372,12 @@ esp_err_t charger_service_set_input_voltage_limit_mv(
     }
 
     const uint8_t raw = (uint8_t)((mv + 50U) / 100U);
-    return charger_service_write_register(REG05_INPUT_VOLTAGE_LIMIT, raw,
-                                          result);
+    err = charger_service_write_register(REG05_INPUT_VOLTAGE_LIMIT, raw,
+                                         result);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return charger_policy_write_u16(KEY_VINDPM_MV, mv);
 }
 
 esp_err_t charger_service_set_input_current_limit_ma(
@@ -1019,7 +1408,10 @@ esp_err_t charger_service_set_input_current_limit_ma(
     err = charger_service_write_register(REG06_INPUT_CURRENT_LIMIT + 1U,
                                          (uint8_t)(raw & 0xFFU), &item);
     append_result(results, result_count, written_count, &item);
-    return err;
+    if (err != ESP_OK) {
+        return err;
+    }
+    return charger_policy_write_u16(KEY_IINDPM_MA, ma);
 }
 
 void charger_service_request_refresh(void)
