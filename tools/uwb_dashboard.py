@@ -21,7 +21,7 @@ import webbrowser
 from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Callable
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -1744,6 +1744,7 @@ const maxAccelSamples = 30000;
 const maxSeriesPoints = 1600;
 const plot = {left: 52, right: 704, top: 14, bottom: 166, width: 652, height: 152};
 const toastTimers = new Map();
+let calibrationPollTimer = null;
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -3012,7 +3013,56 @@ async function postConfig(payload, toastId) {
 }
 
 async function postCalibrationAuto(payload, toastId) {
-  return postJsonEndpoint("/api/calibration-auto", payload, toastId, false);
+  const button = document.getElementById("autoCalibration");
+  if (button) button.disabled = true;
+  setToast(toastId, "starting calibration...", "", null, false);
+  try {
+    const res = await fetch("/api/calibration-auto", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!data.ok || !data.job_id) {
+      setToast(toastId, summarizeApiResponse(data), "bad", data, false);
+      if (button) button.disabled = false;
+      return data;
+    }
+    setToast(toastId, data.summary || "calibration running...", "", data, false);
+    pollCalibrationAuto(data.job_id, toastId, button);
+    return data;
+  } catch (error) {
+    const data = {ok: false, error: String(error)};
+    setToast(toastId, summarizeApiResponse(data), "bad", data, false);
+    if (button) button.disabled = false;
+    return data;
+  }
+}
+
+async function pollCalibrationAuto(jobId, toastId, button) {
+  if (calibrationPollTimer) {
+    clearTimeout(calibrationPollTimer);
+    calibrationPollTimer = null;
+  }
+  try {
+    const res = await fetch(`/api/calibration-auto/status?job_id=${encodeURIComponent(jobId)}`, {cache: "no-store"});
+    const data = await res.json();
+    const done = !data.running && (data.state === "done" || data.state === "error");
+    if (done) {
+      const result = data.result || data;
+      const ok = apiResponseOk(result);
+      setToast(toastId, summarizeApiResponse(result), ok ? "ok" : "bad", result, false);
+      if (button) button.disabled = false;
+      fetchSnapshot();
+      return;
+    }
+    setToast(toastId, data.summary || "calibration running...", "", data, false);
+    calibrationPollTimer = setTimeout(() => pollCalibrationAuto(jobId, toastId, button), 1000);
+  } catch (error) {
+    const data = {ok: false, error: String(error)};
+    setToast(toastId, summarizeApiResponse(data), "bad", data, false);
+    if (button) button.disabled = false;
+  }
 }
 
 async function postAntennaDelay(payload, toastId) {
@@ -3538,6 +3588,11 @@ class HttpHandler(BaseHTTPRequestHandler):
             limit = int(query.get("limit", ["8000"])[0] or "8000")
             self.send_json(self.server.state.accel_after(after, max(1, min(limit, 20000))))
             return
+        if parsed.path == "/api/calibration-auto/status":
+            query = urllib.parse.parse_qs(parsed.query)
+            job_id = query.get("job_id", [""])[0] or None
+            self.send_json(self.server.calibration_job_status(job_id))
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "not found")
 
     def do_POST(self) -> None:
@@ -3583,7 +3638,7 @@ class HttpHandler(BaseHTTPRequestHandler):
     def handle_calibration_auto(self) -> None:
         try:
             payload = self.read_json_body()
-            result = self.server.run_calibration_auto(payload)
+            result = self.server.start_calibration_auto(payload)
             self.send_json(result)
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -3664,6 +3719,8 @@ class DashboardHttpServer(ThreadingHTTPServer):
         self.token = token
         self.quiet = quiet
         self.timeout_sec = timeout_sec
+        self.calibration_job_lock = threading.Lock()
+        self.calibration_job: dict[str, Any] | None = None
 
     def apply_runtime_config(
         self, params: dict[str, str], target_modules: Any = None
@@ -3686,6 +3743,99 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 for module_id, status in self.state.status_by_module.items()
             }
 
+    def start_calibration_auto(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self.calibration_job_lock:
+            if self.calibration_job and self.calibration_job.get("running"):
+                return {
+                    "ok": False,
+                    "job_id": self.calibration_job.get("job_id"),
+                    "running": True,
+                    "summary": "calibration already running",
+                }
+            job_id = str(int(time.time() * 1000))
+            now = time.time()
+            self.calibration_job = {
+                "ok": True,
+                "job_id": job_id,
+                "running": True,
+                "state": "starting",
+                "summary": "starting calibration...",
+                "started_sec": now,
+                "updated_sec": now,
+                "elapsed_sec": 0.0,
+                "result": None,
+            }
+
+        thread = threading.Thread(
+            target=self._run_calibration_auto_job,
+            args=(job_id, payload),
+            daemon=True,
+        )
+        thread.start()
+        return self.calibration_job_status(job_id)
+
+    def calibration_job_status(self, job_id: str | None = None) -> dict[str, Any]:
+        with self.calibration_job_lock:
+            job = self.calibration_job
+            if job is None:
+                return {"ok": False, "error": "no calibration job"}
+            if job_id and job.get("job_id") != job_id:
+                return {"ok": False, "error": "calibration job not found"}
+            output = dict(job)
+            output["elapsed_sec"] = round(time.time() - float(job["started_sec"]), 1)
+            return output
+
+    def update_calibration_job(
+        self,
+        job_id: str,
+        *,
+        state: str | None = None,
+        summary: str | None = None,
+        running: bool | None = None,
+        result: dict[str, Any] | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        with self.calibration_job_lock:
+            job = self.calibration_job
+            if job is None or job.get("job_id") != job_id:
+                return
+            if state is not None:
+                job["state"] = state
+            if summary is not None:
+                job["summary"] = summary
+            if running is not None:
+                job["running"] = running
+            if result is not None:
+                job["result"] = result
+                job["ok"] = bool(result.get("ok"))
+            if detail is not None:
+                job["detail"] = detail
+            job["updated_sec"] = time.time()
+            job["elapsed_sec"] = round(time.time() - float(job["started_sec"]), 1)
+
+    def _run_calibration_auto_job(self, job_id: str, payload: dict[str, Any]) -> None:
+        def progress(summary: str, detail: dict[str, Any] | None = None) -> None:
+            self.update_calibration_job(job_id, summary=summary, detail=detail)
+
+        try:
+            result = self.run_calibration_auto(payload, progress=progress)
+            ok = bool(result.get("ok"))
+            self.update_calibration_job(
+                job_id,
+                state="done" if ok else "error",
+                summary=str(result.get("summary") or ("OK" if ok else "ERROR")),
+                running=False,
+                result=result,
+            )
+        except Exception as exc:
+            self.update_calibration_job(
+                job_id,
+                state="error",
+                summary=f"ERROR: {exc}",
+                running=False,
+                result={"ok": False, "error": str(exc)},
+            )
+
     def target_for_module(self, module_id: int) -> str:
         target = self.resolve_targets([module_id])
         if len(target) != 1:
@@ -3699,11 +3849,13 @@ class DashboardHttpServer(ThreadingHTTPServer):
         expected_pairs: list[tuple[int, int]],
         sample_count: int,
         timeout_sec: float,
+        progress: Callable[[str, dict[str, Any] | None], None] | None = None,
     ) -> tuple[dict[tuple[int, int], list[float]], bool, int]:
         samples = {pair: [] for pair in expected_pairs}
         expected_set = set(expected_pairs)
         last_seen = after_id
         deadline = time.monotonic() + timeout_sec
+        next_progress = 0.0
         while time.monotonic() < deadline:
             with self.state.lock:
                 items = [
@@ -3719,6 +3871,17 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 if pair not in expected_set:
                     continue
                 samples[pair].append(float(match.group("distance")))
+            now = time.monotonic()
+            if progress is not None and now >= next_progress:
+                counts = {f"{a}->{b}": len(values) for (a, b), values in samples.items()}
+                min_count = min(counts.values()) if counts else 0
+                complete_pairs = sum(1 for value in counts.values() if value >= sample_count)
+                progress(
+                    f"collecting samples {min_count}/{sample_count} per pair "
+                    f"({complete_pairs}/{len(samples)} pairs complete)",
+                    {"counts": counts},
+                )
+                next_progress = now + 1.0
             if all(len(values) >= sample_count for values in samples.values()):
                 return samples, True, last_seen
             time.sleep(0.5)
@@ -3785,7 +3948,12 @@ class DashboardHttpServer(ThreadingHTTPServer):
             results.append(item)
         return results
 
-    def run_calibration_auto(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def run_calibration_auto(
+        self,
+        payload: dict[str, Any],
+        *,
+        progress: Callable[[str, dict[str, Any] | None], None] | None = None,
+    ) -> dict[str, Any]:
         raw_params = payload.get("params") or {}
         params = normalize_runtime_params(raw_params)
         method = params.get("cal_method", "three")
@@ -3802,6 +3970,8 @@ class DashboardHttpServer(ThreadingHTTPServer):
         params.setdefault("cal_summary", str(sample_count))
         params["reboot"] = "1"
 
+        if progress is not None:
+            progress("configuring calibration mode...", {"method": method})
         config_results = self.apply_runtime_config(
             params, payload.get("target_modules")
         )
@@ -3812,6 +3982,8 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 "results": config_results,
             }
 
+        if progress is not None:
+            progress("waiting for modules to restart calibration...", None)
         time.sleep(2.0)
         after_id = self.next_log_id_value() - 1
 
@@ -3827,6 +3999,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 expected_pairs=expected_pairs,
                 sample_count=sample_count,
                 timeout_sec=timeout_sec,
+                progress=progress,
             )
             values = samples[(ref_id, dut_id)]
             if not values:
@@ -3838,6 +4011,8 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 raise RuntimeError("two-module auto calibration can adjust only the DUT")
             corrections = {dut_id: correction}
             effective_apply = apply_changes and complete
+            if progress is not None:
+                progress("applying antenna-delay correction...", {"corrections": corrections})
             apply_results = self.apply_calibration_corrections(
                 corrections,
                 min_apply_dtu=min_apply_dtu,
@@ -3878,8 +4053,11 @@ class DashboardHttpServer(ThreadingHTTPServer):
             expected_pairs=expected_pairs,
             sample_count=sample_count,
             timeout_sec=timeout_sec,
+            progress=progress,
         )
 
+        if progress is not None:
+            progress("computing antenna-delay corrections...", None)
         pair_errors: dict[tuple[int, int], float] = {}
         pair_summary: dict[str, dict[str, Any]] = {}
         for raw_pair, distance_mm in edge_mm.items():
@@ -3939,6 +4117,8 @@ class DashboardHttpServer(ThreadingHTTPServer):
             for index, module_id in enumerate(adjust_ids)
         }
         effective_apply = apply_changes and complete
+        if progress is not None:
+            progress("applying antenna-delay corrections...", {"corrections": corrections})
         apply_results = self.apply_calibration_corrections(
             corrections,
             min_apply_dtu=min_apply_dtu,
