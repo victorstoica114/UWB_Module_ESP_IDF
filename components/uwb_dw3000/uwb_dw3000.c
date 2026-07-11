@@ -241,6 +241,10 @@ enum {
 #define UWB_ANCHOR_SURVEY_CMD_INITIATOR_OFFSET 10U
 #define UWB_ANCHOR_SURVEY_CMD_RESPONDER_OFFSET 11U
 #define UWB_ANCHOR_SURVEY_CMD_SLOT_OFFSET 12U
+#define UWB_CALIBRATION_CMD_INITIATOR_OFFSET 10U
+#define UWB_CALIBRATION_CMD_RESPONDER_OFFSET 11U
+#define UWB_CALIBRATION_CMD_SLOT_OFFSET 12U
+#define UWB_CALIBRATION_THREE_PAIR_COUNT 6U
 
 enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_POLL = 1,
@@ -249,6 +253,7 @@ enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_REPORT = 4,
     UWB_DISTANCE_FRAME_SURVEY_CMD = 5,
     UWB_DISTANCE_FRAME_REPORT2 = 6,
+    UWB_DISTANCE_FRAME_CAL_CMD = 7,
 };
 
 enum uwb_dw3000_runtime_mode {
@@ -2356,6 +2361,8 @@ static const char *uwb_distance_type_name(uint8_t type)
         return "REPORT2";
     case UWB_DISTANCE_FRAME_SURVEY_CMD:
         return "SURVEY_CMD";
+    case UWB_DISTANCE_FRAME_CAL_CMD:
+        return "CAL_CMD";
     default:
         return "UNKNOWN";
     }
@@ -3882,6 +3889,209 @@ static int uwb_calibration_pair_index(uint8_t initiator_id,
     return -1;
 }
 
+static size_t uwb_calibration_three_build_pairs(
+    const uint8_t ids[3],
+    struct uwb_anchor_survey_pair pairs[UWB_CALIBRATION_THREE_PAIR_COUNT])
+{
+    size_t pair_count = 0;
+    if (ids == NULL || pairs == NULL) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < APP_RUNTIME_CONFIG_CAL_THREE_COUNT; ++i) {
+        for (size_t j = 0; j < APP_RUNTIME_CONFIG_CAL_THREE_COUNT; ++j) {
+            if (i == j) {
+                continue;
+            }
+            if (pair_count < UWB_CALIBRATION_THREE_PAIR_COUNT) {
+                pairs[pair_count].initiator_id = ids[i];
+                pairs[pair_count].responder_id = ids[j];
+                pair_count++;
+            }
+        }
+    }
+    return pair_count;
+}
+
+static void uwb_calibration_build_command(
+    const struct uwb_anchor_survey_pair *pair, uint8_t slot_index,
+    uint16_t sequence, uint8_t payload[UWB_DW3000_PAYLOAD_LEN])
+{
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_CAL_CMD, pair->initiator_id,
+                             sequence, payload);
+    payload[UWB_CALIBRATION_CMD_INITIATOR_OFFSET] = pair->initiator_id;
+    payload[UWB_CALIBRATION_CMD_RESPONDER_OFFSET] = pair->responder_id;
+    payload[UWB_CALIBRATION_CMD_SLOT_OFFSET] = slot_index;
+}
+
+static bool uwb_calibration_parse_command(
+    const struct uwb_distance_frame *frame,
+    struct uwb_anchor_survey_pair *pair, uint8_t *slot_index)
+{
+    if (frame == NULL || pair == NULL || slot_index == NULL ||
+        frame->type != UWB_DISTANCE_FRAME_CAL_CMD ||
+        frame->payload_len <= UWB_CALIBRATION_CMD_SLOT_OFFSET) {
+        return false;
+    }
+
+    pair->initiator_id =
+        frame->payload[UWB_CALIBRATION_CMD_INITIATOR_OFFSET];
+    pair->responder_id =
+        frame->payload[UWB_CALIBRATION_CMD_RESPONDER_OFFSET];
+    *slot_index = frame->payload[UWB_CALIBRATION_CMD_SLOT_OFFSET];
+    return pair->initiator_id != 0 && pair->responder_id != 0 &&
+           pair->initiator_id != pair->responder_id;
+}
+
+static esp_err_t uwb_calibration_send_command(
+    const struct uwb_anchor_survey_pair *pair, uint8_t slot_index,
+    uint16_t sequence)
+{
+    if (pair == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+    uwb_calibration_build_command(pair, slot_index, sequence, payload);
+    const esp_err_t err = uwb_dw3000_send_payload(payload, sizeof(payload),
+                                                  NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "UWB CAL command TX failed slot=%u seq=%u pair=%u->%u: %s",
+                 (unsigned)slot_index, (unsigned)sequence,
+                 (unsigned)pair->initiator_id,
+                 (unsigned)pair->responder_id,
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "UWB CAL command slot=%u seq=%u initiator=%u responder=%u",
+             (unsigned)slot_index, (unsigned)sequence,
+             (unsigned)pair->initiator_id, (unsigned)pair->responder_id);
+    return ESP_OK;
+}
+
+static void uwb_calibration_three_handle_poll(
+    const struct uwb_distance_frame *frame, const uint8_t ids[3],
+    struct uwb_calibration_stats pair_stats[UWB_CALIBRATION_THREE_PAIR_COUNT])
+{
+    if (frame == NULL || frame->type != UWB_DISTANCE_FRAME_POLL ||
+        !uwb_distance_destination_matches(frame->destination_id)) {
+        return;
+    }
+
+    if (!uwb_calibration_id_in_three_set(frame->source_id, ids)) {
+        ESP_LOGD(TAG, "Ignoring calibration poll from non-set source=%u",
+                 (unsigned)frame->source_id);
+        return;
+    }
+
+    struct uwb_distance_measurement measurement = {0};
+    const esp_err_t err = uwb_distance_respond_to_poll(frame, &measurement);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "UWB CAL respond failed src=%u seq=%u: %s",
+                 (unsigned)frame->source_id, (unsigned)frame->sequence,
+                 esp_err_to_name(err));
+        return;
+    }
+
+    const int pair_index = uwb_calibration_pair_index(
+        measurement.initiator_id, measurement.responder_id, ids);
+    if (pair_index >= 0 && pair_index < (int)UWB_CALIBRATION_THREE_PAIR_COUNT) {
+        uwb_calibration_record_measurement(
+            "three_module_edm", &measurement, &pair_stats[pair_index]);
+    }
+}
+
+static void uwb_calibration_three_handle_command(
+    const struct uwb_distance_frame *frame, uint8_t coordinator_id,
+    const uint8_t ids[3])
+{
+    if (frame == NULL || frame->type != UWB_DISTANCE_FRAME_CAL_CMD ||
+        frame->source_id != coordinator_id ||
+        !uwb_distance_destination_matches(frame->destination_id)) {
+        return;
+    }
+
+    struct uwb_anchor_survey_pair pair = {0};
+    uint8_t slot_index = 0;
+    if (!uwb_calibration_parse_command(frame, &pair, &slot_index)) {
+        ESP_LOGW(TAG, "UWB CAL invalid command seq=%u",
+                 (unsigned)frame->sequence);
+        return;
+    }
+
+    if (pair.initiator_id != s_source_id ||
+        !uwb_calibration_id_in_three_set(pair.responder_id, ids)) {
+        return;
+    }
+
+    ESP_LOGI(TAG,
+             "UWB CAL command accepted slot=%u seq=%u peer=%u delay=%u ms",
+             (unsigned)slot_index, (unsigned)frame->sequence,
+             (unsigned)pair.responder_id,
+             (unsigned)APP_UWB_CALIBRATION_COMMAND_DELAY_MS);
+    uwb_dw3000_delay_ms(APP_UWB_CALIBRATION_COMMAND_DELAY_MS);
+    const esp_err_t err = uwb_distance_initiate_once(
+        pair.responder_id, frame->sequence, false);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "UWB CAL initiated pair=%u->%u seq=%u failed: %s",
+                 (unsigned)pair.initiator_id, (unsigned)pair.responder_id,
+                 (unsigned)frame->sequence, esp_err_to_name(err));
+    }
+}
+
+static void uwb_calibration_three_process_frame(
+    const struct uwb_distance_frame *frame, uint8_t coordinator_id,
+    const uint8_t ids[3],
+    struct uwb_calibration_stats pair_stats[UWB_CALIBRATION_THREE_PAIR_COUNT])
+{
+    if (frame == NULL) {
+        return;
+    }
+
+    switch (frame->type) {
+    case UWB_DISTANCE_FRAME_POLL:
+        uwb_calibration_three_handle_poll(frame, ids, pair_stats);
+        break;
+    case UWB_DISTANCE_FRAME_CAL_CMD:
+        uwb_calibration_three_handle_command(frame, coordinator_id, ids);
+        break;
+    default:
+        break;
+    }
+}
+
+static void uwb_calibration_three_listen_until(
+    TickType_t end_tick, uint8_t coordinator_id, const uint8_t ids[3],
+    struct uwb_calibration_stats pair_stats[UWB_CALIBRATION_THREE_PAIR_COUNT])
+{
+    while ((int32_t)(xTaskGetTickCount() - end_tick) < 0) {
+        const TickType_t now = xTaskGetTickCount();
+        const uint32_t remaining_ms =
+            (uint32_t)(end_tick - now) * portTICK_PERIOD_MS;
+        uint32_t slice_ms =
+            app_runtime_config_get()->calibration_rx_slice_ms;
+        if (remaining_ms < slice_ms) {
+            slice_ms = remaining_ms;
+        }
+        if (slice_ms == 0) {
+            break;
+        }
+
+        struct uwb_distance_frame frame = {0};
+        const esp_err_t err = uwb_distance_receive_next(&frame, slice_ms);
+        if (err == ESP_OK) {
+            uwb_calibration_three_process_frame(&frame, coordinator_id, ids,
+                                                pair_stats);
+        } else if (err != ESP_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "UWB CAL deterministic listen failed: %s",
+                     esp_err_to_name(err));
+            uwb_dw3000_delay_ms(20);
+        }
+    }
+}
+
 static void uwb_calibration_three_module_loop(void)
 {
     const app_runtime_config_t *config = app_runtime_config_get();
@@ -3890,20 +4100,19 @@ static void uwb_calibration_three_module_loop(void)
         config->calibration_three_ids[1],
         config->calibration_three_ids[2],
     };
-    uint8_t peers[2] = {0};
-    size_t peer_count = 0;
-    struct uwb_calibration_stats pair_stats[6] = {0};
+    struct uwb_calibration_stats
+        pair_stats[UWB_CALIBRATION_THREE_PAIR_COUNT] = {0};
     uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
-    size_t next_peer_index = 0;
-    TickType_t next_initiate_tick =
-        xTaskGetTickCount() +
-        pdMS_TO_TICKS(200U + (uint32_t)s_source_id * 73U);
+    const uint8_t coordinator_id = ids[0];
 
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
-             "UWB CAL three-module EDM active: source_id=%u ids=[%u,%u,%u] known_edge=%u mm delay=0x%04x",
+             "UWB CAL three-module EDM active: source_id=%u ids=[%u,%u,%u] coordinator=%u slot=%u ms round_gap=%u ms rx_slice=%u ms known_edge=%u mm delay=0x%04x",
              (unsigned)s_source_id, (unsigned)ids[0], (unsigned)ids[1],
-             (unsigned)ids[2],
+             (unsigned)ids[2], (unsigned)coordinator_id,
+             (unsigned)config->calibration_min_interval_ms,
+             (unsigned)config->calibration_max_interval_ms,
+             (unsigned)config->calibration_rx_slice_ms,
              (unsigned)config->calibration_known_distance_mm,
              (unsigned)s_antenna_delay);
 
@@ -3924,50 +4133,75 @@ static void uwb_calibration_three_module_loop(void)
         }
     }
 
-    for (size_t i = 0; i < 3; ++i) {
-        if (ids[i] != s_source_id && peer_count < 2) {
-            peers[peer_count++] = ids[i];
+    if (s_source_id != coordinator_id) {
+        ESP_LOGI(TAG,
+                 "UWB CAL deterministic follower active: source_id=%u coordinator=%u rx_slice=%u ms",
+                 (unsigned)s_source_id, (unsigned)coordinator_id,
+                 (unsigned)config->calibration_rx_slice_ms);
+        while (true) {
+            config = app_runtime_config_get();
+            struct uwb_distance_frame frame = {0};
+            const esp_err_t err =
+                uwb_distance_receive_next(&frame,
+                                          config->calibration_rx_slice_ms);
+            if (err == ESP_OK) {
+                uwb_calibration_three_process_frame(&frame, coordinator_id, ids,
+                                                    pair_stats);
+            } else if (err != ESP_ERR_TIMEOUT) {
+                ESP_LOGW(TAG, "UWB CAL follower RX failed: %s",
+                         esp_err_to_name(err));
+                uwb_dw3000_delay_ms(20);
+            }
         }
     }
 
+    struct uwb_anchor_survey_pair
+        pairs[UWB_CALIBRATION_THREE_PAIR_COUNT] = {0};
+    const size_t pair_count = uwb_calibration_three_build_pairs(ids, pairs);
+    uint32_t round = 0;
+    ESP_LOGI(TAG,
+             "UWB CAL deterministic coordinator active: source_id=%u pair_count=%u slot=%u ms round_gap=%u ms",
+             (unsigned)s_source_id, (unsigned)pair_count,
+             (unsigned)config->calibration_min_interval_ms,
+             (unsigned)config->calibration_max_interval_ms);
+
     while (true) {
-        struct uwb_distance_frame poll = {0};
-        esp_err_t err = uwb_distance_receive_matching(
-            UWB_DISTANCE_FRAME_POLL, 0, false, 0, &poll,
-            app_runtime_config_get()->calibration_rx_slice_ms);
-        if (err == ESP_OK) {
-            if (!uwb_calibration_id_in_three_set(poll.source_id, ids)) {
-                ESP_LOGD(TAG,
-                         "Ignoring calibration poll from non-set source=%u",
-                         (unsigned)poll.source_id);
-                continue;
-            }
-
-            struct uwb_distance_measurement measurement = {0};
-            err = uwb_distance_respond_to_poll(&poll, &measurement);
-            if (err == ESP_OK) {
-                const int pair_index = uwb_calibration_pair_index(
-                    measurement.initiator_id, measurement.responder_id, ids);
-                if (pair_index >= 0 && pair_index < 6) {
-                    uwb_calibration_record_measurement(
-                        "three_module_edm", &measurement,
-                        &pair_stats[pair_index]);
-                }
-            }
-        } else if (err != ESP_ERR_TIMEOUT) {
-            ESP_LOGW(TAG, "UWB CAL three-module RX slice failed: %s",
-                     esp_err_to_name(err));
-            uwb_dw3000_delay_ms(20);
-        }
-
-        if ((int32_t)(xTaskGetTickCount() - next_initiate_tick) >= 0) {
-            const uint8_t peer_id = peers[next_peer_index];
-            (void)uwb_distance_initiate_once(peer_id, sequence++, false);
-            next_peer_index = (next_peer_index + 1U) % peer_count;
-            next_initiate_tick =
+        ESP_LOGI(TAG, "UWB CAL round=%lu start", (unsigned long)round);
+        for (size_t i = 0; i < pair_count; ++i) {
+            config = app_runtime_config_get();
+            const struct uwb_anchor_survey_pair *pair = &pairs[i];
+            const TickType_t slot_end =
                 xTaskGetTickCount() +
-                pdMS_TO_TICKS(uwb_calibration_random_interval_ms());
+                pdMS_TO_TICKS(config->calibration_min_interval_ms);
+
+            if (pair->initiator_id == s_source_id) {
+                ESP_LOGI(TAG, "UWB CAL local slot=%u seq=%u pair=%u->%u",
+                         (unsigned)i, (unsigned)sequence,
+                         (unsigned)pair->initiator_id,
+                         (unsigned)pair->responder_id);
+                const esp_err_t err = uwb_distance_initiate_once(
+                    pair->responder_id, sequence, false);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG,
+                             "UWB CAL local pair=%u->%u seq=%u failed: %s",
+                             (unsigned)pair->initiator_id,
+                             (unsigned)pair->responder_id,
+                             (unsigned)sequence, esp_err_to_name(err));
+                }
+            } else {
+                (void)uwb_calibration_send_command(pair, (uint8_t)i,
+                                                   sequence);
+            }
+
+            sequence++;
+            uwb_calibration_three_listen_until(slot_end, coordinator_id, ids,
+                                               pair_stats);
         }
+
+        round++;
+        ESP_LOGI(TAG, "UWB CAL round=%lu complete",
+                 (unsigned long)(round - 1UL));
+        uwb_dw3000_delay_ms(config->calibration_max_interval_ms);
     }
 }
 

@@ -1918,7 +1918,9 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         APPLY_U32_PARAM("cal_d12_mm", calibration_three_distance_1_2_mm);
         APPLY_U32_PARAM("cal_samples", calibration_sample_count);
         APPLY_U32_PARAM("cal_summary", calibration_summary_every);
+        APPLY_U32_PARAM("cal_slot_ms", calibration_min_interval_ms);
         APPLY_U32_PARAM("cal_min_ms", calibration_min_interval_ms);
+        APPLY_U32_PARAM("cal_round_gap_ms", calibration_max_interval_ms);
         APPLY_U32_PARAM("cal_max_ms", calibration_max_interval_ms);
         APPLY_U32_PARAM("cal_rx_ms", calibration_rx_slice_ms);
         APPLY_BOOL_PARAM("uwb", uwb_enabled);

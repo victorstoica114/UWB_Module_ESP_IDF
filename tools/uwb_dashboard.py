@@ -1578,10 +1578,10 @@ th { color: var(--muted); font-weight: 700; }
               <div class="form-grid">
                 <label for="uwbCalSummary">Summary every</label>
                 <input id="uwbCalSummary" value="25" type="number" min="1" step="1">
-                <label for="uwbCalMinMs">Min interval ms</label>
-                <input id="uwbCalMinMs" value="800" type="number" min="1" step="1">
-                <label for="uwbCalMaxMs">Max interval ms</label>
-                <input id="uwbCalMaxMs" value="1600" type="number" min="1" step="1">
+                <label for="uwbCalMinMs">Slot ms</label>
+                <input id="uwbCalMinMs" value="350" type="number" min="1" step="1">
+                <label for="uwbCalMaxMs">Round gap ms</label>
+                <input id="uwbCalMaxMs" value="200" type="number" min="1" step="1">
                 <label for="uwbCalRxMs">RX slice ms</label>
                 <input id="uwbCalRxMs" value="50" type="number" min="1" step="1">
               </div>
@@ -3311,6 +3311,10 @@ function calibrationParamsFromForm() {
     mode: "calibration",
     cal_method: method,
     cal_samples: document.getElementById("calSamples").value,
+    cal_summary: document.getElementById("calSamples").value,
+    cal_slot_ms: document.getElementById("uwbCalMinMs").value,
+    cal_round_gap_ms: document.getElementById("uwbCalMaxMs").value,
+    cal_rx_ms: document.getElementById("uwbCalRxMs").value,
     reboot: "1",
   };
   if (method === "two") {
@@ -3463,8 +3467,8 @@ function wireSettings() {
         dt_report_delay_ms: document.getElementById("uwbDtReportDelayMs").value,
         dt_auto_rx_delay_uus: document.getElementById("uwbDtAutoRxDelayUus").value,
         cal_summary: document.getElementById("uwbCalSummary").value,
-        cal_min_ms: document.getElementById("uwbCalMinMs").value,
-        cal_max_ms: document.getElementById("uwbCalMaxMs").value,
+        cal_slot_ms: document.getElementById("uwbCalMinMs").value,
+        cal_round_gap_ms: document.getElementById("uwbCalMaxMs").value,
         cal_rx_ms: document.getElementById("uwbCalRxMs").value,
         reboot: document.getElementById("uwbAdvancedReboot").value,
       }
@@ -4144,7 +4148,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
 
         if progress is not None:
             progress("computing antenna-delay corrections...", None, "computing")
-        pair_errors: dict[tuple[int, int], float] = {}
+        directed_errors: dict[tuple[int, int], float] = {}
         pair_summary: dict[str, dict[str, Any]] = {}
         for raw_pair, distance_mm in edge_mm.items():
             a, b = raw_pair
@@ -4160,7 +4164,6 @@ class DashboardHttpServer(ThreadingHTTPServer):
             error_m = pair_mean - known_m
             error_dtu = error_m / UWB_METERS_PER_DTU
             key = tuple(sorted(raw_pair))
-            pair_errors[key] = error_dtu
             pair_summary[f"{key[0]}-{key[1]}"] = {
                 "mean_m": round(pair_mean, 4),
                 "known_m": round(known_m, 4),
@@ -4168,6 +4171,14 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 "error_cm": round(error_m * 100.0, 2),
                 "error_dtu": round(error_dtu, 2),
             }
+            for src, dst in ((a, b), (b, a)):
+                values_for_direction = samples[(src, dst)]
+                if not values_for_direction:
+                    continue
+                directed_mean = mean(values_for_direction)
+                directed_errors[(src, dst)] = (
+                    directed_mean - known_m
+                ) / UWB_METERS_PER_DTU
 
         adjust_ids = parse_module_ids(
             payload.get("adjust_modules")
@@ -4180,14 +4191,16 @@ class DashboardHttpServer(ThreadingHTTPServer):
 
         rows: list[list[float]] = []
         values: list[float] = []
+        fit_pairs: list[tuple[int, int]] = []
         reference_checks: dict[str, dict[str, Any]] = {}
-        for pair, error_dtu in pair_errors.items():
+        for pair, error_dtu in directed_errors.items():
             row = [1.0 if module_id in pair else 0.0 for module_id in adjust_ids]
             if any(row):
                 rows.append(row)
                 values.append(error_dtu)
+                fit_pairs.append(pair)
             else:
-                reference_checks[f"{pair[0]}-{pair[1]}"] = {
+                reference_checks[f"{pair[0]}->{pair[1]}"] = {
                     "error_dtu": round(error_dtu, 2),
                     "error_cm": round(error_dtu * UWB_METERS_PER_DTU * 100.0, 2),
                 }
@@ -4201,6 +4214,24 @@ class DashboardHttpServer(ThreadingHTTPServer):
             module_id: round_i32(correction_float[index])
             for index, module_id in enumerate(adjust_ids)
         }
+        residuals: dict[str, dict[str, Any]] = {}
+        residual_norm = 0.0
+        max_abs_residual_dtu = 0.0
+        if correction_float:
+            for row, value, pair in zip(rows, values, fit_pairs):
+                predicted = sum(item * correction_float[index] for index, item in enumerate(row))
+                residual_dtu = value - predicted
+                residual_norm += residual_dtu * residual_dtu
+                max_abs_residual_dtu = max(max_abs_residual_dtu, abs(residual_dtu))
+                residuals[f"{pair[0]}->{pair[1]}"] = {
+                    "error_dtu": round(value, 2),
+                    "fit_dtu": round(predicted, 2),
+                    "residual_dtu": round(residual_dtu, 2),
+                    "residual_cm": round(
+                        residual_dtu * UWB_METERS_PER_DTU * 100.0, 2
+                    ),
+                }
+            residual_norm = math.sqrt(residual_norm)
         correction_details = {
             str(module_id): {
                 "float_dtu": round(correction_float[index], 2),
@@ -4258,6 +4289,11 @@ class DashboardHttpServer(ThreadingHTTPServer):
             "last_log_id": last_log_id,
             "directed": self.directed_stats_json(samples),
             "pairs": pair_summary,
+            "directed_fit": residuals,
+            "fit_residual_norm_dtu": round(residual_norm, 2),
+            "fit_max_abs_residual_cm": round(
+                max_abs_residual_dtu * UWB_METERS_PER_DTU * 100.0, 2
+            ),
             "reference_checks": reference_checks,
             "reference_guard_cm": reference_guard_cm,
             "reference_guard_ok": reference_guard_ok,

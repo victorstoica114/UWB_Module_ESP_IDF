@@ -243,13 +243,24 @@ distance, and a first-pass suggested antenna delay. Swap `REFERENCE_ID` and
 #define APP_UWB_CALIBRATION_THREE_DISTANCE_1_2_MM 2000
 ```
 
-For the three-module method, each configured module initiates to the other two
-and responds when addressed. The logs contain directed pair statistics such as
-`1->2`, `2->1`, `1->3`, etc., which can be compared against the measured EDM
-geometry. The three distance macros can all be equal for an equilateral setup
-or can hold the measured distance of each triangle edge. Use the final radio
-configuration and a known distance such as 2-5 m; 20 cm is useful for smoke
-testing, not for calibration.
+For the three-module method, the first ID in the configured set is the
+calibration coordinator. It walks a deterministic six-slot schedule:
+`id0->id1`, `id0->id2`, `id1->id0`, `id1->id2`, `id2->id0`, and `id2->id1`.
+Each slot is `APP_UWB_CALIBRATION_MIN_INTERVAL_MS` long; in the lab this is
+`350 ms`, which is intentionally longer than the complete DS-TWR exchange.
+After all six directed pairs are measured, the firmware waits
+`APP_UWB_CALIBRATION_MAX_INTERVAL_MS` before the next round. The dashboard
+labels these as `Slot ms` and `Round gap ms`.
+
+The logs contain directed pair statistics such as `1->2`, `2->1`, `1->3`,
+etc. The dashboard keeps these directions separate and solves the antenna-delay
+corrections by minimizing the full directed EDM residual, matching the spirit of
+Qorvo APS014: collect all `nChips * (nChips - 1)` TWR measurements, compare them
+against the measured physical EDM, and choose the delays that minimize the
+matrix error. The three distance macros can all be equal for an equilateral
+setup or can hold the measured distance of each triangle edge. Use the final
+radio configuration and a known distance such as 2-5 m; 20 cm is useful for
+smoke testing, not for calibration.
 
 Lab calibration note, 2026-07-11:
 
@@ -269,8 +280,9 @@ For additional modules, keep two already calibrated modules fixed as references
 and place the uncalibrated module in the third fixture position. Run the
 three-module calibration with all three sides set to the measured triangle
 edges, but apply only the correction for the new module. If `K1` and `K2` are
-known-good references and `U` is the new module, compute the new-module
-correction from the symmetric pair errors:
+known-good references and `U` is the new module, the dashboard fits the
+new-module correction from all directed errors that include `U`, while using the
+reference-only directions as a guard. Intuitively this is close to:
 
 ```text
 err_K1_U = mean(err_dtu K1->U, err_dtu U->K1)
@@ -288,7 +300,9 @@ The local dashboard can automate this workflow from `Settings` ->
 1. writes the runtime calibration setup and reboots the selected modules,
 2. collects the requested number of `UWB CAL sample` log entries for each
    required directed pair,
-3. computes symmetric pair errors and solves the antenna-delay corrections, and
+3. computes the directed EDM fit and least-squares antenna-delay corrections,
+   including residuals that show how well one delay per module explains the
+   measurements, and
 4. writes the corrected antenna delay values to NVS for the selected target
    modules.
 
