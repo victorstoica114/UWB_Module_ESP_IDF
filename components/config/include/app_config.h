@@ -17,7 +17,7 @@
 #endif
 
 #ifndef APP_WIFI_SSID
-#define APP_WIFI_SSID "ED313"
+#define APP_WIFI_SSID ""
 #endif
 
 #ifndef APP_UWB_ENABLED

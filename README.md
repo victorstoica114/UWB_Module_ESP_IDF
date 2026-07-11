@@ -21,8 +21,8 @@ Current step:
 The board boot log confirms 16 MB QIO flash, 8 MB octal PSRAM at 80 MHz, and
 the app running from the `ota_0` partition.
 
-Credentials and tokens are read from `secrets.h`. Non-secret application
-settings, including provisioning switches, live in `components/config`.
+Wi-Fi SSID/password and tokens are read from `secrets.h`. Non-secret
+application settings, including provisioning switches, live in `components/config`.
 Use `secrets.example.h` as the template for local credentials.
 
 ## Hardware
@@ -82,11 +82,12 @@ for inspiration/debugging and are intentionally ignored by Git.
 
 `components/config/include/app_config.h` holds versioned non-secret application
 settings: the default runtime mode, persistent identity provisioning, Wi-Fi
-SSID and diagnostics/reconnect behavior, wireless-log defaults, OTA-adjacent
+diagnostics/reconnect behavior, wireless-log defaults, OTA-adjacent
 service defaults, and optional sensor-test parameters. `components/config/include/uwb_config.h`
 holds UWB-only settings: role, source ID override, antenna delay, beacon
 smoke-test parameters, and runtime defaults. Runtime overrides are stored in
-NVS through `/config/runtime`. Keep passwords and OTA tokens in `secrets.h`.
+NVS through `/config/runtime`. Keep Wi-Fi credentials and OTA tokens in
+`secrets.h`.
 
 Runtime ownership is intentionally narrow:
 

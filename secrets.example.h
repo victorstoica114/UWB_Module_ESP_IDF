@@ -1,6 +1,7 @@
 #ifndef SECRETS_H
 #define SECRETS_H
 
+#define APP_WIFI_SSID "your-wifi-ssid"
 #define APP_WIFI_PASSWORD "your-wifi-password"
 #define APP_OTA_PASSWORD "your-ota-password"
 

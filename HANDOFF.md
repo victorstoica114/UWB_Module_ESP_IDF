@@ -32,7 +32,8 @@ another PC or in a fresh Codex session.
 - `secrets.h` is intentionally ignored by Git. Recreate it from
   `secrets.example.h` on the new PC.
 - `components/config/include/app_config.h` owns runtime selection, Wi-Fi
-  defaults, provisioning flags, wireless log target, and stability-test knobs.
+  behavior defaults, provisioning flags, wireless log target, and stability-test
+  knobs. Wi-Fi SSID/password stay in `secrets.h`.
 - `components/config/include/uwb_config.h` owns UWB IDs, roles, antenna delay,
   DS-TWR timing, radio profile, diagnostics, and anchor survey settings.
 - `components/config/include/app_runtime_config.h` defines the NVS-backed
@@ -67,7 +68,8 @@ cd UWB_Module_ESP_IDF
 Copy-Item secrets.example.h secrets.h
 ```
 
-Edit `secrets.h` with the local Wi-Fi password / OTA credentials. Then build:
+Edit `secrets.h` with the local Wi-Fi SSID/password / OTA credentials. Then
+build:
 
 ```powershell
 .\idf.bat set-target esp32s3
