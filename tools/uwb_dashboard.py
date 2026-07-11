@@ -192,6 +192,16 @@ def mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
 def stddev(values: list[float]) -> float:
     if len(values) < 2:
         return 0.0
@@ -1695,7 +1705,7 @@ th { color: var(--muted); font-weight: 700; }
                 <label class="three-only" for="calD12Cm">Distance 1-2 cm</label>
                 <input class="three-only cm-input" id="calD12Cm" value="200.00" type="number" min="0" step="0.01" inputmode="decimal">
                 <label for="calSamples">Samples</label>
-                <input id="calSamples" value="40" type="number" min="1" step="1" inputmode="numeric">
+                <input id="calSamples" value="39" type="number" min="1" step="1" inputmode="numeric">
                 <label for="calAutoApply">Auto apply</label>
                 <div class="checkbox-row"><input id="calAutoApply" type="checkbox" checked><span>write antenna delay</span></div>
                 <label for="calMinApplyDtu">Min apply DTU</label>
@@ -3944,6 +3954,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
             output[f"{pair[0]}->{pair[1]}"] = {
                 "n": len(values),
                 "mean_m": round(mean(values), 4),
+                "median_m": round(median(values), 4),
                 "std_m": round(stddev(values), 4),
                 "min_m": round(min(values), 4),
                 "max_m": round(max(values), 4),
@@ -4089,7 +4100,8 @@ class DashboardHttpServer(ThreadingHTTPServer):
             values = samples[(ref_id, dut_id)]
             if not values:
                 raise RuntimeError("no calibration samples collected")
-            error_m = mean(values) - known_m
+            center_m = median(values)
+            error_m = center_m - known_m
             correction = round_i32(error_m / UWB_METERS_PER_DTU)
             adjust_ids = parse_module_ids(payload.get("adjust_modules")) or [dut_id]
             if adjust_ids != [dut_id]:
@@ -4116,6 +4128,8 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 "method": "two",
                 "complete": complete,
                 "sample_count": sample_count,
+                "center_method": "median",
+                "center_m": round(center_m, 4),
                 "last_log_id": last_log_id,
                 "directed": self.directed_stats_json(samples),
                 "corrections": corrections,
@@ -4152,19 +4166,27 @@ class DashboardHttpServer(ThreadingHTTPServer):
         pair_summary: dict[str, dict[str, Any]] = {}
         for raw_pair, distance_mm in edge_mm.items():
             a, b = raw_pair
-            directed_means = [
-                mean(samples[(a, b)]) if samples[(a, b)] else None,
-                mean(samples[(b, a)]) if samples[(b, a)] else None,
+            directed_centers = [
+                median(samples[(a, b)]) if samples[(a, b)] else None,
+                median(samples[(b, a)]) if samples[(b, a)] else None,
             ]
-            valid_means = [item for item in directed_means if item is not None]
-            if not valid_means:
+            valid_centers = [item for item in directed_centers if item is not None]
+            if not valid_centers:
                 raise RuntimeError(f"no samples for pair {a}-{b}")
-            pair_mean = mean(valid_means)
+            pair_center = mean(valid_centers)
+            pair_mean_values = []
+            if samples[(a, b)]:
+                pair_mean_values.append(mean(samples[(a, b)]))
+            if samples[(b, a)]:
+                pair_mean_values.append(mean(samples[(b, a)]))
+            pair_mean = mean(pair_mean_values) if pair_mean_values else pair_center
             known_m = distance_mm / 1000.0
-            error_m = pair_mean - known_m
+            error_m = pair_center - known_m
             error_dtu = error_m / UWB_METERS_PER_DTU
             key = tuple(sorted(raw_pair))
             pair_summary[f"{key[0]}-{key[1]}"] = {
+                "center_method": "median",
+                "center_m": round(pair_center, 4),
                 "mean_m": round(pair_mean, 4),
                 "known_m": round(known_m, 4),
                 "error_m": round(error_m, 4),
@@ -4175,9 +4197,9 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 values_for_direction = samples[(src, dst)]
                 if not values_for_direction:
                     continue
-                directed_mean = mean(values_for_direction)
+                directed_center = median(values_for_direction)
                 directed_errors[(src, dst)] = (
-                    directed_mean - known_m
+                    directed_center - known_m
                 ) / UWB_METERS_PER_DTU
 
         adjust_ids = parse_module_ids(
@@ -4286,6 +4308,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
             "adjust_ids": adjust_ids,
             "complete": complete,
             "sample_count": sample_count,
+            "center_method": "median",
             "last_log_id": last_log_id,
             "directed": self.directed_stats_json(samples),
             "pairs": pair_summary,

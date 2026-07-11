@@ -262,6 +262,12 @@ setup or can hold the measured distance of each triangle edge. Use the final
 radio configuration and a known distance such as 2-5 m; 20 cm is useful for
 smoke testing, not for calibration.
 
+The dashboard uses a median center for calibration samples. The default
+collection count is `39` samples per directed pair, so the center sample is
+unambiguous after sorting. Mean, standard deviation, min, and max are still
+reported as diagnostics, but antenna-delay corrections are based on medians to
+make an occasional outlier less likely to move the result.
+
 Lab calibration note, 2026-07-11:
 
 - Modules `1`, `2`, and `3` were placed in printed alignment fixtures as a
@@ -285,9 +291,9 @@ new-module correction from all directed errors that include `U`, while using the
 reference-only directions as a guard. Intuitively this is close to:
 
 ```text
-err_K1_U = mean(err_dtu K1->U, err_dtu U->K1)
-err_K2_U = mean(err_dtu K2->U, err_dtu U->K2)
-correction_U = round(mean(err_K1_U, err_K2_U))
+err_K1_U = center(err_dtu K1->U, err_dtu U->K1)
+err_K2_U = center(err_dtu K2->U, err_dtu U->K2)
+correction_U = round(center(err_K1_U, err_K2_U))
 new_delay_U = old_delay_U + correction_U
 ```
 
@@ -300,9 +306,9 @@ The local dashboard can automate this workflow from `Settings` ->
 1. writes the runtime calibration setup and reboots the selected modules,
 2. collects the requested number of `UWB CAL sample` log entries for each
    required directed pair,
-3. computes the directed EDM fit and least-squares antenna-delay corrections,
-   including residuals that show how well one delay per module explains the
-   measurements, and
+3. takes the median distance for each directed pair, computes the directed EDM
+   fit and least-squares antenna-delay corrections, including residuals that
+   show how well one delay per module explains the measurements, and
 4. writes the corrected antenna delay values to NVS for the selected target
    modules.
 
