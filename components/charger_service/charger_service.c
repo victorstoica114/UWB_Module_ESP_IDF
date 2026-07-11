@@ -177,6 +177,43 @@ static uint16_t bq_iindpm_ma_from_raw(uint16_t raw)
     return (uint16_t)((raw & 0x01FFU) * 10U);
 }
 
+static uint8_t bq_battery_soc_percent_from_mv(uint16_t mv)
+{
+    static const struct {
+        uint16_t mv;
+        uint8_t percent;
+    } table[] = {
+        {3300, 0},  {3500, 5},   {3600, 10}, {3700, 20},
+        {3750, 30}, {3800, 40},  {3850, 50}, {3900, 60},
+        {3970, 70}, {4050, 80},  {4110, 90}, {4200, 100},
+    };
+
+    if (mv <= table[0].mv) {
+        return table[0].percent;
+    }
+    const size_t last = (sizeof(table) / sizeof(table[0])) - 1U;
+    if (mv >= table[last].mv) {
+        return table[last].percent;
+    }
+
+    for (size_t i = 1; i <= last; ++i) {
+        if (mv <= table[i].mv) {
+            const uint16_t low_mv = table[i - 1U].mv;
+            const uint16_t high_mv = table[i].mv;
+            const uint8_t low_pct = table[i - 1U].percent;
+            const uint8_t high_pct = table[i].percent;
+            const uint32_t numerator =
+                (uint32_t)(mv - low_mv) * (uint32_t)(high_pct - low_pct);
+            const uint32_t denominator = (uint32_t)(high_mv - low_mv);
+            return (uint8_t)(low_pct +
+                             ((numerator + (denominator / 2U)) /
+                              denominator));
+        }
+    }
+
+    return table[last].percent;
+}
+
 static bool mv_in_range(uint16_t mv, uint16_t min_mv, uint16_t max_mv)
 {
     return mv >= min_mv && mv <= max_mv;
@@ -504,6 +541,11 @@ static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_
             s_snapshot.vac2_mv = read_be_u16(raw, REG39_VAC2_ADC);
             s_snapshot.vbat_mv = read_be_u16(raw, REG3B_VBAT_ADC);
             s_snapshot.vsys_mv = read_be_u16(raw, REG3D_VSYS_ADC);
+            s_snapshot.battery_soc_valid = s_snapshot.vbat_mv > 0U;
+            s_snapshot.battery_soc_percent =
+                s_snapshot.battery_soc_valid
+                    ? bq_battery_soc_percent_from_mv(s_snapshot.vbat_mv)
+                    : 0U;
             s_snapshot.ts_percent =
                 (double)read_be_u16(raw, REG3F_TS_ADC) * 0.0976563;
             s_snapshot.tdie_c =
@@ -539,11 +581,15 @@ static void charger_log_summary_if_needed(void)
     }
 
     ESP_LOGI(TAG,
-             "BQ25792 REG48=0x%02X PN=%u rev=%u adc=%s VBAT=%umV VSYS=%umV VBUS=%umV IBUS=%dmA IBAT=%dmA TDIE=%.1fC PG=%d INT=%d irq=%lu QON=%d reads=%lu",
+             "BQ25792 REG48=0x%02X PN=%u rev=%u adc=%s VBAT=%umV SOC=%u%% VSYS=%umV VBUS=%umV IBUS=%dmA IBAT=%dmA TDIE=%.1fC PG=%d INT=%d irq=%lu QON=%d reads=%lu",
              snapshot.part_info, (unsigned)snapshot.part_number,
              (unsigned)snapshot.device_revision,
              snapshot.adc_enabled ? "on" : "off",
-             (unsigned)snapshot.vbat_mv, (unsigned)snapshot.vsys_mv,
+             (unsigned)snapshot.vbat_mv,
+             (unsigned)(snapshot.battery_soc_valid
+                            ? snapshot.battery_soc_percent
+                            : 0U),
+             (unsigned)snapshot.vsys_mv,
              (unsigned)snapshot.vbus_mv, (int)snapshot.ibus_ma,
              (int)snapshot.ibat_ma, snapshot.tdie_c,
              snapshot.pg_gpio_level, snapshot.int_gpio_level,

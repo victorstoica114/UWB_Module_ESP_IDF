@@ -73,6 +73,8 @@ typedef struct {
     uint16_t vac2_mv;
     uint16_t vbat_mv;
     uint16_t vsys_mv;
+    bool battery_soc_valid;
+    uint8_t battery_soc_percent;
     double ts_percent;
     double tdie_c;
     uint16_t dp_mv;

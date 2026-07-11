@@ -141,9 +141,14 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
         )
     )
     print(
-        "VBAT={vbat}mV VSYS={vsys}mV VBUS={vbus}mV "
+        "VBAT={vbat}mV SOC={soc} VSYS={vsys}mV VBUS={vbus}mV "
         "IBUS={ibus}mA IBAT={ibat}mA TDIE={tdie}C".format(
             vbat=status.get("charger_vbat_mv"),
+            soc=(
+                f"{status.get('charger_battery_soc_percent')}%"
+                if status.get("charger_battery_soc_valid")
+                else "-"
+            ),
             vsys=status.get("charger_vsys_mv"),
             vbus=status.get("charger_vbus_mv"),
             ibus=status.get("charger_ibus_ma"),

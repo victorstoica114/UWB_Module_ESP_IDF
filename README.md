@@ -319,9 +319,11 @@ chunks so the charger monitor stays lower priority than the BNO085
 accelerometer. `/status` exposes the raw register bytes as `charger_raw_hex`
 plus decoded summary fields for part information, status/fault bytes, ADC
 control, watchdog state, charge/input limits, `VBAT`, `VSYS`, `VBUS`, `VAC1`,
-`VAC2`, `IBUS`, `IBAT`, `TS`, `TDIE`, `D+`, and `D-`. The dashboard Info tab
-shows the decoded charger values in the Battery column, the Battery Charger tab
-shows a full live table plus raw register map, and
+`VAC2`, `IBUS`, `IBAT`, `TS`, `TDIE`, `D+`, and `D-`. Firmware also publishes a
+simple 1S Li-Po state-of-charge estimate derived from `VBAT`; this is a
+voltage-based dashboard aid, not a coulomb-counting fuel gauge. The dashboard
+Info tab shows the decoded charger values in the Battery column, the Battery
+Charger tab shows a full live table plus raw register map, and
 `tools/bq25792_dump.py --target-list tools/ota_targets.local.txt` prints every
 register byte with names.
 

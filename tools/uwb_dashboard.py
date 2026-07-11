@@ -730,7 +730,16 @@ th { color: var(--muted); font-weight: 700; }
 .node { fill: #fff; stroke: var(--green); stroke-width: 3; }
 .edge { stroke: #98a2b3; stroke-width: 2; }
 .edge-label { fill: var(--ink); font-size: 14px; font-weight: 700; }
-.toast { margin-top: 10px; color: var(--muted); font-size: 13px; white-space: pre-wrap; }
+.toast { margin-top: 10px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.toast:empty { display: none; }
+.toast:not(:empty) {
+  display: inline-block;
+  border: 1px solid var(--line);
+  background: #fbfcfe;
+  padding: 6px 8px;
+}
+.toast.ok { color: var(--green); border-color: rgba(22, 131, 58, 0.28); }
+.toast.bad { color: var(--red); border-color: rgba(200, 41, 34, 0.28); }
 .graphs-layout {
   min-height: 940px;
   display: grid;
@@ -1284,6 +1293,7 @@ const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?
 const maxAccelSamples = 30000;
 const maxSeriesPoints = 1600;
 const plot = {left: 52, right: 704, top: 14, bottom: 166, width: 652, height: 152};
+const toastTimers = new Map();
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -1904,6 +1914,13 @@ function fmtMa(value) {
   return Number.isFinite(number) ? `${number.toFixed(0)} mA` : "-";
 }
 
+function fmtSoc(item) {
+  const number = Number(item?.charger_battery_soc_percent);
+  return item?.charger_battery_soc_valid && Number.isFinite(number)
+    ? `${number.toFixed(0)}%`
+    : "-";
+}
+
 function fmtGpioLevel(value) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? String(number) : "-";
@@ -1953,8 +1970,9 @@ function renderBatteryCell(item) {
     <span class="muted">PN ${esc(item.charger_part_number ?? "-")} rev ${esc(item.charger_device_revision ?? "-")}</span><br>
     <span class="${adcClass}">ADC ${item.charger_adc_enabled ? "on" : "off"}</span>
     <span class="muted">${esc(writeText)}</span><br>
-    VBAT ${fmtMv(item.charger_vbat_mv)} · VSYS ${fmtMv(item.charger_vsys_mv)}<br>
-    VBUS ${fmtMv(item.charger_vbus_mv)} · IBUS ${fmtMa(item.charger_ibus_ma)}<br>
+    VBAT ${fmtMv(item.charger_vbat_mv)} · SOC ${fmtSoc(item)}<br>
+    VSYS ${fmtMv(item.charger_vsys_mv)} · VBUS ${fmtMv(item.charger_vbus_mv)}<br>
+    IBUS ${fmtMa(item.charger_ibus_ma)}<br>
     IBAT ${fmtMa(item.charger_ibat_ma)} · TDIE ${fmtMaybeNumber(item.charger_tdie_c, 1)} C<br>
     <span class="muted">${pinLine}</span><br>
     <span class="muted">REG48 ${esc(item.charger_part_info || "-")} · reads ${esc(item.charger_read_count ?? "-")} · age ${fmtAgeMs(item.charger_last_update_age_ms)}</span>`;
@@ -2000,8 +2018,9 @@ function renderChargerRows(statuses) {
         ICHG ${fmtMa(item.charger_charge_current_limit_ma)}<br>
         VINDPM ${fmtMv(item.charger_input_voltage_limit_mv)}<br>
         IINDPM ${fmtMa(item.charger_input_current_limit_ma)}</td>
-      <td>VBUS ${fmtMv(item.charger_vbus_mv)} · VSYS ${fmtMv(item.charger_vsys_mv)}<br>
-        VBAT ${fmtMv(item.charger_vbat_mv)} · VAC1 ${fmtMv(item.charger_vac1_mv)}<br>
+      <td>SOC ${fmtSoc(item)} · VBAT ${fmtMv(item.charger_vbat_mv)}<br>
+        VBUS ${fmtMv(item.charger_vbus_mv)} · VSYS ${fmtMv(item.charger_vsys_mv)}<br>
+        VAC1 ${fmtMv(item.charger_vac1_mv)}<br>
         IBUS ${fmtMa(item.charger_ibus_ma)} · IBAT ${fmtMa(item.charger_ibat_ma)}<br>
         TS ${fmtMaybeNumber(item.charger_ts_percent, 2)}% · TDIE ${fmtMaybeNumber(item.charger_tdie_c, 1)} C</td>
       <td>writes ${esc(item.charger_write_count ?? "-")} · err ${esc(item.charger_write_error_count ?? "-")}<br>
@@ -2220,40 +2239,107 @@ function renderDiagram() {
   }
 }
 
-async function postConfig(payload, toastId) {
+function moduleLabelForResult(result) {
+  const target = String(result?.target || "");
+  const status = state.statuses.find(item =>
+    String(item.target || "") === target ||
+    String(item.ip || "") === target ||
+    target.endsWith(String(item.ip || ""))
+  );
+  return status?.module_id ? `M${status.module_id}` : (target || "?");
+}
+
+function resultPayloadOk(result) {
+  if (!result?.ok) return false;
+  if (!result.body) return true;
+  try {
+    const parsed = JSON.parse(result.body);
+    return parsed.ok !== false;
+  } catch (_) {
+    return true;
+  }
+}
+
+function summarizeApiResponse(data) {
+  if (!data || data.ok === false && !Array.isArray(data.results)) {
+    return data?.error ? `ERROR: ${data.error}` : "ERROR";
+  }
+  const results = data.results || [];
+  if (!results.length) return data.ok ? "OK" : "ERROR";
+  const labels = results.map(moduleLabelForResult);
+  const okFlags = results.map(resultPayloadOk);
+  const moduleIds = labels
+    .map(label => /^M(\d+)$/.exec(label)?.[1])
+    .filter(Boolean)
+    .map(Number)
+    .sort((a, b) => a - b);
+  const allOk = okFlags.every(Boolean);
+  if (allOk && moduleIds.length === results.length && moduleIds.length > 1) {
+    const contiguous = moduleIds.every((value, index) =>
+      index === 0 || value === moduleIds[index - 1] + 1
+    );
+    if (contiguous) return `M${moduleIds[0]}-${moduleIds[moduleIds.length - 1]} OK`;
+  }
+  return results.map((result, index) =>
+    `${labels[index]} ${okFlags[index] ? "OK" : "ERROR"}`
+  ).join(" · ");
+}
+
+function apiResponseOk(data) {
+  if (!data || data.ok === false) return false;
+  const results = data.results || [];
+  return !results.length || results.every(resultPayloadOk);
+}
+
+function setToast(toastId, message, kind = "", detail = null, autoClear = true) {
   const toast = document.getElementById(toastId);
-  toast.textContent = "sending...";
-  const res = await fetch("/api/runtime-config", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  toast.textContent = JSON.stringify(data, null, 2);
+  if (!toast) return;
+  if (toastTimers.has(toastId)) {
+    clearTimeout(toastTimers.get(toastId));
+    toastTimers.delete(toastId);
+  }
+  toast.className = `toast ${kind}`.trim();
+  toast.textContent = message;
+  toast.title = detail ? JSON.stringify(detail, null, 2) : "";
+  if (autoClear) {
+    toastTimers.set(toastId, setTimeout(() => {
+      toast.textContent = "";
+      toast.title = "";
+      toast.className = "toast";
+      toastTimers.delete(toastId);
+    }, 4500));
+  }
+}
+
+async function postJsonEndpoint(path, payload, toastId) {
+  setToast(toastId, "sending...", "", null, false);
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    const ok = apiResponseOk(data);
+    setToast(toastId, summarizeApiResponse(data), ok ? "ok" : "bad", data);
+    return data;
+  } catch (error) {
+    const data = {ok: false, error: String(error)};
+    setToast(toastId, summarizeApiResponse(data), "bad", data);
+    return data;
+  }
+}
+
+async function postConfig(payload, toastId) {
+  return postJsonEndpoint("/api/runtime-config", payload, toastId);
 }
 
 async function postAntennaDelay(payload, toastId) {
-  const toast = document.getElementById(toastId);
-  toast.textContent = "sending...";
-  const res = await fetch("/api/antenna-delay", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  toast.textContent = JSON.stringify(data, null, 2);
+  return postJsonEndpoint("/api/antenna-delay", payload, toastId);
 }
 
 async function postChargerConfig(payload, toastId) {
-  const toast = document.getElementById(toastId);
-  toast.textContent = "sending...";
-  const res = await fetch("/api/charger-config", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  toast.textContent = JSON.stringify(data, null, 2);
+  return postJsonEndpoint("/api/charger-config", payload, toastId);
 }
 
 function settingKey(id) { return `uwbDash.setting.${id}`; }

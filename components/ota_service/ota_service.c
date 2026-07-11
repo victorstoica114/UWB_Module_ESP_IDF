@@ -540,6 +540,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_vac2_mv\":%u,"
         "\"charger_vbat_mv\":%u,"
         "\"charger_vsys_mv\":%u,"
+        "\"charger_battery_soc_valid\":%s,"
+        "\"charger_battery_soc_percent\":%u,"
         "\"charger_ts_percent\":%.4f,"
         "\"charger_tdie_c\":%.1f,"
         "\"charger_dp_mv\":%u,"
@@ -774,6 +776,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned)charger_snapshot.vac2_mv,
         (unsigned)charger_snapshot.vbat_mv,
         (unsigned)charger_snapshot.vsys_mv,
+        charger_snapshot.battery_soc_valid ? "true" : "false",
+        (unsigned)charger_snapshot.battery_soc_percent,
         charger_snapshot.ts_percent,
         charger_snapshot.tdie_c,
         (unsigned)charger_snapshot.dp_mv,
@@ -1269,7 +1273,7 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
              (unsigned)snapshot.input_current_limit_ma,
              (unsigned)snapshot.watchdog_setting);
 
-    char response[1200];
+    char response[1400];
     const int len = snprintf(
         response, sizeof(response),
         "{"
@@ -1292,6 +1296,8 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
         "\"charger_vbat_mv\":%u,"
         "\"charger_vsys_mv\":%u,"
         "\"charger_vbus_mv\":%u,"
+        "\"charger_battery_soc_valid\":%s,"
+        "\"charger_battery_soc_percent\":%u,"
         "\"charger_ibus_ma\":%d,"
         "\"charger_ibat_ma\":%d,"
         "\"charger_tdie_c\":%.1f,"
@@ -1320,6 +1326,8 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
         (unsigned)snapshot.vbat_mv,
         (unsigned)snapshot.vsys_mv,
         (unsigned)snapshot.vbus_mv,
+        snapshot.battery_soc_valid ? "true" : "false",
+        (unsigned)snapshot.battery_soc_percent,
         (int)snapshot.ibus_ma,
         (int)snapshot.ibat_ma,
         snapshot.tdie_c,
