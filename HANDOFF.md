@@ -17,6 +17,12 @@ another PC or in a fresh Codex session.
   GPIO18/GPIO17 at 115200 8N1, parses GGA/RMC/GSA/GSV/`$PSTI,030`, and exposes
   fix status in `/status` and the dashboard Info tab. NTRIP/RTCM correction
   forwarding is not enabled yet.
+- BQ25792 charger support is implemented as a read-only runtime monitor on the
+  shared I2C bus. It reads registers `0x00..0x48` in small chunks every 10s or
+  sooner after an `INT` pulse, exposes `charger_raw_hex` and decoded
+  battery/charger fields through `/status`, and shows them in the dashboard
+  Battery column. Datasheet review says config access is available through
+  `R/W` registers, but firmware currently does not write them.
 - The DS-TWR two-module flow works and is the chosen base for the project.
 - TDoA was investigated conceptually, but we decided to stay on DS-TWR because
   precise anchor clock sync is the hard part.
@@ -40,6 +46,14 @@ another PC or in a fresh Codex session.
   first live test targets. It reports satellites used and satellites in view
   separately, which helps diagnose a receiver that sees sky but does not have a
   fix yet.
+- `components/i2c_bus_service/` owns the shared I2C master bus on GPIO9/GPIO10.
+  BNO085 and BQ25792 both use it; transactions are protected by a simple mutex.
+- `components/charger_service/` owns the BQ25792 monitor. Use
+  `tools/bq25792_dump.py --target-list tools/ota_targets.local.txt` to inspect
+  every charger register byte after OTA. Side-band pins are `INT=GPIO4`,
+  `PG=GPIO5`, and `QON=GPIO38`; QON is kept high-Z/read-only because pulling it
+  low can wake from ship mode or trigger a system power reset depending on hold
+  time.
 
 ## Bring-Up On A New PC
 

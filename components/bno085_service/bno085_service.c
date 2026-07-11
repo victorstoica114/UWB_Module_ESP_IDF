@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "i2c_bus_service.h"
 #include "wireless_telemetry_service.h"
 #include "sdkconfig.h"
 
@@ -341,9 +342,14 @@ static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
                                     size_t *packet_len)
 {
     uint8_t header[BNO085_SHTP_HEADER_LEN] = {0};
+    if (!i2c_bus_service_lock(pdMS_TO_TICKS(BNO085_READ_TIMEOUT_MS))) {
+        return ESP_ERR_TIMEOUT;
+    }
+
     esp_err_t err = i2c_master_receive(s_i2c_dev, header, sizeof(header),
                                        BNO085_READ_TIMEOUT_MS);
     if (err != ESP_OK) {
+        i2c_bus_service_unlock();
         return err;
     }
 
@@ -352,11 +358,13 @@ static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
         if (raw_len == 0) {
             s_null_header_count++;
         }
+        i2c_bus_service_unlock();
         return ESP_ERR_TIMEOUT;
     }
 
     const size_t total_len = raw_len & 0x7FFFU;
     if (total_len < BNO085_SHTP_HEADER_LEN) {
+        i2c_bus_service_unlock();
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -367,6 +375,7 @@ static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
     }
 
     if (total_len > packet_size) {
+        i2c_bus_service_unlock();
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -380,6 +389,7 @@ static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
                                  payload_len + BNO085_SHTP_HEADER_LEN,
                                  BNO085_READ_TIMEOUT_MS);
         if (err != ESP_OK) {
+            i2c_bus_service_unlock();
             return err;
         }
 
@@ -398,6 +408,7 @@ static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
 
     s_last_packet_len = total_len;
     *packet_len = total_len;
+    i2c_bus_service_unlock();
     return ESP_OK;
 }
 
@@ -417,8 +428,14 @@ static esp_err_t bno085_send_packet(uint8_t channel, const uint8_t *payload,
     packet[3] = s_shtp_sequence[channel]++;
     memcpy(&packet[BNO085_SHTP_HEADER_LEN], payload, payload_len);
 
-    return i2c_master_transmit(s_i2c_dev, packet, total_len,
-                               BNO085_WRITE_TIMEOUT_MS);
+    if (!i2c_bus_service_lock(pdMS_TO_TICKS(BNO085_WRITE_TIMEOUT_MS))) {
+        return ESP_ERR_TIMEOUT;
+    }
+    const esp_err_t err =
+        i2c_master_transmit(s_i2c_dev, packet, total_len,
+                            BNO085_WRITE_TIMEOUT_MS);
+    i2c_bus_service_unlock();
+    return err;
 }
 
 static esp_err_t bno085_enable_accelerometer(void)
@@ -660,19 +677,7 @@ static void bno085_recover_if_stalled(void)
 
 static esp_err_t bno085_i2c_init(void)
 {
-    const i2c_master_bus_config_t bus_config = {
-        .i2c_port = BNO085_I2C_PORT,
-        .sda_io_num = BOARD_CONFIG_BNO085_SDA_GPIO,
-        .scl_io_num = BOARD_CONFIG_BNO085_SCL_GPIO,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .intr_priority = 0,
-        .trans_queue_depth = 0,
-        .flags = {
-            .enable_internal_pullup = true,
-        },
-    };
-    esp_err_t err = i2c_new_master_bus(&bus_config, &s_i2c_bus);
+    esp_err_t err = i2c_bus_service_get(&s_i2c_bus);
     if (err != ESP_OK) {
         return err;
     }

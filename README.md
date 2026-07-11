@@ -310,6 +310,36 @@ status per module. NTRIP/RTCM correction forwarding is intentionally not enabled
 current implementation is a passive GNSS diagnostic suitable for testing
 modules with antennas, currently modules 3 and 5 near the window.
 
+The BQ25792 Li-Po charger monitor runs on the shared I2C bus
+(`GPIO9/GPIO10`, address `0x6B`) and performs a read-only dump of the complete
+register window `0x00..0x48` every `APP_BQ25792_READ_INTERVAL_MS` (`10s` by
+default). The dump is intentionally split into small register chunks
+(`APP_BQ25792_REGISTER_READ_CHUNK_BYTES`, default `8`) with a short gap between
+chunks so the charger monitor stays lower priority than the BNO085
+accelerometer. `/status` exposes the raw register bytes as `charger_raw_hex`
+plus decoded summary fields for part information, status/fault bytes, ADC
+control, `VBAT`, `VSYS`, `VBUS`, `VAC1`, `VAC2`, `IBUS`, `IBAT`, `TS`, `TDIE`,
+`D+`, and `D-`. The dashboard Info tab shows the decoded charger values in the
+Battery column, and `tools/bq25792_dump.py --target-list
+tools/ota_targets.local.txt` prints every register byte with names.
+
+Three BQ25792 side-band pins are wired to the ESP32 and exposed in `/status`:
+`INT` on `GPIO4`, `QON` on `GPIO38`, and `PG` on `GPIO5`. `INT` is an
+open-drain active-low pulse output; the firmware enables a pull-up and uses the
+falling edge to wake the charger task for an immediate register refresh. `PG`
+is sampled as a power-good flag and reported alongside the `PG_STAT` register
+bit. `QON` is a charger input with an internal pull-up; pulling it low can wake
+the charger from ship mode or, if held low long enough, trigger a system power
+reset. Firmware currently leaves QON as high-impedance input and only reports
+its level.
+
+The datasheet confirms that the BQ25792 is not read-only: many configuration
+registers are `R/W`, and any I2C write moves the charger from default mode into
+host mode and starts/resets the watchdog unless the watchdog is disabled.
+Firmware currently leaves `charger_config_writes_enabled=false`; it reads and
+reports the register map without changing charge limits, ADC enable, watchdog,
+or masks. This is intentional for the first bring-up pass.
+
 Recommended workflow from this folder, in the ESP-IDF v6.0.2 terminal:
 
 ```bat

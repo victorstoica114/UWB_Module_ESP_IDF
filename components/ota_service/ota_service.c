@@ -15,6 +15,7 @@
 #include "esp_system.h"
 #include "app_identity.h"
 #include "app_runtime_config.h"
+#include "charger_service.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gps_service.h"
@@ -44,7 +45,7 @@ enum {
     OTA_SERVICE_REBOOT_DELAY_MS = 1200,
     OTA_SERVICE_MAX_TOKEN_LEN = 128,
     OTA_SERVICE_MAX_QUERY_LEN = 768,
-    OTA_SERVICE_STATUS_RESPONSE_SIZE = 9200,
+    OTA_SERVICE_STATUS_RESPONSE_SIZE = 12000,
 };
 
 #define OTA_SERVICE_TOKEN_HEADER "X-OTA-Token"
@@ -348,6 +349,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     const app_runtime_config_t *runtime_config = app_runtime_config_get();
     gps_service_snapshot_t gps_snapshot = {0};
     gps_service_get_snapshot(&gps_snapshot);
+    charger_service_snapshot_t charger_snapshot = {0};
+    charger_service_get_snapshot(&charger_snapshot);
+    char charger_raw_hex[(CHARGER_SERVICE_REGISTER_MAP_SIZE * 2U) + 1U] = {0};
+    charger_service_format_raw_hex(&charger_snapshot, charger_raw_hex,
+                                   sizeof(charger_raw_hex));
 
     char *response = malloc(OTA_SERVICE_STATUS_RESPONSE_SIZE);
     if (response == NULL) {
@@ -464,6 +470,49 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"gps_rtk_ratio\":%.2f,"
         "\"gps_checksum_errors\":%lu,"
         "\"gps_parse_errors\":%lu,"
+        "\"charger_monitor_enabled\":%s,"
+        "\"charger_present\":%s,"
+        "\"charger_read_ok\":%s,"
+        "\"charger_raw_valid\":%s,"
+        "\"charger_config_write_supported\":%s,"
+        "\"charger_config_writes_enabled\":%s,"
+        "\"charger_last_error\":%d,"
+        "\"charger_last_error_name\":\"%s\","
+        "\"charger_read_count\":%lu,"
+        "\"charger_error_count\":%lu,"
+        "\"charger_last_update_age_ms\":%lu,"
+        "\"charger_int_gpio_level\":%d,"
+        "\"charger_int_irq_count\":%lu,"
+        "\"charger_int_last_irq_age_ms\":%lu,"
+        "\"charger_pg_gpio_level\":%d,"
+        "\"charger_pg_asserted\":%s,"
+        "\"charger_pg_stat\":%s,"
+        "\"charger_qon_gpio_level\":%d,"
+        "\"charger_part_info\":\"0x%02x\","
+        "\"charger_part_number\":%u,"
+        "\"charger_device_revision\":%u,"
+        "\"charger_adc_enabled\":%s,"
+        "\"charger_reg10_charger_control_1\":\"0x%02x\","
+        "\"charger_reg14_charger_control_5\":\"0x%02x\","
+        "\"charger_reg2e_adc_control\":\"0x%02x\","
+        "\"charger_reg2f_adc_disable_0\":\"0x%02x\","
+        "\"charger_reg30_adc_disable_1\":\"0x%02x\","
+        "\"charger_status\":[%u,%u,%u,%u,%u],"
+        "\"charger_fault_status\":[%u,%u],"
+        "\"charger_flag\":[%u,%u,%u,%u],"
+        "\"charger_fault_flag\":[%u,%u],"
+        "\"charger_ibus_ma\":%d,"
+        "\"charger_ibat_ma\":%d,"
+        "\"charger_vbus_mv\":%u,"
+        "\"charger_vac1_mv\":%u,"
+        "\"charger_vac2_mv\":%u,"
+        "\"charger_vbat_mv\":%u,"
+        "\"charger_vsys_mv\":%u,"
+        "\"charger_ts_percent\":%.4f,"
+        "\"charger_tdie_c\":%.1f,"
+        "\"charger_dp_mv\":%u,"
+        "\"charger_dm_mv\":%u,"
+        "\"charger_raw_hex\":\"%s\","
         "\"runtime_radio_channel\":%u,"
         "\"runtime_wireless_telemetry_port\":%lu,"
         "\"uwb_status\":\"%s\","
@@ -622,6 +671,58 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         gps_snapshot.rtk_ratio,
         (unsigned long)gps_snapshot.checksum_error_count,
         (unsigned long)gps_snapshot.parse_error_count,
+        charger_snapshot.monitor_enabled ? "true" : "false",
+        charger_snapshot.present ? "true" : "false",
+        charger_snapshot.read_ok ? "true" : "false",
+        charger_snapshot.raw_valid ? "true" : "false",
+        charger_snapshot.config_write_supported ? "true" : "false",
+        charger_snapshot.config_writes_enabled ? "true" : "false",
+        charger_snapshot.last_error,
+        esp_err_to_name((esp_err_t)charger_snapshot.last_error),
+        (unsigned long)charger_snapshot.read_count,
+        (unsigned long)charger_snapshot.error_count,
+        (unsigned long)charger_snapshot.last_update_age_ms,
+        charger_snapshot.int_gpio_level,
+        (unsigned long)charger_snapshot.int_irq_count,
+        (unsigned long)charger_snapshot.int_last_irq_age_ms,
+        charger_snapshot.pg_gpio_level,
+        charger_snapshot.pg_asserted ? "true" : "false",
+        charger_snapshot.pg_stat ? "true" : "false",
+        charger_snapshot.qon_gpio_level,
+        (unsigned)charger_snapshot.part_info,
+        (unsigned)charger_snapshot.part_number,
+        (unsigned)charger_snapshot.device_revision,
+        charger_snapshot.adc_enabled ? "true" : "false",
+        (unsigned)charger_snapshot.reg10_charger_control_1,
+        (unsigned)charger_snapshot.reg14_charger_control_5,
+        (unsigned)charger_snapshot.reg2e_adc_control,
+        (unsigned)charger_snapshot.reg2f_adc_disable_0,
+        (unsigned)charger_snapshot.reg30_adc_disable_1,
+        (unsigned)charger_snapshot.charger_status[0],
+        (unsigned)charger_snapshot.charger_status[1],
+        (unsigned)charger_snapshot.charger_status[2],
+        (unsigned)charger_snapshot.charger_status[3],
+        (unsigned)charger_snapshot.charger_status[4],
+        (unsigned)charger_snapshot.fault_status[0],
+        (unsigned)charger_snapshot.fault_status[1],
+        (unsigned)charger_snapshot.charger_flag[0],
+        (unsigned)charger_snapshot.charger_flag[1],
+        (unsigned)charger_snapshot.charger_flag[2],
+        (unsigned)charger_snapshot.charger_flag[3],
+        (unsigned)charger_snapshot.fault_flag[0],
+        (unsigned)charger_snapshot.fault_flag[1],
+        (int)charger_snapshot.ibus_ma,
+        (int)charger_snapshot.ibat_ma,
+        (unsigned)charger_snapshot.vbus_mv,
+        (unsigned)charger_snapshot.vac1_mv,
+        (unsigned)charger_snapshot.vac2_mv,
+        (unsigned)charger_snapshot.vbat_mv,
+        (unsigned)charger_snapshot.vsys_mv,
+        charger_snapshot.ts_percent,
+        charger_snapshot.tdie_c,
+        (unsigned)charger_snapshot.dp_mv,
+        (unsigned)charger_snapshot.dm_mv,
+        charger_raw_hex,
         (unsigned)runtime_radio_channel(runtime_config),
         (unsigned long)runtime_config->wireless_telemetry_port,
         uwb_dw3000_status_to_string(uwb_dw3000_get_status()),

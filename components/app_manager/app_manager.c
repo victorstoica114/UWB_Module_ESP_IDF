@@ -9,6 +9,7 @@
 #include "app_runtime_config.h"
 #include "bno085_service.h"
 #include "board_config.h"
+#include "charger_service.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -241,6 +242,12 @@ void app_manager_start(void)
     if (ota_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start OTA service: %s",
                  esp_err_to_name(ota_err));
+    }
+
+    const esp_err_t charger_err = charger_service_start();
+    if (charger_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start BQ25792 service: %s",
+                 esp_err_to_name(charger_err));
     }
 
     const esp_err_t bno085_err = bno085_service_start();

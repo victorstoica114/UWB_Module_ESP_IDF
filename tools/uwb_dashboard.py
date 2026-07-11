@@ -1683,6 +1683,21 @@ function fmtAgeMs(ageMs) {
   return `${(number / 1000).toFixed(1)}s`;
 }
 
+function fmtMv(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${(number / 1000).toFixed(3)} V` : "-";
+}
+
+function fmtMa(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(0)} mA` : "-";
+}
+
+function fmtGpioLevel(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? String(number) : "-";
+}
+
 function renderGpsCell(item) {
   const enabled = Boolean(item.runtime_gps_enabled);
   const powered = Boolean(item.gps_powered);
@@ -1705,6 +1720,33 @@ function renderGpsCell(item) {
     sats ${esc(satsUsed)}/${esc(satsView)} · hdop ${fmtMaybeNumber(item.gps_hdop, 2)}<br>
     ${location}<br>
     <span class="muted">rx ${fmtAgeMs(item.gps_last_rx_age_ms)} · sent ${esc(sentences)} · err ${esc(item.gps_checksum_errors ?? "-")}/${esc(item.gps_parse_errors ?? "-")}</span>`;
+}
+
+function renderBatteryCell(item) {
+  if (!item.charger_monitor_enabled) {
+    return `<span class="muted">monitor off</span>`;
+  }
+  const pinLine = `PG ${fmtGpioLevel(item.charger_pg_gpio_level)}${item.charger_pg_asserted ? " asserted" : ""}
+    · PG_STAT ${item.charger_pg_stat ? "1" : "0"}
+    · INT ${fmtGpioLevel(item.charger_int_gpio_level)} / ${esc(item.charger_int_irq_count ?? "-")}
+    · QON ${fmtGpioLevel(item.charger_qon_gpio_level)}`;
+  if (!item.charger_present) {
+    return `<span class="bad">BQ25792 not found</span><br><span class="muted">${esc(item.charger_last_error_name || "-")}</span><br><span class="muted">${pinLine}</span>`;
+  }
+  const adcClass = item.charger_adc_enabled ? "ok" : "warn";
+  const writeText = item.charger_config_write_supported
+    ? (item.charger_config_writes_enabled ? "writes enabled" : "writes disabled")
+    : "read only";
+  return `
+    <span class="${item.charger_read_ok ? "ok" : "bad"}">BQ25792</span>
+    <span class="muted">PN ${esc(item.charger_part_number ?? "-")} rev ${esc(item.charger_device_revision ?? "-")}</span><br>
+    <span class="${adcClass}">ADC ${item.charger_adc_enabled ? "on" : "off"}</span>
+    <span class="muted">${esc(writeText)}</span><br>
+    VBAT ${fmtMv(item.charger_vbat_mv)} · VSYS ${fmtMv(item.charger_vsys_mv)}<br>
+    VBUS ${fmtMv(item.charger_vbus_mv)} · IBUS ${fmtMa(item.charger_ibus_ma)}<br>
+    IBAT ${fmtMa(item.charger_ibat_ma)} · TDIE ${fmtMaybeNumber(item.charger_tdie_c, 1)} C<br>
+    <span class="muted">${pinLine}</span><br>
+    <span class="muted">REG48 ${esc(item.charger_part_info || "-")} · reads ${esc(item.charger_read_count ?? "-")} · age ${fmtAgeMs(item.charger_last_update_age_ms)}</span>`;
 }
 
 function renderInfo(snapshot) {
@@ -1756,7 +1798,7 @@ function renderInfo(snapshot) {
       <td>${esc(item.uwb_status)}<br>tx ${esc(item.uwb_tx_count)} / rx ${esc(item.uwb_rx_count)}<br>err ${esc(item.uwb_tx_error_count)}/${esc(item.uwb_rx_error_count)}</td>
       <td>${esc(item.uwb_active_antenna_delay_hex)}<br><span class="muted">NVS ${item.uwb_antenna_delay_from_nvs ? "yes" : "no"}</span></td>
       <td>log ${esc(item.wireless_log_status)}<br>dropped ${esc(item.wireless_log_dropped)}<br>tel ${esc(item.wireless_telemetry_status || "-")}<br>port ${esc(item.wireless_telemetry_port ?? item.runtime_wireless_telemetry_port ?? "-")}<br>tel drop ${esc(item.wireless_telemetry_dropped ?? "-")}<br>tel err ${esc(item.wireless_telemetry_last_error ?? "-")}<br>age ${fmtAge(item.status_updated_at)}</td>
-      <td><span class="muted">not exposed yet</span></td>
+      <td>${renderBatteryCell(item)}</td>
     </tr>`).join("");
   renderUwbRadio(state.statuses[0] || {});
   scheduleAccelRender();
