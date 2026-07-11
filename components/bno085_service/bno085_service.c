@@ -388,7 +388,7 @@ static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
                                     size_t *packet_len)
 {
     uint8_t header[BNO085_SHTP_HEADER_LEN] = {0};
-    if (!i2c_bus_service_lock(pdMS_TO_TICKS(BNO085_READ_TIMEOUT_MS))) {
+    if (!i2c_bus_service_lock_realtime(pdMS_TO_TICKS(BNO085_READ_TIMEOUT_MS))) {
         return ESP_ERR_TIMEOUT;
     }
 
@@ -474,7 +474,7 @@ static esp_err_t bno085_send_packet(uint8_t channel, const uint8_t *payload,
     packet[3] = s_shtp_sequence[channel]++;
     memcpy(&packet[BNO085_SHTP_HEADER_LEN], payload, payload_len);
 
-    if (!i2c_bus_service_lock(pdMS_TO_TICKS(BNO085_WRITE_TIMEOUT_MS))) {
+    if (!i2c_bus_service_lock_realtime(pdMS_TO_TICKS(BNO085_WRITE_TIMEOUT_MS))) {
         return ESP_ERR_TIMEOUT;
     }
     const esp_err_t err =

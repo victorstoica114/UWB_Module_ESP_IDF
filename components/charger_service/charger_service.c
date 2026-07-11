@@ -25,7 +25,7 @@ enum {
     CHARGER_TASK_STACK_WORDS = 3072,
     CHARGER_TASK_PRIORITY = 4,
     CHARGER_I2C_TIMEOUT_MS = 200,
-    CHARGER_I2C_LOCK_TIMEOUT_MS = 250,
+    CHARGER_I2C_LOCK_TIMEOUT_MS = 1000,
     CHARGER_LOG_INTERVAL_MS = 5000,
     CHARGER_GPIO_INVALID_LEVEL = -1,
     REG00_MINIMAL_SYSTEM_VOLTAGE = 0x00,
@@ -747,7 +747,7 @@ static esp_err_t charger_i2c_init(void)
         return err;
     }
 
-    if (!i2c_bus_service_lock(pdMS_TO_TICKS(CHARGER_I2C_LOCK_TIMEOUT_MS))) {
+    if (!i2c_bus_service_lock_background(pdMS_TO_TICKS(CHARGER_I2C_LOCK_TIMEOUT_MS))) {
         return ESP_ERR_TIMEOUT;
     }
     err = i2c_master_probe(s_i2c_bus, APP_BQ25792_I2C_ADDRESS,
@@ -763,7 +763,7 @@ static esp_err_t charger_read_bytes(uint8_t start_reg, uint8_t *data,
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!i2c_bus_service_lock(pdMS_TO_TICKS(CHARGER_I2C_LOCK_TIMEOUT_MS))) {
+    if (!i2c_bus_service_lock_background(pdMS_TO_TICKS(CHARGER_I2C_LOCK_TIMEOUT_MS))) {
         return ESP_ERR_TIMEOUT;
     }
     const esp_err_t err = i2c_master_transmit_receive(
@@ -780,7 +780,7 @@ static esp_err_t charger_write_byte(uint8_t reg, uint8_t value)
     }
 
     uint8_t data[2] = {reg, value};
-    if (!i2c_bus_service_lock(pdMS_TO_TICKS(CHARGER_I2C_LOCK_TIMEOUT_MS))) {
+    if (!i2c_bus_service_lock_background(pdMS_TO_TICKS(CHARGER_I2C_LOCK_TIMEOUT_MS))) {
         return ESP_ERR_TIMEOUT;
     }
     const esp_err_t err =
@@ -790,27 +790,29 @@ static esp_err_t charger_write_byte(uint8_t reg, uint8_t value)
     return err;
 }
 
-static esp_err_t charger_read_register_map(uint8_t raw[CHARGER_SERVICE_REGISTER_MAP_SIZE])
+static esp_err_t charger_read_register_range_chunked(
+    uint8_t start_reg, uint8_t *data, size_t data_len)
 {
     size_t offset = 0;
-    while (offset < CHARGER_SERVICE_REGISTER_MAP_SIZE) {
+    while (offset < data_len) {
         size_t chunk_len = APP_BQ25792_REGISTER_READ_CHUNK_BYTES;
         if (chunk_len == 0 || chunk_len > 16U) {
             chunk_len = 8U;
         }
-        const size_t remaining = CHARGER_SERVICE_REGISTER_MAP_SIZE - offset;
+        const size_t remaining = data_len - offset;
         if (chunk_len > remaining) {
             chunk_len = remaining;
         }
 
         const esp_err_t err =
-            charger_read_bytes((uint8_t)offset, &raw[offset], chunk_len);
+            charger_read_bytes((uint8_t)(start_reg + offset), &data[offset],
+                               chunk_len);
         if (err != ESP_OK) {
             return err;
         }
 
         offset += chunk_len;
-        if (offset < CHARGER_SERVICE_REGISTER_MAP_SIZE &&
+        if (offset < data_len &&
             APP_BQ25792_REGISTER_READ_CHUNK_GAP_MS > 0) {
             vTaskDelay(pdMS_TO_TICKS(APP_BQ25792_REGISTER_READ_CHUNK_GAP_MS));
         }
@@ -818,13 +820,33 @@ static esp_err_t charger_read_register_map(uint8_t raw[CHARGER_SERVICE_REGISTER_
     return ESP_OK;
 }
 
+static esp_err_t charger_read_register_map(
+    uint8_t raw[CHARGER_SERVICE_REGISTER_MAP_SIZE])
+{
+    return charger_read_register_range_chunked(
+        0, raw, CHARGER_SERVICE_REGISTER_MAP_SIZE);
+}
+
 static esp_err_t charger_read_quick_registers(
     uint8_t raw[CHARGER_SERVICE_REGISTER_MAP_SIZE])
 {
     const uint8_t start_reg = REG1B_CHARGER_STATUS_0;
-    const uint8_t end_reg = REG45_DM_ADC + 1U;
+    const uint8_t end_reg = REG45_DM_ADC;
     const size_t read_len = (size_t)(end_reg - start_reg + 1U);
-    return charger_read_bytes(start_reg, &raw[start_reg], read_len);
+    const size_t first_len = (read_len + 1U) / 2U;
+    const size_t second_len = read_len - first_len;
+
+    esp_err_t err = charger_read_bytes(start_reg, &raw[start_reg], first_len);
+    if (err != ESP_OK || second_len == 0) {
+        return err;
+    }
+
+    if (APP_BQ25792_REGISTER_READ_CHUNK_GAP_MS > 0) {
+        vTaskDelay(pdMS_TO_TICKS(APP_BQ25792_REGISTER_READ_CHUNK_GAP_MS));
+    }
+
+    return charger_read_bytes((uint8_t)(start_reg + first_len),
+                              &raw[start_reg + first_len], second_len);
 }
 
 static void update_snapshot_gpio_fields(charger_service_snapshot_t *snapshot,

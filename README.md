@@ -107,7 +107,9 @@ most Wi-Fi and TCP work:
 | `wifi_service` | 0 | Owns Wi-Fi STA connect/reconnect management. |
 | `ota_service` | 0 | Starts authenticated OTA and runtime-config HTTP handling. |
 | `bno085` | 0 | Optional BNO085 accelerometer test when enabled. |
+| `bq25792` | 0 | Low-rate charger monitor; uses background I2C access so BNO085 can win bus arbitration. |
 | `wireless_log` | unpinned | Drains the log queue and mirrors logs over TCP; FreeRTOS may run it on either core. |
+| `wireless_tel` | 1 | Drains high-rate telemetry into batched TCP writes. |
 | short-lived reboot tasks | unpinned | Temporary restart helpers after OTA or runtime-config changes. |
 
 ESP-IDF also creates internal Wi-Fi, TCP/IP, event-loop, and HTTP-server tasks.
@@ -325,9 +327,13 @@ then every `APP_BQ25792_READ_INTERVAL_MS` (`10s` by default). The full dump is
 intentionally split into small register chunks
 (`APP_BQ25792_REGISTER_READ_CHUNK_BYTES`, default `8`) with a short gap between
 chunks so the charger monitor stays lower priority than the BNO085
-accelerometer. BQ25792 `INT` wakes the task for a shorter status/ADC refresh
-instead of a full raw-map dump, so charger events can be handled while the
-BNO085 is running at high sample rates. `/status` exposes the raw register bytes
+accelerometer. The shared I2C service has explicit realtime/background locks:
+BNO085 reads and configuration writes use the realtime lock, while BQ25792 reads
+and writes use the background lock and do not start a transaction if a realtime
+waiter is present. BQ25792 `INT` wakes the task for a shorter status/ADC refresh
+split into two I2C transactions instead of a full raw-map dump, so charger
+events can be handled while the BNO085 is running at high sample rates without a
+long charger transfer sitting on the bus. `/status` exposes the raw register bytes
 as `charger_raw_hex` plus decoded summary fields for part information,
 status/fault bytes, ADC control, watchdog state, charge/input limits, `VBAT`,
 `VSYS`, `VBUS`, `VAC1`, `VAC2`, `IBUS`, `IBAT`, `TS`, `TDIE`, `D+`, and `D-`.

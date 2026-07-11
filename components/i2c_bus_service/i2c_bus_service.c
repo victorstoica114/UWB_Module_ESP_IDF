@@ -6,16 +6,51 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 static const char *TAG = "i2c_bus_service";
 
 enum {
     APP_I2C_PORT = 0,
+    BACKGROUND_LOCK_WAIT_TICKS = 1,
 };
 
 static bool s_initialized;
 static i2c_master_bus_handle_t s_bus;
 static SemaphoreHandle_t s_mutex;
+static portMUX_TYPE s_waiter_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_realtime_waiters;
+
+static void realtime_waiter_add(void)
+{
+    taskENTER_CRITICAL(&s_waiter_mux);
+    s_realtime_waiters++;
+    taskEXIT_CRITICAL(&s_waiter_mux);
+}
+
+static void realtime_waiter_remove(void)
+{
+    taskENTER_CRITICAL(&s_waiter_mux);
+    if (s_realtime_waiters > 0) {
+        s_realtime_waiters--;
+    }
+    taskEXIT_CRITICAL(&s_waiter_mux);
+}
+
+static uint32_t realtime_waiter_count(void)
+{
+    uint32_t count = 0;
+    taskENTER_CRITICAL(&s_waiter_mux);
+    count = s_realtime_waiters;
+    taskEXIT_CRITICAL(&s_waiter_mux);
+    return count;
+}
+
+static bool timeout_elapsed(TickType_t start_tick, TickType_t timeout)
+{
+    return timeout != portMAX_DELAY &&
+           (xTaskGetTickCount() - start_tick) >= timeout;
+}
 
 esp_err_t i2c_bus_service_get(i2c_master_bus_handle_t *bus)
 {
@@ -65,7 +100,43 @@ esp_err_t i2c_bus_service_get(i2c_master_bus_handle_t *bus)
 
 bool i2c_bus_service_lock(TickType_t timeout)
 {
-    return s_mutex != NULL && xSemaphoreTake(s_mutex, timeout) == pdTRUE;
+    return i2c_bus_service_lock_background(timeout);
+}
+
+bool i2c_bus_service_lock_realtime(TickType_t timeout)
+{
+    if (s_mutex == NULL) {
+        return false;
+    }
+
+    realtime_waiter_add();
+    const bool locked = xSemaphoreTake(s_mutex, timeout) == pdTRUE;
+    realtime_waiter_remove();
+    return locked;
+}
+
+bool i2c_bus_service_lock_background(TickType_t timeout)
+{
+    if (s_mutex == NULL) {
+        return false;
+    }
+
+    const TickType_t start_tick = xTaskGetTickCount();
+    while (true) {
+        if (realtime_waiter_count() == 0 &&
+            xSemaphoreTake(s_mutex, BACKGROUND_LOCK_WAIT_TICKS) == pdTRUE) {
+            if (realtime_waiter_count() == 0) {
+                return true;
+            }
+            xSemaphoreGive(s_mutex);
+        }
+
+        if (timeout == 0 || timeout_elapsed(start_tick, timeout)) {
+            return false;
+        }
+
+        taskYIELD();
+    }
 }
 
 void i2c_bus_service_unlock(void)

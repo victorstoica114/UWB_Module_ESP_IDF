@@ -48,7 +48,8 @@ another PC or in a fresh Codex session.
   separately, which helps diagnose a receiver that sees sky but does not have a
   fix yet.
 - `components/i2c_bus_service/` owns the shared I2C master bus on GPIO9/GPIO10.
-  BNO085 and BQ25792 both use it; transactions are protected by a simple mutex.
+  BNO085 and BQ25792 both use it. BNO085 takes the bus through the realtime lock;
+  BQ25792 uses the background lock and yields whenever a realtime waiter exists.
 - `components/charger_service/` owns the BQ25792 monitor. Use
   `tools/bq25792_dump.py --target-list tools/ota_targets.local.txt` to inspect
   every charger register byte after OTA. Side-band signals are `INT=GPIO4`,

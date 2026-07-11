@@ -11,6 +11,8 @@ extern "C" {
 
 esp_err_t i2c_bus_service_get(i2c_master_bus_handle_t *bus);
 bool i2c_bus_service_lock(TickType_t timeout);
+bool i2c_bus_service_lock_realtime(TickType_t timeout);
+bool i2c_bus_service_lock_background(TickType_t timeout);
 void i2c_bus_service_unlock(void);
 
 #ifdef __cplusplus
