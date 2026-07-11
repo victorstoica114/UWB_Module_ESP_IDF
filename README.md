@@ -432,6 +432,11 @@ Dashboard charger safety-timer controls affect charge-cycle timeout behavior:
 | `Top-off timer` | `TOPOFF_TMR[1:0]` in `REG0E` | Optional extra `15/30/45 min` top-off after termination threshold; `0` disables it. |
 | `TMR2X` | `TMR2X_EN` in `REG0E` | Doubles active safety timers while input-current/input-voltage DPM or thermal regulation slows charging. |
 
+The dashboard `Reset Charge Cycle` button toggles `EN_CHG` off and back on for
+the selected modules. Per the BQ25792 datasheet, stopping and restarting the
+charge cycle resets the active fast/pre-charge/trickle safety timers and also
+resets top-off timing.
+
 Recommended workflow from this folder, in the ESP-IDF v6.0.2 terminal:
 
 ```bat

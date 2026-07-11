@@ -1043,8 +1043,8 @@ th { color: var(--muted); font-weight: 700; }
             <div class="section">
               <h2>ADC</h2>
               <div class="form-grid">
-                <label for="chargerTargets">Targets</label>
-                <select id="chargerTargets">
+                <label for="chargerAdcTargets">Targets</label>
+                <select id="chargerAdcTargets">
                   <option value="all">all modules</option>
                   <option value="1">module 1</option>
                   <option value="2">module 2</option>
@@ -1053,7 +1053,7 @@ th { color: var(--muted); font-weight: 700; }
                   <option value="5">module 5</option>
                 </select>
                 <label>Loaded</label>
-                <div id="chargerSelectionStatus" class="field-note">waiting for status</div>
+                <div id="chargerAdcSelectionStatus" class="field-note">waiting for status</div>
                 <label for="chargerAdcEnabled">ADC</label>
                 <div class="checkbox-row"><input id="chargerAdcEnabled" type="checkbox"><span>enabled</span></div>
                 <label for="chargerAdcRate">Rate</label>
@@ -1079,11 +1079,22 @@ th { color: var(--muted); font-weight: 700; }
 	                <button id="disableChargerWatchdog">Disable Watchdog</button>
                 <button id="refreshCharger">Refresh</button>
               </div>
-              <div id="chargerToast" class="toast"></div>
+              <div id="chargerAdcToast" class="toast"></div>
             </div>
             <div class="section">
               <h2>Charge Limits</h2>
               <div class="form-grid">
+                <label for="chargerLimitTargets">Targets</label>
+                <select id="chargerLimitTargets">
+                  <option value="all">all modules</option>
+                  <option value="1">module 1</option>
+                  <option value="2">module 2</option>
+                  <option value="3">module 3</option>
+                  <option value="4">module 4</option>
+                  <option value="5">module 5</option>
+                </select>
+                <label>Loaded</label>
+                <div id="chargerLimitSelectionStatus" class="field-note">waiting for status</div>
                 <label for="chargerChargeEnabled">Charging</label>
                 <div class="checkbox-row"><input id="chargerChargeEnabled" type="checkbox"><span>enabled</span></div>
                 <label for="chargerMinimalSystemMv">VSYSMIN mV</label>
@@ -1108,10 +1119,22 @@ th { color: var(--muted); font-weight: 700; }
 	              <div class="form-actions">
 	                <button class="primary" id="applyChargerLimits">Apply Limits</button>
 	              </div>
+              <div id="chargerLimitsToast" class="toast"></div>
             </div>
             <div class="section">
               <h2>Safety Timers</h2>
               <div class="form-grid">
+                <label for="chargerTimerTargets">Targets</label>
+                <select id="chargerTimerTargets">
+                  <option value="all">all modules</option>
+                  <option value="1">module 1</option>
+                  <option value="2">module 2</option>
+                  <option value="3">module 3</option>
+                  <option value="4">module 4</option>
+                  <option value="5">module 5</option>
+                </select>
+                <label>Loaded</label>
+                <div id="chargerTimerSelectionStatus" class="field-note">waiting for status</div>
                 <label for="chargerFastTimerEnabled">Fast timer</label>
                 <div class="checkbox-row"><input id="chargerFastTimerEnabled" type="checkbox"><span>enabled</span></div>
                 <label for="chargerFastTimerHours">Fast duration</label>
@@ -1149,7 +1172,9 @@ th { color: var(--muted); font-weight: 700; }
               </div>
               <div class="form-actions">
                 <button class="primary" id="applyChargerTimers">Apply Safety Timers</button>
+                <button id="resetChargerCycle">Reset Charge Cycle</button>
               </div>
+              <div id="chargerTimersToast" class="toast"></div>
             </div>
             <div class="section">
               <h2>Service Tools</h2>
@@ -1175,6 +1200,7 @@ th { color: var(--muted); font-weight: 700; }
               <div class="form-actions">
                 <button class="danger" id="applyChargerRaw">Apply Raw Register</button>
               </div>
+              <div id="chargerRawToast" class="toast"></div>
             </div>
           </div>
         </div>
@@ -2718,8 +2744,8 @@ function chargerStatusPresent(item) {
      item.charger_adc_enabled !== undefined);
 }
 
-function selectedChargerStatuses() {
-  const target = document.getElementById("chargerTargets")?.value || "all";
+function selectedChargerStatuses(targetSelectId) {
+  const target = document.getElementById(targetSelectId)?.value || "all";
   const items = state.statuses.filter(chargerStatusPresent);
   if (target === "all") return items;
   const moduleId = Number(target);
@@ -2757,12 +2783,12 @@ function setChargerControlFromStatus(field, value, mixed) {
   }
 }
 
-function hydrateChargerSettings() {
-  const items = selectedChargerStatuses();
-  const target = document.getElementById("chargerTargets")?.value || "all";
-  const status = document.getElementById("chargerSelectionStatus");
+function hydrateChargerGroup(fields, targetSelectId, statusId) {
+  const items = selectedChargerStatuses(targetSelectId);
+  const target = document.getElementById(targetSelectId)?.value || "all";
+  const status = document.getElementById(statusId);
   const mixedLabels = [];
-  for (const field of chargerConfigFields()) {
+  for (const field of fields) {
     const common = commonChargerValue(items, field);
     if (common.mixed) mixedLabels.push(field.label);
     setChargerControlFromStatus(field, common.value, common.mixed);
@@ -2781,6 +2807,12 @@ function hydrateChargerSettings() {
     status.textContent = `loaded ${modules}`;
     status.className = "field-note";
   }
+}
+
+function hydrateChargerSettings() {
+  hydrateChargerGroup(chargerAdcFields, "chargerAdcTargets", "chargerAdcSelectionStatus");
+  hydrateChargerGroup(chargerLimitFields, "chargerLimitTargets", "chargerLimitSelectionStatus");
+  hydrateChargerGroup(chargerTimerFields, "chargerTimerTargets", "chargerTimerSelectionStatus");
 }
 
 function clearChargerDirty(fields = chargerConfigFields()) {
@@ -2807,10 +2839,16 @@ function wireChargerDirtyTracking() {
     el.addEventListener("input", markChargerControlDirty);
     el.addEventListener("change", markChargerControlDirty);
   }
-  const targets = document.getElementById("chargerTargets");
-  if (targets) {
+  const groups = [
+    {target: "chargerAdcTargets", fields: chargerAdcFields},
+    {target: "chargerLimitTargets", fields: chargerLimitFields},
+    {target: "chargerTimerTargets", fields: chargerTimerFields},
+  ];
+  for (const group of groups) {
+    const targets = document.getElementById(group.target);
+    if (!targets) continue;
     targets.addEventListener("change", () => {
-      clearChargerDirty();
+      clearChargerDirty(group.fields);
       hydrateChargerSettings();
     });
   }
@@ -2841,7 +2879,7 @@ function collectDirtyChargerParams(fields) {
   return {params, labels};
 }
 
-async function postDirtyChargerConfig(fields, toastId) {
+async function postDirtyChargerConfig(fields, targetSelectId, toastId) {
   const collected = collectDirtyChargerParams(fields);
   if (collected.error) {
     setToast(toastId, collected.error, "bad");
@@ -2852,12 +2890,35 @@ async function postDirtyChargerConfig(fields, toastId) {
     return;
   }
   const data = await postChargerConfig({
-    target_modules: document.getElementById("chargerTargets").value,
+    target_modules: document.getElementById(targetSelectId).value,
     params: collected.params,
   }, toastId);
   if (apiResponseOk(data)) {
     clearChargerDirty(fields);
     setTimeout(hydrateChargerSettings, 300);
+  }
+}
+
+function delayMs(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function resetChargerCycle(targetSelectId, toastId) {
+  const target_modules = document.getElementById(targetSelectId).value;
+  setToast(toastId, "resetting charge cycle...", "", null, false);
+  const off = await postChargerConfig({
+    target_modules,
+    params: {charge_enabled: "0"},
+  }, toastId);
+  if (!apiResponseOk(off)) return;
+  await delayMs(350);
+  const on = await postChargerConfig({
+    target_modules,
+    params: {charge_enabled: "1"},
+  }, toastId);
+  if (apiResponseOk(on)) {
+    clearChargerDirty(chargerLimitFields);
+    setTimeout(hydrateChargerSettings, 500);
   }
 }
 
@@ -2873,7 +2934,8 @@ function persistedSettingIds() {
     "uwbDtFinalDelayMs", "uwbDtReportDelayMs", "uwbDtAutoRxDelayUus",
     "uwbCalSummary", "uwbCalMinMs", "uwbCalMaxMs", "uwbCalRxMs",
     "uwbAntennaDelayHex", "uwbAdvancedReboot",
-    "chargerTargets", "chargerRawModule", "chargerShowRawTools", "chargerRawReg", "chargerRawValue",
+    "chargerAdcTargets", "chargerLimitTargets", "chargerTimerTargets",
+    "chargerRawModule", "chargerShowRawTools", "chargerRawReg", "chargerRawValue",
     "chargerRawMask", "chargerRawBits",
     "calTargets", "calMethod", "calRef", "calDut", "calKnownCm", "calThree",
     "calD01Cm", "calD02Cm", "calD12Cm", "calSamples",
@@ -3019,25 +3081,28 @@ function wireSettings() {
   });
   document.getElementById("chargerRawModule").addEventListener("change", renderChargerRegisters);
   document.getElementById("applyChargerAdc").addEventListener("click", () => {
-    postDirtyChargerConfig(chargerAdcFields, "chargerToast");
+    postDirtyChargerConfig(chargerAdcFields, "chargerAdcTargets", "chargerAdcToast");
   });
   document.getElementById("disableChargerWatchdog").addEventListener("click", () => {
     postChargerConfig({
-      target_modules: document.getElementById("chargerTargets").value,
+      target_modules: document.getElementById("chargerAdcTargets").value,
       params: {disable_watchdog: "1"}
-    }, "chargerToast");
+    }, "chargerAdcToast");
   });
   document.getElementById("refreshCharger").addEventListener("click", () => {
     postChargerConfig({
-      target_modules: document.getElementById("chargerTargets").value,
+      target_modules: document.getElementById("chargerAdcTargets").value,
       params: {refresh: "1"}
-    }, "chargerToast");
+    }, "chargerAdcToast");
   });
   document.getElementById("applyChargerLimits").addEventListener("click", () => {
-    postDirtyChargerConfig(chargerLimitFields, "chargerToast");
+    postDirtyChargerConfig(chargerLimitFields, "chargerLimitTargets", "chargerLimitsToast");
   });
   document.getElementById("applyChargerTimers").addEventListener("click", () => {
-    postDirtyChargerConfig(chargerTimerFields, "chargerToast");
+    postDirtyChargerConfig(chargerTimerFields, "chargerTimerTargets", "chargerTimersToast");
+  });
+  document.getElementById("resetChargerCycle").addEventListener("click", () => {
+    resetChargerCycle("chargerTimerTargets", "chargerTimersToast");
   });
   document.getElementById("applyChargerRaw").addEventListener("click", () => {
     const params = {
@@ -3050,9 +3115,9 @@ function wireSettings() {
     if (mask) params.mask = mask;
     if (bits) params.bits = bits;
     postChargerConfig({
-      target_modules: document.getElementById("chargerTargets").value,
+      target_modules: document.getElementById("chargerRawModule").value,
       params,
-    }, "chargerToast");
+    }, "chargerRawToast");
   });
   document.getElementById("applyCalibration").addEventListener("click", () => {
     const method = document.getElementById("calMethod").value;
