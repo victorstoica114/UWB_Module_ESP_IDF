@@ -50,6 +50,11 @@ another PC or in a fresh Codex session.
 - `components/i2c_bus_service/` owns the shared I2C master bus on GPIO9/GPIO10.
   BNO085 and BQ25792 both use it. BNO085 takes the bus through the realtime lock;
   BQ25792 uses the background lock and yields whenever a realtime waiter exists.
+- `components/wireless_telemetry_service/` owns high-rate TCP telemetry. Keep
+  human-readable diagnostics on the wireless log path, but send dense sensor
+  samples as framed binary (`UWT1`) batches. The BNO085 path skips high-rate
+  enqueueing until TCP telemetry is connected, then sends little-endian integer
+  samples so the ESP32 does not spend CPU formatting text.
 - `components/charger_service/` owns the BQ25792 monitor. Use
   `tools/bq25792_dump.py --target-list tools/ota_targets.local.txt` to inspect
   every charger register byte after OTA. Side-band signals are `INT=GPIO4`,

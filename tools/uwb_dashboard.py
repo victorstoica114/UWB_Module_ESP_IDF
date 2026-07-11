@@ -10,6 +10,7 @@ import queue
 import re
 import socket
 import socketserver
+import struct
 import threading
 import time
 import urllib.error
@@ -41,6 +42,11 @@ SHORT_ACCEL_RE = re.compile(
     r"^A,(?P<module>\d+),(?P<uptime>\d+),(?P<x>-?\d+),(?P<y>-?\d+),"
     r"(?P<z>-?\d+),(?P<accuracy>\d+),(?P<reports>\d+)$"
 )
+TELEMETRY_BINARY_MAGIC = b"UWT1"
+TELEMETRY_BINARY_HEADER_LEN = 12
+TELEMETRY_STREAM_BNO085_ACCEL = 1
+TELEMETRY_ACCEL_SAMPLE_LEN = 21
+TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
 
 
 def classify_component(tag: str, message: str) -> str:
@@ -139,6 +145,73 @@ def parse_port_list(text: str) -> list[int]:
     return ports
 
 
+def binary_telemetry_frame_len(buffer: bytes) -> int | None:
+    if len(buffer) < TELEMETRY_BINARY_HEADER_LEN:
+        return None
+    if not buffer.startswith(TELEMETRY_BINARY_MAGIC):
+        return -1
+
+    version = buffer[4]
+    stream_type = buffer[5]
+    sample_size = buffer[7]
+    count = int.from_bytes(buffer[8:10], "little")
+    payload_len = int.from_bytes(buffer[10:12], "little")
+    if (
+        version != 1
+        or stream_type != TELEMETRY_STREAM_BNO085_ACCEL
+        or sample_size != TELEMETRY_ACCEL_SAMPLE_LEN
+        or payload_len != count * sample_size
+        or payload_len > 4096
+    ):
+        return -1
+
+    frame_len = TELEMETRY_BINARY_HEADER_LEN + payload_len
+    if len(buffer) < frame_len:
+        return None
+    return frame_len
+
+
+def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
+    if len(frame) < TELEMETRY_BINARY_HEADER_LEN:
+        return []
+    if not frame.startswith(TELEMETRY_BINARY_MAGIC):
+        return []
+    if frame[5] != TELEMETRY_STREAM_BNO085_ACCEL:
+        return []
+
+    module_id = int(frame[6])
+    sample_size = int(frame[7])
+    count = int.from_bytes(frame[8:10], "little")
+    payload_len = int.from_bytes(frame[10:12], "little")
+    if sample_size != TELEMETRY_ACCEL_SAMPLE_LEN:
+        return []
+    if payload_len != count * sample_size:
+        return []
+
+    samples: list[dict[str, Any]] = []
+    offset = TELEMETRY_BINARY_HEADER_LEN
+    end = min(len(frame), offset + payload_len)
+    while offset + TELEMETRY_ACCEL_SAMPLE_LEN <= end:
+        uptime_ms, reports, x, y, z, accuracy = TELEMETRY_ACCEL_STRUCT.unpack_from(
+            frame, offset
+        )
+        samples.append(
+            {
+                "module_id": module_id,
+                "host": f"uwb-module-{module_id}",
+                "uptime_ms": int(uptime_ms),
+                "topic": "bno085.accel",
+                "x": x / 1000.0,
+                "y": y / 1000.0,
+                "z": z / 1000.0,
+                "accuracy": int(accuracy),
+                "reports": int(reports),
+            }
+        )
+        offset += TELEMETRY_ACCEL_SAMPLE_LEN
+    return samples
+
+
 class DashboardState:
     def __init__(self, *, max_logs: int) -> None:
         self.lock = threading.Lock()
@@ -181,6 +254,19 @@ class DashboardState:
         parsed["client"] = f"{addr[0]}:{addr[1]}"
         with self.lock:
             self.record_accel_sample_locked(parsed)
+
+    def add_telemetry_samples(
+        self, samples: list[dict[str, Any]], addr: tuple[str, int]
+    ) -> None:
+        if not samples:
+            return
+        now = time.time()
+        client = f"{addr[0]}:{addr[1]}"
+        with self.lock:
+            for sample in samples:
+                sample["received_at"] = now
+                sample["client"] = client
+                self.record_accel_sample_locked(sample)
 
     def parse_line(self, line: str) -> dict[str, Any]:
         match = LOG_RE.match(line)
@@ -462,6 +548,15 @@ class LogHandler(socketserver.BaseRequestHandler):
                 self.server.log_client_connected()
             self.server.state.add_log(text, addr)
 
+        def handle_binary(frame: bytes) -> None:
+            nonlocal client_kind
+            if client_kind is None:
+                client_kind = "telemetry"
+                self.server.telemetry_client_connected()
+            self.server.state.add_telemetry_samples(
+                parse_binary_telemetry_frame(frame), addr
+            )
+
         try:
             while True:
                 try:
@@ -472,7 +567,32 @@ class LogHandler(socketserver.BaseRequestHandler):
                     break
                 buffer += data
                 while True:
+                    if buffer.startswith(TELEMETRY_BINARY_MAGIC):
+                        frame_len = binary_telemetry_frame_len(buffer)
+                        if frame_len is None:
+                            break
+                        if frame_len < 0:
+                            buffer = buffer[1:]
+                            continue
+                        frame = buffer[:frame_len]
+                        buffer = buffer[frame_len:]
+                        handle_binary(frame)
+                        continue
+
                     newline = buffer.find(b"\n")
+                    magic = buffer.find(TELEMETRY_BINARY_MAGIC)
+                    if newline < 0 and magic < 0:
+                        break
+                    if magic > 0 and (newline < 0 or magic < newline):
+                        raw = buffer[:magic]
+                        buffer = buffer[magic:]
+                        for chunk in raw.splitlines():
+                            text = chunk.decode(
+                                "utf-8", errors="replace"
+                            ).strip("\r")
+                            if text:
+                                handle_line(text)
+                        continue
                     if newline < 0:
                         break
                     raw = buffer[:newline]
@@ -481,6 +601,11 @@ class LogHandler(socketserver.BaseRequestHandler):
                     if text:
                         handle_line(text)
         finally:
+            if buffer.startswith(TELEMETRY_BINARY_MAGIC):
+                frame_len = binary_telemetry_frame_len(buffer)
+                if frame_len is not None and frame_len > 0:
+                    handle_binary(buffer[:frame_len])
+                    buffer = buffer[frame_len:]
             if buffer.strip():
                 text = buffer.decode("utf-8", errors="replace").strip()
                 if text:
@@ -499,6 +624,12 @@ class TelemetryHandler(socketserver.BaseRequestHandler):
         self.request.settimeout(30.0)
         buffer = b""
         addr = self.client_address
+
+        def handle_binary(frame: bytes) -> None:
+            self.server.state.add_telemetry_samples(
+                parse_binary_telemetry_frame(frame), addr
+            )
+
         try:
             while True:
                 try:
@@ -509,7 +640,32 @@ class TelemetryHandler(socketserver.BaseRequestHandler):
                     break
                 buffer += data
                 while True:
+                    if buffer.startswith(TELEMETRY_BINARY_MAGIC):
+                        frame_len = binary_telemetry_frame_len(buffer)
+                        if frame_len is None:
+                            break
+                        if frame_len < 0:
+                            buffer = buffer[1:]
+                            continue
+                        frame = buffer[:frame_len]
+                        buffer = buffer[frame_len:]
+                        handle_binary(frame)
+                        continue
+
                     newline = buffer.find(b"\n")
+                    magic = buffer.find(TELEMETRY_BINARY_MAGIC)
+                    if newline < 0 and magic < 0:
+                        break
+                    if magic > 0 and (newline < 0 or magic < newline):
+                        raw = buffer[:magic]
+                        buffer = buffer[magic:]
+                        for chunk in raw.splitlines():
+                            text = chunk.decode(
+                                "utf-8", errors="replace"
+                            ).strip("\r")
+                            if text:
+                                self.server.state.add_telemetry(text, addr)
+                        continue
                     if newline < 0:
                         break
                     raw = buffer[:newline]
@@ -518,6 +674,11 @@ class TelemetryHandler(socketserver.BaseRequestHandler):
                     if text:
                         self.server.state.add_telemetry(text, addr)
         finally:
+            if buffer.startswith(TELEMETRY_BINARY_MAGIC):
+                frame_len = binary_telemetry_frame_len(buffer)
+                if frame_len is not None and frame_len > 0:
+                    handle_binary(buffer[:frame_len])
+                    buffer = buffer[frame_len:]
             if buffer.strip():
                 text = buffer.decode("utf-8", errors="replace").strip()
                 if text:
@@ -2510,7 +2671,7 @@ function renderInfo(snapshot) {
       <td>${renderGpsCell(item)}</td>
       <td>${esc(item.uwb_status)}<br>tx ${esc(item.uwb_tx_count)} / rx ${esc(item.uwb_rx_count)}<br>err ${esc(item.uwb_tx_error_count)}/${esc(item.uwb_rx_error_count)}</td>
       <td>${esc(item.uwb_active_antenna_delay_hex)}<br><span class="muted">NVS ${item.uwb_antenna_delay_from_nvs ? "yes" : "no"}</span></td>
-      <td>log ${esc(item.wireless_log_status)}<br>dropped ${esc(item.wireless_log_dropped)}<br>tel ${esc(item.wireless_telemetry_status || "-")}<br>port ${esc(item.wireless_telemetry_port ?? item.runtime_wireless_telemetry_port ?? "-")}<br>tel drop ${esc(item.wireless_telemetry_dropped ?? "-")}<br><span class="muted">full ${esc(item.wireless_telemetry_drop_full ?? "-")} · mutex ${esc(item.wireless_telemetry_drop_mutex ?? "-")} · fmt ${esc(item.wireless_telemetry_drop_format ?? "-")}<br>qmax ${esc(item.wireless_telemetry_queue_high_water ?? "-")}</span><br>tel err ${esc(item.wireless_telemetry_last_error ?? "-")}<br>age ${fmtAge(item.status_updated_at)}</td>
+      <td>log ${esc(item.wireless_log_status)}<br>dropped ${esc(item.wireless_log_dropped)}<br>tel ${esc(item.wireless_telemetry_status || "-")}<br>port ${esc(item.wireless_telemetry_port ?? item.runtime_wireless_telemetry_port ?? "-")}<br>tel drop ${esc(item.wireless_telemetry_dropped ?? "-")}<br><span class="muted">full ${esc(item.wireless_telemetry_drop_full ?? "-")} · mutex ${esc(item.wireless_telemetry_drop_mutex ?? "-")} · fmt ${esc(item.wireless_telemetry_drop_format ?? "-")}<br>qmax ${esc(item.wireless_telemetry_queue_high_water ?? "-")}<br>bin ${esc(item.wireless_telemetry_binary_frames ?? "-")}f / ${esc(item.wireless_telemetry_binary_samples ?? "-")}s · text ${esc(item.wireless_telemetry_text_frames ?? "-")}</span><br>tel err ${esc(item.wireless_telemetry_last_error ?? "-")}<br>age ${fmtAge(item.status_updated_at)}</td>
       <td>${renderBatteryCell(item)}</td>
     </tr>`).join("");
   renderUwbRadio(state.statuses[0] || {});

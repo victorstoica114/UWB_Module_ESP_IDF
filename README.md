@@ -298,17 +298,33 @@ running, GPIO15 interrupts, rate changes, and stop requests all wake it with
 FreeRTOS task notifications (`INT`, `CONFIG`, `STOP`).
 
 The dashboard Graphs tab plots accelerometer samples as soon as their wireless
-log lines arrive. Its `Timebase` control only changes the visible time window,
+telemetry arrives. Its `Timebase` control only changes the visible time window,
 oscilloscope-style. `Samples/s` is the actual BNO085/report export rate; the
 dashboard applies it as `bno085_sample_hz`, which updates runtime config and
 sets both `bno085_accel_interval_ms` and `bno085_log_interval_ms`. The running
 BNO085 task picks up rate changes live by sending a new `Set Feature` command,
 so no reboot is needed. The BNO08X datasheet lists
 `Accelerometer` at a maximum configurable rate of 500 Hz, although I2C bandwidth
-and wireless log throughput still need to be considered in practice.
-High-rate accelerometer telemetry uses a compact text frame
-`A,module,uptime_ms,x_milli,y_milli,z_milli,accuracy,reports`; the dashboard also
-keeps support for the older verbose `T,...,bno085.accel,...` frame.
+and wireless throughput still need to be considered in practice.
+
+High-rate accelerometer telemetry is intentionally handled like a small sensor
+stream, not like human log text. The BNO085 task does not enqueue accelerometer
+samples until the telemetry TCP connection is established, so startup transients
+do not fill the queue. Once connected, samples are batched into binary frames:
+
+```text
+header: "UWT1", version=1, stream=1, module_id, sample_size=21,
+        count_le16, payload_len_le16
+sample: uptime_ms_le32, reports_le32,
+        x_milli_le32, y_milli_le32, z_milli_le32, accuracy_u8
+```
+
+The dashboard also keeps support for the older compact text frame
+`A,module,uptime_ms,x_milli,y_milli,z_milli,accuracy,reports` and the older
+verbose `T,...,bno085.accel,...` frame, but normal high-rate data should use the
+binary `UWT1` stream. `/status` exposes `wireless_telemetry_binary_frames`,
+`wireless_telemetry_binary_samples`, and `wireless_telemetry_text_frames` so the
+active transport is visible during tests.
 
 The GPS/GNSS path is disabled by default and can be enabled live with runtime
 config (`gps=1`) or from the dashboard Settings tab. When disabled, GPIO47 is
