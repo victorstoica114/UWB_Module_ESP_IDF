@@ -1697,7 +1697,7 @@ th { color: var(--muted); font-weight: 700; }
                 <label for="calSamples">Samples</label>
                 <input id="calSamples" value="40" type="number" min="1" step="1" inputmode="numeric">
                 <label for="calAdjustModules">Adjust modules</label>
-                <input id="calAdjustModules" placeholder="blank = calibration modules">
+                <input id="calAdjustModules" placeholder="blank = selected target, or calibration modules">
                 <label for="calAutoApply">Auto apply</label>
                 <div class="checkbox-row"><input id="calAutoApply" type="checkbox" checked><span>write antenna delay</span></div>
                 <label for="calMinApplyDtu">Min apply DTU</label>
@@ -3848,17 +3848,25 @@ class DashboardHttpServer(ThreadingHTTPServer):
             raise RuntimeError(f"No unique live target for module {module_id}")
         return target[0]
 
-    def calibration_setup_targets(
+    def live_nonparticipant_modules(self, participant_ids: list[int]) -> list[int]:
+        statuses = self.current_status_by_module()
+        return sorted(
+            module_id
+            for module_id, status in statuses.items()
+            if module_id not in participant_ids and status.get("target")
+        )
+
+    def default_calibration_adjust_ids(
         self, requested_targets: Any, participant_ids: list[int]
-    ) -> Any:
+    ) -> list[int]:
         if requested_targets in (None, "", "all"):
-            return requested_targets
+            return participant_ids
         requested_ids = parse_module_ids(requested_targets)
-        merged_ids = requested_ids[:]
-        for module_id in participant_ids:
-            if module_id not in merged_ids:
-                merged_ids.append(module_id)
-        return merged_ids
+        participant_set = set(participant_ids)
+        adjust_ids = [
+            module_id for module_id in requested_ids if module_id in participant_set
+        ]
+        return adjust_ids or participant_ids
 
     def collect_calibration_samples(
         self,
@@ -3997,18 +4005,40 @@ class DashboardHttpServer(ThreadingHTTPServer):
             raise RuntimeError(f"unsupported calibration method: {method}")
         if any(module_id <= 0 for module_id in participant_ids):
             raise RuntimeError("invalid calibration module ID(s)")
-        setup_targets = self.calibration_setup_targets(
-            payload.get("target_modules"), participant_ids
-        )
+        setup_targets = participant_ids
 
         params["mode"] = "calibration"
         params["cal_method"] = method
         params["cal_samples"] = str(sample_count)
         params.setdefault("cal_summary", str(sample_count))
+        params["uwb"] = "1"
         params["reboot"] = "1"
 
+        excluded_ids = self.live_nonparticipant_modules(participant_ids)
+        excluded_results: list[dict[str, Any]] = []
+        if excluded_ids:
+            excluded_params = dict(params)
+            excluded_params["uwb"] = "0"
+            if progress is not None:
+                progress(
+                    "holding excluded UWB modules in reset...",
+                    {"excluded_modules": excluded_ids},
+                    "configuring",
+                )
+            excluded_results = self.apply_runtime_config(excluded_params, excluded_ids)
+            if not all(item.get("ok") for item in excluded_results):
+                return {
+                    "ok": False,
+                    "summary": "excluded module setup failed",
+                    "results": excluded_results,
+                }
+
         if progress is not None:
-            progress("configuring calibration mode...", {"method": method}, "configuring")
+            progress(
+                "configuring calibration participants...",
+                {"method": method, "participants": participant_ids},
+                "configuring",
+            )
         config_results = self.apply_runtime_config(
             params, setup_targets
         )
@@ -4072,6 +4102,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 "directed": self.directed_stats_json(samples),
                 "corrections": corrections,
                 "apply_results": apply_results,
+                "excluded_results": excluded_results,
                 "config_results": config_results,
             }
 
@@ -4124,7 +4155,9 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 "error_dtu": round(error_dtu, 2),
             }
 
-        adjust_ids = parse_module_ids(payload.get("adjust_modules")) or ids
+        adjust_ids = parse_module_ids(
+            payload.get("adjust_modules")
+        ) or self.default_calibration_adjust_ids(payload.get("target_modules"), ids)
         for module_id in adjust_ids:
             if module_id not in ids:
                 raise RuntimeError(
@@ -4192,6 +4225,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
             "reference_checks": reference_checks,
             "corrections": correction_details,
             "apply_results": apply_results,
+            "excluded_results": excluded_results,
             "config_results": config_results,
         }
 
