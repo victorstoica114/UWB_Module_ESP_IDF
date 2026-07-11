@@ -629,6 +629,10 @@ select, input {
   padding: 6px 8px;
   min-height: 31px;
 }
+select.mixed-value, input.mixed-value {
+  border-color: rgba(179, 91, 0, 0.55);
+  background: #fffaf2;
+}
 input[type="checkbox"] {
   min-height: 0;
   width: 17px;
@@ -684,6 +688,16 @@ button.danger { color: var(--red); }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { padding: 8px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 th { color: var(--muted); font-weight: 700; }
+.charger-status-table { table-layout: fixed; }
+.charger-status-table th,
+.charger-status-table td { overflow-wrap: anywhere; }
+.charger-status-table .col-module { width: 13%; }
+.charger-status-table .col-power { width: 13%; }
+.charger-status-table .col-adc { width: 10%; }
+.charger-status-table .col-limits { width: 31%; }
+.charger-status-table .col-measurements { width: 22%; }
+.charger-status-table .col-write { width: 11%; }
+.charger-power-cell { font-size: 12px; line-height: 1.35; }
 .ok { color: var(--green); font-weight: 700; }
 .warn { color: var(--orange); font-weight: 700; }
 .bad { color: var(--red); font-weight: 700; }
@@ -695,6 +709,15 @@ th { color: var(--muted); font-weight: 700; }
 .form-grid { display: grid; grid-template-columns: 160px minmax(160px, 1fr); gap: 8px 10px; align-items: center; }
 .form-grid label { color: var(--muted); font-size: 13px; }
 .form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.field-note {
+  min-height: 31px;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+}
+.field-note.warn { color: var(--orange); font-weight: 700; }
 .param-legend {
   margin-top: 12px;
   padding-top: 10px;
@@ -984,7 +1007,15 @@ th { color: var(--muted); font-weight: 700; }
           <div>
             <div class="section">
               <h2>Live Charger Status</h2>
-              <table>
+              <table class="charger-status-table">
+                <colgroup>
+                  <col class="col-module">
+                  <col class="col-power">
+                  <col class="col-adc">
+                  <col class="col-limits">
+                  <col class="col-measurements">
+                  <col class="col-write">
+                </colgroup>
                 <thead>
                   <tr>
                     <th>Module</th><th>Power</th><th>ADC</th><th>Limits</th><th>Measurements</th><th>Last Write</th>
@@ -1021,6 +1052,8 @@ th { color: var(--muted); font-weight: 700; }
                   <option value="4">module 4</option>
                   <option value="5">module 5</option>
                 </select>
+                <label>Loaded</label>
+                <div id="chargerSelectionStatus" class="field-note">waiting for status</div>
                 <label for="chargerAdcEnabled">ADC</label>
                 <div class="checkbox-row"><input id="chargerAdcEnabled" type="checkbox"><span>enabled</span></div>
                 <label for="chargerAdcRate">Rate</label>
@@ -1995,6 +2028,15 @@ function fmtMa(value) {
   return Number.isFinite(number) ? `${number.toFixed(0)} mA` : "-";
 }
 
+function fmtIbat(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return `<span class="muted">-</span>`;
+  const className = number > 0 ? "ok" : (number < 0 ? "bad" : "muted");
+  const label = number > 0 ? "charging" : (number < 0 ? "discharging" : "idle");
+  const sign = number > 0 ? "+" : "";
+  return `<span class="${className}" title="${label}">${sign}${number.toFixed(0)} mA</span>`;
+}
+
 function fmtSoc(item) {
   const number = Number(item?.charger_battery_soc_percent);
   return item?.charger_battery_soc_valid && Number.isFinite(number)
@@ -2232,7 +2274,7 @@ function renderBatteryCell(item) {
     VBAT ${fmtMv(item.charger_vbat_mv)} · SOC ${fmtSoc(item)}<br>
     VSYS ${fmtMv(item.charger_vsys_mv)} · VBUS ${fmtMv(item.charger_vbus_mv)}<br>
     IBUS ${fmtMa(item.charger_ibus_ma)}<br>
-    IBAT ${fmtMa(item.charger_ibat_ma)} · TDIE ${fmtMaybeNumber(item.charger_tdie_c, 1)} C<br>
+    IBAT ${fmtIbat(item.charger_ibat_ma)} · TDIE ${fmtMaybeNumber(item.charger_tdie_c, 1)} C<br>
     TS ext ${fmtMaybeNumber(item.charger_ts_percent, 2)}%REGN <span class="${ts.className}">${ts.text}</span>${esc(tsFlagText)}<br>
     <span class="muted">${pinLine}</span><br>
     <span class="muted">REG48 ${esc(item.charger_part_info || "-")}
@@ -2281,14 +2323,13 @@ function renderChargerRows(statuses) {
     const tsFlagText = tsFlags.length ? ` · flags ${tsFlags.join(",")}` : "";
     return `<tr>
       <td><b>${esc(item.hostname)}</b><br><span class="muted">${esc(item.ip || item.target || "")}</span></td>
-      <td><span class="${powerClass}">${item.charger_present ? "BQ25792 present" : "not found"}</span><br>
-        Board PG ${fmtGpioLevel(item.charger_pg_gpio_level)} ${item.charger_pg_asserted ? "asserted" : ""}<br>
-        BQ PG_STAT ${item.charger_pg_stat ? "1" : "0"} · INT ${fmtGpioLevel(item.charger_int_gpio_level)} / ${esc(item.charger_int_irq_count ?? "-")}<br>
-        <span class="muted">REG48 ${esc(item.charger_part_info || "-")}
-          · reads ${esc(item.charger_read_count ?? "-")}
-          (${esc(item.charger_full_read_count ?? "-")}/${esc(item.charger_quick_read_count ?? "-")} full/quick)
-          · ${esc(item.charger_last_read_duration_ms ?? "-")} ms
-          · age ${fmtAgeMs(item.charger_last_update_age_ms)}</span></td>
+      <td class="charger-power-cell"><span class="${powerClass}">${item.charger_present ? "BQ present" : "not found"}</span><br>
+        PG ${fmtGpioLevel(item.charger_pg_gpio_level)}${item.charger_pg_asserted ? " asserted" : ""}<br>
+        STAT ${item.charger_pg_stat ? "1" : "0"} · INT ${fmtGpioLevel(item.charger_int_gpio_level)}<br>
+        irq ${esc(item.charger_int_irq_count ?? "-")}<br>
+        <span class="muted">REG48 ${esc(item.charger_part_info || "-")}<br>
+          reads ${esc(item.charger_read_count ?? "-")} · ${esc(item.charger_last_read_duration_ms ?? "-")} ms<br>
+          age ${fmtAgeMs(item.charger_last_update_age_ms)}</span></td>
       <td><span class="${adcClass}">ADC ${item.charger_adc_enabled ? "on" : "off"}</span><br>
         sample ${esc(item.charger_adc_sample ?? "-")} · ${item.charger_adc_continuous ? "continuous" : "one shot"}<br>
         avg ${item.charger_adc_running_average ? "on" : "off"} · EN_IBAT ${item.charger_ibat_discharge_sense_enabled ? "on" : "off"}<br>
@@ -2310,7 +2351,7 @@ function renderChargerRows(statuses) {
       <td>SOC ${fmtSoc(item)} · VBAT ${fmtMv(item.charger_vbat_mv)}<br>
         VBUS ${fmtMv(item.charger_vbus_mv)} · VSYS ${fmtMv(item.charger_vsys_mv)}<br>
         VAC1 ${fmtMv(item.charger_vac1_mv)}<br>
-        IBUS ${fmtMa(item.charger_ibus_ma)} · IBAT ${fmtMa(item.charger_ibat_ma)}<br>
+        IBUS ${fmtMa(item.charger_ibus_ma)} · IBAT ${fmtIbat(item.charger_ibat_ma)}<br>
         TS ext ${fmtMaybeNumber(item.charger_ts_percent, 2)}%REGN <span class="${ts.className}">${ts.text}</span>${esc(tsFlagText)}<br>
         TDIE ${fmtMaybeNumber(item.charger_tdie_c, 1)} C</td>
       <td>writes ${esc(item.charger_write_count ?? "-")} · err ${esc(item.charger_write_error_count ?? "-")}<br>
@@ -2403,6 +2444,7 @@ function renderInfo(snapshot) {
   renderCharger(state.statuses);
   scheduleAccelRender();
   hydrateSettingsFromStatus(state.statuses[0] || {});
+  hydrateChargerSettings();
 }
 
 function setSettingIfFresh(id, value) {
@@ -2452,24 +2494,6 @@ function hydrateSettingsFromStatus(item) {
   setSettingIfFresh("uwbCalMaxMs", item.runtime_calibration_max_interval_ms);
   setSettingIfFresh("uwbCalRxMs", item.runtime_calibration_rx_slice_ms);
   setSettingIfFresh("uwbAntennaDelayHex", item.uwb_configured_antenna_delay_hex || item.uwb_active_antenna_delay_hex);
-  setSettingIfFresh("chargerAdcEnabled", item.charger_adc_enabled);
-  setSettingIfFresh("chargerAdcRate", item.charger_adc_continuous ? "continuous" : "oneshot");
-  setSettingIfFresh("chargerAdcSample", item.charger_adc_sample ?? 2);
-  setSettingIfFresh("chargerAdcAvg", item.charger_adc_running_average);
-  setSettingIfFresh("chargerChargeEnabled", item.charger_charge_enabled);
-  setSettingIfFresh("chargerMinimalSystemMv", item.charger_minimal_system_voltage_mv);
-  setSettingIfFresh("chargerChargeVoltageMv", item.charger_charge_voltage_limit_mv);
-  setSettingIfFresh("chargerChargeCurrentMa", item.charger_charge_current_limit_ma);
-  setSettingIfFresh("chargerInputVoltageMv", item.charger_input_voltage_limit_mv);
-  setSettingIfFresh("chargerInputCurrentMa", item.charger_input_current_limit_ma);
-  const timer = chargerTimerConfig(item);
-  setSettingIfFresh("chargerFastTimerEnabled", timer.fastEnabled);
-  setSettingIfFresh("chargerFastTimerHours", timer.fastHours);
-  setSettingIfFresh("chargerPrechargeTimerEnabled", timer.prechargeEnabled);
-  setSettingIfFresh("chargerPrechargeTimerMinutes", timer.prechargeMinutes);
-  setSettingIfFresh("chargerTrickleTimerEnabled", timer.trickleEnabled);
-  setSettingIfFresh("chargerTopoffTimerMinutes", timer.topoffMinutes);
-  setSettingIfFresh("chargerTimer2xEnabled", timer.timer2xEnabled);
 }
 
 function renderUwbRadio(item) {
@@ -2642,6 +2666,201 @@ async function postChargerConfig(payload, toastId) {
 }
 
 function settingKey(id) { return `uwbDash.setting.${id}`; }
+
+const chargerAdcFields = [
+  {id: "chargerAdcEnabled", param: "adc", label: "ADC", get: item => item.charger_adc_enabled},
+  {id: "chargerAdcRate", param: "adc_rate", label: "ADC rate", get: item => item.charger_adc_continuous ? "continuous" : "oneshot"},
+  {id: "chargerAdcSample", param: "adc_sample", label: "ADC sample", get: item => item.charger_adc_sample ?? 2},
+  {id: "chargerAdcAvg", param: "adc_avg", label: "ADC average", get: item => item.charger_adc_running_average},
+];
+const chargerLimitFields = [
+  {id: "chargerChargeEnabled", param: "charge_enabled", label: "Charging", get: item => item.charger_charge_enabled},
+  {id: "chargerMinimalSystemMv", param: "minimal_system_voltage_mv", label: "VSYSMIN", get: item => item.charger_minimal_system_voltage_mv},
+  {id: "chargerChargeVoltageMv", param: "charge_voltage_mv", label: "Charge voltage", get: item => item.charger_charge_voltage_limit_mv},
+  {id: "chargerChargeCurrentMa", param: "charge_current_ma", label: "Charge current", get: item => item.charger_charge_current_limit_ma},
+  {id: "chargerInputVoltageMv", param: "input_voltage_mv", label: "VINDPM", get: item => item.charger_input_voltage_limit_mv},
+  {id: "chargerInputCurrentMa", param: "input_current_ma", label: "IINDPM", get: item => item.charger_input_current_limit_ma},
+];
+const chargerTimerFields = [
+  {id: "chargerFastTimerEnabled", param: "fast_charge_timer_enabled", label: "Fast timer", get: item => chargerTimerConfig(item).fastEnabled},
+  {id: "chargerFastTimerHours", param: "fast_charge_timer_hours", label: "Fast duration", get: item => chargerTimerConfig(item).fastHours},
+  {id: "chargerPrechargeTimerEnabled", param: "precharge_timer_enabled", label: "Pre-charge timer", get: item => chargerTimerConfig(item).prechargeEnabled},
+  {id: "chargerPrechargeTimerMinutes", param: "precharge_timer_minutes", label: "Pre-charge duration", get: item => chargerTimerConfig(item).prechargeMinutes},
+  {id: "chargerTrickleTimerEnabled", param: "trickle_timer_enabled", label: "Trickle timer", get: item => chargerTimerConfig(item).trickleEnabled},
+  {id: "chargerTopoffTimerMinutes", param: "topoff_timer_minutes", label: "Top-off timer", get: item => chargerTimerConfig(item).topoffMinutes},
+  {id: "chargerTimer2xEnabled", param: "timer_2x_enabled", label: "TMR2X", get: item => chargerTimerConfig(item).timer2xEnabled},
+];
+
+function chargerConfigFields() {
+  return [...chargerAdcFields, ...chargerLimitFields, ...chargerTimerFields];
+}
+
+function legacyChargerConfigSettingIds() {
+  return chargerConfigFields().map(field => field.id);
+}
+
+function clearLegacyChargerConfigSettings() {
+  for (const id of legacyChargerConfigSettingIds()) {
+    localStorage.removeItem(settingKey(id));
+  }
+}
+
+function controlValueToken(value) {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "boolean") return value ? "1" : "0";
+  return String(value);
+}
+
+function chargerStatusPresent(item) {
+  return item && item.module_id && item.charger_present !== false &&
+    (item.charger_reg0f_charger_control_0 !== undefined ||
+     item.charger_charge_enabled !== undefined ||
+     item.charger_adc_enabled !== undefined);
+}
+
+function selectedChargerStatuses() {
+  const target = document.getElementById("chargerTargets")?.value || "all";
+  const items = state.statuses.filter(chargerStatusPresent);
+  if (target === "all") return items;
+  const moduleId = Number(target);
+  return items.filter(item => Number(item.module_id) === moduleId);
+}
+
+function commonChargerValue(items, field) {
+  if (!items.length) return {mixed: false, value: undefined};
+  const values = items.map(item => field.get(item));
+  if (values.some(value => value === undefined || value === null)) {
+    return {mixed: true, value: undefined};
+  }
+  const first = controlValueToken(values[0]);
+  const mixed = values.some(value => controlValueToken(value) !== first);
+  return {mixed, value: mixed ? undefined : values[0]};
+}
+
+function setChargerControlFromStatus(field, value, mixed) {
+  const el = document.getElementById(field.id);
+  if (!el || el.dataset.dirty === "1") return;
+  el.dataset.mixed = mixed ? "1" : "0";
+  el.dataset.loadedValue = mixed ? "" : controlValueToken(value);
+  el.classList.toggle("mixed-value", mixed);
+  if (el.type === "checkbox") {
+    el.indeterminate = mixed;
+    if (!mixed) el.checked = Boolean(value);
+    return;
+  }
+  if (mixed) {
+    el.value = "";
+    el.placeholder = "mixed";
+  } else {
+    el.value = value === undefined || value === null ? "" : String(value);
+    el.placeholder = "";
+  }
+}
+
+function hydrateChargerSettings() {
+  const items = selectedChargerStatuses();
+  const target = document.getElementById("chargerTargets")?.value || "all";
+  const status = document.getElementById("chargerSelectionStatus");
+  const mixedLabels = [];
+  for (const field of chargerConfigFields()) {
+    const common = commonChargerValue(items, field);
+    if (common.mixed) mixedLabels.push(field.label);
+    setChargerControlFromStatus(field, common.value, common.mixed);
+  }
+  if (!status) return;
+  if (!items.length) {
+    status.textContent = `no live charger status for ${target === "all" ? "selected modules" : `M${target}`}`;
+    status.className = "field-note warn";
+    return;
+  }
+  const modules = items.map(item => `M${item.module_id}`).join(", ");
+  if (mixedLabels.length) {
+    status.textContent = `loaded ${modules}; mixed: ${mixedLabels.join(", ")}`;
+    status.className = "field-note warn";
+  } else {
+    status.textContent = `loaded ${modules}`;
+    status.className = "field-note";
+  }
+}
+
+function clearChargerDirty(fields = chargerConfigFields()) {
+  for (const field of fields) {
+    const el = document.getElementById(field.id);
+    if (!el) continue;
+    el.dataset.dirty = "0";
+  }
+}
+
+function markChargerControlDirty(event) {
+  const el = event.currentTarget;
+  el.dataset.dirty = "1";
+  el.dataset.mixed = "0";
+  el.classList.remove("mixed-value");
+  if (el.type === "checkbox") el.indeterminate = false;
+}
+
+function wireChargerDirtyTracking() {
+  for (const field of chargerConfigFields()) {
+    const el = document.getElementById(field.id);
+    if (!el) continue;
+    el.dataset.dirty = "0";
+    el.addEventListener("input", markChargerControlDirty);
+    el.addEventListener("change", markChargerControlDirty);
+  }
+  const targets = document.getElementById("chargerTargets");
+  if (targets) {
+    targets.addEventListener("change", () => {
+      clearChargerDirty();
+      hydrateChargerSettings();
+    });
+  }
+}
+
+function readChargerControlParam(field) {
+  const el = document.getElementById(field.id);
+  if (!el || el.dataset.dirty !== "1") return null;
+  if (el.type === "checkbox") {
+    return {[field.param]: el.checked ? "1" : "0"};
+  }
+  if (!el.value || !el.checkValidity()) {
+    return {error: `${field.label} is not valid`};
+  }
+  return {[field.param]: el.value};
+}
+
+function collectDirtyChargerParams(fields) {
+  const params = {};
+  const labels = [];
+  for (const field of fields) {
+    const item = readChargerControlParam(field);
+    if (item === null) continue;
+    if (item.error) return {error: item.error, params: {}, labels: []};
+    params[field.param] = item[field.param];
+    labels.push(field.label);
+  }
+  return {params, labels};
+}
+
+async function postDirtyChargerConfig(fields, toastId) {
+  const collected = collectDirtyChargerParams(fields);
+  if (collected.error) {
+    setToast(toastId, collected.error, "bad");
+    return;
+  }
+  if (!Object.keys(collected.params).length) {
+    setToast(toastId, "No charger changes to apply", "");
+    return;
+  }
+  const data = await postChargerConfig({
+    target_modules: document.getElementById("chargerTargets").value,
+    params: collected.params,
+  }, toastId);
+  if (apiResponseOk(data)) {
+    clearChargerDirty(fields);
+    setTimeout(hydrateChargerSettings, 300);
+  }
+}
+
 function persistedSettingIds() {
   return [
     "runtimeTargets", "runtimeMode", "runtimeTag", "runtimeAnchors", "runtimeReboot",
@@ -2654,15 +2873,7 @@ function persistedSettingIds() {
     "uwbDtFinalDelayMs", "uwbDtReportDelayMs", "uwbDtAutoRxDelayUus",
     "uwbCalSummary", "uwbCalMinMs", "uwbCalMaxMs", "uwbCalRxMs",
     "uwbAntennaDelayHex", "uwbAdvancedReboot",
-    "chargerTargets", "chargerRawModule", "chargerAdcEnabled",
-    "chargerAdcRate", "chargerAdcSample", "chargerAdcAvg",
-    "chargerChargeEnabled", "chargerMinimalSystemMv", "chargerChargeVoltageMv",
-    "chargerChargeCurrentMa", "chargerInputVoltageMv",
-    "chargerInputCurrentMa", "chargerFastTimerEnabled",
-    "chargerFastTimerHours", "chargerPrechargeTimerEnabled",
-    "chargerPrechargeTimerMinutes", "chargerTrickleTimerEnabled",
-    "chargerTopoffTimerMinutes", "chargerTimer2xEnabled",
-    "chargerShowRawTools", "chargerRawReg", "chargerRawValue",
+    "chargerTargets", "chargerRawModule", "chargerShowRawTools", "chargerRawReg", "chargerRawValue",
     "chargerRawMask", "chargerRawBits",
     "calTargets", "calMethod", "calRef", "calDut", "calKnownCm", "calThree",
     "calD01Cm", "calD02Cm", "calD12Cm", "calSamples",
@@ -2705,8 +2916,10 @@ function updateChargerRawVisibility() {
 }
 
 function wireSettings() {
+  clearLegacyChargerConfigSettings();
   restoreSettings();
   wireSettingPersistence();
+  wireChargerDirtyTracking();
   updateChargerRawVisibility();
   const chargerShowRawTools = document.getElementById("chargerShowRawTools");
   if (chargerShowRawTools) {
@@ -2806,15 +3019,7 @@ function wireSettings() {
   });
   document.getElementById("chargerRawModule").addEventListener("change", renderChargerRegisters);
   document.getElementById("applyChargerAdc").addEventListener("click", () => {
-    postChargerConfig({
-      target_modules: document.getElementById("chargerTargets").value,
-      params: {
-        adc: document.getElementById("chargerAdcEnabled").checked ? "1" : "0",
-        adc_rate: document.getElementById("chargerAdcRate").value,
-        adc_sample: document.getElementById("chargerAdcSample").value,
-        adc_avg: document.getElementById("chargerAdcAvg").checked ? "1" : "0",
-      }
-    }, "chargerToast");
+    postDirtyChargerConfig(chargerAdcFields, "chargerToast");
   });
   document.getElementById("disableChargerWatchdog").addEventListener("click", () => {
     postChargerConfig({
@@ -2829,33 +3034,10 @@ function wireSettings() {
     }, "chargerToast");
   });
   document.getElementById("applyChargerLimits").addEventListener("click", () => {
-    const params = {
-      charge_enabled: document.getElementById("chargerChargeEnabled").checked ? "1" : "0",
-      minimal_system_voltage_mv: document.getElementById("chargerMinimalSystemMv").value,
-      charge_voltage_mv: document.getElementById("chargerChargeVoltageMv").value,
-      charge_current_ma: document.getElementById("chargerChargeCurrentMa").value,
-      input_voltage_mv: document.getElementById("chargerInputVoltageMv").value,
-      input_current_ma: document.getElementById("chargerInputCurrentMa").value,
-    };
-    postChargerConfig({
-      target_modules: document.getElementById("chargerTargets").value,
-      params,
-    }, "chargerToast");
+    postDirtyChargerConfig(chargerLimitFields, "chargerToast");
   });
   document.getElementById("applyChargerTimers").addEventListener("click", () => {
-    const params = {
-      fast_charge_timer_enabled: document.getElementById("chargerFastTimerEnabled").checked ? "1" : "0",
-      fast_charge_timer_hours: document.getElementById("chargerFastTimerHours").value,
-      precharge_timer_enabled: document.getElementById("chargerPrechargeTimerEnabled").checked ? "1" : "0",
-      precharge_timer_minutes: document.getElementById("chargerPrechargeTimerMinutes").value,
-      trickle_timer_enabled: document.getElementById("chargerTrickleTimerEnabled").checked ? "1" : "0",
-      topoff_timer_minutes: document.getElementById("chargerTopoffTimerMinutes").value,
-      timer_2x_enabled: document.getElementById("chargerTimer2xEnabled").checked ? "1" : "0",
-    };
-    postChargerConfig({
-      target_modules: document.getElementById("chargerTargets").value,
-      params,
-    }, "chargerToast");
+    postDirtyChargerConfig(chargerTimerFields, "chargerToast");
   });
   document.getElementById("applyChargerRaw").addEventListener("click", () => {
     const params = {
