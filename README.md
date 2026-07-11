@@ -372,6 +372,37 @@ voltage/current, and input voltage/current using human units (`mV`/`mA`). It
 also has a guarded raw register write path (`reg`, `value`, optional
 `mask`/`bits`, and `confirm=1`) for datasheet-level experiments.
 
+Dashboard charger ADC controls affect measurement behavior, not charging loops
+directly:
+
+| Control | BQ25792 field | Effect |
+| --- | --- | --- |
+| `ADC enabled` | `ADC_EN` in `REG2E` | Turns the internal ADC on/off. When off, `VBAT`, `VSYS`, `VBUS`, `IBAT`, `IBUS`, temperature, D+, and D- readings may be stale or unavailable. |
+| `Rate` | `ADC_RATE` in `REG2E` | `continuous` keeps conversions running in the background. `one shot` performs a conversion sequence on request and then stops. |
+| `Sample` | `ADC_SAMPLE[1:0]` in `REG2E` | Selects conversion time and effective resolution: `15 bit / 24 ms`, `14 bit / 12 ms`, `13 bit / 6 ms`, or `12 bit / 3 ms`. Slower settings are quieter; faster settings are noisier. |
+| `Average` | `ADC_AVG` in `REG2E` | Enables the charger's running average. This stabilizes displayed values, but it makes fast transients less visible. |
+
+When ADC is enabled from the dashboard, firmware also clears the ADC disable
+registers `REG2F` and `REG30`, so all exposed ADC channels are measured. The
+dashboard default is `13 bit / 6 ms`, which is a practical middle ground for
+slow battery telemetry.
+
+Dashboard charger limit controls affect the charger and NVDC power path:
+
+| Control | BQ25792 field | Step | Effect |
+| --- | --- | --- | --- |
+| `VSYSMIN mV` | `VSYSMIN[5:0]` in `REG00` | `250 mV` | Minimum target for the `SYS` rail when the battery is below the configured system minimum. Too low can make the system less robust on a depleted cell; too high can reduce available charge current. |
+| `Charge voltage mV` | `VREG[10:0]` in `REG01..REG02` | `10 mV` | Final battery regulation voltage. For a normal 1S Li-Po this is typically around `4200 mV`; setting this too high is unsafe for the cell. |
+| `Charge current mA` | `ICHG[8:0]` in `REG03..REG04` | `10 mA` | Maximum battery charge current. The actual current can still be reduced by thermal regulation, input limits, or system-load priority. |
+| `Input voltage mV` | `VINDPM[7:0]` in `REG05` | `100 mV` | Input voltage dynamic power management threshold. If `VBUS` droops below this threshold, the charger backs off to avoid collapsing the adapter/USB source. |
+| `Input current mA` | `IINDPM[8:0]` in `REG06..REG07` | `10 mA` | Maximum current drawn from the input source. System load is served first; the remaining budget is available for battery charging. |
+
+In short: `Charge voltage` and `Charge current` define the battery charge target.
+`Input voltage` and `Input current` define how aggressively the board may load
+the external source. `VSYSMIN` protects the system rail when the battery is low.
+All high-level charger policy values are stored in ESP32 NVS and reapplied once
+at charger startup.
+
 Recommended workflow from this folder, in the ESP-IDF v6.0.2 terminal:
 
 ```bat

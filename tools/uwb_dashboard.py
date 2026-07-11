@@ -694,6 +694,21 @@ th { color: var(--muted); font-weight: 700; }
 .form-grid { display: grid; grid-template-columns: 160px minmax(160px, 1fr); gap: 8px 10px; align-items: center; }
 .form-grid label { color: var(--muted); font-size: 13px; }
 .form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.param-legend {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 7px;
+}
+.param-legend div {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr);
+  gap: 9px;
+  align-items: baseline;
+}
+.param-legend b { font-size: 12px; }
+.param-legend span { color: var(--muted); font-size: 12px; line-height: 1.3; }
 .reg-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(142px, 1fr));
@@ -1016,12 +1031,18 @@ th { color: var(--muted); font-weight: 700; }
                   <option value="2" selected>13 bit / 6 ms</option>
                   <option value="3">12 bit / 3 ms</option>
                 </select>
-                <label for="chargerAdcAvg">Average</label>
-                <div class="checkbox-row"><input id="chargerAdcAvg" type="checkbox"><span>running average</span></div>
-              </div>
-              <div class="form-actions">
-                <button class="primary" id="applyChargerAdc">Apply ADC</button>
-                <button id="disableChargerWatchdog">Disable Watchdog</button>
+	                <label for="chargerAdcAvg">Average</label>
+	                <div class="checkbox-row"><input id="chargerAdcAvg" type="checkbox"><span>running average</span></div>
+	              </div>
+	              <div class="param-legend">
+	                <div><b>ADC</b><span>Enables internal charger measurements for voltage, current, temperature, D+ and D-.</span></div>
+	                <div><b>Rate</b><span>Continuous keeps converting; one shot converts once per request.</span></div>
+	                <div><b>Sample</b><span>Higher bit depth is slower and quieter; lower bit depth is faster and noisier.</span></div>
+	                <div><b>Average</b><span>Smooths readings, but makes short changes less visible.</span></div>
+	              </div>
+	              <div class="form-actions">
+	                <button class="primary" id="applyChargerAdc">Apply ADC</button>
+	                <button id="disableChargerWatchdog">Disable Watchdog</button>
                 <button id="refreshCharger">Refresh</button>
               </div>
               <div id="chargerToast" class="toast"></div>
@@ -1037,12 +1058,19 @@ th { color: var(--muted); font-weight: 700; }
                 <input id="chargerChargeCurrentMa" type="number" min="50" max="5000" step="10">
                 <label for="chargerInputVoltageMv">Input voltage mV</label>
                 <input id="chargerInputVoltageMv" type="number" min="3600" max="22000" step="100">
-                <label for="chargerInputCurrentMa">Input current mA</label>
-                <input id="chargerInputCurrentMa" type="number" min="100" max="3300" step="10">
-              </div>
-              <div class="form-actions">
-                <button class="primary" id="applyChargerLimits">Apply Limits</button>
-              </div>
+	                <label for="chargerInputCurrentMa">Input current mA</label>
+	                <input id="chargerInputCurrentMa" type="number" min="100" max="3300" step="10">
+	              </div>
+	              <div class="param-legend">
+	                <div><b>VSYSMIN</b><span>Minimum SYS rail target when the battery is low; step 250 mV.</span></div>
+	                <div><b>Charge voltage</b><span>Battery final voltage limit; sensitive for Li-Po safety; step 10 mV.</span></div>
+	                <div><b>Charge current</b><span>Maximum battery charge current before thermal/input limits intervene; step 10 mA.</span></div>
+	                <div><b>Input voltage</b><span>VINDPM threshold: reduce load if VBUS falls below this; step 100 mV.</span></div>
+	                <div><b>Input current</b><span>IINDPM limit: maximum current drawn from the adapter/USB source; step 10 mA.</span></div>
+	              </div>
+	              <div class="form-actions">
+	                <button class="primary" id="applyChargerLimits">Apply Limits</button>
+	              </div>
             </div>
             <div class="section">
               <h2>Raw Register Write</h2>
