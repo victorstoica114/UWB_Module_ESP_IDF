@@ -200,8 +200,11 @@ new module's correction. The reference-reference pair is the sanity check; if it
 moves away from 2.00 m, fix the geometry/RF stability before writing NVS.
 
 The dashboard now has `Auto Calibrate + Apply` in `Settings` ->
-`Antenna Delay Calibration`. Use `Adjust modules` to restrict NVS writes to the
-module being calibrated, for example `4` with calibration set `1,2,4`.
+`Antenna Delay Calibration`. For replacement-module calibration, select the
+module being calibrated in `Targets` and use the three-module set that includes
+the two calibrated references, for example `Targets = module 4` with calibration
+set `1,2,4`. Auto calibration configures the three participants and holds other
+live UWB modules in reset during the run.
 
 ## Anchor Survey Skeleton
 

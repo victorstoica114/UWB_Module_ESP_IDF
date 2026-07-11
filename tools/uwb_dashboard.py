@@ -1696,8 +1696,6 @@ th { color: var(--muted); font-weight: 700; }
                 <input class="three-only cm-input" id="calD12Cm" value="200.00" type="number" min="0" step="0.01" inputmode="decimal">
                 <label for="calSamples">Samples</label>
                 <input id="calSamples" value="40" type="number" min="1" step="1" inputmode="numeric">
-                <label for="calAdjustModules">Adjust modules</label>
-                <input id="calAdjustModules" placeholder="blank = selected target, or calibration modules">
                 <label for="calAutoApply">Auto apply</label>
                 <div class="checkbox-row"><input id="calAutoApply" type="checkbox" checked><span>write antenna delay</span></div>
                 <label for="calMinApplyDtu">Min apply DTU</label>
@@ -3342,7 +3340,7 @@ function persistedSettingIds() {
     "chargerRawModule", "chargerShowRawTools", "chargerRawReg", "chargerRawValue",
     "chargerRawMask", "chargerRawBits",
     "calTargets", "calMethod", "calRef", "calDut", "calKnownCm", "calThree",
-    "calD01Cm", "calD02Cm", "calD12Cm", "calSamples", "calAdjustModules",
+    "calD01Cm", "calD02Cm", "calD12Cm", "calSamples",
     "calAutoApply", "calMinApplyDtu", "calTimeoutSec",
   ];
 }
@@ -3531,7 +3529,6 @@ function wireSettings() {
   document.getElementById("autoCalibration").addEventListener("click", () => {
     postCalibrationAuto({
       target_modules: document.getElementById("calTargets").value,
-      adjust_modules: document.getElementById("calAdjustModules").value,
       apply: document.getElementById("calAutoApply").checked ? "1" : "0",
       min_apply_dtu: document.getElementById("calMinApplyDtu").value,
       timeout_sec: document.getElementById("calTimeoutSec").value,

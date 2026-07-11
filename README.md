@@ -289,11 +289,14 @@ The local dashboard can automate this workflow from `Settings` ->
 2. collects the requested number of `UWB CAL sample` log entries for each
    required directed pair,
 3. computes symmetric pair errors and solves the antenna-delay corrections, and
-4. writes the corrected antenna delay values to NVS for the modules listed in
-   `Adjust modules`.
+4. writes the corrected antenna delay values to NVS for the selected target
+   modules.
 
-For a new module, keep two calibrated references in the fixtures and enter only
-the new module in `Adjust modules`, for example `4` when running `1,2,4`.
+For a new module, keep two calibrated references in the fixtures, select only
+the new module in `Targets`, and use the three-module set that includes both
+references. For example, select `module 4` and run `1,2,4` to adjust only M4.
+The dashboard configures all three calibration participants automatically and
+holds excluded live UWB modules in reset while the calibration runs.
 `Min apply DTU` prevents rewriting NVS for tiny noise-level corrections; the lab
 default is `2`.
 
