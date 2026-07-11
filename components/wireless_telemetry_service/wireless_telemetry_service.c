@@ -10,6 +10,7 @@
 #include <sys/select.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -83,7 +84,7 @@ static wireless_telemetry_item_t *s_ring_items;
 static size_t s_ring_capacity;
 static size_t s_ring_head;
 static size_t s_ring_count;
-static SemaphoreHandle_t s_ring_mutex;
+static portMUX_TYPE s_ring_lock = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t s_ring_items_ready;
 static uint8_t *s_batch_buffer;
 static TaskHandle_t s_task_handle;
@@ -121,18 +122,12 @@ static bool wireless_telemetry_create_ring(size_t capacity, uint32_t caps)
 {
     s_ring_items = (wireless_telemetry_item_t *)heap_caps_calloc(
         capacity, sizeof(wireless_telemetry_item_t), caps | MALLOC_CAP_8BIT);
-    s_ring_mutex = xSemaphoreCreateMutex();
     s_ring_items_ready = xSemaphoreCreateCounting(capacity, 0);
 
-    if (s_ring_items == NULL || s_ring_mutex == NULL ||
-        s_ring_items_ready == NULL) {
+    if (s_ring_items == NULL || s_ring_items_ready == NULL) {
         if (s_ring_items_ready != NULL) {
             vSemaphoreDelete(s_ring_items_ready);
             s_ring_items_ready = NULL;
-        }
-        if (s_ring_mutex != NULL) {
-            vSemaphoreDelete(s_ring_mutex);
-            s_ring_mutex = NULL;
         }
         if (s_ring_items != NULL) {
             heap_caps_free(s_ring_items);
@@ -153,10 +148,6 @@ static void wireless_telemetry_delete_ring(void)
         vSemaphoreDelete(s_ring_items_ready);
         s_ring_items_ready = NULL;
     }
-    if (s_ring_mutex != NULL) {
-        vSemaphoreDelete(s_ring_mutex);
-        s_ring_mutex = NULL;
-    }
     if (s_ring_items != NULL) {
         heap_caps_free(s_ring_items);
         s_ring_items = NULL;
@@ -176,18 +167,12 @@ static void wireless_telemetry_delete_batch_buffer(void)
 
 static bool wireless_telemetry_enqueue(const wireless_telemetry_item_t *item)
 {
-    if (s_ring_items == NULL || s_ring_mutex == NULL ||
-        s_ring_items_ready == NULL || item == NULL ||
+    if (s_ring_items == NULL || s_ring_items_ready == NULL || item == NULL ||
         !wireless_telemetry_target_configured()) {
         return false;
     }
 
-    if (xSemaphoreTake(s_ring_mutex, 0) != pdTRUE) {
-        s_dropped_count++;
-        s_drop_mutex_count++;
-        return false;
-    }
-
+    taskENTER_CRITICAL(&s_ring_lock);
     const bool was_full = s_ring_count >= s_ring_capacity;
     if (was_full) {
         s_ring_head = (s_ring_head + 1U) % s_ring_capacity;
@@ -202,8 +187,7 @@ static bool wireless_telemetry_enqueue(const wireless_telemetry_item_t *item)
     if (s_ring_count > s_ring_high_water) {
         s_ring_high_water = (uint32_t)s_ring_count;
     }
-
-    xSemaphoreGive(s_ring_mutex);
+    taskEXIT_CRITICAL(&s_ring_lock);
 
     if (!was_full) {
         (void)xSemaphoreGive(s_ring_items_ready);
@@ -214,8 +198,7 @@ static bool wireless_telemetry_enqueue(const wireless_telemetry_item_t *item)
 static bool wireless_telemetry_dequeue(wireless_telemetry_item_t *item,
                                        TickType_t wait_ticks)
 {
-    if (s_ring_items == NULL || s_ring_mutex == NULL ||
-        s_ring_items_ready == NULL || item == NULL) {
+    if (s_ring_items == NULL || s_ring_items_ready == NULL || item == NULL) {
         return false;
     }
 
@@ -223,20 +206,16 @@ static bool wireless_telemetry_dequeue(wireless_telemetry_item_t *item,
         return false;
     }
 
-    if (xSemaphoreTake(s_ring_mutex, portMAX_DELAY) != pdTRUE) {
-        return false;
-    }
-
+    taskENTER_CRITICAL(&s_ring_lock);
     if (s_ring_count == 0) {
-        xSemaphoreGive(s_ring_mutex);
+        taskEXIT_CRITICAL(&s_ring_lock);
         return false;
     }
 
     *item = s_ring_items[s_ring_head];
     s_ring_head = (s_ring_head + 1U) % s_ring_capacity;
     s_ring_count--;
-
-    xSemaphoreGive(s_ring_mutex);
+    taskEXIT_CRITICAL(&s_ring_lock);
     return true;
 }
 
