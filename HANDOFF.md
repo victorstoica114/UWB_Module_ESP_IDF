@@ -204,7 +204,9 @@ The dashboard now has `Auto Calibrate + Apply` in `Settings` ->
 module being calibrated in `Targets` and use the three-module set that includes
 the two calibrated references, for example `Targets = module 4` with calibration
 set `1,2,4`. Auto calibration configures the three participants and holds other
-live UWB modules in reset during the run.
+live UWB modules in reset during the run. `Reference guard cm` defaults to
+`2.00`; if a reference-only edge exceeds that error, NVS writes are blocked even
+with auto-apply enabled.
 
 ## Anchor Survey Skeleton
 

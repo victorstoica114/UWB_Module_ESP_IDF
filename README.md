@@ -299,6 +299,10 @@ The dashboard configures all three calibration participants automatically and
 holds excluded live UWB modules in reset while the calibration runs.
 `Min apply DTU` prevents rewriting NVS for tiny noise-level corrections; the lab
 default is `2`.
+`Reference guard cm` protects the calibrated references: when a reference-only
+edge, such as M1-M2 while calibrating M4, exceeds this error threshold, the
+dashboard refuses NVS writes even when `Auto apply` is enabled. The lab default
+is `2.00 cm`.
 
 `APP_RUNTIME_MODE_UWB_RANGING` is the current 1-tag/4-anchor runtime. The same
 firmware image runs on all modules; the runtime config selects tag ID and anchor

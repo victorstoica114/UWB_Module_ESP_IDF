@@ -1700,6 +1700,8 @@ th { color: var(--muted); font-weight: 700; }
                 <div class="checkbox-row"><input id="calAutoApply" type="checkbox" checked><span>write antenna delay</span></div>
                 <label for="calMinApplyDtu">Min apply DTU</label>
                 <input id="calMinApplyDtu" value="2" type="number" min="0" step="1" inputmode="numeric">
+                <label for="calReferenceGuardCm">Reference guard cm</label>
+                <input id="calReferenceGuardCm" value="2.00" type="number" min="0" step="0.01" inputmode="decimal">
                 <label for="calTimeoutSec">Timeout s</label>
                 <input id="calTimeoutSec" value="180" type="number" min="10" step="5" inputmode="numeric">
               </div>
@@ -3341,7 +3343,7 @@ function persistedSettingIds() {
     "chargerRawMask", "chargerRawBits",
     "calTargets", "calMethod", "calRef", "calDut", "calKnownCm", "calThree",
     "calD01Cm", "calD02Cm", "calD12Cm", "calSamples",
-    "calAutoApply", "calMinApplyDtu", "calTimeoutSec",
+    "calAutoApply", "calMinApplyDtu", "calReferenceGuardCm", "calTimeoutSec",
   ];
 }
 function restoreSettings() {
@@ -3531,6 +3533,7 @@ function wireSettings() {
       target_modules: document.getElementById("calTargets").value,
       apply: document.getElementById("calAutoApply").checked ? "1" : "0",
       min_apply_dtu: document.getElementById("calMinApplyDtu").value,
+      reference_guard_cm: document.getElementById("calReferenceGuardCm").value,
       timeout_sec: document.getElementById("calTimeoutSec").value,
       params: calibrationParamsFromForm(),
     }, "calAutoToast");
@@ -3865,6 +3868,19 @@ class DashboardHttpServer(ThreadingHTTPServer):
         ]
         return adjust_ids or participant_ids
 
+    def reference_guard_failures(
+        self,
+        reference_checks: dict[str, dict[str, Any]],
+        max_error_cm: float,
+    ) -> dict[str, dict[str, Any]]:
+        if max_error_cm <= 0:
+            return {}
+        return {
+            pair: data
+            for pair, data in reference_checks.items()
+            if abs(float(data.get("error_cm") or 0.0)) > max_error_cm
+        }
+
     def collect_calibration_samples(
         self,
         *,
@@ -3990,6 +4006,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
             raise RuntimeError("sample count must be positive")
         timeout_sec = float(payload.get("timeout_sec") or 180)
         min_apply_dtu = max(0, int(payload.get("min_apply_dtu") or 2))
+        reference_guard_cm = max(0.0, float(payload.get("reference_guard_cm") or 2.0))
         apply_changes = parse_bool(payload.get("apply"), True)
         if method in ("two", "two_module"):
             participant_ids = [
@@ -4175,6 +4192,10 @@ class DashboardHttpServer(ThreadingHTTPServer):
                     "error_cm": round(error_dtu * UWB_METERS_PER_DTU * 100.0, 2),
                 }
 
+        reference_guard_failures = self.reference_guard_failures(
+            reference_checks, reference_guard_cm
+        )
+        reference_guard_ok = not reference_guard_failures
         correction_float = solve_least_squares(rows, values) if adjust_ids else []
         corrections = {
             module_id: round_i32(correction_float[index])
@@ -4187,11 +4208,14 @@ class DashboardHttpServer(ThreadingHTTPServer):
             }
             for index, module_id in enumerate(adjust_ids)
         }
-        effective_apply = apply_changes and complete
+        effective_apply = apply_changes and complete and reference_guard_ok
         if progress is not None:
             progress(
                 "applying antenna-delay corrections...",
-                {"corrections": corrections},
+                {
+                    "corrections": corrections,
+                    "reference_guard_ok": reference_guard_ok,
+                },
                 "applying",
             )
         apply_results = self.apply_calibration_corrections(
@@ -4199,6 +4223,10 @@ class DashboardHttpServer(ThreadingHTTPServer):
             min_apply_dtu=min_apply_dtu,
             apply_changes=effective_apply,
         )
+        if apply_changes and complete and not reference_guard_ok:
+            for item in apply_results:
+                if not item.get("applied"):
+                    item["reason"] = "reference_guard"
         write_ok = all(
             item.get("applied") or item.get("reason") for item in apply_results
         )
@@ -4207,9 +4235,20 @@ class DashboardHttpServer(ThreadingHTTPServer):
             for item in apply_results
             if item.get("applied")
         ]
-        summary_action = "applied " + ", ".join(applied_labels) if applied_labels else "no writes"
+        if reference_guard_failures:
+            failed_labels = ", ".join(
+                f"{pair} {data['error_cm']:+.2f} cm"
+                for pair, data in sorted(reference_guard_failures.items())
+            )
+            summary_action = f"reference guard blocked writes: {failed_labels}"
+        else:
+            summary_action = (
+                "applied " + ", ".join(applied_labels)
+                if applied_labels
+                else "no writes"
+            )
         return {
-            "ok": complete and write_ok,
+            "ok": complete and write_ok and reference_guard_ok,
             "summary": f"auto calibration complete: {summary_action}",
             "method": "three",
             "ids": ids,
@@ -4220,6 +4259,9 @@ class DashboardHttpServer(ThreadingHTTPServer):
             "directed": self.directed_stats_json(samples),
             "pairs": pair_summary,
             "reference_checks": reference_checks,
+            "reference_guard_cm": reference_guard_cm,
+            "reference_guard_ok": reference_guard_ok,
+            "reference_guard_failures": reference_guard_failures,
             "corrections": correction_details,
             "apply_results": apply_results,
             "excluded_results": excluded_results,
