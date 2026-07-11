@@ -367,8 +367,9 @@ as policy.
 The firmware exposes an authenticated live endpoint at `/config/charger` for
 controlled writes. The endpoint disables the watchdog before charger
 configuration changes, can enable/disable the ADC, can choose continuous or
-one-shot ADC conversion and ADC sample speed, and can set `VSYSMIN`, charge
-voltage/current, and input voltage/current using human units (`mV`/`mA`). It
+one-shot ADC conversion and ADC sample speed, and can set `VSYSMIN`, charging
+enable state, charge voltage/current, and input voltage/current using human
+units (`mV`/`mA`). It
 also has a guarded raw register write path (`reg`, `value`, optional
 `mask`/`bits`, and `confirm=1`) for datasheet-level experiments.
 
@@ -391,6 +392,7 @@ Dashboard charger limit controls affect the charger and NVDC power path:
 
 | Control | BQ25792 field | Step | Effect |
 | --- | --- | --- | --- |
+| `Charging` | `EN_CHG` in `REG0F` | boolean | Enables or disables battery charging. Disabling it does not power down the board; the system rail can still be powered from `VBUS` through the NVDC power path. |
 | `VSYSMIN mV` | `VSYSMIN[5:0]` in `REG00` | `250 mV` | Minimum target for the `SYS` rail when the battery is below the configured system minimum. Too low can make the system less robust on a depleted cell; too high can reduce available charge current. |
 | `Charge voltage mV` | `VREG[10:0]` in `REG01..REG02` | `10 mV` | Final battery regulation voltage. For a normal 1S Li-Po this is typically around `4200 mV`; setting this too high is unsafe for the cell. |
 | `Charge current mA` | `ICHG[8:0]` in `REG03..REG04` | `10 mA` | Maximum battery charge current. The actual current can still be reduced by thermal regulation, input limits, or system-load priority. |

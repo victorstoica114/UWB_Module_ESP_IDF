@@ -1050,6 +1050,8 @@ th { color: var(--muted); font-weight: 700; }
             <div class="section">
               <h2>Charge Limits</h2>
               <div class="form-grid">
+                <label for="chargerChargeEnabled">Charging</label>
+                <div class="checkbox-row"><input id="chargerChargeEnabled" type="checkbox"><span>enabled</span></div>
                 <label for="chargerMinimalSystemMv">VSYSMIN mV</label>
                 <input id="chargerMinimalSystemMv" type="number" min="2500" max="16000" step="250">
                 <label for="chargerChargeVoltageMv">Charge voltage mV</label>
@@ -1060,11 +1062,12 @@ th { color: var(--muted); font-weight: 700; }
                 <input id="chargerInputVoltageMv" type="number" min="3600" max="22000" step="100">
 	                <label for="chargerInputCurrentMa">Input current mA</label>
 	                <input id="chargerInputCurrentMa" type="number" min="100" max="3300" step="10">
-	              </div>
-	              <div class="param-legend">
-	                <div><b>VSYSMIN</b><span>Minimum SYS rail target when the battery is low; step 250 mV.</span></div>
-	                <div><b>Charge voltage</b><span>Battery final voltage limit; sensitive for Li-Po safety; step 10 mV.</span></div>
-	                <div><b>Charge current</b><span>Maximum battery charge current before thermal/input limits intervene; step 10 mA.</span></div>
+              </div>
+              <div class="param-legend">
+                <div><b>Charging</b><span>Controls EN_CHG. Disabling it stops battery charging but can leave the board powered from VBUS/SYS.</span></div>
+                <div><b>VSYSMIN</b><span>Minimum SYS rail target when the battery is low; step 250 mV.</span></div>
+                <div><b>Charge voltage</b><span>Battery final voltage limit; sensitive for Li-Po safety; step 10 mV.</span></div>
+                <div><b>Charge current</b><span>Maximum battery charge current before thermal/input limits intervene; step 10 mA.</span></div>
 	                <div><b>Input voltage</b><span>VINDPM threshold: reduce load if VBUS falls below this; step 100 mV.</span></div>
 	                <div><b>Input current</b><span>IINDPM limit: maximum current drawn from the adapter/USB source; step 10 mA.</span></div>
 	              </div>
@@ -1974,8 +1977,18 @@ function renderGpsCell(item) {
     <span class="${fixClass}">${esc(fixText)}</span>
     <span class="muted">q${esc(item.gps_fix_quality ?? "-")} type ${esc(item.gps_fix_type ?? "-")}</span><br>
     sats ${esc(satsUsed)}/${esc(satsView)} · hdop ${fmtMaybeNumber(item.gps_hdop, 2)}<br>
-    ${location}<br>
-    <span class="muted">rx ${fmtAgeMs(item.gps_last_rx_age_ms)} · sent ${esc(sentences)} · err ${esc(item.gps_checksum_errors ?? "-")}/${esc(item.gps_parse_errors ?? "-")}</span>`;
+	    ${location}<br>
+	    <span class="muted">rx ${fmtAgeMs(item.gps_last_rx_age_ms)} · sent ${esc(sentences)} · err ${esc(item.gps_checksum_errors ?? "-")}/${esc(item.gps_parse_errors ?? "-")}</span>`;
+}
+
+function chargerChargeStatus(item) {
+  if (item.charger_charge_enabled === true) {
+    return {className: "ok", text: "CHG enabled"};
+  }
+  if (item.charger_charge_enabled === false) {
+    return {className: "warn", text: "CHG disabled"};
+  }
+  return {className: "muted", text: "CHG unknown"};
 }
 
 function renderBatteryCell(item) {
@@ -1990,6 +2003,7 @@ function renderBatteryCell(item) {
     return `<span class="bad">BQ25792 not found</span><br><span class="muted">${esc(item.charger_last_error_name || "-")}</span><br><span class="muted">${pinLine}</span>`;
   }
   const adcClass = item.charger_adc_enabled ? "ok" : "warn";
+  const charge = chargerChargeStatus(item);
   const writeText = item.charger_config_write_supported
     ? (item.charger_config_writes_enabled ? "writes enabled" : "writes disabled")
     : "read only";
@@ -1997,6 +2011,7 @@ function renderBatteryCell(item) {
     <span class="${item.charger_read_ok ? "ok" : "bad"}">BQ25792</span>
     <span class="muted">PN ${esc(item.charger_part_number ?? "-")} rev ${esc(item.charger_device_revision ?? "-")}</span><br>
     <span class="${adcClass}">ADC ${item.charger_adc_enabled ? "on" : "off"}</span>
+    <span class="${charge.className}">${charge.text}</span>
     <span class="muted">${esc(writeText)}</span><br>
     VBAT ${fmtMv(item.charger_vbat_mv)} · SOC ${fmtSoc(item)}<br>
     VSYS ${fmtMv(item.charger_vsys_mv)} · VBUS ${fmtMv(item.charger_vbus_mv)}<br>
@@ -2035,6 +2050,7 @@ function renderChargerRows(statuses) {
   rows.innerHTML = (statuses || []).map(item => {
     const powerClass = item.charger_present ? "ok" : "bad";
     const adcClass = item.charger_adc_enabled ? "ok" : "warn";
+    const charge = chargerChargeStatus(item);
     return `<tr>
       <td><b>${esc(item.hostname)}</b><br><span class="muted">${esc(item.ip || item.target || "")}</span></td>
       <td><span class="${powerClass}">${item.charger_present ? "BQ25792 present" : "not found"}</span><br>
@@ -2049,7 +2065,8 @@ function renderChargerRows(statuses) {
         sample ${esc(item.charger_adc_sample ?? "-")} · ${item.charger_adc_continuous ? "continuous" : "one shot"}<br>
         avg ${item.charger_adc_running_average ? "on" : "off"} · EN_IBAT ${item.charger_ibat_discharge_sense_enabled ? "on" : "off"}<br>
         WD ${esc(item.charger_watchdog_setting ?? "-")} ${item.charger_watchdog_disabled ? "(disabled)" : ""}</td>
-      <td>VSYSMIN ${fmtMv(item.charger_minimal_system_voltage_mv)}<br>
+      <td><span class="${charge.className}">${charge.text}</span><br>
+        VSYSMIN ${fmtMv(item.charger_minimal_system_voltage_mv)}<br>
         VREG ${fmtMv(item.charger_charge_voltage_limit_mv)}<br>
         ICHG ${fmtMa(item.charger_charge_current_limit_ma)}<br>
         VINDPM ${fmtMv(item.charger_input_voltage_limit_mv)}<br>
@@ -2202,6 +2219,7 @@ function hydrateSettingsFromStatus(item) {
   setSettingIfFresh("chargerAdcRate", item.charger_adc_continuous ? "continuous" : "oneshot");
   setSettingIfFresh("chargerAdcSample", item.charger_adc_sample ?? 2);
   setSettingIfFresh("chargerAdcAvg", item.charger_adc_running_average);
+  setSettingIfFresh("chargerChargeEnabled", item.charger_charge_enabled);
   setSettingIfFresh("chargerMinimalSystemMv", item.charger_minimal_system_voltage_mv);
   setSettingIfFresh("chargerChargeVoltageMv", item.charger_charge_voltage_limit_mv);
   setSettingIfFresh("chargerChargeCurrentMa", item.charger_charge_current_limit_ma);
@@ -2393,7 +2411,7 @@ function persistedSettingIds() {
     "uwbAntennaDelayHex", "uwbAdvancedReboot",
     "chargerTargets", "chargerRawModule", "chargerAdcEnabled",
     "chargerAdcRate", "chargerAdcSample", "chargerAdcAvg",
-    "chargerMinimalSystemMv", "chargerChargeVoltageMv",
+    "chargerChargeEnabled", "chargerMinimalSystemMv", "chargerChargeVoltageMv",
     "chargerChargeCurrentMa", "chargerInputVoltageMv",
     "chargerInputCurrentMa", "chargerRawReg", "chargerRawValue",
     "chargerRawMask", "chargerRawBits",
@@ -2551,6 +2569,7 @@ function wireSettings() {
   });
   document.getElementById("applyChargerLimits").addEventListener("click", () => {
     const params = {
+      charge_enabled: document.getElementById("chargerChargeEnabled").checked ? "1" : "0",
       minimal_system_voltage_mv: document.getElementById("chargerMinimalSystemMv").value,
       charge_voltage_mv: document.getElementById("chargerChargeVoltageMv").value,
       charge_current_ma: document.getElementById("chargerChargeCurrentMa").value,

@@ -115,7 +115,7 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
     print(
         "present={present} read_ok={read_ok} err={err} "
         "part={part} pn={pn} rev={rev} adc={adc} sample={sample} "
-        "wd={watchdog} writes={writes}".format(
+        "chg={charge} wd={watchdog} writes={writes}".format(
             present=status.get("charger_present"),
             read_ok=status.get("charger_read_ok"),
             err=status.get("charger_last_error_name"),
@@ -124,6 +124,7 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
             rev=status.get("charger_device_revision"),
             adc=status.get("charger_adc_enabled"),
             sample=status.get("charger_adc_sample"),
+            charge=status.get("charger_charge_enabled"),
             watchdog=status.get("charger_watchdog_setting"),
             writes="enabled"
             if status.get("charger_config_writes_enabled")

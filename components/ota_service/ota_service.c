@@ -517,6 +517,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_part_number\":%u,"
         "\"charger_device_revision\":%u,"
         "\"charger_adc_enabled\":%s,"
+        "\"charger_reg0f_charger_control_0\":\"0x%02x\","
         "\"charger_reg10_charger_control_1\":\"0x%02x\","
         "\"charger_reg14_charger_control_5\":\"0x%02x\","
         "\"charger_reg2e_adc_control\":\"0x%02x\","
@@ -527,6 +528,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_charge_current_limit_ma\":%u,"
         "\"charger_input_voltage_limit_mv\":%u,"
         "\"charger_input_current_limit_ma\":%u,"
+        "\"charger_charge_enabled\":%s,"
         "\"charger_watchdog_setting\":%u,"
         "\"charger_watchdog_disabled\":%s,"
         "\"charger_adc_sample\":%u,"
@@ -748,6 +750,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned)charger_snapshot.part_number,
         (unsigned)charger_snapshot.device_revision,
         charger_snapshot.adc_enabled ? "true" : "false",
+        (unsigned)charger_snapshot.reg0f_charger_control_0,
         (unsigned)charger_snapshot.reg10_charger_control_1,
         (unsigned)charger_snapshot.reg14_charger_control_5,
         (unsigned)charger_snapshot.reg2e_adc_control,
@@ -758,6 +761,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned)charger_snapshot.charge_current_limit_ma,
         (unsigned)charger_snapshot.input_voltage_limit_mv,
         (unsigned)charger_snapshot.input_current_limit_ma,
+        charger_snapshot.charge_enabled ? "true" : "false",
         (unsigned)charger_snapshot.watchdog_setting,
         charger_snapshot.watchdog_disabled ? "true" : "false",
         (unsigned)charger_snapshot.adc_sample,
@@ -1032,6 +1036,7 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
     bool handled = false;
     uint32_t operation_count = 0;
     esp_err_t first_error = ESP_OK;
+    esp_err_t query_err = ESP_OK;
 
     if (ota_query_option_enabled(query, "refresh")) {
         charger_service_request_refresh();
@@ -1049,9 +1054,40 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
         }
     }
 
+    char charge_enabled_text[16] = {0};
+    query_err = httpd_query_key_value(query, "charge_enabled",
+                                      charge_enabled_text,
+                                      sizeof(charge_enabled_text));
+    if (query_err == ESP_ERR_NOT_FOUND) {
+        query_err = httpd_query_key_value(query, "charging",
+                                          charge_enabled_text,
+                                          sizeof(charge_enabled_text));
+    }
+    if (query_err == ESP_ERR_NOT_FOUND) {
+        query_err = httpd_query_key_value(query, "en_chg", charge_enabled_text,
+                                          sizeof(charge_enabled_text));
+    }
+    if (query_err == ESP_OK) {
+        bool charge_enabled = false;
+        if (!ota_parse_bool_text(charge_enabled_text, &charge_enabled)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid charge_enabled value");
+        }
+        charger_service_write_result_t result = {0};
+        const esp_err_t err =
+            charger_service_set_charge_enabled(charge_enabled, &result);
+        operation_count += 2U;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    } else if (query_err != ESP_ERR_NOT_FOUND) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid charge_enabled value");
+    }
+
     char adc_text[16] = {0};
-    esp_err_t query_err =
-        httpd_query_key_value(query, "adc", adc_text, sizeof(adc_text));
+    query_err = httpd_query_key_value(query, "adc", adc_text, sizeof(adc_text));
     if (query_err == ESP_OK) {
         bool adc_enabled = false;
         if (!ota_parse_bool_text(adc_text, &adc_enabled)) {
@@ -1272,16 +1308,18 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
     charger_service_get_snapshot(&snapshot);
 
     ESP_LOGW(TAG,
-             "Charger config: ops=%lu err=%s ADC=%s VREG=%umV ICHG=%umA VINDPM=%umV IINDPM=%umA WD=%u",
+             "Charger config: ops=%lu err=%s ADC=%s CHG=%s REG0F=0x%02X VREG=%umV ICHG=%umA VINDPM=%umV IINDPM=%umA WD=%u",
              (unsigned long)operation_count, esp_err_to_name(first_error),
              snapshot.adc_enabled ? "on" : "off",
+             snapshot.charge_enabled ? "on" : "off",
+             (unsigned)snapshot.reg0f_charger_control_0,
              (unsigned)snapshot.charge_voltage_limit_mv,
              (unsigned)snapshot.charge_current_limit_ma,
              (unsigned)snapshot.input_voltage_limit_mv,
              (unsigned)snapshot.input_current_limit_ma,
              (unsigned)snapshot.watchdog_setting);
 
-    char response[1400];
+    char response[1500];
     const int len = snprintf(
         response, sizeof(response),
         "{"
@@ -1294,6 +1332,8 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
         "\"charger_adc_sample\":%u,"
         "\"charger_adc_continuous\":%s,"
         "\"charger_adc_running_average\":%s,"
+        "\"charger_charge_enabled\":%s,"
+        "\"charger_reg0f_charger_control_0\":\"0x%02x\","
         "\"charger_watchdog_setting\":%u,"
         "\"charger_watchdog_disabled\":%s,"
         "\"charger_minimal_system_voltage_mv\":%u,"
@@ -1324,6 +1364,8 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
         (unsigned)snapshot.adc_sample,
         snapshot.adc_continuous ? "true" : "false",
         snapshot.adc_running_average ? "true" : "false",
+        snapshot.charge_enabled ? "true" : "false",
+        (unsigned)snapshot.reg0f_charger_control_0,
         (unsigned)snapshot.watchdog_setting,
         snapshot.watchdog_disabled ? "true" : "false",
         (unsigned)snapshot.minimal_system_voltage_mv,

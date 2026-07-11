@@ -33,6 +33,7 @@ enum {
     REG03_CHARGE_CURRENT_LIMIT = 0x03,
     REG05_INPUT_VOLTAGE_LIMIT = 0x05,
     REG06_INPUT_CURRENT_LIMIT = 0x06,
+    REG0F_CHARGER_CONTROL_0 = 0x0F,
     REG10_CHARGER_CONTROL_1 = 0x10,
     REG14_CHARGER_CONTROL_5 = 0x14,
     REG1B_CHARGER_STATUS_0 = 0x1B,
@@ -69,6 +70,7 @@ typedef enum {
 
 #define CHARGER_NVS_NAMESPACE "charger"
 #define KEY_WATCHDOG_DISABLED "wd_dis"
+#define KEY_CHARGE_ENABLED "chg_en"
 #define KEY_ADC_ENABLED "adc_en"
 #define KEY_ADC_CONTINUOUS "adc_cont"
 #define KEY_ADC_SAMPLE "adc_samp"
@@ -82,6 +84,8 @@ typedef enum {
 typedef struct {
     bool has_watchdog_disabled;
     bool watchdog_disabled;
+    bool has_charge_enabled;
+    bool charge_enabled;
     bool has_adc;
     bool adc_enabled;
     bool adc_continuous;
@@ -353,6 +357,11 @@ static esp_err_t charger_policy_load(charger_policy_t *policy)
     if (charger_policy_read_u8(handle, KEY_WATCHDOG_DISABLED, &u8)) {
         policy->has_watchdog_disabled = true;
         policy->watchdog_disabled = u8 != 0U;
+        policy->field_count++;
+    }
+    if (charger_policy_read_u8(handle, KEY_CHARGE_ENABLED, &u8)) {
+        policy->has_charge_enabled = true;
+        policy->charge_enabled = u8 != 0U;
         policy->field_count++;
     }
     if (charger_policy_read_u8(handle, KEY_ADC_ENABLED, &u8)) {
@@ -731,6 +740,7 @@ static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_
                    sizeof(s_snapshot.charger_flag));
             memcpy(s_snapshot.fault_flag, &raw[REG26_FAULT_FLAG_0],
                    sizeof(s_snapshot.fault_flag));
+            s_snapshot.reg0f_charger_control_0 = raw[REG0F_CHARGER_CONTROL_0];
             s_snapshot.reg10_charger_control_1 = raw[REG10_CHARGER_CONTROL_1];
             s_snapshot.reg14_charger_control_5 = raw[REG14_CHARGER_CONTROL_5];
             s_snapshot.reg2e_adc_control = raw[REG2E_ADC_CONTROL];
@@ -746,6 +756,8 @@ static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_
                 bq_vindpm_mv_from_raw(raw[REG05_INPUT_VOLTAGE_LIMIT]);
             s_snapshot.input_current_limit_ma =
                 bq_iindpm_ma_from_raw(read_be_u16(raw, REG06_INPUT_CURRENT_LIMIT));
+            s_snapshot.charge_enabled =
+                (raw[REG0F_CHARGER_CONTROL_0] & 0x20U) != 0U;
             s_snapshot.watchdog_setting =
                 (uint8_t)(raw[REG10_CHARGER_CONTROL_1] & 0x07U);
             s_snapshot.watchdog_disabled = s_snapshot.watchdog_setting == 0U;
@@ -906,6 +918,13 @@ static esp_err_t charger_apply_saved_policy(void)
             "IINDPM",
             charger_service_set_input_current_limit_ma(
                 policy.input_current_limit_ma, results, 4, &written_count),
+            &first_err, &applied_count);
+    }
+    if (policy.has_charge_enabled) {
+        charger_service_write_result_t result = {0};
+        charger_note_policy_result(
+            "EN_CHG",
+            charger_service_set_charge_enabled(policy.charge_enabled, &result),
             &first_err, &applied_count);
     }
 
@@ -1192,6 +1211,23 @@ esp_err_t charger_service_set_watchdog_disabled(
         return err;
     }
     return charger_policy_write_u8(KEY_WATCHDOG_DISABLED, 1U);
+}
+
+esp_err_t charger_service_set_charge_enabled(
+    bool enabled, charger_service_write_result_t *result)
+{
+    charger_service_write_result_t watchdog_result = {0};
+    esp_err_t err = charger_service_set_watchdog_disabled(&watchdog_result);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = charger_service_update_register_bits(
+        REG0F_CHARGER_CONTROL_0, 0x20U, enabled ? 0x20U : 0x00U, result);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return charger_policy_write_u8(KEY_CHARGE_ENABLED, enabled ? 1U : 0U);
 }
 
 esp_err_t charger_service_set_adc(bool enabled, bool continuous,

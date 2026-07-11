@@ -53,6 +53,7 @@ typedef struct {
     uint8_t fault_status[2];
     uint8_t charger_flag[4];
     uint8_t fault_flag[2];
+    uint8_t reg0f_charger_control_0;
     uint8_t reg10_charger_control_1;
     uint8_t reg14_charger_control_5;
     uint8_t reg2e_adc_control;
@@ -63,6 +64,7 @@ typedef struct {
     uint16_t charge_current_limit_ma;
     uint16_t input_voltage_limit_mv;
     uint16_t input_current_limit_ma;
+    bool charge_enabled;
     uint8_t watchdog_setting;
     bool watchdog_disabled;
     uint8_t adc_sample;
@@ -109,6 +111,8 @@ esp_err_t charger_service_update_register_bits(
     charger_service_write_result_t *result);
 esp_err_t charger_service_set_watchdog_disabled(
     charger_service_write_result_t *result);
+esp_err_t charger_service_set_charge_enabled(
+    bool enabled, charger_service_write_result_t *result);
 esp_err_t charger_service_set_adc(bool enabled, bool continuous,
                                   uint8_t sample, bool running_average,
                                   charger_service_write_result_t *results,
