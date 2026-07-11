@@ -1991,6 +1991,65 @@ function chargerChargeStatus(item) {
   return {className: "muted", text: "CHG unknown"};
 }
 
+const CHARGER_CHG_STAT_NAMES = [
+  "not charging", "trickle", "pre-charge", "fast CC",
+  "taper CV", "reserved", "top-off", "terminated"
+];
+const CHARGER_VBUS_STAT_NAMES = {
+  0: "no input",
+  1: "USB SDP 500 mA",
+  2: "USB CDP 1.5 A",
+  3: "USB DCP 3.25 A",
+  4: "HVDCP 1.5 A",
+  5: "unknown adapter 3 A",
+  6: "non-standard adapter",
+  7: "OTG",
+  8: "not qualified",
+};
+
+function chargerStatusByte(item, index) {
+  const list = Array.isArray(item?.charger_status) ? item.charger_status : [];
+  const value = Number(list[index]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function chargerFaultByte(item, index) {
+  const list = Array.isArray(item?.charger_fault_status) ? item.charger_fault_status : [];
+  const value = Number(list[index]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function chargerChargePhase(item) {
+  const code = (chargerStatusByte(item, 1) >> 5) & 0x07;
+  return {code, text: CHARGER_CHG_STAT_NAMES[code] || `chg ${code}`};
+}
+
+function chargerVbusStatus(item) {
+  const code = (chargerStatusByte(item, 1) >> 1) & 0x0f;
+  return {code, text: CHARGER_VBUS_STAT_NAMES[code] || `reserved ${code}`};
+}
+
+function chargerVsysRegulating(item) {
+  return (chargerStatusByte(item, 3) & 0x10) !== 0;
+}
+
+function chargerVbatOvp(item) {
+  return (chargerFaultByte(item, 0) & 0x20) !== 0;
+}
+
+function chargerLimitWarning(item) {
+  const vsysmin = Number(item?.charger_minimal_system_voltage_mv);
+  const vreg = Number(item?.charger_charge_voltage_limit_mv);
+  if (!Number.isFinite(vsysmin) || !Number.isFinite(vreg)) return "";
+  if (vsysmin >= vreg) {
+    return `<br><span class="bad">warning: VSYSMIN >= VREG</span>`;
+  }
+  if (vsysmin > 4100 && vreg <= 4990) {
+    return `<br><span class="warn">high VSYSMIN for 1S</span>`;
+  }
+  return "";
+}
+
 function renderBatteryCell(item) {
   if (!item.charger_monitor_enabled) {
     return `<span class="muted">monitor off</span>`;
@@ -2007,12 +2066,19 @@ function renderBatteryCell(item) {
   const writeText = item.charger_config_write_supported
     ? (item.charger_config_writes_enabled ? "writes enabled" : "writes disabled")
     : "read only";
+  const phase = chargerChargePhase(item);
+  const vbus = chargerVbusStatus(item);
+  const vsysClass = chargerVsysRegulating(item) ? "warn" : "ok";
+  const ovpClass = chargerVbatOvp(item) ? "bad" : "ok";
   return `
     <span class="${item.charger_read_ok ? "ok" : "bad"}">BQ25792</span>
     <span class="muted">PN ${esc(item.charger_part_number ?? "-")} rev ${esc(item.charger_device_revision ?? "-")}</span><br>
     <span class="${adcClass}">ADC ${item.charger_adc_enabled ? "on" : "off"}</span>
     <span class="${charge.className}">${charge.text}</span>
     <span class="muted">${esc(writeText)}</span><br>
+    phase ${esc(phase.text)} · input ${esc(vbus.text)}<br>
+    <span class="${vsysClass}">VSYSMIN loop ${chargerVsysRegulating(item) ? "on" : "off"}</span>
+    <span class="${ovpClass}">VBAT_OVP ${chargerVbatOvp(item) ? "on" : "off"}</span>${chargerLimitWarning(item)}<br>
     VBAT ${fmtMv(item.charger_vbat_mv)} · SOC ${fmtSoc(item)}<br>
     VSYS ${fmtMv(item.charger_vsys_mv)} · VBUS ${fmtMv(item.charger_vbus_mv)}<br>
     IBUS ${fmtMa(item.charger_ibus_ma)}<br>
@@ -2051,6 +2117,13 @@ function renderChargerRows(statuses) {
     const powerClass = item.charger_present ? "ok" : "bad";
     const adcClass = item.charger_adc_enabled ? "ok" : "warn";
     const charge = chargerChargeStatus(item);
+    const phase = chargerChargePhase(item);
+    const vbus = chargerVbusStatus(item);
+    const status0 = chargerStatusByte(item, 0);
+    const iindpm = (status0 & 0x80) !== 0;
+    const vindpm = (status0 & 0x40) !== 0;
+    const vsys = chargerVsysRegulating(item);
+    const ovp = chargerVbatOvp(item);
     return `<tr>
       <td><b>${esc(item.hostname)}</b><br><span class="muted">${esc(item.ip || item.target || "")}</span></td>
       <td><span class="${powerClass}">${item.charger_present ? "BQ25792 present" : "not found"}</span><br>
@@ -2066,6 +2139,12 @@ function renderChargerRows(statuses) {
         avg ${item.charger_adc_running_average ? "on" : "off"} · EN_IBAT ${item.charger_ibat_discharge_sense_enabled ? "on" : "off"}<br>
         WD ${esc(item.charger_watchdog_setting ?? "-")} ${item.charger_watchdog_disabled ? "(disabled)" : ""}</td>
       <td><span class="${charge.className}">${charge.text}</span><br>
+        phase ${esc(phase.text)}<br>
+        input ${esc(vbus.text)}<br>
+        <span class="${vsys ? "warn" : "ok"}">VSYSMIN ${vsys ? "on" : "off"}</span>
+        <span class="${iindpm ? "warn" : "ok"}">IINDPM ${iindpm ? "on" : "off"}</span>
+        <span class="${vindpm ? "warn" : "ok"}">VINDPM ${vindpm ? "on" : "off"}</span><br>
+        <span class="${ovp ? "bad" : "ok"}">VBAT_OVP ${ovp ? "on" : "off"}</span>${chargerLimitWarning(item)}<br>
         VSYSMIN ${fmtMv(item.charger_minimal_system_voltage_mv)}<br>
         VREG ${fmtMv(item.charger_charge_voltage_limit_mv)}<br>
         ICHG ${fmtMa(item.charger_charge_current_limit_ma)}<br>

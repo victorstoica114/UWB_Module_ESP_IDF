@@ -393,7 +393,7 @@ Dashboard charger limit controls affect the charger and NVDC power path:
 | Control | BQ25792 field | Step | Effect |
 | --- | --- | --- | --- |
 | `Charging` | `EN_CHG` in `REG0F` | boolean | Enables or disables battery charging. Disabling it does not power down the board; the system rail can still be powered from `VBUS` through the NVDC power path. |
-| `VSYSMIN mV` | `VSYSMIN[5:0]` in `REG00` | `250 mV` | Minimum target for the `SYS` rail when the battery is below the configured system minimum. Too low can make the system less robust on a depleted cell; too high can reduce available charge current. |
+| `VSYSMIN mV` | `VSYSMIN[5:0]` in `REG00` | `250 mV` | Minimum target for the `SYS` rail when the battery is below the configured system minimum. For our 1S Li-Po modules the datasheet POR/default is `3500 mV`; keep it below `VREG`. |
 | `Charge voltage mV` | `VREG[10:0]` in `REG01..REG02` | `10 mV` | Final battery regulation voltage. For a normal 1S Li-Po this is typically around `4200 mV`; setting this too high is unsafe for the cell. |
 | `Charge current mA` | `ICHG[8:0]` in `REG03..REG04` | `10 mA` | Maximum battery charge current. The actual current can still be reduced by thermal regulation, input limits, or system-load priority. |
 | `Input voltage mV` | `VINDPM[7:0]` in `REG05` | `100 mV` | Input voltage dynamic power management threshold. If `VBUS` droops below this threshold, the charger backs off to avoid collapsing the adapter/USB source. |
@@ -402,6 +402,12 @@ Dashboard charger limit controls affect the charger and NVDC power path:
 In short: `Charge voltage` and `Charge current` define the battery charge target.
 `Input voltage` and `Input current` define how aggressively the board may load
 the external source. `VSYSMIN` protects the system rail when the battery is low.
+TI notes that setting battery regulation voltage below the system minimum is not
+recommended. In practical terms, `VREG=4200 mV` and `VSYSMIN=4500 mV` is a bad
+1S combination: the charger reports `VSYS_STAT=1`, enters the NVDC/SYSMIN power
+path loop, and charging behavior becomes harder to reason about. The dashboard
+and `tools/bq25792_dump.py` warn when `VSYSMIN >= VREG` or when `VSYSMIN` looks
+too high for a 1S pack.
 All high-level charger policy values are stored in ESP32 NVS and reapplied once
 at charger startup.
 

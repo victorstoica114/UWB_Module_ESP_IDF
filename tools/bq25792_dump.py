@@ -110,7 +110,65 @@ def raw_bytes(status: dict) -> bytes:
     return bytes.fromhex(raw_hex)
 
 
+CHG_STAT_NAMES = {
+    0: "not_charging",
+    1: "trickle",
+    2: "precharge",
+    3: "fast_cc",
+    4: "taper_cv",
+    5: "reserved",
+    6: "topoff",
+    7: "terminated",
+}
+
+VBUS_STAT_NAMES = {
+    0: "no_input",
+    1: "usb_sdp_500ma",
+    2: "usb_cdp_1_5a",
+    3: "usb_dcp_3_25a",
+    4: "hvdcp_1_5a",
+    5: "unknown_adapter_3a",
+    6: "non_standard",
+    7: "otg",
+    8: "not_qualified",
+}
+
+
+def decode_status(status: dict) -> dict[str, object]:
+    charger_status = list(status.get("charger_status") or [])
+    fault_status = list(status.get("charger_fault_status") or [])
+    while len(charger_status) < 5:
+        charger_status.append(0)
+    while len(fault_status) < 2:
+        fault_status.append(0)
+
+    chg_stat = (int(charger_status[1]) >> 5) & 0x07
+    vbus_stat = (int(charger_status[1]) >> 1) & 0x0F
+    vsysmin_mv = status.get("charger_minimal_system_voltage_mv")
+    vreg_mv = status.get("charger_charge_voltage_limit_mv")
+    warning = ""
+    if isinstance(vsysmin_mv, int) and isinstance(vreg_mv, int):
+        if vsysmin_mv >= vreg_mv:
+            warning = "VSYSMIN>=VREG"
+        elif vsysmin_mv > 4100 and vreg_mv <= 4990:
+            warning = "high_VSYSMIN_for_1S"
+
+    return {
+        "iindpm": bool(int(charger_status[0]) & 0x80),
+        "vindpm": bool(int(charger_status[0]) & 0x40),
+        "pg": bool(int(charger_status[0]) & 0x08),
+        "chg_stat": chg_stat,
+        "chg_name": CHG_STAT_NAMES.get(chg_stat, str(chg_stat)),
+        "vbus_stat": vbus_stat,
+        "vbus_name": VBUS_STAT_NAMES.get(vbus_stat, f"reserved_{vbus_stat:x}"),
+        "vsys": bool(int(charger_status[3]) & 0x10),
+        "vbat_ovp": bool(int(fault_status[0]) & 0x20),
+        "warning": warning,
+    }
+
+
 def print_summary(host: str, status: dict, raw: bytes) -> None:
+    decoded = decode_status(status)
     print(f"\n{host} {status.get('hostname', '')}")
     print(
         "present={present} read_ok={read_ok} err={err} "
@@ -130,6 +188,11 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
             if status.get("charger_config_writes_enabled")
             else "disabled",
         )
+    )
+    print(
+        "decoded: CHG_STAT={chg_stat}({chg_name}) VBUS_STAT={vbus_stat}({vbus_name}) "
+        "VSYSMIN_LOOP={vsys} IINDPM={iindpm} VINDPM={vindpm} PG={pg} "
+        "VBAT_OVP={vbat_ovp} warning={warning}".format(**decoded)
     )
     print(
         "limits: VSYSMIN={vsysmin}mV VREG={vreg}mV ICHG={ichg}mA "
