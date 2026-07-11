@@ -323,17 +323,19 @@ control, `VBAT`, `VSYS`, `VBUS`, `VAC1`, `VAC2`, `IBUS`, `IBAT`, `TS`, `TDIE`,
 Battery column, and `tools/bq25792_dump.py --target-list
 tools/ota_targets.local.txt` prints every register byte with names.
 
-Three BQ25792 side-band signals are wired to the ESP32 and exposed in
+Three charger/power side-band signals are wired to the ESP32 and exposed in
 `/status`: `INT` on `GPIO4`, `QON_CMD` on `GPIO38`, and `PG` on `GPIO5`.
 `INT` is an open-drain active-low pulse output; the firmware enables a pull-up
 and uses the falling edge to wake the charger task for an immediate register
-refresh. `PG` is sampled as a power-good flag and reported alongside the
-`PG_STAT` register bit. `GPIO38` does not connect directly to the BQ25792
-`~QON` pin: it drives a BSS138 gate through the QON command net, which has a
-`100k` pulldown. Idle `GPIO38=0` is normal; driving the command net high would
-pull the real BQ25792 `~QON` pin low. That low pulse can wake the charger from
-ship mode or, if held long enough, trigger a system power reset. Firmware
-currently leaves `GPIO38` as high-impedance input and only reports its level.
+refresh. `PG` on `GPIO5` is the board power-good net from the power sheet
+through a `100R` series resistor and a `100k` pull-up to the regulator output;
+it is reported alongside, but is not the same signal as, the BQ25792 `PG_STAT`
+register bit. `GPIO38` does not connect directly to the BQ25792 `~QON` pin: it
+drives a BSS138 gate through the QON command net, which has a `100k` pulldown.
+Idle `GPIO38=0` is normal; driving the command net high would pull the real
+BQ25792 `~QON` pin low. That low pulse can wake the charger from ship mode or,
+if held long enough, trigger a system power reset. Firmware currently leaves
+`GPIO38` as high-impedance input and only reports its level.
 
 The datasheet confirms that the BQ25792 is not read-only: many configuration
 registers are `R/W`, and any I2C write moves the charger from default mode into

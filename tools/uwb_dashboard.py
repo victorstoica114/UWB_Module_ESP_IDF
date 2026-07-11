@@ -1726,7 +1726,7 @@ function renderBatteryCell(item) {
   if (!item.charger_monitor_enabled) {
     return `<span class="muted">monitor off</span>`;
   }
-  const pinLine = `PG ${fmtGpioLevel(item.charger_pg_gpio_level)}${item.charger_pg_asserted ? " asserted" : ""}
+  const pinLine = `Board PG ${fmtGpioLevel(item.charger_pg_gpio_level)}${item.charger_pg_asserted ? " asserted" : ""}
     · PG_STAT ${item.charger_pg_stat ? "1" : "0"}
     · INT ${fmtGpioLevel(item.charger_int_gpio_level)} / ${esc(item.charger_int_irq_count ?? "-")}
     · QON cmd ${fmtGpioLevel(item.charger_qon_gpio_level)}${item.charger_qon_asserted ? " asserted" : ""}`;

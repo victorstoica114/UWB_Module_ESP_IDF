@@ -139,7 +139,7 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
         )
     )
     print(
-        "pins: PG={pg} asserted={pg_asserted} PG_STAT={pg_stat} INT={int_level} "
+        "pins: BOARD_PG={pg} asserted={pg_asserted} PG_STAT={pg_stat} INT={int_level} "
         "irq={irq} irq_age={irq_age}ms QON_CMD={qon} asserted={qon_asserted}".format(
             pg=status.get("charger_pg_gpio_level"),
             pg_asserted=status.get("charger_pg_asserted"),
