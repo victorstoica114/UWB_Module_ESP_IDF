@@ -114,7 +114,8 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
     print(f"\n{host} {status.get('hostname', '')}")
     print(
         "present={present} read_ok={read_ok} err={err} "
-        "part={part} pn={pn} rev={rev} adc={adc} writes={writes}".format(
+        "part={part} pn={pn} rev={rev} adc={adc} sample={sample} "
+        "wd={watchdog} writes={writes}".format(
             present=status.get("charger_present"),
             read_ok=status.get("charger_read_ok"),
             err=status.get("charger_last_error_name"),
@@ -122,9 +123,21 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
             pn=status.get("charger_part_number"),
             rev=status.get("charger_device_revision"),
             adc=status.get("charger_adc_enabled"),
+            sample=status.get("charger_adc_sample"),
+            watchdog=status.get("charger_watchdog_setting"),
             writes="enabled"
             if status.get("charger_config_writes_enabled")
             else "disabled",
+        )
+    )
+    print(
+        "limits: VSYSMIN={vsysmin}mV VREG={vreg}mV ICHG={ichg}mA "
+        "VINDPM={vindpm}mV IINDPM={iindpm}mA".format(
+            vsysmin=status.get("charger_minimal_system_voltage_mv"),
+            vreg=status.get("charger_charge_voltage_limit_mv"),
+            ichg=status.get("charger_charge_current_limit_ma"),
+            vindpm=status.get("charger_input_voltage_limit_mv"),
+            iindpm=status.get("charger_input_current_limit_ma"),
         )
     )
     print(
@@ -149,6 +162,18 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
             irq_age=status.get("charger_int_last_irq_age_ms"),
             qon=status.get("charger_qon_gpio_level"),
             qon_asserted=status.get("charger_qon_asserted"),
+        )
+    )
+    print(
+        "last write: count={count} errors={errors} reg={reg} before={before} "
+        "after={after} err={err} age={age}ms".format(
+            count=status.get("charger_write_count"),
+            errors=status.get("charger_write_error_count"),
+            reg=status.get("charger_last_write_reg"),
+            before=status.get("charger_last_write_before"),
+            after=status.get("charger_last_write_after"),
+            err=status.get("charger_last_write_error_name"),
+            age=status.get("charger_last_write_age_ms"),
         )
     )
     print("reg  value  name")

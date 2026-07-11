@@ -311,17 +311,19 @@ current implementation is a passive GNSS diagnostic suitable for testing
 modules with antennas, currently modules 3 and 5 near the window.
 
 The BQ25792 Li-Po charger monitor runs on the shared I2C bus
-(`GPIO9/GPIO10`, address `0x6B`) and performs a read-only dump of the complete
-register window `0x00..0x48` every `APP_BQ25792_READ_INTERVAL_MS` (`10s` by
-default). The dump is intentionally split into small register chunks
+(`GPIO9/GPIO10`, address `0x6B`) and dumps the complete register window
+`0x00..0x48` every `APP_BQ25792_READ_INTERVAL_MS` (`10s` by default). The dump
+is intentionally split into small register chunks
 (`APP_BQ25792_REGISTER_READ_CHUNK_BYTES`, default `8`) with a short gap between
 chunks so the charger monitor stays lower priority than the BNO085
 accelerometer. `/status` exposes the raw register bytes as `charger_raw_hex`
 plus decoded summary fields for part information, status/fault bytes, ADC
-control, `VBAT`, `VSYS`, `VBUS`, `VAC1`, `VAC2`, `IBUS`, `IBAT`, `TS`, `TDIE`,
-`D+`, and `D-`. The dashboard Info tab shows the decoded charger values in the
-Battery column, and `tools/bq25792_dump.py --target-list
-tools/ota_targets.local.txt` prints every register byte with names.
+control, watchdog state, charge/input limits, `VBAT`, `VSYS`, `VBUS`, `VAC1`,
+`VAC2`, `IBUS`, `IBAT`, `TS`, `TDIE`, `D+`, and `D-`. The dashboard Info tab
+shows the decoded charger values in the Battery column, the Battery Charger tab
+shows a full live table plus raw register map, and
+`tools/bq25792_dump.py --target-list tools/ota_targets.local.txt` prints every
+register byte with names.
 
 Three charger/power side-band signals are wired to the ESP32 and exposed in
 `/status`: `INT` on `GPIO4`, `QON_CMD` on `GPIO38`, and `PG` on `GPIO5`.
@@ -339,10 +341,16 @@ if held long enough, trigger a system power reset. Firmware currently leaves
 
 The datasheet confirms that the BQ25792 is not read-only: many configuration
 registers are `R/W`, and any I2C write moves the charger from default mode into
-host mode and starts/resets the watchdog unless the watchdog is disabled.
-Firmware currently leaves `charger_config_writes_enabled=false`; it reads and
-reports the register map without changing charge limits, ADC enable, watchdog,
-or masks. This is intentional for the first bring-up pass.
+host mode and starts/resets the watchdog unless the watchdog is disabled. The
+firmware exposes an authenticated live endpoint at `/config/charger` for
+controlled writes. The endpoint disables the watchdog before charger
+configuration changes, can enable/disable the ADC, can choose continuous or
+one-shot ADC conversion and ADC sample speed, and can set `VSYSMIN`, charge
+voltage/current, and input voltage/current using human units (`mV`/`mA`). It
+also has a guarded raw register write path (`reg`, `value`, optional
+`mask`/`bits`, and `confirm=1`) for datasheet-level experiments. These settings
+are live BQ registers, not NVS-backed firmware configuration; reboot or power
+cycling the charger can return BQ-controlled values to defaults.
 
 Recommended workflow from this folder, in the ESP-IDF v6.0.2 terminal:
 
@@ -459,10 +467,11 @@ python3 tools/uwb_dashboard.py --log-port 6055 --http-port 8780 --open
 ```
 
 Open `http://127.0.0.1:8780/`. The dashboard has separate log tabs for module
-pairs, a combined log view, a status page, and runtime/calibration controls.
-Log filters and settings are persisted in the browser. Calibration distances are
-entered in centimeters and rounded to the nearest millimeter before being sent
-to `/config/runtime`.
+pairs, a combined log view, accelerometer graphs, a status page, runtime and UWB
+configuration controls, and a Battery Charger tab for BQ25792 ADC/watchdog,
+charge/input limit, and raw register experiments. Log filters and settings are
+persisted in the browser. Calibration distances are entered in centimeters and
+rounded to the nearest millimeter before being sent to `/config/runtime`.
 Only one program can listen on TCP port 6055 at a time, so stop
 `wireless_log_listener.py` before starting the dashboard.
 

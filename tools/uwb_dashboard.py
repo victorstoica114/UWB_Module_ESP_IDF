@@ -104,6 +104,12 @@ def runtime_url(target: str) -> str:
     return f"http://{target}/config/runtime"
 
 
+def charger_url(target: str) -> str:
+    if re.match(r"^https?://", target):
+        return target.rstrip("/") + "/config/charger"
+    return f"http://{target}/config/charger"
+
+
 def antenna_delay_url(target: str) -> str:
     if re.match(r"^https?://", target):
         return target.rstrip("/") + "/config/antenna-delay"
@@ -679,13 +685,39 @@ table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { padding: 8px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 th { color: var(--muted); font-weight: 700; }
 .ok { color: var(--green); font-weight: 700; }
+.warn { color: var(--orange); font-weight: 700; }
 .bad { color: var(--red); font-weight: 700; }
 .settings-grid { display: grid; grid-template-columns: minmax(340px, 520px) minmax(420px, 1fr); gap: 14px; align-items: start; }
+.charger-grid { grid-template-columns: minmax(620px, 1.25fr) minmax(360px, 0.75fr); }
 .section { border: 1px solid var(--line); padding: 12px; margin-bottom: 12px; background: #fff; }
 .section h2 { margin: 0 0 11px; font-size: 15px; }
 .form-grid { display: grid; grid-template-columns: 160px minmax(160px, 1fr); gap: 8px 10px; align-items: center; }
 .form-grid label { color: var(--muted); font-size: 13px; }
 .form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.reg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(142px, 1fr));
+  gap: 7px;
+  margin-top: 10px;
+}
+.reg-cell {
+  border: 1px solid var(--line);
+  background: #fbfcfe;
+  padding: 7px;
+  min-height: 62px;
+}
+.reg-cell b {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+.reg-cell span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+}
 .diagram {
   min-height: 340px;
   border: 1px solid var(--line);
@@ -830,7 +862,7 @@ th { color: var(--muted); font-weight: 700; }
   line-height: 1.4;
 }
 @media (max-width: 940px) {
-  .terminal-grid, .settings-grid, .graphs-layout { grid-template-columns: 1fr; }
+  .terminal-grid, .settings-grid, .charger-grid, .graphs-layout { grid-template-columns: 1fr; }
   .page { height: auto; }
   .terminal { height: 520px; }
   .chart-stack { grid-template-rows: none; }
@@ -857,6 +889,7 @@ th { color: var(--muted); font-weight: 700; }
     <button class="tab" data-tab="logsAll">All Logs</button>
     <button class="tab" data-tab="graphs">Graphs</button>
     <button class="tab" data-tab="info">Info</button>
+    <button class="tab" data-tab="batteryCharger">Battery Charger</button>
     <button class="tab" data-tab="uwbSettings">UWB Settings</button>
     <button class="tab" data-tab="settings">Settings</button>
   </nav>
@@ -918,6 +951,110 @@ th { color: var(--muted); font-weight: 700; }
           <thead><tr><th>Module</th><th>Wi-Fi</th><th>Runtime</th><th>Components</th><th>GPS</th><th>UWB</th><th>Antenna</th><th>Logs</th><th>Battery</th></tr></thead>
           <tbody id="infoRows"></tbody>
         </table>
+      </div>
+    </section>
+    <section id="batteryCharger" class="page">
+      <div class="settings">
+        <div class="settings-grid charger-grid">
+          <div>
+            <div class="section">
+              <h2>Live Charger Status</h2>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Module</th><th>Power</th><th>ADC</th><th>Limits</th><th>Measurements</th><th>Last Write</th>
+                  </tr>
+                </thead>
+                <tbody id="chargerRows"></tbody>
+              </table>
+            </div>
+            <div class="section">
+              <h2>Raw Registers</h2>
+              <div class="form-grid">
+                <label for="chargerRawModule">Module</label>
+                <select id="chargerRawModule">
+                  <option value="1">module 1</option>
+                  <option value="2">module 2</option>
+                  <option value="3">module 3</option>
+                  <option value="4">module 4</option>
+                  <option value="5">module 5</option>
+                </select>
+              </div>
+              <div id="chargerRawRegisters" class="reg-grid"></div>
+            </div>
+          </div>
+          <div>
+            <div class="section">
+              <h2>ADC</h2>
+              <div class="form-grid">
+                <label for="chargerTargets">Targets</label>
+                <select id="chargerTargets">
+                  <option value="all">all modules</option>
+                  <option value="1">module 1</option>
+                  <option value="2">module 2</option>
+                  <option value="3">module 3</option>
+                  <option value="4">module 4</option>
+                  <option value="5">module 5</option>
+                </select>
+                <label for="chargerAdcEnabled">ADC</label>
+                <div class="checkbox-row"><input id="chargerAdcEnabled" type="checkbox"><span>enabled</span></div>
+                <label for="chargerAdcRate">Rate</label>
+                <select id="chargerAdcRate"><option value="continuous">continuous</option><option value="oneshot">one shot</option></select>
+                <label for="chargerAdcSample">Sample</label>
+                <select id="chargerAdcSample">
+                  <option value="0">15 bit / 24 ms</option>
+                  <option value="1">14 bit / 12 ms</option>
+                  <option value="2" selected>13 bit / 6 ms</option>
+                  <option value="3">12 bit / 3 ms</option>
+                </select>
+                <label for="chargerAdcAvg">Average</label>
+                <div class="checkbox-row"><input id="chargerAdcAvg" type="checkbox"><span>running average</span></div>
+              </div>
+              <div class="form-actions">
+                <button class="primary" id="applyChargerAdc">Apply ADC</button>
+                <button id="disableChargerWatchdog">Disable Watchdog</button>
+                <button id="refreshCharger">Refresh</button>
+              </div>
+              <div id="chargerToast" class="toast"></div>
+            </div>
+            <div class="section">
+              <h2>Charge Limits</h2>
+              <div class="form-grid">
+                <label for="chargerMinimalSystemMv">VSYSMIN mV</label>
+                <input id="chargerMinimalSystemMv" type="number" min="2500" max="16000" step="250">
+                <label for="chargerChargeVoltageMv">Charge voltage mV</label>
+                <input id="chargerChargeVoltageMv" type="number" min="3000" max="18800" step="10">
+                <label for="chargerChargeCurrentMa">Charge current mA</label>
+                <input id="chargerChargeCurrentMa" type="number" min="50" max="5000" step="10">
+                <label for="chargerInputVoltageMv">Input voltage mV</label>
+                <input id="chargerInputVoltageMv" type="number" min="3600" max="22000" step="100">
+                <label for="chargerInputCurrentMa">Input current mA</label>
+                <input id="chargerInputCurrentMa" type="number" min="100" max="3300" step="10">
+              </div>
+              <div class="form-actions">
+                <button class="primary" id="applyChargerLimits">Apply Limits</button>
+              </div>
+            </div>
+            <div class="section">
+              <h2>Raw Register Write</h2>
+              <div class="form-grid">
+                <label for="chargerRawReg">Register</label>
+                <input id="chargerRawReg" value="0x2E">
+                <label for="chargerRawValue">Value</label>
+                <input id="chargerRawValue" value="0xA0">
+                <label for="chargerRawMask">Mask</label>
+                <input id="chargerRawMask" placeholder="optional, e.g. 0x80">
+                <label for="chargerRawBits">Bits</label>
+                <input id="chargerRawBits" placeholder="optional with mask">
+                <label for="chargerRawConfirm">Confirm</label>
+                <div class="checkbox-row"><input id="chargerRawConfirm" type="checkbox"><span>allow raw write</span></div>
+              </div>
+              <div class="form-actions">
+                <button class="danger" id="applyChargerRaw">Apply Raw Register</button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
     <section id="uwbSettings" class="page">
@@ -1147,6 +1284,80 @@ const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?
 const maxAccelSamples = 30000;
 const maxSeriesPoints = 1600;
 const plot = {left: 52, right: 704, top: 14, bottom: 166, width: 652, height: 152};
+const BQ_REG_NAMES = {
+  0x00: "Minimal System Voltage",
+  0x01: "Charge Voltage MSB",
+  0x02: "Charge Voltage LSB",
+  0x03: "Charge Current MSB",
+  0x04: "Charge Current LSB",
+  0x05: "Input Voltage Limit",
+  0x06: "Input Current MSB",
+  0x07: "Input Current LSB",
+  0x08: "Precharge Control",
+  0x09: "Termination Control",
+  0x0A: "Recharge Control",
+  0x0B: "VOTG Regulation MSB",
+  0x0C: "VOTG Regulation LSB",
+  0x0D: "IOTG Regulation",
+  0x0E: "Timer Control",
+  0x0F: "Charger Control 0",
+  0x10: "Charger Control 1",
+  0x11: "Charger Control 2",
+  0x12: "Charger Control 3",
+  0x13: "Charger Control 4",
+  0x14: "Charger Control 5",
+  0x16: "Temperature Control",
+  0x17: "NTC Control 0",
+  0x18: "NTC Control 1",
+  0x19: "ICO Current MSB",
+  0x1A: "ICO Current LSB",
+  0x1B: "Charger Status 0",
+  0x1C: "Charger Status 1",
+  0x1D: "Charger Status 2",
+  0x1E: "Charger Status 3",
+  0x1F: "Charger Status 4",
+  0x20: "Fault Status 0",
+  0x21: "Fault Status 1",
+  0x22: "Charger Flag 0",
+  0x23: "Charger Flag 1",
+  0x24: "Charger Flag 2",
+  0x25: "Charger Flag 3",
+  0x26: "Fault Flag 0",
+  0x27: "Fault Flag 1",
+  0x28: "Charger Mask 0",
+  0x29: "Charger Mask 1",
+  0x2A: "Charger Mask 2",
+  0x2B: "Charger Mask 3",
+  0x2C: "Fault Mask 0",
+  0x2D: "Fault Mask 1",
+  0x2E: "ADC Control",
+  0x2F: "ADC Disable 0",
+  0x30: "ADC Disable 1",
+  0x31: "IBUS ADC MSB",
+  0x32: "IBUS ADC LSB",
+  0x33: "IBAT ADC MSB",
+  0x34: "IBAT ADC LSB",
+  0x35: "VBUS ADC MSB",
+  0x36: "VBUS ADC LSB",
+  0x37: "VAC1 ADC MSB",
+  0x38: "VAC1 ADC LSB",
+  0x39: "VAC2 ADC MSB",
+  0x3A: "VAC2 ADC LSB",
+  0x3B: "VBAT ADC MSB",
+  0x3C: "VBAT ADC LSB",
+  0x3D: "VSYS ADC MSB",
+  0x3E: "VSYS ADC LSB",
+  0x3F: "TS ADC MSB",
+  0x40: "TS ADC LSB",
+  0x41: "TDIE ADC MSB",
+  0x42: "TDIE ADC LSB",
+  0x43: "D+ ADC MSB",
+  0x44: "D+ ADC LSB",
+  0x45: "D- ADC MSB",
+  0x46: "D- ADC LSB",
+  0x47: "DPDM Driver",
+  0x48: "Part Information",
+};
 
 function storageKey(id, name) { return `uwbDash.${id}.${name}`; }
 function levelClass(level) { return `level-${["D","I","W","E"].includes(level) ? level : "unknown"}`; }
@@ -1749,6 +1960,85 @@ function renderBatteryCell(item) {
     <span class="muted">REG48 ${esc(item.charger_part_info || "-")} · reads ${esc(item.charger_read_count ?? "-")} · age ${fmtAgeMs(item.charger_last_update_age_ms)}</span>`;
 }
 
+function hexByte(value) {
+  const number = Number(value);
+  return Number.isFinite(number)
+    ? `0x${number.toString(16).toUpperCase().padStart(2, "0")}`
+    : "-";
+}
+
+function chargerRawBytes(item) {
+  const raw = String(item?.charger_raw_hex || "");
+  if (!raw || raw.length % 2) return [];
+  const bytes = [];
+  for (let index = 0; index < raw.length; index += 2) {
+    const value = Number.parseInt(raw.slice(index, index + 2), 16);
+    if (!Number.isFinite(value)) return [];
+    bytes.push(value);
+  }
+  return bytes;
+}
+
+function renderChargerRows(statuses) {
+  const rows = document.getElementById("chargerRows");
+  if (!rows) return;
+  rows.innerHTML = (statuses || []).map(item => {
+    const powerClass = item.charger_present ? "ok" : "bad";
+    const adcClass = item.charger_adc_enabled ? "ok" : "warn";
+    return `<tr>
+      <td><b>${esc(item.hostname)}</b><br><span class="muted">${esc(item.ip || item.target || "")}</span></td>
+      <td><span class="${powerClass}">${item.charger_present ? "BQ25792 present" : "not found"}</span><br>
+        Board PG ${fmtGpioLevel(item.charger_pg_gpio_level)} ${item.charger_pg_asserted ? "asserted" : ""}<br>
+        BQ PG_STAT ${item.charger_pg_stat ? "1" : "0"} · INT ${fmtGpioLevel(item.charger_int_gpio_level)} / ${esc(item.charger_int_irq_count ?? "-")}<br>
+        <span class="muted">REG48 ${esc(item.charger_part_info || "-")} · age ${fmtAgeMs(item.charger_last_update_age_ms)}</span></td>
+      <td><span class="${adcClass}">ADC ${item.charger_adc_enabled ? "on" : "off"}</span><br>
+        sample ${esc(item.charger_adc_sample ?? "-")} · ${item.charger_adc_continuous ? "continuous" : "one shot"}<br>
+        avg ${item.charger_adc_running_average ? "on" : "off"} · EN_IBAT ${item.charger_ibat_discharge_sense_enabled ? "on" : "off"}<br>
+        WD ${esc(item.charger_watchdog_setting ?? "-")} ${item.charger_watchdog_disabled ? "(disabled)" : ""}</td>
+      <td>VSYSMIN ${fmtMv(item.charger_minimal_system_voltage_mv)}<br>
+        VREG ${fmtMv(item.charger_charge_voltage_limit_mv)}<br>
+        ICHG ${fmtMa(item.charger_charge_current_limit_ma)}<br>
+        VINDPM ${fmtMv(item.charger_input_voltage_limit_mv)}<br>
+        IINDPM ${fmtMa(item.charger_input_current_limit_ma)}</td>
+      <td>VBUS ${fmtMv(item.charger_vbus_mv)} · VSYS ${fmtMv(item.charger_vsys_mv)}<br>
+        VBAT ${fmtMv(item.charger_vbat_mv)} · VAC1 ${fmtMv(item.charger_vac1_mv)}<br>
+        IBUS ${fmtMa(item.charger_ibus_ma)} · IBAT ${fmtMa(item.charger_ibat_ma)}<br>
+        TS ${fmtMaybeNumber(item.charger_ts_percent, 2)}% · TDIE ${fmtMaybeNumber(item.charger_tdie_c, 1)} C</td>
+      <td>writes ${esc(item.charger_write_count ?? "-")} · err ${esc(item.charger_write_error_count ?? "-")}<br>
+        reg ${esc(item.charger_last_write_reg || "-")} ${item.charger_last_write_mask_used ? `mask ${esc(item.charger_last_write_mask || "-")}` : ""}<br>
+        ${esc(item.charger_last_write_before || "-")} -> ${esc(item.charger_last_write_after || "-")}<br>
+        <span class="muted">${esc(item.charger_last_write_error_name || "-")} · ${fmtAgeMs(item.charger_last_write_age_ms)}</span></td>
+    </tr>`;
+  }).join("");
+}
+
+function renderChargerRegisters() {
+  const grid = document.getElementById("chargerRawRegisters");
+  const select = document.getElementById("chargerRawModule");
+  if (!grid || !select) return;
+  const moduleId = Number(select.value || 1);
+  const item = state.statuses.find(status => Number(status.module_id) === moduleId);
+  const bytes = chargerRawBytes(item);
+  if (!item) {
+    grid.innerHTML = `<div class="muted">module ${moduleId} has no status yet</div>`;
+    return;
+  }
+  if (!bytes.length) {
+    grid.innerHTML = `<div class="muted">no raw register map available</div>`;
+    return;
+  }
+  grid.innerHTML = bytes.map((value, reg) => `
+    <div class="reg-cell">
+      <b>${hexByte(reg)} = ${hexByte(value)}</b>
+      <span>${esc(BQ_REG_NAMES[reg] || "Reserved")}</span>
+    </div>`).join("");
+}
+
+function renderCharger(statuses) {
+  renderChargerRows(statuses);
+  renderChargerRegisters();
+}
+
 function renderInfo(snapshot) {
   state.statuses = snapshot.statuses || [];
   mergeAccelHistory(snapshot.accel_history || {});
@@ -1801,6 +2091,7 @@ function renderInfo(snapshot) {
       <td>${renderBatteryCell(item)}</td>
     </tr>`).join("");
   renderUwbRadio(state.statuses[0] || {});
+  renderCharger(state.statuses);
   scheduleAccelRender();
   hydrateSettingsFromStatus(state.statuses[0] || {});
 }
@@ -1852,6 +2143,15 @@ function hydrateSettingsFromStatus(item) {
   setSettingIfFresh("uwbCalMaxMs", item.runtime_calibration_max_interval_ms);
   setSettingIfFresh("uwbCalRxMs", item.runtime_calibration_rx_slice_ms);
   setSettingIfFresh("uwbAntennaDelayHex", item.uwb_configured_antenna_delay_hex || item.uwb_active_antenna_delay_hex);
+  setSettingIfFresh("chargerAdcEnabled", item.charger_adc_enabled);
+  setSettingIfFresh("chargerAdcRate", item.charger_adc_continuous ? "continuous" : "oneshot");
+  setSettingIfFresh("chargerAdcSample", item.charger_adc_sample ?? 2);
+  setSettingIfFresh("chargerAdcAvg", item.charger_adc_running_average);
+  setSettingIfFresh("chargerMinimalSystemMv", item.charger_minimal_system_voltage_mv);
+  setSettingIfFresh("chargerChargeVoltageMv", item.charger_charge_voltage_limit_mv);
+  setSettingIfFresh("chargerChargeCurrentMa", item.charger_charge_current_limit_ma);
+  setSettingIfFresh("chargerInputVoltageMv", item.charger_input_voltage_limit_mv);
+  setSettingIfFresh("chargerInputCurrentMa", item.charger_input_current_limit_ma);
 }
 
 function renderUwbRadio(item) {
@@ -1944,6 +2244,18 @@ async function postAntennaDelay(payload, toastId) {
   toast.textContent = JSON.stringify(data, null, 2);
 }
 
+async function postChargerConfig(payload, toastId) {
+  const toast = document.getElementById(toastId);
+  toast.textContent = "sending...";
+  const res = await fetch("/api/charger-config", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  toast.textContent = JSON.stringify(data, null, 2);
+}
+
 function settingKey(id) { return `uwbDash.setting.${id}`; }
 function persistedSettingIds() {
   return [
@@ -1957,6 +2269,12 @@ function persistedSettingIds() {
     "uwbDtFinalDelayMs", "uwbDtReportDelayMs", "uwbDtAutoRxDelayUus",
     "uwbCalSummary", "uwbCalMinMs", "uwbCalMaxMs", "uwbCalRxMs",
     "uwbAntennaDelayHex", "uwbAdvancedReboot",
+    "chargerTargets", "chargerRawModule", "chargerAdcEnabled",
+    "chargerAdcRate", "chargerAdcSample", "chargerAdcAvg",
+    "chargerMinimalSystemMv", "chargerChargeVoltageMv",
+    "chargerChargeCurrentMa", "chargerInputVoltageMv",
+    "chargerInputCurrentMa", "chargerRawReg", "chargerRawValue",
+    "chargerRawMask", "chargerRawBits",
     "calTargets", "calMethod", "calRef", "calDut", "calKnownCm", "calThree",
     "calD01Cm", "calD02Cm", "calD12Cm", "calSamples",
   ];
@@ -2085,6 +2403,58 @@ function wireSettings() {
       reboot: document.getElementById("uwbAdvancedReboot").value,
     }, "uwbToast");
   });
+  document.getElementById("chargerRawModule").addEventListener("change", renderChargerRegisters);
+  document.getElementById("applyChargerAdc").addEventListener("click", () => {
+    postChargerConfig({
+      target_modules: document.getElementById("chargerTargets").value,
+      params: {
+        adc: document.getElementById("chargerAdcEnabled").checked ? "1" : "0",
+        adc_rate: document.getElementById("chargerAdcRate").value,
+        adc_sample: document.getElementById("chargerAdcSample").value,
+        adc_avg: document.getElementById("chargerAdcAvg").checked ? "1" : "0",
+      }
+    }, "chargerToast");
+  });
+  document.getElementById("disableChargerWatchdog").addEventListener("click", () => {
+    postChargerConfig({
+      target_modules: document.getElementById("chargerTargets").value,
+      params: {disable_watchdog: "1"}
+    }, "chargerToast");
+  });
+  document.getElementById("refreshCharger").addEventListener("click", () => {
+    postChargerConfig({
+      target_modules: document.getElementById("chargerTargets").value,
+      params: {refresh: "1"}
+    }, "chargerToast");
+  });
+  document.getElementById("applyChargerLimits").addEventListener("click", () => {
+    const params = {
+      minimal_system_voltage_mv: document.getElementById("chargerMinimalSystemMv").value,
+      charge_voltage_mv: document.getElementById("chargerChargeVoltageMv").value,
+      charge_current_ma: document.getElementById("chargerChargeCurrentMa").value,
+      input_voltage_mv: document.getElementById("chargerInputVoltageMv").value,
+      input_current_ma: document.getElementById("chargerInputCurrentMa").value,
+    };
+    postChargerConfig({
+      target_modules: document.getElementById("chargerTargets").value,
+      params,
+    }, "chargerToast");
+  });
+  document.getElementById("applyChargerRaw").addEventListener("click", () => {
+    const params = {
+      reg: document.getElementById("chargerRawReg").value,
+      value: document.getElementById("chargerRawValue").value,
+      confirm: document.getElementById("chargerRawConfirm").checked ? "1" : "0",
+    };
+    const mask = document.getElementById("chargerRawMask").value.trim();
+    const bits = document.getElementById("chargerRawBits").value.trim();
+    if (mask) params.mask = mask;
+    if (bits) params.bits = bits;
+    postChargerConfig({
+      target_modules: document.getElementById("chargerTargets").value,
+      params,
+    }, "chargerToast");
+  });
   document.getElementById("applyCalibration").addEventListener("click", () => {
     const method = document.getElementById("calMethod").value;
     const params = {mode: "calibration", cal_method: method, cal_samples: document.getElementById("calSamples").value, reboot: "1"};
@@ -2160,6 +2530,9 @@ class HttpHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/antenna-delay":
             self.handle_antenna_delay()
             return
+        if parsed.path == "/api/charger-config":
+            self.handle_charger_config()
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "not found")
 
     def read_json_body(self) -> dict[str, Any]:
@@ -2182,6 +2555,17 @@ class HttpHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json_body()
             results = self.server.apply_antenna_delay(payload)
+            self.send_json({"ok": all(item["ok"] for item in results), "results": results})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def handle_charger_config(self) -> None:
+        try:
+            payload = self.read_json_body()
+            params = normalize_plain_params(payload.get("params") or {})
+            results = self.server.apply_charger_config(
+                params, payload.get("target_modules")
+            )
             self.send_json({"ok": all(item["ok"] for item in results), "results": results})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -2222,6 +2606,14 @@ def normalize_runtime_params(raw: dict[str, Any]) -> dict[str, str]:
         else:
             params[key] = str(value)
     return params
+
+
+def normalize_plain_params(raw: dict[str, Any]) -> dict[str, str]:
+    return {
+        str(key): str(value)
+        for key, value in raw.items()
+        if value is not None and value != ""
+    }
 
 
 class DashboardHttpServer(ThreadingHTTPServer):
@@ -2269,6 +2661,16 @@ class DashboardHttpServer(ThreadingHTTPServer):
             params["reboot"] = "1"
         targets = self.resolve_targets(payload.get("target_modules"))
         return [self.send_antenna_delay(target, params) for target in targets]
+
+    def apply_charger_config(
+        self, params: dict[str, str], target_modules: Any = None
+    ) -> list[dict[str, Any]]:
+        if not self.token:
+            raise RuntimeError("APP_OTA_PASSWORD missing in secrets.h")
+        if not params:
+            raise RuntimeError("No charger config parameters provided")
+        targets = self.resolve_targets(target_modules)
+        return [self.send_charger_config(target, params) for target in targets]
 
     def resolve_targets(self, target_modules: Any) -> list[str]:
         if target_modules in (None, "", "all"):
@@ -2338,6 +2740,31 @@ class DashboardHttpServer(ThreadingHTTPServer):
         query = urllib.parse.urlencode(params)
         request = urllib.request.Request(
             f"{antenna_delay_url(target)}?{query}",
+            data=b"",
+            method="POST",
+            headers={"Content-Length": "0", "X-OTA-Token": self.token},
+        )
+        started = time.monotonic()
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_sec) as response:
+                body = response.read().decode("utf-8", errors="replace").strip()
+                return {
+                    "target": target,
+                    "ok": 200 <= response.status < 300,
+                    "status": response.status,
+                    "elapsed_sec": round(time.monotonic() - started, 3),
+                    "body": body,
+                }
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace").strip()
+            return {"target": target, "ok": False, "status": exc.code, "body": body or exc.reason}
+        except (urllib.error.URLError, TimeoutError) as exc:
+            return {"target": target, "ok": False, "error": str(exc)}
+
+    def send_charger_config(self, target: str, params: dict[str, str]) -> dict[str, Any]:
+        query = urllib.parse.urlencode(params, safe=",")
+        request = urllib.request.Request(
+            f"{charger_url(target)}?{query}",
             data=b"",
             method="POST",
             headers={"Content-Length": "0", "X-OTA-Token": self.token},

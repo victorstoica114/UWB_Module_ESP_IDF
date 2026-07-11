@@ -45,7 +45,7 @@ enum {
     OTA_SERVICE_REBOOT_DELAY_MS = 1200,
     OTA_SERVICE_MAX_TOKEN_LEN = 128,
     OTA_SERVICE_MAX_QUERY_LEN = 768,
-    OTA_SERVICE_STATUS_RESPONSE_SIZE = 12000,
+    OTA_SERVICE_STATUS_RESPONSE_SIZE = 16000,
 };
 
 #define OTA_SERVICE_TOKEN_HEADER "X-OTA-Token"
@@ -176,6 +176,24 @@ static bool ota_parse_u32(const char *text, uint32_t *value)
 
     *value = (uint32_t)parsed;
     return true;
+}
+
+static bool ota_parse_bool_text(const char *text, bool *value)
+{
+    if (text == NULL || value == NULL) {
+        return false;
+    }
+    if (strcmp(text, "1") == 0 || strcmp(text, "true") == 0 ||
+        strcmp(text, "on") == 0 || strcmp(text, "yes") == 0) {
+        *value = true;
+        return true;
+    }
+    if (strcmp(text, "0") == 0 || strcmp(text, "false") == 0 ||
+        strcmp(text, "off") == 0 || strcmp(text, "no") == 0) {
+        *value = false;
+        return true;
+    }
+    return false;
 }
 
 static bool ota_parse_bno085_sample_hz(const char *text, uint32_t *interval_ms)
@@ -331,7 +349,9 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "POST /config/antenna-delay?value=0x4018[&reboot=1]\n"
         "POST /config/antenna-delay?clear=1[&reboot=1]\n"
         "POST /config/runtime?mode=ranging&tag=1&anchors=2,3,4,5[&reboot=1]\n"
-        "POST /config/runtime?clear=1[&reboot=1]\n";
+        "POST /config/runtime?clear=1[&reboot=1]\n"
+        "POST /config/charger?adc=1&adc_sample=2\n"
+        "POST /config/charger?charge_current_ma=500&charge_voltage_mv=4200\n";
 
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
@@ -498,6 +518,17 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_reg2e_adc_control\":\"0x%02x\","
         "\"charger_reg2f_adc_disable_0\":\"0x%02x\","
         "\"charger_reg30_adc_disable_1\":\"0x%02x\","
+        "\"charger_minimal_system_voltage_mv\":%u,"
+        "\"charger_charge_voltage_limit_mv\":%u,"
+        "\"charger_charge_current_limit_ma\":%u,"
+        "\"charger_input_voltage_limit_mv\":%u,"
+        "\"charger_input_current_limit_ma\":%u,"
+        "\"charger_watchdog_setting\":%u,"
+        "\"charger_watchdog_disabled\":%s,"
+        "\"charger_adc_sample\":%u,"
+        "\"charger_adc_continuous\":%s,"
+        "\"charger_adc_running_average\":%s,"
+        "\"charger_ibat_discharge_sense_enabled\":%s,"
         "\"charger_status\":[%u,%u,%u,%u,%u],"
         "\"charger_fault_status\":[%u,%u],"
         "\"charger_flag\":[%u,%u,%u,%u],"
@@ -513,6 +544,18 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_tdie_c\":%.1f,"
         "\"charger_dp_mv\":%u,"
         "\"charger_dm_mv\":%u,"
+        "\"charger_write_count\":%lu,"
+        "\"charger_write_error_count\":%lu,"
+        "\"charger_last_write_age_ms\":%lu,"
+        "\"charger_last_write_reg\":\"0x%02x\","
+        "\"charger_last_write_requested_value\":\"0x%02x\","
+        "\"charger_last_write_mask\":\"0x%02x\","
+        "\"charger_last_write_before\":\"0x%02x\","
+        "\"charger_last_write_after\":\"0x%02x\","
+        "\"charger_last_write_mask_used\":%s,"
+        "\"charger_last_write_changed\":%s,"
+        "\"charger_last_write_error\":%d,"
+        "\"charger_last_write_error_name\":\"%s\","
         "\"charger_raw_hex\":\"%s\","
         "\"runtime_radio_channel\":%u,"
         "\"runtime_wireless_telemetry_port\":%lu,"
@@ -700,6 +743,17 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned)charger_snapshot.reg2e_adc_control,
         (unsigned)charger_snapshot.reg2f_adc_disable_0,
         (unsigned)charger_snapshot.reg30_adc_disable_1,
+        (unsigned)charger_snapshot.minimal_system_voltage_mv,
+        (unsigned)charger_snapshot.charge_voltage_limit_mv,
+        (unsigned)charger_snapshot.charge_current_limit_ma,
+        (unsigned)charger_snapshot.input_voltage_limit_mv,
+        (unsigned)charger_snapshot.input_current_limit_ma,
+        (unsigned)charger_snapshot.watchdog_setting,
+        charger_snapshot.watchdog_disabled ? "true" : "false",
+        (unsigned)charger_snapshot.adc_sample,
+        charger_snapshot.adc_continuous ? "true" : "false",
+        charger_snapshot.adc_running_average ? "true" : "false",
+        charger_snapshot.ibat_discharge_sense_enabled ? "true" : "false",
         (unsigned)charger_snapshot.charger_status[0],
         (unsigned)charger_snapshot.charger_status[1],
         (unsigned)charger_snapshot.charger_status[2],
@@ -724,6 +778,18 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         charger_snapshot.tdie_c,
         (unsigned)charger_snapshot.dp_mv,
         (unsigned)charger_snapshot.dm_mv,
+        (unsigned long)charger_snapshot.write_count,
+        (unsigned long)charger_snapshot.write_error_count,
+        (unsigned long)charger_snapshot.last_write_age_ms,
+        (unsigned)charger_snapshot.last_write_reg,
+        (unsigned)charger_snapshot.last_write_requested_value,
+        (unsigned)charger_snapshot.last_write_mask,
+        (unsigned)charger_snapshot.last_write_before,
+        (unsigned)charger_snapshot.last_write_after,
+        charger_snapshot.last_write_mask_used ? "true" : "false",
+        charger_snapshot.last_write_changed ? "true" : "false",
+        charger_snapshot.last_write_error,
+        esp_err_to_name((esp_err_t)charger_snapshot.last_write_error),
         charger_raw_hex,
         (unsigned)runtime_radio_channel(runtime_config),
         (unsigned long)runtime_config->wireless_telemetry_port,
@@ -890,6 +956,387 @@ static esp_err_t antenna_delay_post_handler(httpd_req_t *req)
     }
 
     return response_err;
+}
+
+static esp_err_t charger_config_apply_u16(
+    const char *query, const char *key, esp_err_t (*setter)(
+                                        uint16_t,
+                                        charger_service_write_result_t *,
+                                        size_t, size_t *),
+    bool *handled, uint32_t *operation_count, esp_err_t *first_error)
+{
+    char value_text[32] = {0};
+    const esp_err_t query_err =
+        httpd_query_key_value(query, key, value_text, sizeof(value_text));
+    if (query_err == ESP_ERR_NOT_FOUND) {
+        return ESP_OK;
+    }
+    if (query_err != ESP_OK) {
+        return query_err;
+    }
+
+    uint16_t value = 0;
+    if (!ota_parse_u16(value_text, &value)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    charger_service_write_result_t results[4] = {0};
+    size_t written_count = 0;
+    const esp_err_t err = setter(value, results, 4, &written_count);
+    *handled = true;
+    *operation_count += (uint32_t)written_count;
+    if (err != ESP_OK && *first_error == ESP_OK) {
+        *first_error = err;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t charger_config_post_handler(httpd_req_t *req)
+{
+    if (!ota_request_authorized(req)) {
+        ESP_LOGW(TAG, "Rejected charger config: missing or invalid token");
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED,
+                                   "Missing or invalid OTA token");
+    }
+
+    if (s_ota_in_progress) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "OTA already in progress");
+    }
+
+    const size_t query_len = httpd_req_get_url_query_len(req);
+    if (query_len == 0 || query_len >= OTA_SERVICE_MAX_QUERY_LEN) {
+        return httpd_resp_send_err(
+            req, HTTPD_400_BAD_REQUEST,
+            "Use charger config query parameters");
+    }
+
+    char query[OTA_SERVICE_MAX_QUERY_LEN] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid query string");
+    }
+
+    bool handled = false;
+    uint32_t operation_count = 0;
+    esp_err_t first_error = ESP_OK;
+
+    if (ota_query_option_enabled(query, "refresh")) {
+        charger_service_request_refresh();
+        handled = true;
+    }
+
+    if (ota_query_option_enabled(query, "disable_watchdog") ||
+        ota_query_option_enabled(query, "watchdog_disable")) {
+        charger_service_write_result_t result = {0};
+        const esp_err_t err = charger_service_set_watchdog_disabled(&result);
+        operation_count++;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    }
+
+    char adc_text[16] = {0};
+    esp_err_t query_err =
+        httpd_query_key_value(query, "adc", adc_text, sizeof(adc_text));
+    if (query_err == ESP_OK) {
+        bool adc_enabled = false;
+        if (!ota_parse_bool_text(adc_text, &adc_enabled)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid adc value");
+        }
+
+        uint8_t adc_sample = 2;
+        char sample_text[16] = {0};
+        query_err = httpd_query_key_value(query, "adc_sample", sample_text,
+                                          sizeof(sample_text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_u8(sample_text, &adc_sample) || adc_sample > 3U) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid adc_sample");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid adc_sample");
+        }
+
+        bool continuous = true;
+        char rate_text[16] = {0};
+        query_err = httpd_query_key_value(query, "adc_rate", rate_text,
+                                          sizeof(rate_text));
+        if (query_err == ESP_OK) {
+            if (strcmp(rate_text, "continuous") == 0 ||
+                strcmp(rate_text, "cont") == 0 || strcmp(rate_text, "0") == 0) {
+                continuous = true;
+            } else if (strcmp(rate_text, "oneshot") == 0 ||
+                       strcmp(rate_text, "one_shot") == 0 ||
+                       strcmp(rate_text, "1") == 0) {
+                continuous = false;
+            } else {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid adc_rate");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid adc_rate");
+        }
+
+        bool running_average = false;
+        char avg_text[16] = {0};
+        query_err = httpd_query_key_value(query, "adc_avg", avg_text,
+                                          sizeof(avg_text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_bool_text(avg_text, &running_average)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid adc_avg");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid adc_avg");
+        }
+
+        charger_service_write_result_t results[6] = {0};
+        size_t written_count = 0;
+        const esp_err_t err =
+            charger_service_set_adc(adc_enabled, continuous, adc_sample,
+                                    running_average, results, 6,
+                                    &written_count);
+        operation_count += (uint32_t)written_count;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    } else if (query_err != ESP_ERR_NOT_FOUND) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid adc value");
+    }
+
+    esp_err_t apply_err = charger_config_apply_u16(
+        query, "minimal_system_voltage_mv",
+        charger_service_set_minimal_system_voltage_mv, &handled,
+        &operation_count, &first_error);
+    if (apply_err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid minimal_system_voltage_mv");
+    }
+
+    apply_err = charger_config_apply_u16(
+        query, "charge_voltage_mv",
+        charger_service_set_charge_voltage_limit_mv, &handled,
+        &operation_count, &first_error);
+    if (apply_err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid charge_voltage_mv");
+    }
+
+    apply_err = charger_config_apply_u16(
+        query, "charge_current_ma",
+        charger_service_set_charge_current_limit_ma, &handled,
+        &operation_count, &first_error);
+    if (apply_err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid charge_current_ma");
+    }
+
+    char input_voltage_text[32] = {0};
+    query_err = httpd_query_key_value(query, "input_voltage_mv",
+                                      input_voltage_text,
+                                      sizeof(input_voltage_text));
+    if (query_err == ESP_OK) {
+        uint16_t mv = 0;
+        if (!ota_parse_u16(input_voltage_text, &mv)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid input_voltage_mv");
+        }
+        charger_service_write_result_t result = {0};
+        const esp_err_t err =
+            charger_service_set_input_voltage_limit_mv(mv, &result);
+        operation_count += 2U;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    } else if (query_err != ESP_ERR_NOT_FOUND) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid input_voltage_mv");
+    }
+
+    apply_err = charger_config_apply_u16(
+        query, "input_current_ma",
+        charger_service_set_input_current_limit_ma, &handled,
+        &operation_count, &first_error);
+    if (apply_err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid input_current_ma");
+    }
+
+    char reg_text[16] = {0};
+    query_err = httpd_query_key_value(query, "reg", reg_text,
+                                      sizeof(reg_text));
+    if (query_err == ESP_OK) {
+        if (!ota_query_option_enabled(query, "confirm")) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Raw register write needs confirm=1");
+        }
+
+        uint8_t reg = 0;
+        if (!ota_parse_u8(reg_text, &reg) ||
+            reg >= CHARGER_SERVICE_REGISTER_MAP_SIZE) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid reg");
+        }
+
+        charger_service_write_result_t result = {0};
+        const esp_err_t watchdog_err =
+            charger_service_set_watchdog_disabled(&result);
+        operation_count++;
+        if (watchdog_err != ESP_OK && first_error == ESP_OK) {
+            first_error = watchdog_err;
+        }
+
+        char mask_text[16] = {0};
+        char value_text[16] = {0};
+        const esp_err_t mask_err =
+            httpd_query_key_value(query, "mask", mask_text, sizeof(mask_text));
+        if (mask_err == ESP_OK) {
+            char bits_text[16] = {0};
+            if (httpd_query_key_value(query, "bits", bits_text,
+                                      sizeof(bits_text)) != ESP_OK &&
+                httpd_query_key_value(query, "value", bits_text,
+                                      sizeof(bits_text)) != ESP_OK) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Missing bits/value");
+            }
+            uint8_t mask = 0;
+            uint8_t bits = 0;
+            if (!ota_parse_u8(mask_text, &mask) ||
+                !ota_parse_u8(bits_text, &bits)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid mask/bits");
+            }
+            const esp_err_t err =
+                charger_service_update_register_bits(reg, mask, bits, &result);
+            operation_count++;
+            if (err != ESP_OK && first_error == ESP_OK) {
+                first_error = err;
+            }
+        } else if (mask_err == ESP_ERR_NOT_FOUND) {
+            if (httpd_query_key_value(query, "value", value_text,
+                                      sizeof(value_text)) != ESP_OK) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Missing raw value");
+            }
+            uint8_t value = 0;
+            if (!ota_parse_u8(value_text, &value)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid value");
+            }
+            const esp_err_t err =
+                charger_service_write_register(reg, value, &result);
+            operation_count++;
+            if (err != ESP_OK && first_error == ESP_OK) {
+                first_error = err;
+            }
+        } else {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid mask");
+        }
+        handled = true;
+    } else if (query_err != ESP_ERR_NOT_FOUND) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid reg");
+    }
+
+    if (!handled) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "No charger operation requested");
+    }
+
+    charger_service_request_refresh();
+    vTaskDelay(pdMS_TO_TICKS(40));
+
+    charger_service_snapshot_t snapshot = {0};
+    charger_service_get_snapshot(&snapshot);
+
+    ESP_LOGW(TAG,
+             "Charger config: ops=%lu err=%s ADC=%s VREG=%umV ICHG=%umA VINDPM=%umV IINDPM=%umA WD=%u",
+             (unsigned long)operation_count, esp_err_to_name(first_error),
+             snapshot.adc_enabled ? "on" : "off",
+             (unsigned)snapshot.charge_voltage_limit_mv,
+             (unsigned)snapshot.charge_current_limit_ma,
+             (unsigned)snapshot.input_voltage_limit_mv,
+             (unsigned)snapshot.input_current_limit_ma,
+             (unsigned)snapshot.watchdog_setting);
+
+    char response[1200];
+    const int len = snprintf(
+        response, sizeof(response),
+        "{"
+        "\"ok\":%s,"
+        "\"operation_count\":%lu,"
+        "\"error\":%d,"
+        "\"error_name\":\"%s\","
+        "\"charger_present\":%s,"
+        "\"charger_adc_enabled\":%s,"
+        "\"charger_adc_sample\":%u,"
+        "\"charger_adc_continuous\":%s,"
+        "\"charger_adc_running_average\":%s,"
+        "\"charger_watchdog_setting\":%u,"
+        "\"charger_watchdog_disabled\":%s,"
+        "\"charger_minimal_system_voltage_mv\":%u,"
+        "\"charger_charge_voltage_limit_mv\":%u,"
+        "\"charger_charge_current_limit_ma\":%u,"
+        "\"charger_input_voltage_limit_mv\":%u,"
+        "\"charger_input_current_limit_ma\":%u,"
+        "\"charger_vbat_mv\":%u,"
+        "\"charger_vsys_mv\":%u,"
+        "\"charger_vbus_mv\":%u,"
+        "\"charger_ibus_ma\":%d,"
+        "\"charger_ibat_ma\":%d,"
+        "\"charger_tdie_c\":%.1f,"
+        "\"charger_write_count\":%lu,"
+        "\"charger_write_error_count\":%lu,"
+        "\"charger_last_write_reg\":\"0x%02x\","
+        "\"charger_last_write_before\":\"0x%02x\","
+        "\"charger_last_write_after\":\"0x%02x\","
+        "\"charger_last_write_error_name\":\"%s\""
+        "}\n",
+        first_error == ESP_OK ? "true" : "false",
+        (unsigned long)operation_count, first_error,
+        esp_err_to_name(first_error),
+        snapshot.present ? "true" : "false",
+        snapshot.adc_enabled ? "true" : "false",
+        (unsigned)snapshot.adc_sample,
+        snapshot.adc_continuous ? "true" : "false",
+        snapshot.adc_running_average ? "true" : "false",
+        (unsigned)snapshot.watchdog_setting,
+        snapshot.watchdog_disabled ? "true" : "false",
+        (unsigned)snapshot.minimal_system_voltage_mv,
+        (unsigned)snapshot.charge_voltage_limit_mv,
+        (unsigned)snapshot.charge_current_limit_ma,
+        (unsigned)snapshot.input_voltage_limit_mv,
+        (unsigned)snapshot.input_current_limit_ma,
+        (unsigned)snapshot.vbat_mv,
+        (unsigned)snapshot.vsys_mv,
+        (unsigned)snapshot.vbus_mv,
+        (int)snapshot.ibus_ma,
+        (int)snapshot.ibat_ma,
+        snapshot.tdie_c,
+        (unsigned long)snapshot.write_count,
+        (unsigned long)snapshot.write_error_count,
+        (unsigned)snapshot.last_write_reg,
+        (unsigned)snapshot.last_write_before,
+        (unsigned)snapshot.last_write_after,
+        esp_err_to_name((esp_err_t)snapshot.last_write_error));
+
+    if (len < 0 || len >= (int)sizeof(response)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "response too long");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, response, len);
 }
 
 static esp_err_t runtime_config_post_handler(httpd_req_t *req)
@@ -1432,7 +1879,7 @@ static esp_err_t start_http_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 8192;
-    config.max_uri_handlers = 5;
+    config.max_uri_handlers = 6;
 
     esp_err_t err = httpd_start(&s_http_server, &config);
     if (err != ESP_OK) {
@@ -1470,6 +1917,12 @@ static esp_err_t start_http_server(void)
         .handler = runtime_config_post_handler,
         .user_ctx = NULL,
     };
+    const httpd_uri_t charger_config_uri = {
+        .uri = "/config/charger",
+        .method = HTTP_POST,
+        .handler = charger_config_post_handler,
+        .user_ctx = NULL,
+    };
 
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &root_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &status_uri));
@@ -1478,6 +1931,8 @@ static esp_err_t start_http_server(void)
         httpd_register_uri_handler(s_http_server, &antenna_delay_uri));
     ESP_ERROR_CHECK(
         httpd_register_uri_handler(s_http_server, &runtime_config_uri));
+    ESP_ERROR_CHECK(
+        httpd_register_uri_handler(s_http_server, &charger_config_uri));
 
     s_running = true;
     s_status = OTA_SERVICE_STATUS_RUNNING;
