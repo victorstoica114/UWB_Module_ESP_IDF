@@ -408,6 +408,7 @@ Dashboard charger limit controls affect the charger and NVDC power path:
 | `Charge current mA` | `ICHG[8:0]` in `REG03..REG04` | `10 mA` | Maximum battery charge current. The actual current can still be reduced by thermal regulation, input limits, or system-load priority. |
 | `VINDPM mV` | `VINDPM[7:0]` in `REG05` | `100 mV` | Input voltage dynamic power management threshold. If `VBUS` droops below this threshold, the charger backs off to avoid collapsing the adapter/USB source. |
 | `IINDPM mA` | `IINDPM[8:0]` in `REG06..REG07` | `10 mA` | Maximum current drawn from the input source. System load is served first; the remaining budget is available for battery charging. |
+| `ILIM_HIZ clamp` | `EN_EXTILIM` in `REG14` | boolean | Enables the external `ILIM_HIZ` pin clamp. When enabled, the effective input-current limit is the lower of the `IINDPM` register and the analog `ILIM_HIZ` pin setting; disabling it lets software set `IINDPM` above that hardware clamp. |
 
 In short: `Charge voltage` and `Charge current` define the battery charge target.
 `Input voltage` and `Input current` define how aggressively the board may load

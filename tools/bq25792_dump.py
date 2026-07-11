@@ -185,6 +185,9 @@ def decode_status(status: dict) -> dict[str, object]:
 
 def print_summary(host: str, status: dict, raw: bytes) -> None:
     decoded = decode_status(status)
+    ext_ilim = status.get("charger_external_input_current_limit_enabled")
+    if ext_ilim is None and len(raw) > 0x14:
+        ext_ilim = bool(raw[0x14] & 0x02)
     print(f"\n{host} {status.get('hostname', '')}")
     print(
         "present={present} read_ok={read_ok} err={err} "
@@ -229,12 +232,13 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
     )
     print(
         "limits: VSYSMIN={vsysmin}mV VREG={vreg}mV ICHG={ichg}mA "
-        "VINDPM={vindpm}mV IINDPM={iindpm}mA".format(
+        "VINDPM={vindpm}mV IINDPM={iindpm}mA EXTILIM={extilim}".format(
             vsysmin=status.get("charger_minimal_system_voltage_mv"),
             vreg=status.get("charger_charge_voltage_limit_mv"),
             ichg=status.get("charger_charge_current_limit_ma"),
             vindpm=status.get("charger_input_voltage_limit_mv"),
             iindpm=status.get("charger_input_current_limit_ma"),
+            extilim=ext_ilim,
         )
     )
     print(

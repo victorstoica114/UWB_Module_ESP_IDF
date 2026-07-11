@@ -540,6 +540,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_charge_current_limit_ma\":%u,"
         "\"charger_input_voltage_limit_mv\":%u,"
         "\"charger_input_current_limit_ma\":%u,"
+        "\"charger_external_input_current_limit_enabled\":%s,"
         "\"charger_charge_enabled\":%s,"
         "\"charger_charge_status_code\":%u,"
         "\"charger_vbus_status_code\":%u,"
@@ -805,6 +806,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned)charger_snapshot.charge_current_limit_ma,
         (unsigned)charger_snapshot.input_voltage_limit_mv,
         (unsigned)charger_snapshot.input_current_limit_ma,
+        charger_snapshot.external_input_current_limit_enabled ? "true"
+                                                              : "false",
         charger_snapshot.charge_enabled ? "true" : "false",
         (unsigned)charger_snapshot.charge_status_code,
         (unsigned)charger_snapshot.vbus_status_code,
@@ -1281,6 +1284,41 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
                                    "Invalid input_voltage_mv");
     }
 
+    char ext_ilim_text[16] = {0};
+    query_err = httpd_query_key_value(
+        query, "external_input_current_limit_enabled", ext_ilim_text,
+        sizeof(ext_ilim_text));
+    if (query_err == ESP_ERR_NOT_FOUND) {
+        query_err = httpd_query_key_value(query, "external_ilim_enabled",
+                                          ext_ilim_text,
+                                          sizeof(ext_ilim_text));
+    }
+    if (query_err == ESP_ERR_NOT_FOUND) {
+        query_err = httpd_query_key_value(query, "en_extilim", ext_ilim_text,
+                                          sizeof(ext_ilim_text));
+    }
+    if (query_err == ESP_OK) {
+        bool enabled = false;
+        if (!ota_parse_bool_text(ext_ilim_text, &enabled)) {
+            return httpd_resp_send_err(
+                req, HTTPD_400_BAD_REQUEST,
+                "Invalid external_input_current_limit_enabled");
+        }
+        charger_service_write_result_t result = {0};
+        const esp_err_t err =
+            charger_service_set_external_input_current_limit_enabled(enabled,
+                                                                     &result);
+        operation_count += 2U;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    } else if (query_err != ESP_ERR_NOT_FOUND) {
+        return httpd_resp_send_err(
+            req, HTTPD_400_BAD_REQUEST,
+            "Invalid external_input_current_limit_enabled");
+    }
+
     apply_err = charger_config_apply_u16(
         query, "input_current_ma",
         charger_service_set_input_current_limit_ma, &handled,
@@ -1507,7 +1545,7 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
     charger_service_get_snapshot(&snapshot);
 
     ESP_LOGW(TAG,
-             "Charger config: ops=%lu err=%s ADC=%s CHG=%s REG0F=0x%02X VREG=%umV ICHG=%umA VINDPM=%umV IINDPM=%umA fast_tmr=%s/%uh pre_tmr=%s/%umin WD=%u",
+             "Charger config: ops=%lu err=%s ADC=%s CHG=%s REG0F=0x%02X VREG=%umV ICHG=%umA VINDPM=%umV IINDPM=%umA EXTILIM=%s fast_tmr=%s/%uh pre_tmr=%s/%umin WD=%u",
              (unsigned long)operation_count, esp_err_to_name(first_error),
              snapshot.adc_enabled ? "on" : "off",
              snapshot.charge_enabled ? "on" : "off",
@@ -1516,13 +1554,14 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
              (unsigned)snapshot.charge_current_limit_ma,
              (unsigned)snapshot.input_voltage_limit_mv,
              (unsigned)snapshot.input_current_limit_ma,
+             snapshot.external_input_current_limit_enabled ? "on" : "off",
              snapshot.fast_charge_timer_enabled ? "on" : "off",
              (unsigned)snapshot.fast_charge_timer_hours,
              snapshot.precharge_timer_enabled ? "on" : "off",
              (unsigned)snapshot.precharge_timer_minutes,
              (unsigned)snapshot.watchdog_setting);
 
-    char response[2400];
+    char response[2600];
     const int len = snprintf(
         response, sizeof(response),
         "{"
@@ -1561,6 +1600,7 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
         "\"charger_charge_current_limit_ma\":%u,"
         "\"charger_input_voltage_limit_mv\":%u,"
         "\"charger_input_current_limit_ma\":%u,"
+        "\"charger_external_input_current_limit_enabled\":%s,"
         "\"charger_vbat_mv\":%u,"
         "\"charger_vsys_mv\":%u,"
         "\"charger_vbus_mv\":%u,"
@@ -1616,6 +1656,7 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
         (unsigned)snapshot.charge_current_limit_ma,
         (unsigned)snapshot.input_voltage_limit_mv,
         (unsigned)snapshot.input_current_limit_ma,
+        snapshot.external_input_current_limit_enabled ? "true" : "false",
         (unsigned)snapshot.vbat_mv,
         (unsigned)snapshot.vsys_mv,
         (unsigned)snapshot.vbus_mv,

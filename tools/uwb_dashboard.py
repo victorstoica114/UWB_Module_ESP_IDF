@@ -1105,20 +1105,23 @@ th { color: var(--muted); font-weight: 700; }
                 <input id="chargerChargeCurrentMa" type="number" min="50" max="5000" step="10">
                 <label for="chargerInputVoltageMv">VINDPM mV</label>
                 <input id="chargerInputVoltageMv" type="number" min="3600" max="22000" step="100">
-	                <label for="chargerInputCurrentMa">IINDPM mA</label>
-	                <input id="chargerInputCurrentMa" type="number" min="100" max="3300" step="10">
+                <label for="chargerInputCurrentMa">IINDPM mA</label>
+                <input id="chargerInputCurrentMa" type="number" min="100" max="3300" step="10">
+                <label for="chargerExtIlimEnabled">ILIM_HIZ clamp</label>
+                <div class="checkbox-row"><input id="chargerExtIlimEnabled" type="checkbox"><span>enabled</span></div>
               </div>
               <div class="param-legend">
                 <div><b>Charging</b><span>Controls EN_CHG. Disabling it stops battery charging but can leave the board powered from VBUS/SYS.</span></div>
                 <div><b>VSYSMIN</b><span>Minimum SYS rail target when the battery is low; step 250 mV.</span></div>
                 <div><b>Charge voltage</b><span>Battery final voltage limit; sensitive for Li-Po safety; step 10 mV.</span></div>
                 <div><b>Charge current</b><span>Maximum battery charge current before thermal/input limits intervene; step 10 mA.</span></div>
-	                <div><b>VINDPM</b><span>Input voltage DPM threshold: reduce load if VBUS falls below this; step 100 mV.</span></div>
-	                <div><b>IINDPM</b><span>Input current DPM limit: maximum current drawn from the adapter/USB source; step 10 mA.</span></div>
-	              </div>
-	              <div class="form-actions">
-	                <button class="primary" id="applyChargerLimits">Apply Limits</button>
-	              </div>
+                <div><b>VINDPM</b><span>Input voltage DPM threshold: reduce load if VBUS falls below this; step 100 mV.</span></div>
+                <div><b>IINDPM</b><span>Input current DPM limit: maximum current drawn from the adapter/USB source; step 10 mA.</span></div>
+                <div><b>ILIM_HIZ clamp</b><span>Controls EN_EXTILIM. Enabled means the external ILIM_HIZ pin can clamp IINDPM; disabled lets software set IINDPM above that hardware pin limit.</span></div>
+              </div>
+              <div class="form-actions">
+                <button class="primary" id="applyChargerLimits">Apply Limits</button>
+              </div>
               <div id="chargerLimitsToast" class="toast"></div>
             </div>
             <div class="section">
@@ -2150,6 +2153,15 @@ function chargerBoolField(item, key, fallback = false) {
   return Boolean(fallback);
 }
 
+function chargerExternalIlimEnabled(item) {
+  if (item && Object.prototype.hasOwnProperty.call(item, "charger_external_input_current_limit_enabled")) {
+    return chargerBoolField(item, "charger_external_input_current_limit_enabled");
+  }
+  const bytes = chargerRawBytes(item);
+  const reg14 = bytes[0x14];
+  return Number.isFinite(reg14) ? (reg14 & 0x02) !== 0 : undefined;
+}
+
 function chargerChargePhase(item) {
   const code = (chargerStatusByte(item, 1) >> 5) & 0x07;
   return {code, text: CHARGER_CHG_STAT_NAMES[code] || `chg ${code}`};
@@ -2284,6 +2296,9 @@ function renderBatteryCell(item) {
   const vbus = chargerVbusStatus(item);
   const vsysClass = chargerVsysRegulating(item) ? "warn" : "ok";
   const ovpClass = chargerVbatOvp(item) ? "bad" : "ok";
+  const extIlim = chargerExternalIlimEnabled(item);
+  const extIlimText = extIlim === undefined ? "?" : (extIlim ? "on" : "off");
+  const extIlimClass = extIlim === undefined ? "muted" : (extIlim ? "warn" : "ok");
   const ts = chargerTsRange(item);
   const tsFlags = chargerTsFlags(item);
   const tsFlagText = tsFlags.length ? ` · flags ${tsFlags.join(",")}` : "";
@@ -2295,6 +2310,7 @@ function renderBatteryCell(item) {
     <span class="muted">${esc(writeText)}</span><br>
     phase ${esc(phase.text)} · input ${esc(vbus.text)}<br>
     <span class="${vsysClass}">VSYSMIN loop ${chargerVsysRegulating(item) ? "on" : "off"}</span>
+    <span class="${extIlimClass}">ILIM_HIZ clamp ${extIlimText}</span>
     <span class="${ovpClass}">VBAT_OVP ${chargerVbatOvp(item) ? "on" : "off"}</span>${chargerLimitWarning(item)}<br>
     ${chargerTimerSummary(item)}<br>
     VBAT ${fmtMv(item.charger_vbat_mv)} · SOC ${fmtSoc(item)}<br>
@@ -2343,6 +2359,9 @@ function renderChargerRows(statuses) {
     const vindpm = (status0 & 0x40) !== 0;
     const vsys = chargerVsysRegulating(item);
     const ovp = chargerVbatOvp(item);
+    const extIlim = chargerExternalIlimEnabled(item);
+    const extIlimText = extIlim === undefined ? "?" : (extIlim ? "on" : "off");
+    const extIlimClass = extIlim === undefined ? "muted" : (extIlim ? "warn" : "ok");
     const timerExpired = chargerFastTimerExpired(item);
     const ts = chargerTsRange(item);
     const tsFlags = chargerTsFlags(item);
@@ -2373,6 +2392,7 @@ function renderChargerRows(statuses) {
         ICHG ${fmtMa(item.charger_charge_current_limit_ma)}<br>
         VINDPM ${fmtMv(item.charger_input_voltage_limit_mv)}<br>
         IINDPM ${fmtMa(item.charger_input_current_limit_ma)}<br>
+        <span class="${extIlimClass}">ILIM_HIZ clamp ${extIlimText}</span><br>
         ${chargerTimerSummary(item)}</td>
       <td>SOC ${fmtSoc(item)} · VBAT ${fmtMv(item.charger_vbat_mv)}<br>
         VBUS ${fmtMv(item.charger_vbus_mv)} · VSYS ${fmtMv(item.charger_vsys_mv)}<br>
@@ -2706,6 +2726,7 @@ const chargerLimitFields = [
   {id: "chargerChargeCurrentMa", param: "charge_current_ma", label: "Charge current", get: item => item.charger_charge_current_limit_ma},
   {id: "chargerInputVoltageMv", param: "input_voltage_mv", label: "VINDPM", get: item => item.charger_input_voltage_limit_mv},
   {id: "chargerInputCurrentMa", param: "input_current_ma", label: "IINDPM", get: item => item.charger_input_current_limit_ma},
+  {id: "chargerExtIlimEnabled", param: "external_input_current_limit_enabled", label: "ILIM_HIZ clamp", get: chargerExternalIlimEnabled},
 ];
 const chargerTimerFields = [
   {id: "chargerFastTimerEnabled", param: "fast_charge_timer_enabled", label: "Fast timer", get: item => chargerTimerConfig(item).fastEnabled},

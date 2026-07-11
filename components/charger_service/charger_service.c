@@ -85,6 +85,7 @@ typedef enum {
 #define KEY_ICHG_MA "ichg"
 #define KEY_VINDPM_MV "vindpm"
 #define KEY_IINDPM_MA "iindpm"
+#define KEY_EXT_ILIM_EN "ext_ilim"
 #define KEY_TOPOFF_TIMER_MIN "top_min"
 #define KEY_TRICKLE_TIMER_EN "tri_tmr"
 #define KEY_PRECHG_TIMER_EN "pre_en"
@@ -113,6 +114,8 @@ typedef struct {
     uint16_t input_voltage_limit_mv;
     bool has_input_current_limit_ma;
     uint16_t input_current_limit_ma;
+    bool has_external_input_current_limit_enabled;
+    bool external_input_current_limit_enabled;
     bool has_safety_timers;
     uint16_t topoff_timer_minutes;
     bool trickle_timer_enabled;
@@ -483,6 +486,11 @@ static esp_err_t charger_policy_load(charger_policy_t *policy)
     if (charger_policy_read_u16(handle, KEY_IINDPM_MA, &u16)) {
         policy->has_input_current_limit_ma = true;
         policy->input_current_limit_ma = u16;
+        policy->field_count++;
+    }
+    if (charger_policy_read_u8(handle, KEY_EXT_ILIM_EN, &u8)) {
+        policy->has_external_input_current_limit_enabled = true;
+        policy->external_input_current_limit_enabled = u8 != 0U;
         policy->field_count++;
     }
     if (charger_policy_read_u8(handle, KEY_TOPOFF_TIMER_MIN, &u8)) {
@@ -948,6 +956,8 @@ static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_
                 (raw[REG0E_TIMER_CONTROL] & 0x01U) != 0U;
             s_snapshot.precharge_timer_minutes =
                 (raw[REG0D_IOTG_REGULATION] & 0x80U) != 0U ? 30U : 120U;
+            s_snapshot.external_input_current_limit_enabled =
+                (raw[REG14_CHARGER_CONTROL_5] & 0x02U) != 0U;
             s_snapshot.adc_sample =
                 (uint8_t)((raw[REG2E_ADC_CONTROL] >> 4U) & 0x03U);
             s_snapshot.adc_continuous =
@@ -1113,6 +1123,14 @@ static esp_err_t charger_apply_saved_policy(void)
             "VINDPM",
             charger_service_set_input_voltage_limit_mv(
                 policy.input_voltage_limit_mv, &result),
+            &first_err, &applied_count);
+    }
+    if (policy.has_external_input_current_limit_enabled) {
+        charger_service_write_result_t result = {0};
+        charger_note_policy_result(
+            "EN_EXTILIM",
+            charger_service_set_external_input_current_limit_enabled(
+                policy.external_input_current_limit_enabled, &result),
             &first_err, &applied_count);
     }
     if (policy.has_input_current_limit_ma) {
@@ -1666,6 +1684,24 @@ esp_err_t charger_service_set_input_current_limit_ma(
         return err;
     }
     return charger_policy_write_u16(KEY_IINDPM_MA, ma);
+}
+
+esp_err_t charger_service_set_external_input_current_limit_enabled(
+    bool enabled, charger_service_write_result_t *result)
+{
+    charger_service_write_result_t watchdog_result = {0};
+    esp_err_t err = charger_service_set_watchdog_disabled(&watchdog_result);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = charger_service_update_register_bits(REG14_CHARGER_CONTROL_5, 0x02U,
+                                               enabled ? 0x02U : 0x00U,
+                                               result);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return charger_policy_write_u8(KEY_EXT_ILIM_EN, enabled ? 1U : 0U);
 }
 
 esp_err_t charger_service_set_safety_timers(

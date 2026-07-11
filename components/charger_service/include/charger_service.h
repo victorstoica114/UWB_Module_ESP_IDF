@@ -90,6 +90,7 @@ typedef struct {
     uint8_t fast_charge_timer_hours;
     bool timer_2x_enabled;
     uint16_t precharge_timer_minutes;
+    bool external_input_current_limit_enabled;
     uint8_t adc_sample;
     bool adc_continuous;
     bool adc_running_average;
@@ -164,6 +165,8 @@ esp_err_t charger_service_set_input_voltage_limit_mv(
 esp_err_t charger_service_set_input_current_limit_ma(
     uint16_t ma, charger_service_write_result_t *results, size_t result_count,
     size_t *written_count);
+esp_err_t charger_service_set_external_input_current_limit_enabled(
+    bool enabled, charger_service_write_result_t *result);
 esp_err_t charger_service_set_safety_timers(
     uint16_t topoff_timer_minutes, bool trickle_timer_enabled,
     bool precharge_timer_enabled, bool fast_charge_timer_enabled,
