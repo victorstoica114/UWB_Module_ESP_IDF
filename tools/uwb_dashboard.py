@@ -37,6 +37,10 @@ ACCEL_RE = re.compile(
 TELEMETRY_RE = re.compile(
     r"^T,(?P<host>[^,]+),(?P<uptime>\d+),(?P<topic>[^,]+),(?P<payload>.*)$"
 )
+SHORT_ACCEL_RE = re.compile(
+    r"^A,(?P<module>\d+),(?P<uptime>\d+),(?P<x>-?\d+),(?P<y>-?\d+),"
+    r"(?P<z>-?\d+),(?P<accuracy>\d+),(?P<reports>\d+)$"
+)
 
 
 def classify_component(tag: str, message: str) -> str:
@@ -229,7 +233,26 @@ class DashboardState:
         )
 
     def parse_telemetry(self, line: str) -> dict[str, Any] | None:
-        match = TELEMETRY_RE.match(line.strip())
+        clean = line.strip()
+        short_match = SHORT_ACCEL_RE.match(clean)
+        if short_match is not None:
+            try:
+                module_id = int(short_match.group("module"))
+                return {
+                    "module_id": module_id,
+                    "host": f"uwb-module-{module_id}",
+                    "uptime_ms": int(short_match.group("uptime")),
+                    "topic": "bno085.accel",
+                    "x": int(short_match.group("x")) / 1000.0,
+                    "y": int(short_match.group("y")) / 1000.0,
+                    "z": int(short_match.group("z")) / 1000.0,
+                    "accuracy": int(short_match.group("accuracy")),
+                    "reports": int(short_match.group("reports")),
+                }
+            except ValueError:
+                return None
+
+        match = TELEMETRY_RE.match(clean)
         if match is None:
             return None
         host = match.group("host")
@@ -423,7 +446,11 @@ class LogHandler(socketserver.BaseRequestHandler):
 
         def handle_line(text: str) -> None:
             nonlocal client_kind
-            if TELEMETRY_RE.match(text.strip()) is not None:
+            clean = text.strip()
+            if (
+                TELEMETRY_RE.match(clean) is not None
+                or SHORT_ACCEL_RE.match(clean) is not None
+            ):
                 if client_kind is None:
                     client_kind = "telemetry"
                     self.server.telemetry_client_connected()
@@ -2483,7 +2510,7 @@ function renderInfo(snapshot) {
       <td>${renderGpsCell(item)}</td>
       <td>${esc(item.uwb_status)}<br>tx ${esc(item.uwb_tx_count)} / rx ${esc(item.uwb_rx_count)}<br>err ${esc(item.uwb_tx_error_count)}/${esc(item.uwb_rx_error_count)}</td>
       <td>${esc(item.uwb_active_antenna_delay_hex)}<br><span class="muted">NVS ${item.uwb_antenna_delay_from_nvs ? "yes" : "no"}</span></td>
-      <td>log ${esc(item.wireless_log_status)}<br>dropped ${esc(item.wireless_log_dropped)}<br>tel ${esc(item.wireless_telemetry_status || "-")}<br>port ${esc(item.wireless_telemetry_port ?? item.runtime_wireless_telemetry_port ?? "-")}<br>tel drop ${esc(item.wireless_telemetry_dropped ?? "-")}<br>tel err ${esc(item.wireless_telemetry_last_error ?? "-")}<br>age ${fmtAge(item.status_updated_at)}</td>
+      <td>log ${esc(item.wireless_log_status)}<br>dropped ${esc(item.wireless_log_dropped)}<br>tel ${esc(item.wireless_telemetry_status || "-")}<br>port ${esc(item.wireless_telemetry_port ?? item.runtime_wireless_telemetry_port ?? "-")}<br>tel drop ${esc(item.wireless_telemetry_dropped ?? "-")}<br><span class="muted">full ${esc(item.wireless_telemetry_drop_full ?? "-")} · mutex ${esc(item.wireless_telemetry_drop_mutex ?? "-")} · fmt ${esc(item.wireless_telemetry_drop_format ?? "-")}<br>qmax ${esc(item.wireless_telemetry_queue_high_water ?? "-")}</span><br>tel err ${esc(item.wireless_telemetry_last_error ?? "-")}<br>age ${fmtAge(item.status_updated_at)}</td>
       <td>${renderBatteryCell(item)}</td>
     </tr>`).join("");
   renderUwbRadio(state.statuses[0] || {});

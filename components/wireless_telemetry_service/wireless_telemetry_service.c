@@ -82,6 +82,10 @@ static volatile enum wireless_telemetry_status s_status =
     WIRELESS_TELEMETRY_STATUS_DISABLED;
 static volatile bool s_connected;
 static volatile uint32_t s_dropped_count;
+static volatile uint32_t s_drop_full_count;
+static volatile uint32_t s_drop_mutex_count;
+static volatile uint32_t s_drop_format_count;
+static volatile uint32_t s_ring_high_water;
 static volatile int s_last_error;
 
 static bool wireless_telemetry_target_configured(void)
@@ -167,6 +171,7 @@ static bool wireless_telemetry_enqueue(const wireless_telemetry_item_t *item)
 
     if (xSemaphoreTake(s_ring_mutex, 0) != pdTRUE) {
         s_dropped_count++;
+        s_drop_mutex_count++;
         return false;
     }
 
@@ -175,11 +180,15 @@ static bool wireless_telemetry_enqueue(const wireless_telemetry_item_t *item)
         s_ring_head = (s_ring_head + 1U) % s_ring_capacity;
         s_ring_count--;
         s_dropped_count++;
+        s_drop_full_count++;
     }
 
     const size_t tail = (s_ring_head + s_ring_count) % s_ring_capacity;
     s_ring_items[tail] = *item;
     s_ring_count++;
+    if (s_ring_count > s_ring_high_water) {
+        s_ring_high_water = (uint32_t)s_ring_count;
+    }
 
     xSemaphoreGive(s_ring_mutex);
 
@@ -372,8 +381,9 @@ static bool wireless_telemetry_format_item(const wireless_telemetry_item_t *item
         break;
     case WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL:
         written = snprintf(
-            line, line_size, "T,%s,%lu,bno085.accel,%ld,%ld,%ld,%u,%lu",
-            app_identity_get_hostname(), (unsigned long)item->uptime_ms,
+            line, line_size, "A,%u,%lu,%ld,%ld,%ld,%u,%lu",
+            (unsigned)app_identity_get_module_id(),
+            (unsigned long)item->uptime_ms,
             (long)item->data.accel.x_milli_mps2,
             (long)item->data.accel.y_milli_mps2,
             (long)item->data.accel.z_milli_mps2,
@@ -405,12 +415,14 @@ static bool wireless_telemetry_take_batch(char *batch, size_t batch_size,
             if (written <= 0 || written >= (int)(batch_size - used)) {
                 if (used == 0) {
                     s_dropped_count++;
+                    s_drop_format_count++;
                 }
                 break;
             }
             used += (size_t)written;
         } else {
             s_dropped_count++;
+            s_drop_format_count++;
         }
 
         if (batch_size - used < WIRELESS_TELEMETRY_LINE_MAX + 2U) {
@@ -611,6 +623,26 @@ uint16_t wireless_telemetry_service_get_port(void)
 uint32_t wireless_telemetry_service_get_dropped_count(void)
 {
     return s_dropped_count;
+}
+
+uint32_t wireless_telemetry_service_get_drop_full_count(void)
+{
+    return s_drop_full_count;
+}
+
+uint32_t wireless_telemetry_service_get_drop_mutex_count(void)
+{
+    return s_drop_mutex_count;
+}
+
+uint32_t wireless_telemetry_service_get_drop_format_count(void)
+{
+    return s_drop_format_count;
+}
+
+uint32_t wireless_telemetry_service_get_queue_high_water(void)
+{
+    return s_ring_high_water;
 }
 
 int wireless_telemetry_service_get_last_error(void)

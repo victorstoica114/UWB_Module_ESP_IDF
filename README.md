@@ -306,6 +306,9 @@ BNO085 task picks up rate changes live by sending a new `Set Feature` command,
 so no reboot is needed. The BNO08X datasheet lists
 `Accelerometer` at a maximum configurable rate of 500 Hz, although I2C bandwidth
 and wireless log throughput still need to be considered in practice.
+High-rate accelerometer telemetry uses a compact text frame
+`A,module,uptime_ms,x_milli,y_milli,z_milli,accuracy,reports`; the dashboard also
+keeps support for the older verbose `T,...,bno085.accel,...` frame.
 
 The GPS/GNSS path is disabled by default and can be enabled live with runtime
 config (`gps=1`) or from the dashboard Settings tab. When disabled, GPIO47 is
@@ -567,6 +570,14 @@ persisted in the browser. Calibration distances are entered in centimeters and
 rounded to the nearest millimeter before being sent to `/config/runtime`.
 Only one program can listen on TCP port 6055 at a time, so stop
 `wireless_log_listener.py` before starting the dashboard.
+
+On Linux systems with UFW enabled, open the high-rate telemetry port for the
+module subnet. In the current lab network, logs use `6055/tcp` and high-rate
+accelerometer telemetry uses `6060/tcp`:
+
+```sh
+sudo ufw allow in on wlp0s20f3 from 192.168.139.0/24 to any port 6060 proto tcp
+```
 
 The same wireless-log stream can drive a first live 2D view of the tag. The
 viewer has no Python package dependencies; it listens on the wireless-log TCP
