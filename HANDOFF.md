@@ -178,6 +178,31 @@ Last useful stability result around 1 m:
 
 Distance bias is expected before antenna delay calibration.
 
+## Antenna Delay Calibration Snapshot
+
+2026-07-11: modules `1`, `2`, and `3` were calibrated in printed alignment
+fixtures as a 2.00 m equilateral triangle.
+
+- Final NVS antenna delays:
+  - `M1=0x3ff8`
+  - `M2=0x3ff7`
+  - `M3=0x3fe6`
+- Verification after reboot:
+  - `1-2=2.001 m`
+  - `1-3=1.996 m`
+  - `2-3=2.000 m`
+- Per-link standard deviation was around `1.0-1.4 cm`.
+
+Modules `4` and `5` still need antenna delay calibration. Suggested workflow:
+keep two calibrated modules fixed as references, put the uncalibrated module in
+the third fixture position, run three-module calibration, and apply only the
+new module's correction. The reference-reference pair is the sanity check; if it
+moves away from 2.00 m, fix the geometry/RF stability before writing NVS.
+
+The dashboard now has `Auto Calibrate + Apply` in `Settings` ->
+`Antenna Delay Calibration`. Use `Adjust modules` to restrict NVS writes to the
+module being calibrated, for example `4` with calibration set `1,2,4`.
+
 ## Anchor Survey Skeleton
 
 The new anchor survey skeleton is committed but not yet hardware-tested with

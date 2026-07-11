@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import pathlib
 import queue
 import re
@@ -42,11 +43,17 @@ SHORT_ACCEL_RE = re.compile(
     r"^A,(?P<module>\d+),(?P<uptime>\d+),(?P<x>-?\d+),(?P<y>-?\d+),"
     r"(?P<z>-?\d+),(?P<accuracy>\d+),(?P<reports>\d+)$"
 )
+CAL_SAMPLE_RE = re.compile(
+    r"\bUWB CAL sample (?P<method>\S+) pair=(?P<src>\d+)->(?P<dst>\d+) "
+    r"sample=(?P<sample>\d+) seq=(?P<seq>\d+) "
+    r"distance=(?P<distance>[-+]?\d+(?:\.\d+)?) m"
+)
 TELEMETRY_BINARY_MAGIC = b"UWT1"
 TELEMETRY_BINARY_HEADER_LEN = 12
 TELEMETRY_STREAM_BNO085_ACCEL = 1
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
+UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
 
 
 def classify_component(tag: str, message: str) -> str:
@@ -129,6 +136,108 @@ def antenna_delay_url(target: str) -> str:
 def cm_to_mm_text(value: Any) -> str:
     number = float(value)
     return str(int(round(number * 10.0)))
+
+
+def parse_bool(value: Any, default: bool = False) -> bool:
+    if value is None or value == "":
+        return default
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on", "y"):
+        return True
+    if text in ("0", "false", "no", "off", "n"):
+        return False
+    return default
+
+
+def parse_module_ids(value: Any, *, expected: int | None = None) -> list[int]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        raw_items = re.split(r"[\s,]+", value.strip())
+    else:
+        raw_items = [str(item) for item in value]
+    ids: list[int] = []
+    for raw in raw_items:
+        item = str(raw).strip()
+        if not item:
+            continue
+        module_id = int(item)
+        if module_id <= 0:
+            raise ValueError(f"invalid module id: {module_id}")
+        if module_id not in ids:
+            ids.append(module_id)
+    if expected is not None and len(ids) != expected:
+        raise ValueError(f"expected {expected} module id(s), got {len(ids)}")
+    return ids
+
+
+def parse_u16_text(value: Any) -> int:
+    text = str(value).strip()
+    base = 16 if text.lower().startswith("0x") else 10
+    parsed = int(text, base)
+    if parsed < 0 or parsed > 0xFFFF:
+        raise ValueError(f"invalid u16 value: {value}")
+    return parsed
+
+
+def clamp_u16(value: int) -> int:
+    return max(0, min(0xFFFF, int(value)))
+
+
+def round_i32(value: float) -> int:
+    return int(value + 0.5) if value >= 0.0 else int(value - 0.5)
+
+
+def mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def stddev(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    avg = mean(values)
+    return math.sqrt(sum((value - avg) ** 2 for value in values) / (len(values) - 1))
+
+
+def solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float]:
+    size = len(vector)
+    rows = [list(matrix[i]) + [vector[i]] for i in range(size)]
+    for col in range(size):
+        pivot = max(range(col, size), key=lambda row: abs(rows[row][col]))
+        if abs(rows[pivot][col]) < 1e-9:
+            raise ValueError("calibration correction matrix is singular")
+        rows[col], rows[pivot] = rows[pivot], rows[col]
+        pivot_value = rows[col][col]
+        rows[col] = [item / pivot_value for item in rows[col]]
+        for row in range(size):
+            if row == col:
+                continue
+            factor = rows[row][col]
+            if abs(factor) < 1e-12:
+                continue
+            rows[row] = [
+                rows[row][item] - factor * rows[col][item]
+                for item in range(size + 1)
+            ]
+    return [rows[row][size] for row in range(size)]
+
+
+def solve_least_squares(
+    rows: list[list[float]], values: list[float]
+) -> list[float]:
+    if not rows:
+        return []
+    width = len(rows[0])
+    normal = [[0.0 for _ in range(width)] for _ in range(width)]
+    rhs = [0.0 for _ in range(width)]
+    for row, value in zip(rows, values):
+        if not any(abs(item) > 1e-12 for item in row):
+            continue
+        for i in range(width):
+            rhs[i] += row[i] * value
+            for j in range(width):
+                normal[i][j] += row[i] * row[j]
+    return solve_linear_system(normal, rhs)
 
 
 def parse_port_list(text: str) -> list[int]:
@@ -1584,14 +1693,24 @@ th { color: var(--muted); font-weight: 700; }
                 <label class="three-only" for="calD02Cm">Distance 0-2 cm</label>
                 <input class="three-only cm-input" id="calD02Cm" value="200.00" type="number" min="0" step="0.01" inputmode="decimal">
                 <label class="three-only" for="calD12Cm">Distance 1-2 cm</label>
-                <input class="three-only cm-input" id="calD12Cm" value="282.84" type="number" min="0" step="0.01" inputmode="decimal">
+                <input class="three-only cm-input" id="calD12Cm" value="200.00" type="number" min="0" step="0.01" inputmode="decimal">
                 <label for="calSamples">Samples</label>
                 <input id="calSamples" value="40" type="number" min="1" step="1" inputmode="numeric">
+                <label for="calAdjustModules">Adjust modules</label>
+                <input id="calAdjustModules" placeholder="blank = calibration modules">
+                <label for="calAutoApply">Auto apply</label>
+                <div class="checkbox-row"><input id="calAutoApply" type="checkbox" checked><span>write antenna delay</span></div>
+                <label for="calMinApplyDtu">Min apply DTU</label>
+                <input id="calMinApplyDtu" value="2" type="number" min="0" step="1" inputmode="numeric">
+                <label for="calTimeoutSec">Timeout s</label>
+                <input id="calTimeoutSec" value="180" type="number" min="10" step="5" inputmode="numeric">
               </div>
               <div class="form-actions">
-                <button class="primary" id="applyCalibration">Calibrate Antenna Delay</button>
+                <button id="applyCalibration">Start Calibration Only</button>
+                <button class="primary" id="autoCalibration">Auto Calibrate + Apply</button>
               </div>
               <div id="calToast" class="toast"></div>
+              <div id="calAutoToast" class="toast"></div>
             </div>
           </div>
           <div class="section">
@@ -2818,6 +2937,7 @@ function resultPayloadOk(result) {
 }
 
 function summarizeApiResponse(data) {
+  if (data?.summary) return data.summary;
   if (!data || data.ok === false && !Array.isArray(data.results)) {
     return data?.error ? `ERROR: ${data.error}` : "ERROR";
   }
@@ -2868,7 +2988,7 @@ function setToast(toastId, message, kind = "", detail = null, autoClear = true) 
   }
 }
 
-async function postJsonEndpoint(path, payload, toastId) {
+async function postJsonEndpoint(path, payload, toastId, autoClear = true) {
   setToast(toastId, "sending...", "", null, false);
   try {
     const res = await fetch(path, {
@@ -2878,17 +2998,21 @@ async function postJsonEndpoint(path, payload, toastId) {
     });
     const data = await res.json();
     const ok = apiResponseOk(data);
-    setToast(toastId, summarizeApiResponse(data), ok ? "ok" : "bad", data);
+    setToast(toastId, summarizeApiResponse(data), ok ? "ok" : "bad", data, autoClear);
     return data;
   } catch (error) {
     const data = {ok: false, error: String(error)};
-    setToast(toastId, summarizeApiResponse(data), "bad", data);
+    setToast(toastId, summarizeApiResponse(data), "bad", data, autoClear);
     return data;
   }
 }
 
 async function postConfig(payload, toastId) {
   return postJsonEndpoint("/api/runtime-config", payload, toastId);
+}
+
+async function postCalibrationAuto(payload, toastId) {
+  return postJsonEndpoint("/api/calibration-auto", payload, toastId, false);
 }
 
 async function postAntennaDelay(payload, toastId) {
@@ -3131,6 +3255,27 @@ async function resetChargerCycle(targetSelectId, toastId) {
   }
 }
 
+function calibrationParamsFromForm() {
+  const method = document.getElementById("calMethod").value;
+  const params = {
+    mode: "calibration",
+    cal_method: method,
+    cal_samples: document.getElementById("calSamples").value,
+    reboot: "1",
+  };
+  if (method === "two") {
+    params.cal_ref = document.getElementById("calRef").value;
+    params.cal_dut = document.getElementById("calDut").value;
+    params.cal_known_cm = document.getElementById("calKnownCm").value;
+  } else {
+    params.cal_three = document.getElementById("calThree").value;
+    params.cal_d01_cm = document.getElementById("calD01Cm").value;
+    params.cal_d02_cm = document.getElementById("calD02Cm").value;
+    params.cal_d12_cm = document.getElementById("calD12Cm").value;
+  }
+  return params;
+}
+
 function persistedSettingIds() {
   return [
     "runtimeTargets", "runtimeMode", "runtimeTag", "runtimeAnchors", "runtimeReboot",
@@ -3147,7 +3292,8 @@ function persistedSettingIds() {
     "chargerRawModule", "chargerShowRawTools", "chargerRawReg", "chargerRawValue",
     "chargerRawMask", "chargerRawBits",
     "calTargets", "calMethod", "calRef", "calDut", "calKnownCm", "calThree",
-    "calD01Cm", "calD02Cm", "calD12Cm", "calSamples",
+    "calD01Cm", "calD02Cm", "calD12Cm", "calSamples", "calAdjustModules",
+    "calAutoApply", "calMinApplyDtu", "calTimeoutSec",
   ];
 }
 function restoreSettings() {
@@ -3329,19 +3475,18 @@ function wireSettings() {
     }, "chargerRawToast");
   });
   document.getElementById("applyCalibration").addEventListener("click", () => {
-    const method = document.getElementById("calMethod").value;
-    const params = {mode: "calibration", cal_method: method, cal_samples: document.getElementById("calSamples").value, reboot: "1"};
-    if (method === "two") {
-      params.cal_ref = document.getElementById("calRef").value;
-      params.cal_dut = document.getElementById("calDut").value;
-      params.cal_known_cm = document.getElementById("calKnownCm").value;
-    } else {
-      params.cal_three = document.getElementById("calThree").value;
-      params.cal_d01_cm = document.getElementById("calD01Cm").value;
-      params.cal_d02_cm = document.getElementById("calD02Cm").value;
-      params.cal_d12_cm = document.getElementById("calD12Cm").value;
-    }
+    const params = calibrationParamsFromForm();
     postConfig({target_modules: document.getElementById("calTargets").value, params}, "calToast");
+  });
+  document.getElementById("autoCalibration").addEventListener("click", () => {
+    postCalibrationAuto({
+      target_modules: document.getElementById("calTargets").value,
+      adjust_modules: document.getElementById("calAdjustModules").value,
+      apply: document.getElementById("calAutoApply").checked ? "1" : "0",
+      min_apply_dtu: document.getElementById("calMinApplyDtu").value,
+      timeout_sec: document.getElementById("calTimeoutSec").value,
+      params: calibrationParamsFromForm(),
+    }, "calAutoToast");
   });
   ["calMethod","calRef","calDut","calKnownCm","calThree","calD01Cm","calD02Cm","calD12Cm"].forEach(id => {
     document.getElementById(id).addEventListener("input", updateCalVisibility);
@@ -3400,6 +3545,9 @@ class HttpHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/runtime-config":
             self.handle_runtime_config()
             return
+        if parsed.path == "/api/calibration-auto":
+            self.handle_calibration_auto()
+            return
         if parsed.path == "/api/antenna-delay":
             self.handle_antenna_delay()
             return
@@ -3429,6 +3577,14 @@ class HttpHandler(BaseHTTPRequestHandler):
             payload = self.read_json_body()
             results = self.server.apply_antenna_delay(payload)
             self.send_json({"ok": all(item["ok"] for item in results), "results": results})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def handle_calibration_auto(self) -> None:
+        try:
+            payload = self.read_json_body()
+            result = self.server.run_calibration_auto(payload)
+            self.send_json(result)
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
 
@@ -3518,6 +3674,301 @@ class DashboardHttpServer(ThreadingHTTPServer):
             raise RuntimeError("No runtime config parameters provided")
         targets = self.resolve_targets(target_modules)
         return [self.send_runtime_config(target, params) for target in targets]
+
+    def next_log_id_value(self) -> int:
+        with self.state.lock:
+            return int(self.state.next_log_id)
+
+    def current_status_by_module(self) -> dict[int, dict[str, Any]]:
+        with self.state.lock:
+            return {
+                int(module_id): dict(status)
+                for module_id, status in self.state.status_by_module.items()
+            }
+
+    def target_for_module(self, module_id: int) -> str:
+        target = self.resolve_targets([module_id])
+        if len(target) != 1:
+            raise RuntimeError(f"No unique live target for module {module_id}")
+        return target[0]
+
+    def collect_calibration_samples(
+        self,
+        *,
+        after_id: int,
+        expected_pairs: list[tuple[int, int]],
+        sample_count: int,
+        timeout_sec: float,
+    ) -> tuple[dict[tuple[int, int], list[float]], bool, int]:
+        samples = {pair: [] for pair in expected_pairs}
+        expected_set = set(expected_pairs)
+        last_seen = after_id
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            with self.state.lock:
+                items = [
+                    item for item in self.state.logs if int(item["id"]) > last_seen
+                ]
+            for item in items:
+                last_seen = max(last_seen, int(item["id"]))
+                message = str(item.get("message") or item.get("raw") or "")
+                match = CAL_SAMPLE_RE.search(message)
+                if match is None:
+                    continue
+                pair = (int(match.group("src")), int(match.group("dst")))
+                if pair not in expected_set:
+                    continue
+                samples[pair].append(float(match.group("distance")))
+            if all(len(values) >= sample_count for values in samples.values()):
+                return samples, True, last_seen
+            time.sleep(0.5)
+        return samples, False, last_seen
+
+    def directed_stats_json(
+        self, samples: dict[tuple[int, int], list[float]]
+    ) -> dict[str, dict[str, Any]]:
+        output: dict[str, dict[str, Any]] = {}
+        for pair, values in sorted(samples.items()):
+            if not values:
+                output[f"{pair[0]}->{pair[1]}"] = {"n": 0}
+                continue
+            output[f"{pair[0]}->{pair[1]}"] = {
+                "n": len(values),
+                "mean_m": round(mean(values), 4),
+                "std_m": round(stddev(values), 4),
+                "min_m": round(min(values), 4),
+                "max_m": round(max(values), 4),
+            }
+        return output
+
+    def apply_calibration_corrections(
+        self,
+        corrections: dict[int, int],
+        *,
+        min_apply_dtu: int,
+        apply_changes: bool,
+    ) -> list[dict[str, Any]]:
+        statuses = self.current_status_by_module()
+        results: list[dict[str, Any]] = []
+        for module_id, correction in sorted(corrections.items()):
+            status = statuses.get(module_id)
+            if status is None:
+                raise RuntimeError(f"No status for module {module_id}")
+            delay_text = (
+                status.get("uwb_active_antenna_delay_hex")
+                or status.get("uwb_configured_antenna_delay_hex")
+            )
+            old_delay = parse_u16_text(delay_text)
+            new_delay = clamp_u16(old_delay + correction)
+            item: dict[str, Any] = {
+                "module_id": module_id,
+                "old_delay": f"0x{old_delay:04x}",
+                "correction_dtu": correction,
+                "new_delay": f"0x{new_delay:04x}",
+                "applied": False,
+            }
+            if not apply_changes:
+                item["reason"] = "dry_run"
+                results.append(item)
+                continue
+            if abs(correction) < min_apply_dtu:
+                item["reason"] = f"below_min_apply_dtu_{min_apply_dtu}"
+                results.append(item)
+                continue
+            target = self.target_for_module(module_id)
+            response = self.send_antenna_delay(
+                target, {"value": f"0x{new_delay:04x}", "reboot": "1"}
+            )
+            item["target"] = target
+            item["write"] = response
+            item["applied"] = bool(response.get("ok"))
+            results.append(item)
+        return results
+
+    def run_calibration_auto(self, payload: dict[str, Any]) -> dict[str, Any]:
+        raw_params = payload.get("params") or {}
+        params = normalize_runtime_params(raw_params)
+        method = params.get("cal_method", "three")
+        sample_count = int(params.get("cal_samples", raw_params.get("cal_samples", 40)))
+        if sample_count <= 0:
+            raise RuntimeError("sample count must be positive")
+        timeout_sec = float(payload.get("timeout_sec") or 180)
+        min_apply_dtu = max(0, int(payload.get("min_apply_dtu") or 2))
+        apply_changes = parse_bool(payload.get("apply"), True)
+
+        params["mode"] = "calibration"
+        params["cal_method"] = method
+        params["cal_samples"] = str(sample_count)
+        params.setdefault("cal_summary", str(sample_count))
+        params["reboot"] = "1"
+
+        config_results = self.apply_runtime_config(
+            params, payload.get("target_modules")
+        )
+        if not all(item.get("ok") for item in config_results):
+            return {
+                "ok": False,
+                "summary": "calibration setup failed",
+                "results": config_results,
+            }
+
+        time.sleep(2.0)
+        after_id = self.next_log_id_value() - 1
+
+        if method in ("two", "two_module"):
+            ref_id = int(params.get("cal_ref", 0))
+            dut_id = int(params.get("cal_dut", 0))
+            if ref_id <= 0 or dut_id <= 0 or ref_id == dut_id:
+                raise RuntimeError("invalid two-module calibration IDs")
+            known_m = int(params.get("cal_known_mm", 0)) / 1000.0
+            expected_pairs = [(ref_id, dut_id)]
+            samples, complete, last_log_id = self.collect_calibration_samples(
+                after_id=after_id,
+                expected_pairs=expected_pairs,
+                sample_count=sample_count,
+                timeout_sec=timeout_sec,
+            )
+            values = samples[(ref_id, dut_id)]
+            if not values:
+                raise RuntimeError("no calibration samples collected")
+            error_m = mean(values) - known_m
+            correction = round_i32(error_m / UWB_METERS_PER_DTU)
+            adjust_ids = parse_module_ids(payload.get("adjust_modules")) or [dut_id]
+            if adjust_ids != [dut_id]:
+                raise RuntimeError("two-module auto calibration can adjust only the DUT")
+            corrections = {dut_id: correction}
+            effective_apply = apply_changes and complete
+            apply_results = self.apply_calibration_corrections(
+                corrections,
+                min_apply_dtu=min_apply_dtu,
+                apply_changes=effective_apply,
+            )
+            write_ok = all(
+                item.get("applied") or item.get("reason") for item in apply_results
+            )
+            return {
+                "ok": complete and write_ok,
+                "summary": f"auto calibration {'applied' if effective_apply else 'computed'} M{dut_id} {correction:+d} DTU",
+                "method": "two",
+                "complete": complete,
+                "sample_count": sample_count,
+                "last_log_id": last_log_id,
+                "directed": self.directed_stats_json(samples),
+                "corrections": corrections,
+                "apply_results": apply_results,
+                "config_results": config_results,
+            }
+
+        if method not in ("three", "three_module", "three_module_edm"):
+            raise RuntimeError(f"unsupported calibration method: {method}")
+
+        ids = parse_module_ids(params.get("cal_three"), expected=3)
+        edge_mm = {
+            (ids[0], ids[1]): int(params.get("cal_d01_mm", 0)),
+            (ids[0], ids[2]): int(params.get("cal_d02_mm", 0)),
+            (ids[1], ids[2]): int(params.get("cal_d12_mm", 0)),
+        }
+        for pair, distance_mm in edge_mm.items():
+            if distance_mm <= 0:
+                raise RuntimeError(f"invalid distance for edge {pair}: {distance_mm}")
+
+        expected_pairs = [(src, dst) for src in ids for dst in ids if src != dst]
+        samples, complete, last_log_id = self.collect_calibration_samples(
+            after_id=after_id,
+            expected_pairs=expected_pairs,
+            sample_count=sample_count,
+            timeout_sec=timeout_sec,
+        )
+
+        pair_errors: dict[tuple[int, int], float] = {}
+        pair_summary: dict[str, dict[str, Any]] = {}
+        for raw_pair, distance_mm in edge_mm.items():
+            a, b = raw_pair
+            directed_means = [
+                mean(samples[(a, b)]) if samples[(a, b)] else None,
+                mean(samples[(b, a)]) if samples[(b, a)] else None,
+            ]
+            valid_means = [item for item in directed_means if item is not None]
+            if not valid_means:
+                raise RuntimeError(f"no samples for pair {a}-{b}")
+            pair_mean = mean(valid_means)
+            known_m = distance_mm / 1000.0
+            error_m = pair_mean - known_m
+            error_dtu = error_m / UWB_METERS_PER_DTU
+            key = tuple(sorted(raw_pair))
+            pair_errors[key] = error_dtu
+            pair_summary[f"{key[0]}-{key[1]}"] = {
+                "mean_m": round(pair_mean, 4),
+                "known_m": round(known_m, 4),
+                "error_m": round(error_m, 4),
+                "error_cm": round(error_m * 100.0, 2),
+                "error_dtu": round(error_dtu, 2),
+            }
+
+        adjust_ids = parse_module_ids(payload.get("adjust_modules")) or ids
+        for module_id in adjust_ids:
+            if module_id not in ids:
+                raise RuntimeError(
+                    f"adjust module {module_id} is not in calibration set {ids}"
+                )
+
+        rows: list[list[float]] = []
+        values: list[float] = []
+        reference_checks: dict[str, dict[str, Any]] = {}
+        for pair, error_dtu in pair_errors.items():
+            row = [1.0 if module_id in pair else 0.0 for module_id in adjust_ids]
+            if any(row):
+                rows.append(row)
+                values.append(error_dtu)
+            else:
+                reference_checks[f"{pair[0]}-{pair[1]}"] = {
+                    "error_dtu": round(error_dtu, 2),
+                    "error_cm": round(error_dtu * UWB_METERS_PER_DTU * 100.0, 2),
+                }
+
+        correction_float = solve_least_squares(rows, values) if adjust_ids else []
+        corrections = {
+            module_id: round_i32(correction_float[index])
+            for index, module_id in enumerate(adjust_ids)
+        }
+        correction_details = {
+            str(module_id): {
+                "float_dtu": round(correction_float[index], 2),
+                "applied_dtu": corrections[module_id],
+            }
+            for index, module_id in enumerate(adjust_ids)
+        }
+        effective_apply = apply_changes and complete
+        apply_results = self.apply_calibration_corrections(
+            corrections,
+            min_apply_dtu=min_apply_dtu,
+            apply_changes=effective_apply,
+        )
+        write_ok = all(
+            item.get("applied") or item.get("reason") for item in apply_results
+        )
+        applied_labels = [
+            f"M{item['module_id']} {item['correction_dtu']:+d}"
+            for item in apply_results
+            if item.get("applied")
+        ]
+        summary_action = "applied " + ", ".join(applied_labels) if applied_labels else "no writes"
+        return {
+            "ok": complete and write_ok,
+            "summary": f"auto calibration complete: {summary_action}",
+            "method": "three",
+            "ids": ids,
+            "adjust_ids": adjust_ids,
+            "complete": complete,
+            "sample_count": sample_count,
+            "last_log_id": last_log_id,
+            "directed": self.directed_stats_json(samples),
+            "pairs": pair_summary,
+            "reference_checks": reference_checks,
+            "corrections": correction_details,
+            "apply_results": apply_results,
+            "config_results": config_results,
+        }
 
     def apply_antenna_delay(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         if not self.token:

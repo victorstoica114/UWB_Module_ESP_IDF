@@ -251,6 +251,52 @@ or can hold the measured distance of each triangle edge. Use the final radio
 configuration and a known distance such as 2-5 m; 20 cm is useful for smoke
 testing, not for calibration.
 
+Lab calibration note, 2026-07-11:
+
+- Modules `1`, `2`, and `3` were placed in printed alignment fixtures as a
+  2.00 m equilateral triangle.
+- Starting delays were `M1=0x3fd6`, `M2=0x4019`, `M3=0x3fdc`.
+- The first pass showed symmetric pair errors of about `1-2=-0.05 dtu`,
+  `1-3=+44.65 dtu`, and `2-3=-23.90 dtu`.
+- Solving the three pair equations produced corrections of `M1=+34 dtu`,
+  `M2=-34 dtu`, and `M3=+10 dtu`.
+- The delays stored in NVS are now `M1=0x3ff8`, `M2=0x3ff7`,
+  `M3=0x3fe6`.
+- Verification after reboot measured `1-2=2.001 m`, `1-3=1.996 m`, and
+  `2-3=2.000 m`, with per-link standard deviation around `1.0-1.4 cm`.
+
+For additional modules, keep two already calibrated modules fixed as references
+and place the uncalibrated module in the third fixture position. Run the
+three-module calibration with all three sides set to the measured triangle
+edges, but apply only the correction for the new module. If `K1` and `K2` are
+known-good references and `U` is the new module, compute the new-module
+correction from the symmetric pair errors:
+
+```text
+err_K1_U = mean(err_dtu K1->U, err_dtu U->K1)
+err_K2_U = mean(err_dtu K2->U, err_dtu U->K2)
+correction_U = round(mean(err_K1_U, err_K2_U))
+new_delay_U = old_delay_U + correction_U
+```
+
+The reference-reference pair should remain close to zero. If it does not, check
+the physical placement or RF stability before writing a new delay.
+
+The local dashboard can automate this workflow from `Settings` ->
+`Antenna Delay Calibration` with `Auto Calibrate + Apply`. The button:
+
+1. writes the runtime calibration setup and reboots the selected modules,
+2. collects the requested number of `UWB CAL sample` log entries for each
+   required directed pair,
+3. computes symmetric pair errors and solves the antenna-delay corrections, and
+4. writes the corrected antenna delay values to NVS for the modules listed in
+   `Adjust modules`.
+
+For a new module, keep two calibrated references in the fixtures and enter only
+the new module in `Adjust modules`, for example `4` when running `1,2,4`.
+`Min apply DTU` prevents rewriting NVS for tiny noise-level corrections; the lab
+default is `2`.
+
 `APP_RUNTIME_MODE_UWB_RANGING` is the current 1-tag/4-anchor runtime. The same
 firmware image runs on all modules; the runtime config selects tag ID and anchor
 IDs, while persistent NVS identity keeps each module's hostname, module ID, UWB
