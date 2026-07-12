@@ -48,6 +48,7 @@ CAL_SAMPLE_RE = re.compile(
     r"sample=(?P<sample>\d+) seq=(?P<seq>\d+) "
     r"distance=(?P<distance>[-+]?\d+(?:\.\d+)?) m"
 )
+CAL_SYNC_SKIP_RE = re.compile(r"\bUWB CAL slot skipped due to sync fail\b")
 TELEMETRY_BINARY_MAGIC = b"UWT1"
 TELEMETRY_BINARY_HEADER_LEN = 12
 TELEMETRY_STREAM_BNO085_ACCEL = 1
@@ -230,6 +231,8 @@ def calibration_reason_label(reason: Any) -> str | None:
         return "below min apply"
     if text == "reference_guard":
         return "reference guard"
+    if text == "sync_miss":
+        return "sync miss"
     return text.replace("_", " ")
 
 
@@ -3954,9 +3957,12 @@ class DashboardHttpServer(ThreadingHTTPServer):
         progress: (
             Callable[[str, dict[str, Any] | None, str | None], None] | None
         ) = None,
-    ) -> tuple[dict[tuple[int, int], list[float]], bool, int]:
+    ) -> tuple[
+        dict[tuple[int, int], list[float]], bool, int, list[dict[str, Any]]
+    ]:
         samples = {pair: [] for pair in expected_pairs}
         expected_set = set(expected_pairs)
+        sync_misses: list[dict[str, Any]] = []
         last_seen = after_id
         deadline = time.monotonic() + timeout_sec
         next_progress = 0.0
@@ -3968,6 +3974,15 @@ class DashboardHttpServer(ThreadingHTTPServer):
             for item in items:
                 last_seen = max(last_seen, int(item["id"]))
                 message = str(item.get("message") or item.get("raw") or "")
+                if CAL_SYNC_SKIP_RE.search(message):
+                    sync_misses.append(
+                        {
+                            "id": int(item["id"]),
+                            "module_id": item.get("module_id"),
+                            "message": message,
+                        }
+                    )
+                    continue
                 match = CAL_SAMPLE_RE.search(message)
                 if match is None:
                     continue
@@ -3977,20 +3992,35 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 samples[pair].append(float(match.group("distance")))
             now = time.monotonic()
             if progress is not None and now >= next_progress:
-                counts = {f"{a}->{b}": len(values) for (a, b), values in samples.items()}
+                counts = {
+                    f"{a}->{b}": len(values)
+                    for (a, b), values in samples.items()
+                }
                 min_count = min(counts.values()) if counts else 0
-                complete_pairs = sum(1 for value in counts.values() if value >= sample_count)
+                complete_pairs = sum(
+                    1 for value in counts.values() if value >= sample_count
+                )
+                sync_miss_count = len(sync_misses)
+                prefix = (
+                    f"sync miss detected ({sync_miss_count}); "
+                    if sync_miss_count
+                    else ""
+                )
                 progress(
-                    f"collecting samples {min_count}/{sample_count} per pair "
+                    f"{prefix}collecting samples {min_count}/{sample_count} per pair "
                     f"({complete_pairs}/{len(samples)} pairs complete)",
-                    {"counts": counts},
-                    "collecting",
+                    {
+                        "counts": counts,
+                        "sync_miss_count": sync_miss_count,
+                        "sync_misses": sync_misses[-5:],
+                    },
+                    "invalid" if sync_miss_count else "collecting",
                 )
                 next_progress = now + 1.0
             if all(len(values) >= sample_count for values in samples.values()):
-                return samples, True, last_seen
+                return samples, True, last_seen, sync_misses
             time.sleep(0.5)
-        return samples, False, last_seen
+        return samples, False, last_seen, sync_misses
 
     def directed_stats_json(
         self, samples: dict[tuple[int, int], list[float]]
@@ -4139,7 +4169,12 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 raise RuntimeError("invalid two-module calibration IDs")
             known_m = int(params.get("cal_known_mm", 0)) / 1000.0
             expected_pairs = [(ref_id, dut_id)]
-            samples, complete, last_log_id = self.collect_calibration_samples(
+            (
+                samples,
+                complete,
+                last_log_id,
+                sync_misses,
+            ) = self.collect_calibration_samples(
                 after_id=after_id,
                 expected_pairs=expected_pairs,
                 sample_count=sample_count,
@@ -4156,11 +4191,12 @@ class DashboardHttpServer(ThreadingHTTPServer):
             if adjust_ids != [dut_id]:
                 raise RuntimeError("two-module auto calibration can adjust only the DUT")
             corrections = {dut_id: correction}
-            effective_apply = apply_changes and complete
+            sync_ok = not sync_misses
+            effective_apply = apply_changes and complete and sync_ok
             if progress is not None:
                 progress(
                     "applying antenna-delay correction...",
-                    {"corrections": corrections},
+                    {"corrections": corrections, "sync_ok": sync_ok},
                     "applying",
                 )
             apply_results = self.apply_calibration_corrections(
@@ -4168,17 +4204,26 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 min_apply_dtu=min_apply_dtu,
                 apply_changes=effective_apply,
             )
+            if apply_changes and complete and not sync_ok:
+                for item in apply_results:
+                    if not item.get("applied"):
+                        item["reason"] = "sync_miss"
             write_ok = all(
                 item.get("applied") or item.get("reason") for item in apply_results
             )
+            summary_prefix = "" if sync_ok else "invalid: sync miss; "
             return {
-                "ok": complete and write_ok,
+                "ok": complete and write_ok and sync_ok,
                 "summary": (
                     "auto calibration complete: "
+                    + summary_prefix
                     + calibration_write_summary(apply_results)
                 ),
                 "method": "two",
                 "complete": complete,
+                "valid": sync_ok,
+                "sync_miss_count": len(sync_misses),
+                "sync_misses": sync_misses[-10:],
                 "sample_count": sample_count,
                 "center_method": "median",
                 "center_m": round(center_m, 4),
@@ -4204,7 +4249,12 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 raise RuntimeError(f"invalid distance for edge {pair}: {distance_mm}")
 
         expected_pairs = [(src, dst) for src in ids for dst in ids if src != dst]
-        samples, complete, last_log_id = self.collect_calibration_samples(
+        (
+            samples,
+            complete,
+            last_log_id,
+            sync_misses,
+        ) = self.collect_calibration_samples(
             after_id=after_id,
             expected_pairs=expected_pairs,
             sample_count=sample_count,
@@ -4313,12 +4363,14 @@ class DashboardHttpServer(ThreadingHTTPServer):
             }
             for index, module_id in enumerate(adjust_ids)
         }
-        effective_apply = apply_changes and complete and reference_guard_ok
+        sync_ok = not sync_misses
+        effective_apply = apply_changes and complete and sync_ok and reference_guard_ok
         if progress is not None:
             progress(
                 "applying antenna-delay corrections...",
                 {
                     "corrections": corrections,
+                    "sync_ok": sync_ok,
                     "reference_guard_ok": reference_guard_ok,
                 },
                 "applying",
@@ -4332,10 +4384,19 @@ class DashboardHttpServer(ThreadingHTTPServer):
             for item in apply_results:
                 if not item.get("applied"):
                     item["reason"] = "reference_guard"
+        if apply_changes and complete and not sync_ok:
+            for item in apply_results:
+                if not item.get("applied"):
+                    item["reason"] = "sync_miss"
         write_ok = all(
             item.get("applied") or item.get("reason") for item in apply_results
         )
-        if reference_guard_failures:
+        if not sync_ok:
+            summary_action = (
+                f"invalid: sync miss ({len(sync_misses)}); "
+                + calibration_write_summary(apply_results)
+            )
+        elif reference_guard_failures:
             failed_labels = ", ".join(
                 f"{pair} {data['error_cm']:+.2f} cm"
                 for pair, data in sorted(reference_guard_failures.items())
@@ -4347,12 +4408,15 @@ class DashboardHttpServer(ThreadingHTTPServer):
         else:
             summary_action = calibration_write_summary(apply_results)
         return {
-            "ok": complete and write_ok and reference_guard_ok,
+            "ok": complete and write_ok and sync_ok and reference_guard_ok,
             "summary": f"auto calibration complete: {summary_action}",
             "method": "three",
             "ids": ids,
             "adjust_ids": adjust_ids,
             "complete": complete,
+            "valid": sync_ok,
+            "sync_miss_count": len(sync_misses),
+            "sync_misses": sync_misses[-10:],
             "sample_count": sample_count,
             "center_method": "median",
             "last_log_id": last_log_id,

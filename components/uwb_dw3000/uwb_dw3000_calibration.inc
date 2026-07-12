@@ -21,6 +21,56 @@ struct uwb_calibration_stats {
     double last_m;
 };
 
+/* Slot-sync health counters. Any sync miss invalidates that lab slot. */
+struct uwb_calibration_sync_stats {
+    uint32_t sync_ok;
+    uint32_t sync_timeout;
+    uint32_t sync_invalid;
+    uint32_t sync_rx_error;
+    uint32_t sync_tx_fail;
+    uint32_t slot_skipped;
+};
+
+static struct uwb_calibration_sync_stats s_calibration_sync_stats;
+
+static void uwb_calibration_sync_stats_reset(void)
+{
+    memset(&s_calibration_sync_stats, 0, sizeof(s_calibration_sync_stats));
+}
+
+static void uwb_calibration_note_sync_timeout(const char *role,
+                                              uint8_t coordinator_id)
+{
+    s_calibration_sync_stats.sync_timeout++;
+    s_calibration_sync_stats.slot_skipped++;
+    ESP_LOGW(TAG,
+             "UWB CAL slot skipped due to sync fail role=%s coordinator=%u reason=timeout sync_ok=%lu sync_timeout=%lu sync_invalid=%lu sync_rx_error=%lu sync_tx_fail=%lu slot_skipped=%lu",
+             role, (unsigned)coordinator_id,
+             (unsigned long)s_calibration_sync_stats.sync_ok,
+             (unsigned long)s_calibration_sync_stats.sync_timeout,
+             (unsigned long)s_calibration_sync_stats.sync_invalid,
+             (unsigned long)s_calibration_sync_stats.sync_rx_error,
+             (unsigned long)s_calibration_sync_stats.sync_tx_fail,
+             (unsigned long)s_calibration_sync_stats.slot_skipped);
+}
+
+static void uwb_calibration_note_sync_tx_fail(const char *role,
+                                             uint16_t sequence,
+                                             esp_err_t err)
+{
+    s_calibration_sync_stats.sync_tx_fail++;
+    s_calibration_sync_stats.slot_skipped++;
+    ESP_LOGW(TAG,
+             "UWB CAL slot skipped due to sync fail role=%s seq=%u reason=tx_fail err=%s sync_ok=%lu sync_timeout=%lu sync_invalid=%lu sync_rx_error=%lu sync_tx_fail=%lu slot_skipped=%lu",
+             role, (unsigned)sequence, esp_err_to_name(err),
+             (unsigned long)s_calibration_sync_stats.sync_ok,
+             (unsigned long)s_calibration_sync_stats.sync_timeout,
+             (unsigned long)s_calibration_sync_stats.sync_invalid,
+             (unsigned long)s_calibration_sync_stats.sync_rx_error,
+             (unsigned long)s_calibration_sync_stats.sync_tx_fail,
+             (unsigned long)s_calibration_sync_stats.slot_skipped);
+}
+
 /* Keep the runtime log readable while the UI still selects the method by ID. */
 static const char *uwb_calibration_method_name(uint8_t method)
 {
@@ -249,6 +299,7 @@ static esp_err_t uwb_calibration_wait_for_sync(uint8_t coordinator_id,
             if (err == ESP_ERR_TIMEOUT) {
                 return err;
             }
+            s_calibration_sync_stats.sync_rx_error++;
             ESP_LOGW(TAG, "UWB CAL sync RX failed: %s", esp_err_to_name(err));
             continue;
         }
@@ -259,6 +310,7 @@ static esp_err_t uwb_calibration_wait_for_sync(uint8_t coordinator_id,
             frame.source_id != coordinator_id ||
             !uwb_distance_destination_matches(frame.destination_id)) {
             (void)uwb_calibration_timer_reset();
+            s_calibration_sync_stats.sync_invalid++;
             s_rx_ignored_count++;
             ESP_LOGD(TAG, "Ignoring non-sync calibration frame ignored=%lu",
                      (unsigned long)s_rx_ignored_count);
@@ -270,6 +322,7 @@ static esp_err_t uwb_calibration_wait_for_sync(uint8_t coordinator_id,
         }
         ESP_RETURN_ON_ERROR(uwb_calibration_timer_accept_rx_sync(), TAG,
                             "calibration RX sync timer start failed");
+        s_calibration_sync_stats.sync_ok++;
         ESP_LOGD(TAG, "UWB CAL sync accepted src=%u seq=%u",
                  (unsigned)frame.source_id, (unsigned)frame.sequence);
         return ESP_OK;
@@ -316,6 +369,8 @@ static void uwb_calibration_two_module_loop(void)
             const uint16_t slot_sequence = sequence++;
             esp_err_t err = uwb_calibration_send_sync(slot_sequence);
             if (err != ESP_OK) {
+                uwb_calibration_note_sync_tx_fail("reference", slot_sequence,
+                                                 err);
                 ESP_LOGW(TAG, "UWB CAL two-module sync TX failed seq=%u: %s",
                          (unsigned)slot_sequence, esp_err_to_name(err));
                 uwb_dw3000_delay_ms(config->calibration_min_interval_ms);
@@ -348,6 +403,7 @@ static void uwb_calibration_two_module_loop(void)
         esp_err_t err =
             uwb_calibration_wait_for_sync(reference_id, &slot_sequence);
         if (err == ESP_ERR_TIMEOUT) {
+            uwb_calibration_note_sync_timeout("dut", reference_id);
             continue;
         }
         if (err != ESP_OK) {
@@ -693,6 +749,7 @@ static void uwb_calibration_three_module_loop(void)
             const esp_err_t err =
                 uwb_calibration_wait_for_sync(coordinator_id, &sync_sequence);
             if (err == ESP_ERR_TIMEOUT) {
+                uwb_calibration_note_sync_timeout("follower", coordinator_id);
                 continue;
             }
             if (err != ESP_OK) {
@@ -729,6 +786,8 @@ static void uwb_calibration_three_module_loop(void)
             const uint16_t slot_sequence = sequence++;
             esp_err_t err = uwb_calibration_send_sync(slot_sequence);
             if (err != ESP_OK) {
+                uwb_calibration_note_sync_tx_fail("coordinator",
+                                                 slot_sequence, err);
                 ESP_LOGW(TAG, "UWB CAL slot sync TX failed slot=%u seq=%u: %s",
                          (unsigned)i, (unsigned)slot_sequence,
                          esp_err_to_name(err));
@@ -772,6 +831,7 @@ static void uwb_calibration_three_module_loop(void)
 static void uwb_dw3000_calibration_loop(void)
 {
     const uint8_t method = app_runtime_config_get()->calibration_method;
+    uwb_calibration_sync_stats_reset();
     ESP_LOGI(TAG, "UWB calibration runtime start: method=%s(%u)",
              uwb_calibration_method_name(method), (unsigned)method);
 
