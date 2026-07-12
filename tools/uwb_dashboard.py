@@ -57,6 +57,10 @@ TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
 
 
+class CalibrationCancelled(RuntimeError):
+    pass
+
+
 def classify_component(tag: str, message: str) -> str:
     clean_tag = tag.lower()
     clean_message = message.lower()
@@ -1770,6 +1774,7 @@ th { color: var(--muted); font-weight: 700; }
               <div class="form-actions">
                 <button id="applyCalibration">Start Calibration Only</button>
                 <button class="primary" id="autoCalibration">Auto Calibrate + Apply</button>
+                <button id="cancelCalibration" disabled>Cancel Calibration</button>
               </div>
               <div id="calToast" class="toast"></div>
               <div id="calAutoToast" class="toast"></div>
@@ -1807,6 +1812,7 @@ const maxSeriesPoints = 1600;
 const plot = {left: 52, right: 704, top: 14, bottom: 166, width: 652, height: 152};
 const toastTimers = new Map();
 let calibrationPollTimer = null;
+let calibrationJobId = null;
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -3076,7 +3082,9 @@ async function postConfig(payload, toastId) {
 
 async function postCalibrationAuto(payload, toastId) {
   const button = document.getElementById("autoCalibration");
+  const cancelButton = document.getElementById("cancelCalibration");
   if (button) button.disabled = true;
+  if (cancelButton) cancelButton.disabled = true;
   setToast(toastId, "starting calibration...", "", null, false);
   try {
     const res = await fetch("/api/calibration-auto", {
@@ -3088,8 +3096,11 @@ async function postCalibrationAuto(payload, toastId) {
     if (!data.ok || !data.job_id) {
       setToast(toastId, summarizeApiResponse(data), "bad", data, false);
       if (button) button.disabled = false;
+      if (cancelButton) cancelButton.disabled = true;
       return data;
     }
+    calibrationJobId = data.job_id;
+    if (cancelButton) cancelButton.disabled = false;
     setToast(toastId, data.summary || "calibration running...", "", data, false);
     pollCalibrationAuto(data.job_id, toastId, button);
     return data;
@@ -3097,11 +3108,34 @@ async function postCalibrationAuto(payload, toastId) {
     const data = {ok: false, error: String(error)};
     setToast(toastId, summarizeApiResponse(data), "bad", data, false);
     if (button) button.disabled = false;
+    if (cancelButton) cancelButton.disabled = true;
+    return data;
+  }
+}
+
+async function postCalibrationCancel(toastId) {
+  const cancelButton = document.getElementById("cancelCalibration");
+  if (cancelButton) cancelButton.disabled = true;
+  setToast(toastId, "cancelling calibration...", "", null, false);
+  try {
+    const res = await fetch("/api/calibration-auto/cancel", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({job_id: calibrationJobId || ""}),
+    });
+    const data = await res.json();
+    setToast(toastId, summarizeApiResponse(data), data.ok ? "ok" : "bad", data, false);
+    fetchSnapshot();
+    return data;
+  } catch (error) {
+    const data = {ok: false, error: String(error)};
+    setToast(toastId, summarizeApiResponse(data), "bad", data, false);
     return data;
   }
 }
 
 async function pollCalibrationAuto(jobId, toastId, button) {
+  const cancelButton = document.getElementById("cancelCalibration");
   if (calibrationPollTimer) {
     clearTimeout(calibrationPollTimer);
     calibrationPollTimer = null;
@@ -3109,21 +3143,26 @@ async function pollCalibrationAuto(jobId, toastId, button) {
   try {
     const res = await fetch(`/api/calibration-auto/status?job_id=${encodeURIComponent(jobId)}`, {cache: "no-store"});
     const data = await res.json();
-    const done = !data.running && (data.state === "done" || data.state === "error");
+    const done = !data.running && (data.state === "done" || data.state === "error" || data.state === "cancelled");
     if (done) {
       const result = data.result || data;
       const ok = apiResponseOk(result);
       setToast(toastId, summarizeApiResponse(result), ok ? "ok" : "bad", result, false);
       if (button) button.disabled = false;
+      if (cancelButton) cancelButton.disabled = true;
+      calibrationJobId = null;
       fetchSnapshot();
       return;
     }
+    calibrationJobId = jobId;
+    if (cancelButton) cancelButton.disabled = Boolean(data.cancel_requested);
     setToast(toastId, data.summary || "calibration running...", "", data, false);
     calibrationPollTimer = setTimeout(() => pollCalibrationAuto(jobId, toastId, button), 1000);
   } catch (error) {
     const data = {ok: false, error: String(error)};
     setToast(toastId, summarizeApiResponse(data), "bad", data, false);
     if (button) button.disabled = false;
+    if (cancelButton) cancelButton.disabled = true;
   }
 }
 
@@ -3609,6 +3648,9 @@ function wireSettings() {
       params: calibrationParamsFromForm(),
     }, "calAutoToast");
   });
+  document.getElementById("cancelCalibration").addEventListener("click", () => {
+    postCalibrationCancel("calAutoToast");
+  });
   ["calMethod","calRef","calDut","calKnownCm","calThree","calD01Cm","calD02Cm","calD12Cm"].forEach(id => {
     document.getElementById(id).addEventListener("input", updateCalVisibility);
     document.getElementById(id).addEventListener("change", updateCalVisibility);
@@ -3674,6 +3716,9 @@ class HttpHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/calibration-auto":
             self.handle_calibration_auto()
             return
+        if parsed.path == "/api/calibration-auto/cancel":
+            self.handle_calibration_cancel()
+            return
         if parsed.path == "/api/antenna-delay":
             self.handle_antenna_delay()
             return
@@ -3710,6 +3755,14 @@ class HttpHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json_body()
             result = self.server.start_calibration_auto(payload)
+            self.send_json(result)
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def handle_calibration_cancel(self) -> None:
+        try:
+            payload = self.read_json_body()
+            result = self.server.cancel_calibration_auto(payload.get("job_id"))
             self.send_json(result)
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -3835,6 +3888,8 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 "updated_sec": now,
                 "elapsed_sec": 0.0,
                 "result": None,
+                "payload": payload,
+                "cancel_requested": False,
             }
 
         thread = threading.Thread(
@@ -3884,6 +3939,79 @@ class DashboardHttpServer(ThreadingHTTPServer):
             job["updated_sec"] = time.time()
             job["elapsed_sec"] = round(time.time() - float(job["started_sec"]), 1)
 
+    def calibration_cancel_requested(self, job_id: str) -> bool:
+        with self.calibration_job_lock:
+            job = self.calibration_job
+            return bool(
+                job is not None
+                and job.get("job_id") == job_id
+                and job.get("cancel_requested")
+            )
+
+    def calibration_participant_ids_from_payload(
+        self, payload: dict[str, Any]
+    ) -> list[int]:
+        raw_params = payload.get("params") or {}
+        params = normalize_runtime_params(raw_params)
+        method = params.get("cal_method", "three")
+        if method in ("two", "two_module"):
+            return [
+                int(params.get("cal_ref", 0)),
+                int(params.get("cal_dut", 0)),
+            ]
+        if method in ("three", "three_module", "three_module_edm"):
+            return parse_module_ids(params.get("cal_three"), expected=3)
+        return []
+
+    def cancel_calibration_auto(self, job_id: Any = None) -> dict[str, Any]:
+        with self.calibration_job_lock:
+            job = self.calibration_job
+            if job is None:
+                return {"ok": False, "error": "no calibration job"}
+            if job_id and str(job_id) != str(job.get("job_id")):
+                return {"ok": False, "error": "calibration job not found"}
+            if not job.get("running"):
+                return {
+                    "ok": True,
+                    "summary": "calibration is not running",
+                    "job_id": job.get("job_id"),
+                    "state": job.get("state"),
+                }
+            job["cancel_requested"] = True
+            job["state"] = "cancelling"
+            job["summary"] = "cancelling calibration..."
+            job["updated_sec"] = time.time()
+            payload = dict(job.get("payload") or {})
+            active_job_id = str(job.get("job_id"))
+
+        try:
+            participant_ids = [
+                module_id
+                for module_id in self.calibration_participant_ids_from_payload(payload)
+                if module_id > 0
+            ]
+        except Exception:
+            participant_ids = []
+
+        target_modules: Any = participant_ids if participant_ids else "all"
+        stop_results = self.apply_runtime_config(
+            {"uwb": "0", "reboot": "1"}, target_modules
+        )
+        ok = all(item.get("ok") for item in stop_results)
+        self.update_calibration_job(
+            active_job_id,
+            state="cancelling",
+            summary="cancelling calibration; UWB stop requested",
+            detail={"participants": participant_ids, "stop_results": stop_results},
+        )
+        return {
+            "ok": ok,
+            "job_id": active_job_id,
+            "summary": "calibration cancel requested; UWB stop sent",
+            "participants": participant_ids,
+            "results": stop_results,
+        }
+
     def _run_calibration_auto_job(self, job_id: str, payload: dict[str, Any]) -> None:
         def progress(
             summary: str,
@@ -3895,12 +4023,29 @@ class DashboardHttpServer(ThreadingHTTPServer):
             )
 
         try:
-            result = self.run_calibration_auto(payload, progress=progress)
+            result = self.run_calibration_auto(
+                payload,
+                progress=progress,
+                should_cancel=lambda: self.calibration_cancel_requested(job_id),
+            )
             ok = bool(result.get("ok"))
             self.update_calibration_job(
                 job_id,
                 state="done" if ok else "error",
                 summary=str(result.get("summary") or ("OK" if ok else "ERROR")),
+                running=False,
+                result=result,
+            )
+        except CalibrationCancelled:
+            result = {
+                "ok": False,
+                "cancelled": True,
+                "summary": "auto calibration cancelled; UWB stop requested",
+            }
+            self.update_calibration_job(
+                job_id,
+                state="cancelled",
+                summary=result["summary"],
                 running=False,
                 result=result,
             )
@@ -3962,6 +4107,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
         progress: (
             Callable[[str, dict[str, Any] | None, str | None], None] | None
         ) = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> tuple[
         dict[tuple[int, int], list[float]], bool, int, list[dict[str, Any]]
     ]:
@@ -3972,6 +4118,8 @@ class DashboardHttpServer(ThreadingHTTPServer):
         deadline = time.monotonic() + timeout_sec
         next_progress = 0.0
         while time.monotonic() < deadline:
+            if should_cancel is not None and should_cancel():
+                raise CalibrationCancelled()
             with self.state.lock:
                 items = [
                     item for item in self.state.logs if int(item["id"]) > last_seen
@@ -4116,7 +4264,12 @@ class DashboardHttpServer(ThreadingHTTPServer):
         progress: (
             Callable[[str, dict[str, Any] | None, str | None], None] | None
         ) = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
+        def check_cancel() -> None:
+            if should_cancel is not None and should_cancel():
+                raise CalibrationCancelled()
+
         raw_params = payload.get("params") or {}
         params = normalize_runtime_params(raw_params)
         method = params.get("cal_method", "three")
@@ -4185,6 +4338,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
         if progress is not None:
             progress("waiting for modules to restart calibration...", None, "waiting")
         time.sleep(2.0)
+        check_cancel()
         after_id = self.next_log_id_value() - 1
 
         if method in ("two", "two_module"):
@@ -4205,7 +4359,9 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 sample_count=sample_count,
                 timeout_sec=timeout_sec,
                 progress=progress,
+                should_cancel=should_cancel,
             )
+            check_cancel()
             values = samples[(ref_id, dut_id)]
             if not values:
                 raise RuntimeError("no calibration samples collected")
@@ -4224,6 +4380,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
                     {"corrections": corrections, "sync_ok": sync_ok},
                     "applying",
                 )
+            check_cancel()
             apply_results = self.apply_calibration_corrections(
                 corrections,
                 min_apply_dtu=min_apply_dtu,
@@ -4293,7 +4450,9 @@ class DashboardHttpServer(ThreadingHTTPServer):
             sample_count=sample_count,
             timeout_sec=timeout_sec,
             progress=progress,
+            should_cancel=should_cancel,
         )
+        check_cancel()
 
         if progress is not None:
             progress("computing antenna-delay corrections...", None, "computing")
@@ -4408,6 +4567,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 },
                 "applying",
             )
+        check_cancel()
         apply_results = self.apply_calibration_corrections(
             corrections,
             min_apply_dtu=min_apply_dtu,
