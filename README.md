@@ -229,6 +229,11 @@ exchange and supports two workflows selected in `components/config/include/uwb_c
 ```
 
 For the two-module method, the reference module initiates and the DUT responds.
+Each measurement slot starts with a short UWB `CAL_SYNC` frame from the
+reference. The reference starts a dedicated 1 MHz ESP GPTimer when that SYNC
+transmission completes; the DUT arms the same timer before RX and starts it from
+the DW3000 IRQ when the SYNC frame arrives. Both sides then wait the fixed
+`APP_UWB_CALIBRATION_SLOT_GUARD_US` guard window before POLL/RESP/FINAL begins.
 The DUT logs sample distance, mean, standard deviation, error against the known
 distance, and a first-pass suggested antenna delay. Swap `REFERENCE_ID` and
 `DUT_ID` to calibrate the other board.
@@ -248,6 +253,12 @@ calibration coordinator. It walks a deterministic six-slot schedule:
 `id0->id1`, `id0->id2`, `id1->id0`, `id1->id2`, `id2->id0`, and `id2->id1`.
 Each slot is `APP_UWB_CALIBRATION_MIN_INTERVAL_MS` long; in the lab this is
 `350 ms`, which is intentionally longer than the complete DS-TWR exchange.
+Before every slot, the coordinator broadcasts a short `CAL_SYNC` frame and all
+participants restart the dedicated 1 MHz calibration timer. The first
+`APP_UWB_CALIBRATION_SLOT_GUARD_US` microseconds of the slot are a guard window
+(`500 us` by default), then the assigned ordered pair performs DS-TWR. Because
+SYNC is repeated before every slot, ESP timer drift can only accumulate inside
+one slot.
 After all six directed pairs are measured, the firmware waits
 `APP_UWB_CALIBRATION_MAX_INTERVAL_MS` before the next round. The dashboard
 labels these as `Slot ms` and `Round gap ms`.

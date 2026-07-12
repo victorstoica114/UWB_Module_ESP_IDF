@@ -9,11 +9,13 @@
 
 #include "board_config.h"
 #include "driver/gpio.h"
+#include "driver/gptimer.h"
 #include "driver/spi_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
@@ -250,6 +252,7 @@ enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_SURVEY_CMD = 5,
     UWB_DISTANCE_FRAME_REPORT2 = 6,
     UWB_DISTANCE_FRAME_CAL_CMD = 7,
+    UWB_DISTANCE_FRAME_CAL_SYNC = 8,
 };
 
 enum uwb_dw3000_runtime_mode {
@@ -388,6 +391,11 @@ static volatile uint32_t s_rx_ignored_count;
 static volatile uint8_t s_last_rx_source_id;
 static volatile uint32_t s_last_rx_sequence;
 static uint16_t s_antenna_delay = APP_UWB_ANTENNA_DELAY_DEFAULT;
+static gptimer_handle_t s_calibration_timer;
+static volatile bool s_calibration_timer_running;
+static volatile bool s_calibration_timer_irq_armed;
+static volatile bool s_calibration_timer_irq_started;
+static volatile bool s_calibration_timer_start_on_tx_done;
 
 static int gpio_level_active(int active_high)
 {
@@ -459,9 +467,167 @@ static void uwb_dw3000_delay_ms(uint32_t delay_ms)
     vTaskDelay(ticks);
 }
 
+static esp_err_t uwb_calibration_timer_init(void)
+{
+    if (s_calibration_timer != NULL) {
+        return ESP_OK;
+    }
+
+    const gptimer_config_t timer_config = {
+        .clk_src = GPTIMER_CLK_SRC_DEFAULT,
+        .direction = GPTIMER_COUNT_UP,
+        .resolution_hz = 1000000U,
+    };
+
+    ESP_RETURN_ON_ERROR(gptimer_new_timer(&timer_config,
+                                          &s_calibration_timer),
+                        TAG, "calibration timer create failed");
+    ESP_RETURN_ON_ERROR(gptimer_enable(s_calibration_timer), TAG,
+                        "calibration timer enable failed");
+    ESP_RETURN_ON_ERROR(gptimer_set_raw_count(s_calibration_timer, 0), TAG,
+                        "calibration timer initial clear failed");
+
+    s_calibration_timer_running = false;
+    s_calibration_timer_irq_armed = false;
+    s_calibration_timer_irq_started = false;
+    s_calibration_timer_start_on_tx_done = false;
+    ESP_LOGI(TAG, "UWB calibration timer ready at 1 MHz");
+    return ESP_OK;
+}
+
+static esp_err_t uwb_calibration_timer_stop_if_running(void)
+{
+    if (s_calibration_timer == NULL || !s_calibration_timer_running) {
+        return ESP_OK;
+    }
+
+    const esp_err_t err = gptimer_stop(s_calibration_timer);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        return err;
+    }
+    s_calibration_timer_running = false;
+    return ESP_OK;
+}
+
+static esp_err_t uwb_calibration_timer_reset(void)
+{
+    ESP_RETURN_ON_ERROR(uwb_calibration_timer_init(), TAG,
+                        "calibration timer init failed");
+    ESP_RETURN_ON_ERROR(uwb_calibration_timer_stop_if_running(), TAG,
+                        "calibration timer stop failed");
+
+    s_calibration_timer_irq_armed = false;
+    s_calibration_timer_irq_started = false;
+    s_calibration_timer_start_on_tx_done = false;
+    ESP_RETURN_ON_ERROR(gptimer_set_raw_count(s_calibration_timer, 0), TAG,
+                        "calibration timer count clear failed");
+    return ESP_OK;
+}
+
+static esp_err_t uwb_calibration_timer_start(void)
+{
+    ESP_RETURN_ON_ERROR(uwb_calibration_timer_init(), TAG,
+                        "calibration timer init failed");
+    if (s_calibration_timer_running) {
+        return ESP_OK;
+    }
+
+    const esp_err_t err = gptimer_start(s_calibration_timer);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        return err;
+    }
+    s_calibration_timer_running = true;
+    return ESP_OK;
+}
+
+static void IRAM_ATTR uwb_calibration_timer_start_from_isr(void)
+{
+    if (!s_calibration_timer_irq_armed || s_calibration_timer_irq_started ||
+        s_calibration_timer == NULL) {
+        return;
+    }
+
+    if (gptimer_start(s_calibration_timer) == ESP_OK) {
+        s_calibration_timer_running = true;
+        s_calibration_timer_irq_started = true;
+        s_calibration_timer_irq_armed = false;
+    }
+}
+
+static esp_err_t uwb_calibration_timer_arm_rx_irq_start(void)
+{
+    ESP_RETURN_ON_ERROR(uwb_calibration_timer_reset(), TAG,
+                        "calibration timer reset before RX sync failed");
+    s_calibration_timer_irq_armed = s_irq_enabled;
+    return ESP_OK;
+}
+
+static esp_err_t uwb_calibration_timer_arm_tx_irq_start(void)
+{
+    ESP_RETURN_ON_ERROR(uwb_calibration_timer_reset(), TAG,
+                        "calibration timer reset before TX sync failed");
+    s_calibration_timer_start_on_tx_done = true;
+    s_calibration_timer_irq_armed = s_irq_enabled;
+    return ESP_OK;
+}
+
+static esp_err_t uwb_calibration_timer_accept_rx_sync(void)
+{
+    s_calibration_timer_irq_armed = false;
+    if (!s_calibration_timer_irq_started) {
+        ESP_RETURN_ON_ERROR(uwb_calibration_timer_start(), TAG,
+                            "calibration timer RX fallback start failed");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t uwb_calibration_timer_accept_tx_sync(void)
+{
+    if (!s_calibration_timer_start_on_tx_done) {
+        return ESP_OK;
+    }
+
+    s_calibration_timer_start_on_tx_done = false;
+    s_calibration_timer_irq_armed = false;
+    if (!s_calibration_timer_irq_started) {
+        ESP_RETURN_ON_ERROR(uwb_calibration_timer_start(), TAG,
+                            "calibration timer TX fallback start failed");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t uwb_calibration_timer_get_us(uint64_t *time_us)
+{
+    if (time_us == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_RETURN_ON_ERROR(uwb_calibration_timer_init(), TAG,
+                        "calibration timer init failed");
+    return gptimer_get_raw_count(s_calibration_timer, time_us);
+}
+
+static void uwb_calibration_timer_wait_until_us(uint32_t target_us)
+{
+    while (true) {
+        uint64_t now_us = 0;
+        if (uwb_calibration_timer_get_us(&now_us) != ESP_OK ||
+            now_us >= target_us) {
+            return;
+        }
+
+        const uint32_t remaining_us = target_us - (uint32_t)now_us;
+        if (remaining_us >= 2000U) {
+            vTaskDelay(pdMS_TO_TICKS(remaining_us / 1000U));
+        } else {
+            esp_rom_delay_us(remaining_us);
+        }
+    }
+}
+
 static void IRAM_ATTR uwb_dw3000_irq_isr_handler(void *arg)
 {
     (void)arg;
+    uwb_calibration_timer_start_from_isr();
     BaseType_t higher_priority_task_woken = pdFALSE;
     if (s_task_handle != NULL) {
         vTaskNotifyGiveFromISR(s_task_handle, &higher_priority_task_woken);
@@ -2350,6 +2516,8 @@ static const char *uwb_distance_type_name(uint8_t type)
         return "SURVEY_CMD";
     case UWB_DISTANCE_FRAME_CAL_CMD:
         return "CAL_CMD";
+    case UWB_DISTANCE_FRAME_CAL_SYNC:
+        return "CAL_SYNC";
     default:
         return "UNKNOWN";
     }
@@ -3663,6 +3831,8 @@ static esp_err_t uwb_dw3000_wait_for_tx_complete(uint64_t *tx_timestamp)
                 ESP_RETURN_ON_ERROR(uwb_dw3000_read_tx_timestamp(tx_timestamp),
                                     TAG, "TX timestamp read failed");
             }
+            ESP_RETURN_ON_ERROR(uwb_calibration_timer_accept_tx_sync(), TAG,
+                                "calibration timer TX sync start failed");
             s_tx_count++;
             ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
                                 "clear after TX failed");

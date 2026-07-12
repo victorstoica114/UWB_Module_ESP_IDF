@@ -9,6 +9,7 @@
 #define UWB_CALIBRATION_CMD_RESPONDER_OFFSET 11U
 #define UWB_CALIBRATION_CMD_SLOT_OFFSET 12U
 #define UWB_CALIBRATION_THREE_PAIR_COUNT 6U
+#define UWB_CALIBRATION_SYNC_TIMEOUT_MS 1000U
 
 /* Running statistics for the firmware-side calibration progress logs. */
 struct uwb_calibration_stats {
@@ -170,6 +171,111 @@ static void uwb_calibration_record_measurement(
     }
 }
 
+static uint32_t uwb_calibration_slot_us(const app_runtime_config_t *config)
+{
+    if (config == NULL || config->calibration_min_interval_ms == 0) {
+        return 1U;
+    }
+    if (config->calibration_min_interval_ms > UINT32_MAX / 1000U) {
+        return UINT32_MAX;
+    }
+    return config->calibration_min_interval_ms * 1000U;
+}
+
+static uint32_t uwb_calibration_guard_us(uint32_t slot_us)
+{
+    if (slot_us <= APP_UWB_CALIBRATION_SLOT_GUARD_US) {
+        return slot_us / 2U;
+    }
+    return APP_UWB_CALIBRATION_SLOT_GUARD_US;
+}
+
+static uint32_t uwb_calibration_slot_remaining_ms(uint32_t slot_end_us)
+{
+    uint64_t now_us = 0;
+    if (uwb_calibration_timer_get_us(&now_us) != ESP_OK ||
+        now_us >= slot_end_us) {
+        return 0;
+    }
+
+    const uint32_t remaining_us = slot_end_us - (uint32_t)now_us;
+    return (remaining_us + 999U) / 1000U;
+}
+
+static void uwb_calibration_finish_slot(uint32_t slot_us)
+{
+    uwb_calibration_timer_wait_until_us(slot_us);
+    (void)uwb_calibration_timer_reset();
+}
+
+/* A short broadcast frame synchronizes the ESP-side calibration slot timer. */
+static esp_err_t uwb_calibration_send_sync(uint16_t sequence)
+{
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_CAL_SYNC,
+                             UWB_DISTANCE_FRAME_BROADCAST_ID, sequence,
+                             payload);
+
+    ESP_RETURN_ON_ERROR(uwb_calibration_timer_arm_tx_irq_start(), TAG,
+                        "calibration TX sync timer arm failed");
+    const esp_err_t err = uwb_dw3000_send_payload(
+        payload, UWB_DISTANCE_FRAME_HEADER_LEN, NULL);
+    if (err != ESP_OK) {
+        (void)uwb_calibration_timer_reset();
+    }
+    return err;
+}
+
+static esp_err_t uwb_calibration_wait_for_sync(uint8_t coordinator_id,
+                                               uint16_t *sequence)
+{
+    const TickType_t start = xTaskGetTickCount();
+
+    while (true) {
+        const uint32_t remaining_ms =
+            uwb_dw3000_remaining_ms(start, UWB_CALIBRATION_SYNC_TIMEOUT_MS);
+        if (remaining_ms == 0) {
+            (void)uwb_calibration_timer_reset();
+            return ESP_ERR_TIMEOUT;
+        }
+
+        ESP_RETURN_ON_ERROR(uwb_calibration_timer_arm_rx_irq_start(), TAG,
+                            "calibration RX sync timer arm failed");
+        struct uwb_dw3000_rx_frame rx_frame = {0};
+        const esp_err_t err =
+            uwb_dw3000_receive_frame(&rx_frame, remaining_ms);
+        if (err != ESP_OK) {
+            (void)uwb_calibration_timer_reset();
+            if (err == ESP_ERR_TIMEOUT) {
+                return err;
+            }
+            ESP_LOGW(TAG, "UWB CAL sync RX failed: %s", esp_err_to_name(err));
+            continue;
+        }
+
+        struct uwb_distance_frame frame = {0};
+        if (!uwb_distance_parse_frame(&rx_frame, &frame) ||
+            frame.type != UWB_DISTANCE_FRAME_CAL_SYNC ||
+            frame.source_id != coordinator_id ||
+            !uwb_distance_destination_matches(frame.destination_id)) {
+            (void)uwb_calibration_timer_reset();
+            s_rx_ignored_count++;
+            ESP_LOGD(TAG, "Ignoring non-sync calibration frame ignored=%lu",
+                     (unsigned long)s_rx_ignored_count);
+            continue;
+        }
+
+        if (sequence != NULL) {
+            *sequence = frame.sequence;
+        }
+        ESP_RETURN_ON_ERROR(uwb_calibration_timer_accept_rx_sync(), TAG,
+                            "calibration RX sync timer start failed");
+        ESP_LOGD(TAG, "UWB CAL sync accepted src=%u seq=%u",
+                 (unsigned)frame.source_id, (unsigned)frame.sequence);
+        return ESP_OK;
+    }
+}
+
 /*
  * Two-module calibration is kept as a simple diagnostic path. The reference
  * node initiates once per fixed slot; there is no random phase or jitter.
@@ -205,8 +311,20 @@ static void uwb_calibration_two_module_loop(void)
                  (unsigned)dut_id);
         while (true) {
             config = app_runtime_config_get();
-            (void)uwb_distance_initiate_once(dut_id, sequence++, false);
-            uwb_dw3000_delay_ms(config->calibration_min_interval_ms);
+            const uint32_t slot_us = uwb_calibration_slot_us(config);
+            const uint32_t guard_us = uwb_calibration_guard_us(slot_us);
+            const uint16_t slot_sequence = sequence++;
+            esp_err_t err = uwb_calibration_send_sync(slot_sequence);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "UWB CAL two-module sync TX failed seq=%u: %s",
+                         (unsigned)slot_sequence, esp_err_to_name(err));
+                uwb_dw3000_delay_ms(config->calibration_min_interval_ms);
+                continue;
+            }
+
+            uwb_calibration_timer_wait_until_us(guard_us);
+            (void)uwb_distance_initiate_once(dut_id, slot_sequence, false);
+            uwb_calibration_finish_slot(slot_us);
         }
     }
 
@@ -223,15 +341,42 @@ static void uwb_calibration_two_module_loop(void)
              "UWB CAL two-module role=DUT responder reference_peer=%u",
              (unsigned)reference_id);
     while (true) {
-        struct uwb_distance_frame poll = {0};
-        esp_err_t err = uwb_distance_receive_matching(
-            UWB_DISTANCE_FRAME_POLL, reference_id, false, 0, &poll, 1000);
+        config = app_runtime_config_get();
+        const uint32_t slot_us = uwb_calibration_slot_us(config);
+        const uint32_t guard_us = uwb_calibration_guard_us(slot_us);
+        uint16_t slot_sequence = 0;
+        esp_err_t err =
+            uwb_calibration_wait_for_sync(reference_id, &slot_sequence);
         if (err == ESP_ERR_TIMEOUT) {
+            continue;
+        }
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "UWB CAL two-module sync wait failed: %s",
+                     esp_err_to_name(err));
+            uwb_dw3000_delay_ms(20);
+            continue;
+        }
+
+        uwb_calibration_timer_wait_until_us(guard_us);
+        const uint32_t poll_timeout_ms =
+            uwb_calibration_slot_remaining_ms(slot_us);
+        if (poll_timeout_ms == 0) {
+            uwb_calibration_finish_slot(slot_us);
+            continue;
+        }
+
+        struct uwb_distance_frame poll = {0};
+        err = uwb_distance_receive_matching(
+            UWB_DISTANCE_FRAME_POLL, reference_id, true, slot_sequence, &poll,
+            poll_timeout_ms);
+        if (err == ESP_ERR_TIMEOUT) {
+            uwb_calibration_finish_slot(slot_us);
             continue;
         }
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "UWB CAL two-module POLL wait failed: %s",
                      esp_err_to_name(err));
+            uwb_calibration_finish_slot(slot_us);
             uwb_dw3000_delay_ms(20);
             continue;
         }
@@ -242,6 +387,7 @@ static void uwb_calibration_two_module_loop(void)
             uwb_calibration_record_measurement("two_module", &measurement,
                                                &stats);
         }
+        uwb_calibration_finish_slot(slot_us);
     }
 }
 
@@ -455,13 +601,16 @@ static void uwb_calibration_three_process_frame(
 
 /* Listen until the fixed slot expires so the next ordered pair starts cleanly. */
 static void uwb_calibration_three_listen_until(
-    TickType_t end_tick, uint8_t coordinator_id, const uint8_t ids[3],
+    uint32_t slot_end_us, uint8_t coordinator_id, const uint8_t ids[3],
     struct uwb_calibration_stats pair_stats[UWB_CALIBRATION_THREE_PAIR_COUNT])
 {
-    while ((int32_t)(xTaskGetTickCount() - end_tick) < 0) {
-        const TickType_t now = xTaskGetTickCount();
+    while (true) {
         const uint32_t remaining_ms =
-            (uint32_t)(end_tick - now) * portTICK_PERIOD_MS;
+            uwb_calibration_slot_remaining_ms(slot_end_us);
+        if (remaining_ms == 0) {
+            break;
+        }
+
         uint32_t slice_ms =
             app_runtime_config_get()->calibration_rx_slice_ms;
         if (remaining_ms < slice_ms) {
@@ -538,18 +687,25 @@ static void uwb_calibration_three_module_loop(void)
                  (unsigned)config->calibration_rx_slice_ms);
         while (true) {
             config = app_runtime_config_get();
-            struct uwb_distance_frame frame = {0};
+            const uint32_t slot_us = uwb_calibration_slot_us(config);
+            const uint32_t guard_us = uwb_calibration_guard_us(slot_us);
+            uint16_t sync_sequence = 0;
             const esp_err_t err =
-                uwb_distance_receive_next(&frame,
-                                          config->calibration_rx_slice_ms);
-            if (err == ESP_OK) {
-                uwb_calibration_three_process_frame(&frame, coordinator_id, ids,
-                                                    pair_stats);
-            } else if (err != ESP_ERR_TIMEOUT) {
-                ESP_LOGW(TAG, "UWB CAL follower RX failed: %s",
+                uwb_calibration_wait_for_sync(coordinator_id, &sync_sequence);
+            if (err == ESP_ERR_TIMEOUT) {
+                continue;
+            }
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "UWB CAL follower sync failed: %s",
                          esp_err_to_name(err));
                 uwb_dw3000_delay_ms(20);
+                continue;
             }
+
+            uwb_calibration_timer_wait_until_us(guard_us);
+            uwb_calibration_three_listen_until(slot_us, coordinator_id, ids,
+                                               pair_stats);
+            uwb_calibration_finish_slot(slot_us);
         }
     }
 
@@ -568,32 +724,42 @@ static void uwb_calibration_three_module_loop(void)
         for (size_t i = 0; i < pair_count; ++i) {
             config = app_runtime_config_get();
             const struct uwb_anchor_survey_pair *pair = &pairs[i];
-            const TickType_t slot_end =
-                xTaskGetTickCount() +
-                pdMS_TO_TICKS(config->calibration_min_interval_ms);
+            const uint32_t slot_us = uwb_calibration_slot_us(config);
+            const uint32_t guard_us = uwb_calibration_guard_us(slot_us);
+            const uint16_t slot_sequence = sequence++;
+            esp_err_t err = uwb_calibration_send_sync(slot_sequence);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "UWB CAL slot sync TX failed slot=%u seq=%u: %s",
+                         (unsigned)i, (unsigned)slot_sequence,
+                         esp_err_to_name(err));
+                uwb_dw3000_delay_ms(config->calibration_min_interval_ms);
+                continue;
+            }
+
+            uwb_calibration_timer_wait_until_us(guard_us);
 
             if (pair->initiator_id == s_source_id) {
                 ESP_LOGI(TAG, "UWB CAL local slot=%u seq=%u pair=%u->%u",
-                         (unsigned)i, (unsigned)sequence,
+                         (unsigned)i, (unsigned)slot_sequence,
                          (unsigned)pair->initiator_id,
                          (unsigned)pair->responder_id);
-                const esp_err_t err = uwb_distance_initiate_once(
-                    pair->responder_id, sequence, false);
+                err = uwb_distance_initiate_once(
+                    pair->responder_id, slot_sequence, false);
                 if (err != ESP_OK) {
                     ESP_LOGW(TAG,
                              "UWB CAL local pair=%u->%u seq=%u failed: %s",
                              (unsigned)pair->initiator_id,
                              (unsigned)pair->responder_id,
-                             (unsigned)sequence, esp_err_to_name(err));
+                             (unsigned)slot_sequence, esp_err_to_name(err));
                 }
             } else {
                 (void)uwb_calibration_send_command(pair, (uint8_t)i,
-                                                   sequence);
+                                                   slot_sequence);
             }
 
-            sequence++;
-            uwb_calibration_three_listen_until(slot_end, coordinator_id, ids,
+            uwb_calibration_three_listen_until(slot_us, coordinator_id, ids,
                                                pair_stats);
+            uwb_calibration_finish_slot(slot_us);
         }
 
         round++;
