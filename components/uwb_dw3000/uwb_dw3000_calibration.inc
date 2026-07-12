@@ -360,7 +360,10 @@ static esp_err_t uwb_calibration_wait_for_sync(uint8_t coordinator_id,
         if (err != ESP_OK) {
             (void)uwb_calibration_timer_reset();
             if (err == ESP_ERR_TIMEOUT) {
-                return err;
+                if (uwb_dw3000_remaining_ms(start, timeout_ms) == 0) {
+                    return err;
+                }
+                continue;
             }
             s_calibration_sync_stats.sync_rx_error++;
             ESP_LOGW(TAG, "UWB CAL sync RX failed: %s", esp_err_to_name(err));
