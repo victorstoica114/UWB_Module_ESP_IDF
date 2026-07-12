@@ -260,6 +260,11 @@ participants restart the dedicated 1 MHz calibration timer. The first
 SYNC is repeated before every slot, ESP timer drift can only accumulate inside
 one slot.
 
+The coordinator waits `APP_UWB_CALIBRATION_SYNC_PREPARE_MS` before each SYNC
+frame (`20 ms` by default). This is not part of the measured slot; it simply
+gives the followers time to finish the previous slot, clear DW3000 state, and
+re-arm RX before the next SYNC is transmitted.
+
 SYNC is intentionally not retried inside the same slot. Followers wait long
 enough to cover the normal round gap, then use the `CAL_SYNC` sequence number to
 detect skipped slots. If a sequence gap is detected, if the long SYNC wait

@@ -319,6 +319,13 @@ static void uwb_calibration_finish_slot(uint32_t slot_us)
     (void)uwb_calibration_timer_reset();
 }
 
+static void uwb_calibration_prepare_sync_slot(void)
+{
+    if (APP_UWB_CALIBRATION_SYNC_PREPARE_MS > 0) {
+        uwb_dw3000_delay_ms(APP_UWB_CALIBRATION_SYNC_PREPARE_MS);
+    }
+}
+
 /* A short broadcast frame synchronizes the ESP-side calibration slot timer. */
 static esp_err_t uwb_calibration_send_sync(uint16_t sequence)
 {
@@ -433,6 +440,7 @@ static void uwb_calibration_two_module_loop(void)
             const uint32_t slot_us = uwb_calibration_slot_us(config);
             const uint32_t guard_us = uwb_calibration_guard_us(slot_us);
             const uint16_t slot_sequence = sequence++;
+            uwb_calibration_prepare_sync_slot();
             esp_err_t err = uwb_calibration_send_sync(slot_sequence);
             if (err != ESP_OK) {
                 uwb_calibration_note_sync_tx_fail("reference", slot_sequence,
@@ -862,6 +870,7 @@ static void uwb_calibration_three_module_loop(void)
             const uint32_t slot_us = uwb_calibration_slot_us(config);
             const uint32_t guard_us = uwb_calibration_guard_us(slot_us);
             const uint16_t slot_sequence = sequence++;
+            uwb_calibration_prepare_sync_slot();
             esp_err_t err = uwb_calibration_send_sync(slot_sequence);
             if (err != ESP_OK) {
                 uwb_calibration_note_sync_tx_fail("coordinator",
