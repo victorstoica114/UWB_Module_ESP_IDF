@@ -303,6 +303,11 @@ For `39` samples over all six directed pairs, use at least a `240 s` dashboard
 auto-calibration timeout. A `180 s` timeout is close enough to the real run time
 that a clean calibration can finish one or two directed samples short.
 
+When dashboard auto calibration finishes, it stops UWB on the calibration
+participants by writing `uwb=0` and rebooting them. Antenna-delay writes made by
+the same job are staged in NVS first, so this final reboot also applies the new
+delay while leaving the DW3000 held in reset.
+
 Lab calibration note, 2026-07-11:
 
 - Modules `1`, `2`, and `3` were placed in printed alignment fixtures as a

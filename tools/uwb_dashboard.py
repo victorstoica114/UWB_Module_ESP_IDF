@@ -4053,6 +4053,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
         *,
         min_apply_dtu: int,
         apply_changes: bool,
+        reboot_after_write: bool = True,
     ) -> list[dict[str, Any]]:
         statuses = self.current_status_by_module()
         results: list[dict[str, Any]] = []
@@ -4082,14 +4083,31 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 results.append(item)
                 continue
             target = self.target_for_module(module_id)
-            response = self.send_antenna_delay(
-                target, {"value": f"0x{new_delay:04x}", "reboot": "1"}
-            )
+            write_params = {"value": f"0x{new_delay:04x}"}
+            if reboot_after_write:
+                write_params["reboot"] = "1"
+            response = self.send_antenna_delay(target, write_params)
             item["target"] = target
             item["write"] = response
             item["applied"] = bool(response.get("ok"))
             results.append(item)
         return results
+
+    def stop_calibration_uwb(
+        self,
+        participant_ids: list[int],
+        *,
+        progress: (
+            Callable[[str, dict[str, Any] | None, str | None], None] | None
+        ) = None,
+    ) -> list[dict[str, Any]]:
+        if progress is not None:
+            progress(
+                "stopping calibration UWB...",
+                {"participants": participant_ids},
+                "stopping",
+            )
+        return self.apply_runtime_config({"uwb": "0", "reboot": "1"}, participant_ids)
 
     def run_calibration_auto(
         self,
@@ -4210,6 +4228,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 corrections,
                 min_apply_dtu=min_apply_dtu,
                 apply_changes=effective_apply,
+                reboot_after_write=False,
             )
             if apply_changes and complete and not sync_ok:
                 for item in apply_results:
@@ -4218,13 +4237,19 @@ class DashboardHttpServer(ThreadingHTTPServer):
             write_ok = all(
                 item.get("applied") or item.get("reason") for item in apply_results
             )
+            stop_results = self.stop_calibration_uwb(
+                participant_ids, progress=progress
+            )
+            stop_ok = all(item.get("ok") for item in stop_results)
             summary_prefix = "" if sync_ok else "invalid: sync miss; "
+            stop_suffix = "; UWB stopped" if stop_ok else "; UWB stop failed"
             return {
-                "ok": complete and write_ok and sync_ok,
+                "ok": complete and write_ok and sync_ok and stop_ok,
                 "summary": (
                     "auto calibration complete: "
                     + summary_prefix
                     + calibration_write_summary(apply_results)
+                    + stop_suffix
                 ),
                 "method": "two",
                 "complete": complete,
@@ -4238,6 +4263,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 "directed": self.directed_stats_json(samples),
                 "corrections": corrections,
                 "apply_results": apply_results,
+                "stop_results": stop_results,
                 "excluded_results": excluded_results,
                 "config_results": config_results,
             }
@@ -4386,6 +4412,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
             corrections,
             min_apply_dtu=min_apply_dtu,
             apply_changes=effective_apply,
+            reboot_after_write=False,
         )
         if apply_changes and complete and not reference_guard_ok:
             for item in apply_results:
@@ -4398,6 +4425,8 @@ class DashboardHttpServer(ThreadingHTTPServer):
         write_ok = all(
             item.get("applied") or item.get("reason") for item in apply_results
         )
+        stop_results = self.stop_calibration_uwb(participant_ids, progress=progress)
+        stop_ok = all(item.get("ok") for item in stop_results)
         if not sync_ok:
             summary_action = (
                 f"invalid: sync miss ({len(sync_misses)}); "
@@ -4414,8 +4443,9 @@ class DashboardHttpServer(ThreadingHTTPServer):
             )
         else:
             summary_action = calibration_write_summary(apply_results)
+        summary_action += "; UWB stopped" if stop_ok else "; UWB stop failed"
         return {
-            "ok": complete and write_ok and sync_ok and reference_guard_ok,
+            "ok": complete and write_ok and sync_ok and reference_guard_ok and stop_ok,
             "summary": f"auto calibration complete: {summary_action}",
             "method": "three",
             "ids": ids,
@@ -4440,6 +4470,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
             "reference_guard_failures": reference_guard_failures,
             "corrections": correction_details,
             "apply_results": apply_results,
+            "stop_results": stop_results,
             "excluded_results": excluded_results,
             "config_results": config_results,
         }
