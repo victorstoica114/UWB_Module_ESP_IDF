@@ -3415,8 +3415,13 @@ function persistedSettingIds() {
 function restoreSettings() {
   for (const id of persistedSettingIds()) {
     const el = document.getElementById(id);
-    const saved = localStorage.getItem(settingKey(id));
+    const key = settingKey(id);
+    let saved = localStorage.getItem(key);
     if (!el || saved === null) continue;
+    if (id === "calTimeoutSec" && saved === "180") {
+      saved = "240";
+      localStorage.setItem(key, saved);
+    }
     if (el.type === "checkbox") {
       el.checked = saved === "1";
     } else {
