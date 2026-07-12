@@ -260,14 +260,16 @@ participants restart the dedicated 1 MHz calibration timer. The first
 SYNC is repeated before every slot, ESP timer drift can only accumulate inside
 one slot.
 
-SYNC is intentionally not retried inside the same slot. If a follower times out
-waiting for `CAL_SYNC`, or the coordinator/reference cannot transmit it, firmware
-logs `UWB CAL slot skipped due to sync fail` and discards that slot. The same
-log line includes aggregate sync health counters (`sync_ok`, `sync_timeout`,
-`sync_invalid`, `sync_rx_error`, `sync_tx_fail`, and `slot_skipped`). During
-dashboard-driven auto calibration, any such sync miss in the collection window
-marks the run invalid and blocks antenna-delay writes, even if enough diagnostic
-samples are later collected.
+SYNC is intentionally not retried inside the same slot. Followers wait long
+enough to cover the normal round gap, then use the `CAL_SYNC` sequence number to
+detect skipped slots. If a sequence gap is detected, if the long SYNC wait
+expires, or if the coordinator/reference cannot transmit SYNC, firmware logs
+`UWB CAL slot skipped due to sync fail` and discards that slot. The same log line
+includes aggregate sync health counters (`sync_ok`, `sync_timeout`,
+`sync_invalid`, `sync_rx_error`, `sync_tx_fail`, `sync_sequence_gap`, and
+`slot_skipped`). During dashboard-driven auto calibration, any such sync miss in
+the collection window marks the run invalid and blocks antenna-delay writes, even
+if enough diagnostic samples are later collected.
 
 After all six directed pairs are measured, the firmware waits
 `APP_UWB_CALIBRATION_MAX_INTERVAL_MS` before the next round. The dashboard

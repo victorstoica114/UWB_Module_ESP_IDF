@@ -10,6 +10,7 @@
 #define UWB_CALIBRATION_CMD_SLOT_OFFSET 12U
 #define UWB_CALIBRATION_THREE_PAIR_COUNT 6U
 #define UWB_CALIBRATION_SYNC_TIMEOUT_MS 1000U
+#define UWB_CALIBRATION_SYNC_TIMEOUT_MARGIN_MS 250U
 
 /* Running statistics for the firmware-side calibration progress logs. */
 struct uwb_calibration_stats {
@@ -28,6 +29,7 @@ struct uwb_calibration_sync_stats {
     uint32_t sync_invalid;
     uint32_t sync_rx_error;
     uint32_t sync_tx_fail;
+    uint32_t sync_sequence_gap;
     uint32_t slot_skipped;
 };
 
@@ -44,13 +46,14 @@ static void uwb_calibration_note_sync_timeout(const char *role,
     s_calibration_sync_stats.sync_timeout++;
     s_calibration_sync_stats.slot_skipped++;
     ESP_LOGW(TAG,
-             "UWB CAL slot skipped due to sync fail role=%s coordinator=%u reason=timeout sync_ok=%lu sync_timeout=%lu sync_invalid=%lu sync_rx_error=%lu sync_tx_fail=%lu slot_skipped=%lu",
+             "UWB CAL slot skipped due to sync fail role=%s coordinator=%u reason=timeout sync_ok=%lu sync_timeout=%lu sync_invalid=%lu sync_rx_error=%lu sync_tx_fail=%lu sync_sequence_gap=%lu slot_skipped=%lu",
              role, (unsigned)coordinator_id,
              (unsigned long)s_calibration_sync_stats.sync_ok,
              (unsigned long)s_calibration_sync_stats.sync_timeout,
              (unsigned long)s_calibration_sync_stats.sync_invalid,
              (unsigned long)s_calibration_sync_stats.sync_rx_error,
              (unsigned long)s_calibration_sync_stats.sync_tx_fail,
+             (unsigned long)s_calibration_sync_stats.sync_sequence_gap,
              (unsigned long)s_calibration_sync_stats.slot_skipped);
 }
 
@@ -61,13 +64,34 @@ static void uwb_calibration_note_sync_tx_fail(const char *role,
     s_calibration_sync_stats.sync_tx_fail++;
     s_calibration_sync_stats.slot_skipped++;
     ESP_LOGW(TAG,
-             "UWB CAL slot skipped due to sync fail role=%s seq=%u reason=tx_fail err=%s sync_ok=%lu sync_timeout=%lu sync_invalid=%lu sync_rx_error=%lu sync_tx_fail=%lu slot_skipped=%lu",
+             "UWB CAL slot skipped due to sync fail role=%s seq=%u reason=tx_fail err=%s sync_ok=%lu sync_timeout=%lu sync_invalid=%lu sync_rx_error=%lu sync_tx_fail=%lu sync_sequence_gap=%lu slot_skipped=%lu",
              role, (unsigned)sequence, esp_err_to_name(err),
              (unsigned long)s_calibration_sync_stats.sync_ok,
              (unsigned long)s_calibration_sync_stats.sync_timeout,
              (unsigned long)s_calibration_sync_stats.sync_invalid,
              (unsigned long)s_calibration_sync_stats.sync_rx_error,
              (unsigned long)s_calibration_sync_stats.sync_tx_fail,
+             (unsigned long)s_calibration_sync_stats.sync_sequence_gap,
+             (unsigned long)s_calibration_sync_stats.slot_skipped);
+}
+
+static void uwb_calibration_note_sync_sequence_gap(const char *role,
+                                                  uint16_t previous_sequence,
+                                                  uint16_t sequence,
+                                                  uint16_t missed_slots)
+{
+    s_calibration_sync_stats.sync_sequence_gap++;
+    s_calibration_sync_stats.slot_skipped += missed_slots;
+    ESP_LOGW(TAG,
+             "UWB CAL slot skipped due to sync fail role=%s reason=sequence_gap last_seq=%u seq=%u missed_slots=%u sync_ok=%lu sync_timeout=%lu sync_invalid=%lu sync_rx_error=%lu sync_tx_fail=%lu sync_sequence_gap=%lu slot_skipped=%lu",
+             role, (unsigned)previous_sequence, (unsigned)sequence,
+             (unsigned)missed_slots,
+             (unsigned long)s_calibration_sync_stats.sync_ok,
+             (unsigned long)s_calibration_sync_stats.sync_timeout,
+             (unsigned long)s_calibration_sync_stats.sync_invalid,
+             (unsigned long)s_calibration_sync_stats.sync_rx_error,
+             (unsigned long)s_calibration_sync_stats.sync_tx_fail,
+             (unsigned long)s_calibration_sync_stats.sync_sequence_gap,
              (unsigned long)s_calibration_sync_stats.slot_skipped);
 }
 
@@ -252,6 +276,43 @@ static uint32_t uwb_calibration_slot_remaining_ms(uint32_t slot_end_us)
     return (remaining_us + 999U) / 1000U;
 }
 
+static uint32_t
+uwb_calibration_sync_timeout_ms(const app_runtime_config_t *config)
+{
+    uint32_t timeout_ms = UWB_CALIBRATION_SYNC_TIMEOUT_MS;
+    if (config == NULL) {
+        return timeout_ms;
+    }
+
+    const uint64_t expected_wait_ms =
+        (uint64_t)config->calibration_min_interval_ms +
+        (uint64_t)config->calibration_max_interval_ms +
+        UWB_CALIBRATION_SYNC_TIMEOUT_MARGIN_MS;
+    if (expected_wait_ms > timeout_ms) {
+        timeout_ms = expected_wait_ms > UINT32_MAX
+                         ? UINT32_MAX
+                         : (uint32_t)expected_wait_ms;
+    }
+    return timeout_ms;
+}
+
+static void uwb_calibration_check_sync_sequence_gap(
+    const char *role, uint16_t previous_sequence, bool *have_previous_sequence,
+    uint16_t sequence)
+{
+    if (have_previous_sequence == NULL) {
+        return;
+    }
+    if (*have_previous_sequence) {
+        const uint16_t delta = (uint16_t)(sequence - previous_sequence);
+        if (delta > 1U && delta < 0x8000U) {
+            uwb_calibration_note_sync_sequence_gap(
+                role, previous_sequence, sequence, (uint16_t)(delta - 1U));
+        }
+    }
+    *have_previous_sequence = true;
+}
+
 static void uwb_calibration_finish_slot(uint32_t slot_us)
 {
     uwb_calibration_timer_wait_until_us(slot_us);
@@ -280,10 +341,12 @@ static esp_err_t uwb_calibration_wait_for_sync(uint8_t coordinator_id,
                                                uint16_t *sequence)
 {
     const TickType_t start = xTaskGetTickCount();
+    const uint32_t timeout_ms =
+        uwb_calibration_sync_timeout_ms(app_runtime_config_get());
 
     while (true) {
         const uint32_t remaining_ms =
-            uwb_dw3000_remaining_ms(start, UWB_CALIBRATION_SYNC_TIMEOUT_MS);
+            uwb_dw3000_remaining_ms(start, timeout_ms);
         if (remaining_ms == 0) {
             (void)uwb_calibration_timer_reset();
             return ESP_ERR_TIMEOUT;
@@ -395,6 +458,8 @@ static void uwb_calibration_two_module_loop(void)
     ESP_LOGI(TAG,
              "UWB CAL two-module role=DUT responder reference_peer=%u",
              (unsigned)reference_id);
+    uint16_t previous_sync_sequence = 0;
+    bool have_previous_sync_sequence = false;
     while (true) {
         config = app_runtime_config_get();
         const uint32_t slot_us = uwb_calibration_slot_us(config);
@@ -412,6 +477,10 @@ static void uwb_calibration_two_module_loop(void)
             uwb_dw3000_delay_ms(20);
             continue;
         }
+        uwb_calibration_check_sync_sequence_gap(
+            "dut", previous_sync_sequence, &have_previous_sync_sequence,
+            slot_sequence);
+        previous_sync_sequence = slot_sequence;
 
         uwb_calibration_timer_wait_until_us(guard_us);
         const uint32_t poll_timeout_ms =
@@ -741,6 +810,8 @@ static void uwb_calibration_three_module_loop(void)
                  "UWB CAL deterministic follower active: source_id=%u coordinator=%u rx_slice=%u ms",
                  (unsigned)s_source_id, (unsigned)coordinator_id,
                  (unsigned)config->calibration_rx_slice_ms);
+        uint16_t previous_sync_sequence = 0;
+        bool have_previous_sync_sequence = false;
         while (true) {
             config = app_runtime_config_get();
             const uint32_t slot_us = uwb_calibration_slot_us(config);
@@ -758,6 +829,10 @@ static void uwb_calibration_three_module_loop(void)
                 uwb_dw3000_delay_ms(20);
                 continue;
             }
+            uwb_calibration_check_sync_sequence_gap(
+                "follower", previous_sync_sequence,
+                &have_previous_sync_sequence, sync_sequence);
+            previous_sync_sequence = sync_sequence;
 
             uwb_calibration_timer_wait_until_us(guard_us);
             uwb_calibration_three_listen_until(slot_us, coordinator_id, ids,
