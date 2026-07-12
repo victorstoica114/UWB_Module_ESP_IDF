@@ -10,6 +10,7 @@
 #define UWB_CALIBRATION_CMD_SLOT_OFFSET 12U
 #define UWB_CALIBRATION_THREE_PAIR_COUNT 6U
 
+/* Running statistics for the firmware-side calibration progress logs. */
 struct uwb_calibration_stats {
     uint32_t samples;
     double mean_m;
@@ -19,6 +20,7 @@ struct uwb_calibration_stats {
     double last_m;
 };
 
+/* Keep the runtime log readable while the UI still selects the method by ID. */
 static const char *uwb_calibration_method_name(uint8_t method)
 {
     switch (method) {
@@ -31,6 +33,7 @@ static const char *uwb_calibration_method_name(uint8_t method)
     }
 }
 
+/* Convert the configured lab geometry into the expected distance for a pair. */
 static double uwb_calibration_known_distance_for_pair_m(uint8_t first_id,
                                                        uint8_t second_id)
 {
@@ -55,6 +58,7 @@ static double uwb_calibration_known_distance_for_pair_m(uint8_t first_id,
     return (double)distance_mm / 1000.0;
 }
 
+/* Unit conversion helpers for translating distance error to antenna-delay DTU. */
 static double uwb_calibration_meters_per_dtu(void)
 {
     return UWB_DW3000_TIME_UNIT_SECONDS * UWB_DW3000_SPEED_OF_LIGHT_MPS;
@@ -66,18 +70,7 @@ static int32_t uwb_calibration_round_to_i32(double value)
                         : (int32_t)(value - 0.5);
 }
 
-static uint32_t uwb_calibration_random_interval_ms(void)
-{
-    const app_runtime_config_t *config = app_runtime_config_get();
-    const uint32_t min_ms = config->calibration_min_interval_ms;
-    const uint32_t max_ms = config->calibration_max_interval_ms;
-    if (max_ms <= min_ms) {
-        return min_ms;
-    }
-
-    return min_ms + (esp_random() % (max_ms - min_ms + 1U));
-}
-
+/* Sample accounting and concise progress logs shared by both methods. */
 static void uwb_calibration_stats_update(struct uwb_calibration_stats *stats,
                                          double distance_m)
 {
@@ -177,20 +170,25 @@ static void uwb_calibration_record_measurement(
     }
 }
 
+/*
+ * Two-module calibration is kept as a simple diagnostic path. The reference
+ * node initiates once per fixed slot; there is no random phase or jitter.
+ */
 static void uwb_calibration_two_module_loop(void)
 {
     const app_runtime_config_t *config = app_runtime_config_get();
     const uint8_t reference_id = config->calibration_reference_id;
     const uint8_t dut_id = config->calibration_dut_id;
     struct uwb_calibration_stats stats = {0};
-    uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
+    uint16_t sequence = 1U;
 
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
-             "UWB CAL two-module active: source_id=%u reference_id=%u dut_id=%u known=%u mm delay=0x%04x",
+             "UWB CAL two-module active: source_id=%u reference_id=%u dut_id=%u known=%u mm slot=%u ms delay=0x%04x",
              (unsigned)s_source_id, (unsigned)reference_id,
              (unsigned)dut_id,
              (unsigned)config->calibration_known_distance_mm,
+             (unsigned)config->calibration_min_interval_ms,
              (unsigned)s_antenna_delay);
 
     if (reference_id == 0 || dut_id == 0 || reference_id == dut_id) {
@@ -206,8 +204,9 @@ static void uwb_calibration_two_module_loop(void)
                  "UWB CAL two-module role=reference initiator peer_dut=%u",
                  (unsigned)dut_id);
         while (true) {
+            config = app_runtime_config_get();
             (void)uwb_distance_initiate_once(dut_id, sequence++, false);
-            uwb_dw3000_delay_ms(uwb_calibration_random_interval_ms());
+            uwb_dw3000_delay_ms(config->calibration_min_interval_ms);
         }
     }
 
@@ -246,6 +245,7 @@ static void uwb_calibration_two_module_loop(void)
     }
 }
 
+/* Identity and ordered-pair helpers for deterministic three-module EDM. */
 static bool uwb_calibration_id_in_three_set(uint8_t id, const uint8_t ids[3])
 {
     return ids != NULL &&
@@ -330,6 +330,7 @@ static bool uwb_calibration_parse_command(
            pair->initiator_id != pair->responder_id;
 }
 
+/* Coordinator command: one CAL_CMD frame assigns one ordered pair to a slot. */
 static esp_err_t uwb_calibration_send_command(
     const struct uwb_anchor_survey_pair *pair, uint8_t slot_index,
     uint16_t sequence)
@@ -358,6 +359,7 @@ static esp_err_t uwb_calibration_send_command(
     return ESP_OK;
 }
 
+/* Responder path: answer a POLL and record the finished DS-TWR measurement. */
 static void uwb_calibration_three_handle_poll(
     const struct uwb_distance_frame *frame, const uint8_t ids[3],
     struct uwb_calibration_stats pair_stats[UWB_CALIBRATION_THREE_PAIR_COUNT])
@@ -390,6 +392,7 @@ static void uwb_calibration_three_handle_poll(
     }
 }
 
+/* Initiator path: followers start ranging only after their coordinator command. */
 static void uwb_calibration_three_handle_command(
     const struct uwb_distance_frame *frame, uint8_t coordinator_id,
     const uint8_t ids[3])
@@ -428,6 +431,7 @@ static void uwb_calibration_three_handle_command(
     }
 }
 
+/* Shared RX dispatcher for follower listening and coordinator slot windows. */
 static void uwb_calibration_three_process_frame(
     const struct uwb_distance_frame *frame, uint8_t coordinator_id,
     const uint8_t ids[3],
@@ -449,6 +453,7 @@ static void uwb_calibration_three_process_frame(
     }
 }
 
+/* Listen until the fixed slot expires so the next ordered pair starts cleanly. */
 static void uwb_calibration_three_listen_until(
     TickType_t end_tick, uint8_t coordinator_id, const uint8_t ids[3],
     struct uwb_calibration_stats pair_stats[UWB_CALIBRATION_THREE_PAIR_COUNT])
@@ -479,6 +484,12 @@ static void uwb_calibration_three_listen_until(
     }
 }
 
+/*
+ * Three-module EDM calibration:
+ * - ids[0] is the coordinator.
+ * - The coordinator walks all six ordered pairs in fixed slots.
+ * - Followers only initiate when they receive a CAL_CMD for their slot.
+ */
 static void uwb_calibration_three_module_loop(void)
 {
     const app_runtime_config_t *config = app_runtime_config_get();
@@ -489,7 +500,7 @@ static void uwb_calibration_three_module_loop(void)
     };
     struct uwb_calibration_stats
         pair_stats[UWB_CALIBRATION_THREE_PAIR_COUNT] = {0};
-    uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
+    uint16_t sequence = 1U;
     const uint8_t coordinator_id = ids[0];
 
     s_status = UWB_DW3000_STATUS_READY;
@@ -613,4 +624,3 @@ static void uwb_dw3000_calibration_loop(void)
         break;
     }
 }
-
