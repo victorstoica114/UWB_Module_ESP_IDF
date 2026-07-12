@@ -295,6 +295,9 @@ collection count is `39` samples per directed pair, so the center sample is
 unambiguous after sorting. Mean, standard deviation, min, and max are still
 reported as diagnostics, but antenna-delay corrections are based on medians to
 make an occasional outlier less likely to move the result.
+The dashboard uses exactly that many samples per directed pair for the solve:
+once a direction reaches the requested count, later samples for that direction
+are ignored so all six directed edges have equal weight.
 
 For `39` samples over all six directed pairs, use at least a `240 s` dashboard
 auto-calibration timeout. A `180 s` timeout is close enough to the real run time

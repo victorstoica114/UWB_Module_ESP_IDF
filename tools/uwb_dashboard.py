@@ -3994,6 +3994,8 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 pair = (int(match.group("src")), int(match.group("dst")))
                 if pair not in expected_set:
                     continue
+                if len(samples[pair]) >= sample_count:
+                    continue
                 samples[pair].append(float(match.group("distance")))
             now = time.monotonic()
             if progress is not None and now >= next_progress:
