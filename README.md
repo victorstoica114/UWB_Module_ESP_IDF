@@ -296,6 +296,10 @@ unambiguous after sorting. Mean, standard deviation, min, and max are still
 reported as diagnostics, but antenna-delay corrections are based on medians to
 make an occasional outlier less likely to move the result.
 
+For `39` samples over all six directed pairs, use at least a `240 s` dashboard
+auto-calibration timeout. A `180 s` timeout is close enough to the real run time
+that a clean calibration can finish one or two directed samples short.
+
 Lab calibration note, 2026-07-11:
 
 - Modules `1`, `2`, and `3` were placed in printed alignment fixtures as a

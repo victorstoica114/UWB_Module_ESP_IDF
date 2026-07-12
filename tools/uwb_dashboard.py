@@ -1765,7 +1765,7 @@ th { color: var(--muted); font-weight: 700; }
                 <label for="calReferenceGuardCm">Reference guard cm</label>
                 <input id="calReferenceGuardCm" value="2.00" type="number" min="0" step="0.01" inputmode="decimal">
                 <label for="calTimeoutSec">Timeout s</label>
-                <input id="calTimeoutSec" value="180" type="number" min="10" step="5" inputmode="numeric">
+                <input id="calTimeoutSec" value="240" type="number" min="10" step="5" inputmode="numeric">
               </div>
               <div class="form-actions">
                 <button id="applyCalibration">Start Calibration Only</button>
@@ -4098,7 +4098,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
         sample_count = int(params.get("cal_samples", raw_params.get("cal_samples", 40)))
         if sample_count <= 0:
             raise RuntimeError("sample count must be positive")
-        timeout_sec = float(payload.get("timeout_sec") or 180)
+        timeout_sec = float(payload.get("timeout_sec") or 240)
         min_apply_dtu = max(0, int(payload.get("min_apply_dtu") or 2))
         reference_guard_cm = max(0.0, float(payload.get("reference_guard_cm") or 2.0))
         apply_changes = parse_bool(payload.get("apply"), True)
