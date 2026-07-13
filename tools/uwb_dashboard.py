@@ -1797,7 +1797,7 @@ th { color: var(--muted); font-weight: 700; }
             <h2>Measured Anchor Geometry</h2>
             <div class="muted" style="margin-bottom:8px;">Relative anchor coordinates are reconstructed from live anchor-anchor ranges.</div>
             <table>
-              <thead><tr><th>Pair</th><th>m</th><th>age</th><th>fit</th></tr></thead>
+              <thead><tr><th>Pair</th><th>m / avg</th><th>std</th><th>age</th><th>fit</th></tr></thead>
               <tbody id="positionGeometryRows"></tbody>
             </table>
           </div>
@@ -2905,6 +2905,9 @@ function anchorGeometryResiduals(anchors, distanceItems) {
 function refineMeasuredAnchorGeometry(anchorIds, anchors, distanceItems) {
   const ids = anchorIds.map(Number);
   const variables = [];
+  if (anchors[ids[1]]) {
+    variables.push({id: ids[1], axis: "x"});
+  }
   for (const id of ids.slice(2)) {
     if (anchors[id]) {
       variables.push({id, axis: "x"});
@@ -3391,10 +3394,18 @@ function renderPositionGeometryPanel(model) {
     const key = anchorPairKey(a, b);
     const item = geometry.distanceItems?.[key];
     const residual = geometry.residuals?.[key];
+    const stats = item?.stats || {};
     const direction = item ? `A${esc(item.initiator_id)}→A${esc(item.responder_id)}` : "waiting";
+    const mean = stats.mean_m === null || stats.mean_m === undefined
+      ? NaN
+      : Number(stats.mean_m);
+    const std = stats.std_m === null || stats.std_m === undefined
+      ? NaN
+      : Number(stats.std_m);
     return `<tr>
       <td>A${esc(a)}-A${esc(b)}<br><span class="muted">${direction}</span></td>
-      <td>${item ? fmtFixed(item.distance_m, 3) : "-"}</td>
+      <td>${item ? fmtFixed(item.distance_m, 3) : "-"}<br><span class="muted">${Number.isFinite(mean) ? "avg " + fmtFixed(mean, 3) : ""}</span></td>
+      <td>${Number.isFinite(std) ? fmtCmFromM(std, 1) + " cm" : "-"}</td>
       <td class="${item && Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${item ? fmtFixed(item.age_sec, 1) + "s" : "-"}</td>
       <td>${residual === undefined ? "-" : fmtFixed(residual * 100, 1) + " cm"}</td>
     </tr>`;
@@ -3452,16 +3463,27 @@ function renderPositionReadout(model) {
 
   if (model.settings.solver === "tdoa") {
     title.textContent = "TDOA Observations";
-    head.innerHTML = `<tr><th>Tag</th><th>Pair</th><th>diff m</th><th>age</th><th>resid.</th></tr>`;
+    head.innerHTML = `<tr><th>Tag</th><th>Pair</th><th>diff m</th><th>rev sum</th><th>age</th><th>resid.</th></tr>`;
     const tdoaRows = [];
     for (const tag of Object.values(model.tags)) {
+      const reverseMap = new Map(
+        (tag.observations || []).map(item => [
+          `${item.initiator_id}-${item.responder_id}`,
+          item,
+        ])
+      );
       for (const item of tag.observations || []) {
         const key = `${item.initiator_id}-${item.responder_id}`;
+        const reverse = reverseMap.get(`${item.responder_id}-${item.initiator_id}`);
+        const reverseSum = reverse
+          ? Number(item.diff_m) + Number(reverse.diff_m)
+          : NaN;
         const residual = tag.residuals?.[key];
         tdoaRows.push(`<tr>
           <td>T${esc(tag.tagId)}</td>
           <td>A${esc(item.initiator_id)}→A${esc(item.responder_id)}</td>
           <td>${fmtFixed(item.diff_m, 3)}</td>
+          <td>${Number.isFinite(reverseSum) ? fmtCmFromM(reverseSum, 1) + " cm" : "-"}</td>
           <td class="${Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${fmtFixed(item.age_sec, 1)}s</td>
           <td>${residual === undefined ? "-" : fmtFixed(residual * 100, 1) + " cm"}</td>
         </tr>`);
