@@ -1794,11 +1794,11 @@ th { color: var(--muted); font-weight: 700; }
                 </select>
                 <label for="calMethod">Method</label>
                 <select id="calMethod"><option value="two">2 modules</option><option value="three">3 modules</option></select>
-                <label class="two-only" for="calRef">Reference</label>
-                <input class="two-only" id="calRef" value="1" type="number" min="1" step="1" inputmode="numeric">
-                <label class="two-only" for="calDut">DUT</label>
-                <input class="two-only" id="calDut" value="2" type="number" min="1" step="1" inputmode="numeric">
-                <label class="two-only" for="calKnownCm">Distance cm</label>
+                <label class="two-only" for="calPair">Modules</label>
+                <input class="two-only" id="calPair" value="1,2" placeholder="reference,DUT">
+                <label class="two-only">Roles</label>
+                <div class="two-only field-note">first module is the reference; second module is the DUT that gets adjusted</div>
+                <label class="two-only" for="calKnownCm">Distance 0-1 cm</label>
                 <input class="two-only cm-input" id="calKnownCm" value="200.00" type="number" min="0" step="0.01" inputmode="decimal">
                 <label class="three-only" for="calThree">Modules</label>
                 <input class="three-only" id="calThree" value="1,2,3">
@@ -3005,6 +3005,15 @@ async function fetchSnapshot() {
   renderInfo(await res.json());
 }
 
+function parseCalibrationIds(inputId, expected) {
+  const raw = document.getElementById(inputId)?.value || "";
+  const ids = raw.split(/[,\s]+/)
+    .map(value => value.trim())
+    .filter(Boolean);
+  while (ids.length < expected) ids.push("?");
+  return ids.slice(0, expected);
+}
+
 function updateCalVisibility() {
   const method = document.getElementById("calMethod").value;
   document.querySelectorAll(".two-only").forEach(el => el.style.display = method === "two" ? "" : "none");
@@ -3016,16 +3025,19 @@ function renderDiagram() {
   const method = document.getElementById("calMethod").value;
   const d = document.getElementById("calDiagram");
   if (method === "two") {
+    const ids = parseCalibrationIds("calPair", 2);
     d.innerHTML = `<svg viewBox="0 0 520 320" role="img">
       <line class="edge" x1="140" y1="160" x2="380" y2="160"></line>
       <text class="edge-label" x="235" y="142">${esc(document.getElementById("calKnownCm").value)} cm</text>
       <rect class="node" x="100" y="125" width="80" height="70" rx="8"></rect>
       <rect class="node" x="340" y="125" width="80" height="70" rx="8"></rect>
-      <text x="124" y="166" font-size="18" font-weight="700">M${esc(document.getElementById("calRef").value)}</text>
-      <text x="364" y="166" font-size="18" font-weight="700">M${esc(document.getElementById("calDut").value)}</text>
+      <text x="124" y="166" font-size="18" font-weight="700">M${esc(ids[0])}</text>
+      <text x="364" y="166" font-size="18" font-weight="700">M${esc(ids[1])}</text>
+      <text x="112" y="212" font-size="12" fill="#667085">reference</text>
+      <text x="368" y="212" font-size="12" fill="#667085">DUT</text>
     </svg>`;
   } else {
-    const ids = document.getElementById("calThree").value.split(",").map(v => v.trim());
+    const ids = parseCalibrationIds("calThree", 3);
     d.innerHTML = `<svg viewBox="0 0 520 320" role="img">
       <line class="edge" x1="260" y1="65" x2="110" y2="245"></line>
       <line class="edge" x1="260" y1="65" x2="410" y2="245"></line>
@@ -3687,8 +3699,9 @@ function calibrationParamsFromForm() {
     reboot: "1",
   };
   if (method === "two") {
-    params.cal_ref = document.getElementById("calRef").value;
-    params.cal_dut = document.getElementById("calDut").value;
+    const ids = parseCalibrationIds("calPair", 2);
+    params.cal_ref = ids[0] === "?" ? "" : ids[0];
+    params.cal_dut = ids[1] === "?" ? "" : ids[1];
     params.cal_known_cm = document.getElementById("calKnownCm").value;
   } else {
     params.cal_three = document.getElementById("calThree").value;
@@ -3714,7 +3727,7 @@ function persistedSettingIds() {
     "chargerAdcTargets", "chargerLimitTargets", "chargerTimerTargets",
     "chargerRawModule", "chargerShowRawTools", "chargerRawReg", "chargerRawValue",
     "chargerRawMask", "chargerRawBits",
-    "calTargets", "calMethod", "calRef", "calDut", "calKnownCm", "calThree",
+    "calTargets", "calMethod", "calPair", "calKnownCm", "calThree",
     "calD01Cm", "calD02Cm", "calD12Cm", "calSamples",
     "calAutoApply", "calMinApplyDtu", "calReferenceGuardCm", "calTimeoutSec",
   ];
@@ -3735,7 +3748,25 @@ function restoreSettings() {
       el.value = saved;
     }
   }
+  migrateCalibrationPairSetting();
 }
+
+function migrateCalibrationPairSetting() {
+  const pairEl = document.getElementById("calPair");
+  if (!pairEl) return;
+  const pairKey = settingKey("calPair");
+  if (localStorage.getItem(pairKey) !== null) return;
+
+  const ref = localStorage.getItem(settingKey("calRef"));
+  const dut = localStorage.getItem(settingKey("calDut"));
+  if (ref && dut) {
+    pairEl.value = `${ref},${dut}`;
+    localStorage.setItem(pairKey, pairEl.value);
+  }
+  localStorage.removeItem(settingKey("calRef"));
+  localStorage.removeItem(settingKey("calDut"));
+}
+
 function wireSettingPersistence() {
   for (const id of persistedSettingIds()) {
     const el = document.getElementById(id);
@@ -3929,7 +3960,7 @@ function wireSettings() {
   document.getElementById("cancelCalibration").addEventListener("click", () => {
     postCalibrationCancel("calAutoToast");
   });
-  ["calMethod","calRef","calDut","calKnownCm","calThree","calD01Cm","calD02Cm","calD12Cm"].forEach(id => {
+  ["calMethod","calPair","calKnownCm","calThree","calD01Cm","calD02Cm","calD12Cm"].forEach(id => {
     document.getElementById(id).addEventListener("input", updateCalVisibility);
     document.getElementById(id).addEventListener("change", updateCalVisibility);
   });
@@ -4678,6 +4709,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
             if not values:
                 raise RuntimeError("no calibration samples collected")
             center_m = median(values)
+            mean_m = sum(values) / len(values)
             error_m = center_m - known_m
             correction = round_i32(error_m / UWB_METERS_PER_DTU)
             adjust_ids = parse_module_ids(payload.get("adjust_modules")) or [dut_id]
@@ -4721,6 +4753,10 @@ class DashboardHttpServer(ThreadingHTTPServer):
                     + stop_suffix
                 ),
                 "method": "two",
+                "ids": participant_ids,
+                "adjust_ids": [dut_id],
+                "reference_id": ref_id,
+                "dut_id": dut_id,
                 "complete": complete,
                 "valid": sync_ok,
                 "sync_miss_count": len(sync_misses),
@@ -4728,7 +4764,17 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 "sample_count": sample_count,
                 "center_method": "median",
                 "center_m": round(center_m, 4),
+                "known_m": round(known_m, 4),
                 "last_log_id": last_log_id,
+                "pairs": {
+                    f"{ref_id}->{dut_id}": {
+                        "known_m": round(known_m, 4),
+                        "center_m": round(center_m, 4),
+                        "mean_m": round(mean_m, 4),
+                        "error_cm": round(error_m * 100.0, 2),
+                        "error_dtu": round(error_m / UWB_METERS_PER_DTU, 2),
+                    }
+                },
                 "directed": self.directed_stats_json(samples),
                 "corrections": corrections,
                 "apply_results": apply_results,
