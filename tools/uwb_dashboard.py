@@ -724,6 +724,160 @@ class DashboardState:
             key, deque(maxlen=self.max_tdoa_samples)
         ).append(sample)
 
+    @staticmethod
+    def median_float(values: list[float]) -> float | None:
+        clean = sorted(value for value in values if math.isfinite(value))
+        if not clean:
+            return None
+        middle = len(clean) // 2
+        if len(clean) % 2:
+            return clean[middle]
+        return (clean[middle - 1] + clean[middle]) / 2.0
+
+    @staticmethod
+    def sequence_delta(start: int, end: int) -> int:
+        return (int(end) - int(start)) % 65536
+
+    @classmethod
+    def tdoa_sequences_are_paired(
+        cls, left: dict[str, Any], right: dict[str, Any], pair_count: int
+    ) -> bool:
+        if pair_count <= 0:
+            return False
+        try:
+            left_seq = int(left["seq"])
+            right_seq = int(right["seq"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        return (
+            cls.sequence_delta(left_seq, right_seq) == pair_count
+            or cls.sequence_delta(right_seq, left_seq) == pair_count
+        )
+
+    def tdoa_runtime_anchor_ids_locked(self) -> list[int]:
+        for item in self.status_by_module.values():
+            anchor_ids = item.get("runtime_anchor_ids")
+            if isinstance(anchor_ids, list):
+                ids = [
+                    int(anchor_id)
+                    for anchor_id in anchor_ids
+                    if isinstance(anchor_id, int) and anchor_id > 0
+                ]
+                if len(ids) >= 3:
+                    return ids
+        ids: set[int] = set()
+        for anchor_a_id, anchor_b_id in self.tdoa_anchor_distances:
+            ids.add(int(anchor_a_id))
+            ids.add(int(anchor_b_id))
+        return sorted(ids)
+
+    def tdoa_paired_observations_locked(
+        self, now: float, max_age_sec: float
+    ) -> dict[str, Any]:
+        anchor_ids = self.tdoa_runtime_anchor_ids_locked()
+        pair_count = len(anchor_ids) * (len(anchor_ids) - 1) // 2
+        if pair_count <= 0:
+            return {}
+
+        tag_ids = sorted({key[0] for key in self.tdoa_history})
+        paired_observations: dict[str, Any] = {}
+        for tag_id in tag_ids:
+            for i, initiator_id in enumerate(anchor_ids):
+                for responder_id in anchor_ids[i + 1 :]:
+                    left_history = [
+                        sample
+                        for sample in self.tdoa_history.get(
+                            (tag_id, initiator_id, responder_id), []
+                        )
+                        if now - float(sample.get("received_at") or 0.0)
+                        <= max_age_sec
+                    ]
+                    right_history = [
+                        sample
+                        for sample in self.tdoa_history.get(
+                            (tag_id, responder_id, initiator_id), []
+                        )
+                        if now - float(sample.get("received_at") or 0.0)
+                        <= max_age_sec
+                    ]
+                    if not left_history or not right_history:
+                        continue
+
+                    matched: list[tuple[dict[str, Any], dict[str, Any]]] = []
+                    for left in left_history:
+                        compatible = [
+                            right
+                            for right in right_history
+                            if self.tdoa_sequences_are_paired(
+                                left, right, pair_count
+                            )
+                        ]
+                        if not compatible:
+                            continue
+                        compatible.sort(
+                            key=lambda right: abs(
+                                float(left.get("received_at") or 0.0)
+                                - float(right.get("received_at") or 0.0)
+                            )
+                        )
+                        matched.append((left, compatible[0]))
+                    if not matched:
+                        continue
+
+                    diffs: list[float] = []
+                    raw_diffs: list[float] = []
+                    reverse_sums: list[float] = []
+                    for left, right in matched:
+                        left_diff = float(left["diff_m"])
+                        right_diff = float(right["diff_m"])
+                        diffs.append((left_diff - right_diff) / 2.0)
+                        reverse_sums.append(left_diff + right_diff)
+                        left_raw = float(left.get("raw_diff_m") or math.nan)
+                        right_raw = float(right.get("raw_diff_m") or math.nan)
+                        if math.isfinite(left_raw) and math.isfinite(right_raw):
+                            raw_diffs.append((left_raw - right_raw) / 2.0)
+
+                    diff_m = self.median_float(diffs)
+                    reverse_sum_m = self.median_float(reverse_sums)
+                    if diff_m is None or reverse_sum_m is None:
+                        continue
+                    raw_diff_m = self.median_float(raw_diffs)
+                    latest_left, latest_right = max(
+                        matched,
+                        key=lambda pair: max(
+                            float(pair[0].get("received_at") or 0.0),
+                            float(pair[1].get("received_at") or 0.0),
+                        ),
+                    )
+                    received_at = max(
+                        float(latest_left.get("received_at") or 0.0),
+                        float(latest_right.get("received_at") or 0.0),
+                    )
+                    paired_observations[
+                        f"{tag_id}:{initiator_id}:{responder_id}"
+                    ] = {
+                        "tag_id": tag_id,
+                        "initiator_id": initiator_id,
+                        "responder_id": responder_id,
+                        "seq": int(latest_left["seq"]),
+                        "reverse_seq": int(latest_right["seq"]),
+                        "diff_m": diff_m,
+                        "raw_diff_m": raw_diff_m
+                        if raw_diff_m is not None
+                        else float(latest_left["raw_diff_m"]),
+                        "reverse_sum_m": reverse_sum_m,
+                        "latest_reverse_sum_m": float(latest_left["diff_m"])
+                        + float(latest_right["diff_m"]),
+                        "anchor_distance_m": float(
+                            latest_left["anchor_distance_m"]
+                        ),
+                        "age_sec": now - received_at,
+                        "samples": len(matched),
+                        "source_module_id": latest_left.get("source_module_id"),
+                        "log_id": latest_left.get("log_id"),
+                    }
+        return paired_observations
+
     def ranging_snapshot_locked(self, now: float) -> dict[str, Any]:
         distances: dict[str, Any] = {}
         for (tag_id, anchor_id), item in sorted(self.ranging_distances.items()):
@@ -765,6 +919,7 @@ class DashboardState:
     def tdoa_snapshot_locked(self, now: float) -> dict[str, Any]:
         observations: dict[str, Any] = {}
         anchor_distances: dict[str, Any] = {}
+        max_age_sec = 3.0
         for (tag_id, initiator_id, responder_id), item in sorted(
             self.tdoa_observations.items()
         ):
@@ -845,7 +1000,10 @@ class DashboardState:
         return {
             "observations": observations,
             "anchor_distances": anchor_distances,
-            "max_age_sec": 3.0,
+            "paired_observations": self.tdoa_paired_observations_locked(
+                now, max_age_sec
+            ),
+            "max_age_sec": max_age_sec,
         }
 
 
@@ -3051,6 +3209,80 @@ function freshTdoaObservations(tagId, anchorIds, maxAge) {
       Number(a.responder_id) - Number(b.responder_id));
 }
 
+function sequenceForwardDelta(from, to) {
+  const start = Number(from);
+  const end = Number(to);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return NaN;
+  return ((Math.trunc(end) - Math.trunc(start)) + 65536) % 65536;
+}
+
+function tdoaSequencesArePaired(left, right, pairCount) {
+  const forward = sequenceForwardDelta(left?.seq, right?.seq);
+  const reverse = sequenceForwardDelta(right?.seq, left?.seq);
+  return forward === pairCount || reverse === pairCount;
+}
+
+function pairedTdoaObservations(tagId, anchorIds, maxAge) {
+  const selected = new Set(anchorIds.map(Number));
+  const serverPaired = Object.values(state.tdoa?.paired_observations || {})
+    .filter(item =>
+      Number(item.tag_id) === Number(tagId) &&
+      selected.has(Number(item.initiator_id)) &&
+      selected.has(Number(item.responder_id)) &&
+      Number(item.age_sec) <= maxAge &&
+      Number.isFinite(Number(item.diff_m)))
+    .sort((left, right) =>
+      Number(left.initiator_id) - Number(right.initiator_id) ||
+      Number(left.responder_id) - Number(right.responder_id));
+  if (serverPaired.length) return serverPaired;
+
+  const fresh = freshTdoaObservations(tagId, anchorIds, maxAge);
+  const byDirection = new Map(
+    fresh.map(item => [`${item.initiator_id}-${item.responder_id}`, item])
+  );
+  const pairs = selectedAnchorPairs(anchorIds);
+  const pairCount = pairs.length;
+  const paired = [];
+
+  for (const [a, b] of pairs) {
+    const ab = byDirection.get(`${a}-${b}`);
+    const ba = byDirection.get(`${b}-${a}`);
+    if (!ab || !ba || !tdoaSequencesArePaired(ab, ba, pairCount)) continue;
+
+    const abDiff = Number(ab.diff_m);
+    const baDiff = Number(ba.diff_m);
+    if (!Number.isFinite(abDiff) || !Number.isFinite(baDiff)) continue;
+
+    const rawAbDiff = Number(ab.raw_diff_m);
+    const rawBaDiff = Number(ba.raw_diff_m);
+    const age = Math.max(Number(ab.age_sec) || 0, Number(ba.age_sec) || 0);
+    const reverseSum = abDiff + baDiff;
+    paired.push({
+      ...ab,
+      initiator_id: a,
+      responder_id: b,
+      diff_m: (abDiff - baDiff) / 2,
+      raw_diff_m: Number.isFinite(rawAbDiff) && Number.isFinite(rawBaDiff)
+        ? (rawAbDiff - rawBaDiff) / 2
+        : Number(ab.raw_diff_m),
+      age_sec: age,
+      paired: true,
+      reverse_seq: ba.seq,
+      reverse_age_sec: ba.age_sec,
+      reverse_diff_m: baDiff,
+      reverse_sum_m: reverseSum,
+      seq_gap: Math.min(
+        sequenceForwardDelta(ab.seq, ba.seq),
+        sequenceForwardDelta(ba.seq, ab.seq)
+      ),
+    });
+  }
+
+  return paired.sort((left, right) =>
+    Number(left.initiator_id) - Number(right.initiator_id) ||
+    Number(left.responder_id) - Number(right.responder_id));
+}
+
 function solveTdoa(anchors, observations) {
   const usable = observations
     .map(item => ({
@@ -3156,7 +3388,7 @@ function computePositionModel() {
       let position = null;
       let residuals = {};
       if (settings.solver === "tdoa") {
-        observations = freshTdoaObservations(tagId, settings.anchorIds, settings.maxAge)
+        observations = pairedTdoaObservations(tagId, settings.anchorIds, settings.maxAge)
           .filter(item => anchors[Number(item.initiator_id)] && anchors[Number(item.responder_id)]);
         position = solveTdoa(anchors, observations);
         residuals = tdoaResiduals(position, anchors, observations);
@@ -3466,22 +3698,13 @@ function renderPositionReadout(model) {
     head.innerHTML = `<tr><th>Tag</th><th>Pair</th><th>diff m</th><th>rev sum</th><th>age</th><th>resid.</th></tr>`;
     const tdoaRows = [];
     for (const tag of Object.values(model.tags)) {
-      const reverseMap = new Map(
-        (tag.observations || []).map(item => [
-          `${item.initiator_id}-${item.responder_id}`,
-          item,
-        ])
-      );
       for (const item of tag.observations || []) {
         const key = `${item.initiator_id}-${item.responder_id}`;
-        const reverse = reverseMap.get(`${item.responder_id}-${item.initiator_id}`);
-        const reverseSum = reverse
-          ? Number(item.diff_m) + Number(reverse.diff_m)
-          : NaN;
+        const reverseSum = Number(item.reverse_sum_m);
         const residual = tag.residuals?.[key];
         tdoaRows.push(`<tr>
           <td>T${esc(tag.tagId)}</td>
-          <td>A${esc(item.initiator_id)}→A${esc(item.responder_id)}</td>
+          <td>A${esc(item.initiator_id)}↔A${esc(item.responder_id)}<br><span class="muted">seq ${esc(item.seq)}/${esc(item.reverse_seq)} · n ${esc(item.samples || 1)}</span></td>
           <td>${fmtFixed(item.diff_m, 3)}</td>
           <td>${Number.isFinite(reverseSum) ? fmtCmFromM(reverseSum, 1) + " cm" : "-"}</td>
           <td class="${Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${fmtFixed(item.age_sec, 1)}s</td>
