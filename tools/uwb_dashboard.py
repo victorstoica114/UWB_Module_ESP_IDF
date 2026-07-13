@@ -1159,10 +1159,18 @@ th { color: var(--muted); font-weight: 700; }
 .cal-result-table th {
   white-space: nowrap;
 }
-.toast { margin-top: 10px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.toast {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+  max-width: 100%;
+}
 .toast:empty { display: none; }
 .toast:not(:empty) {
-  display: inline-block;
+  display: block;
   border: 1px solid var(--line);
   background: #fbfcfe;
   padding: 6px 8px;
