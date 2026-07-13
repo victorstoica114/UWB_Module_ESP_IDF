@@ -262,16 +262,32 @@ anchor frames and logs one TDOA observation when it has heard `POLL`, `RESP`, an
 `REPORT2` for the same anchor pair and sequence.
 
 The coordinator is the first configured anchor ID. For anchors `2,3,4,5`, one
-round walks all unordered anchor pairs:
+round walks all unordered anchor pairs. Successive rounds alternate the direction
+of every pair, so each physical edge is measured in both radio directions:
 
 ```text
+round 0:
 2 -> 3
 2 -> 4
 2 -> 5
 3 -> 4
 3 -> 5
 4 -> 5
+
+round 1:
+3 -> 2
+4 -> 2
+5 -> 2
+4 -> 3
+5 -> 3
+5 -> 4
 ```
+
+This is inspired by the FlexTDOA idea of rotating radio roles. It does not
+remove multipath, but it avoids always using the same antenna orientation and
+same anchor role on a given edge. The dashboard stores the measured
+anchor-anchor distance as an unordered pair, while each TDOA observation keeps
+the directed `initiator -> responder` sign.
 
 For one anchor pair `Ai -> Aj`, the tag hears:
 
@@ -308,9 +324,14 @@ UWB_DS_TWR_TDOA obs tag=<tag> initiator=<Ai> responder=<Aj> seq=<seq> diff=<m> m
 
 The dashboard `Position` tab can use `DS-TWR-TDOA` as the solver source. It
 takes fresh `diff` observations and solves the tag position on the PC with a
-local least-squares range-difference fit. This is intentionally separate from
-`DS-TWR ranges`, because the blue distance circles only make sense for absolute
-tag-anchor ranges.
+local least-squares range-difference fit. In this mode the dashboard also
+reconstructs the relative anchor geometry from the live anchor-anchor DS-TWR
+measurements. The first selected anchor is placed at `(0,0)`, the second defines
+the X axis, the third/fourth are trilaterated from the measured edges, and the
+geometry table reports residual error in centimeters. This means the real setup
+can be a slightly skewed quadrilateral instead of a perfect square. This is
+intentionally separate from `DS-TWR ranges`, because the blue distance circles
+only make sense for absolute tag-anchor ranges.
 
 ### Time Units
 

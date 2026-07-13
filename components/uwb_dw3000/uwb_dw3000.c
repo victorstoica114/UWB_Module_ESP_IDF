@@ -3662,15 +3662,27 @@ uwb_ds_twr_tdoa_find_observation(
 }
 
 static bool uwb_ds_twr_tdoa_anchor_pair_valid(const uint8_t *anchor_ids,
-                                              size_t anchor_count,
-                                              uint8_t initiator_id,
-                                              uint8_t responder_id)
+                                               size_t anchor_count,
+                                               uint8_t initiator_id,
+                                               uint8_t responder_id)
 {
     return initiator_id != 0 && responder_id != 0 &&
            initiator_id != responder_id &&
            uwb_anchor_survey_id_in_set(anchor_ids, anchor_count,
                                        initiator_id) &&
            uwb_anchor_survey_id_in_set(anchor_ids, anchor_count, responder_id);
+}
+
+static struct uwb_anchor_survey_pair uwb_ds_twr_tdoa_pair_for_round(
+    const struct uwb_anchor_survey_pair *base_pair, uint32_t round)
+{
+    struct uwb_anchor_survey_pair pair = *base_pair;
+    if ((round & 1U) != 0U) {
+        const uint8_t initiator_id = pair.initiator_id;
+        pair.initiator_id = pair.responder_id;
+        pair.responder_id = initiator_id;
+    }
+    return pair;
 }
 
 static void uwb_ds_twr_tdoa_log_observation(
@@ -3716,14 +3728,19 @@ static void uwb_ds_twr_tdoa_log_observation(
     const double raw_diff_m = uwb_distance_tof_to_meters(raw_diff_dtu);
 
     ESP_LOGI(TAG,
-             "UWB_DS_TWR_TDOA obs tag=%u initiator=%u responder=%u seq=%u diff=%.3f m raw=%.3f m anchor=%.3f m rx_delta=%.2f dtu reply=%.2f dtu reply_corr=%.2f dtu anchor_tof=%.2f dtu clk_valid=%u clk_raw=%ld clk_ratio=%.3e",
+             "UWB_DS_TWR_TDOA obs tag=%u initiator=%u responder=%u seq=%u diff=%.3f m raw=%.3f m anchor=%.3f m clk_valid=%u clk_ratio=%.3e",
              (unsigned)tag_id, (unsigned)observation->initiator_id,
              (unsigned)observation->responder_id,
              (unsigned)observation->sequence, diff_m, raw_diff_m,
-             anchor_distance_m, rx_delta_tag_dtu, reply_b_dtu,
+             anchor_distance_m,
+             observation->resp_clock_offset_valid ? 1U : 0U, clock_offset_ratio);
+    ESP_LOGD(TAG,
+             "DS_TWR_TDOA obs timing tag=%u pair=%u-%u seq=%u rx_delta=%.2f dtu reply=%.2f dtu reply_corr=%.2f dtu anchor_tof=%.2f dtu clk_raw=%ld",
+             (unsigned)tag_id, (unsigned)observation->initiator_id,
+             (unsigned)observation->responder_id,
+             (unsigned)observation->sequence, rx_delta_tag_dtu, reply_b_dtu,
              reply_b_corrected_dtu, anchor_tof_dtu,
-             observation->resp_clock_offset_valid ? 1U : 0U,
-             (long)observation->resp_clock_offset_raw, clock_offset_ratio);
+             (long)observation->resp_clock_offset_raw);
 
     memset(observation, 0, sizeof(*observation));
 }
@@ -4031,37 +4048,40 @@ static void uwb_ds_twr_tdoa_anchor_loop(uint8_t coordinator_id,
     uint32_t round = 0;
 
     ESP_LOGI(TAG,
-             "DS_TWR_TDOA coordinator active: source_id=%u pair_count=%u slot=%u ms round_gap=%u ms",
+             "DS_TWR_TDOA coordinator active: source_id=%u pair_count=%u slot=%u ms round_gap=%u ms role_alternate=1",
              (unsigned)s_source_id, (unsigned)pair_count,
              (unsigned)config->anchor_survey_slot_ms,
              (unsigned)config->anchor_survey_round_gap_ms);
 
     while (true) {
-        ESP_LOGI(TAG, "DS_TWR_TDOA round=%lu start", (unsigned long)round);
+        ESP_LOGI(TAG, "DS_TWR_TDOA round=%lu start phase=%s",
+                 (unsigned long)round,
+                 ((round & 1U) != 0U) ? "reverse" : "forward");
         for (size_t i = 0; i < pair_count; ++i) {
             config = app_runtime_config_get();
-            const struct uwb_anchor_survey_pair *pair = &pairs[i];
+            const struct uwb_anchor_survey_pair pair =
+                uwb_ds_twr_tdoa_pair_for_round(&pairs[i], round);
             const TickType_t slot_end =
                 xTaskGetTickCount() +
                 pdMS_TO_TICKS(config->anchor_survey_slot_ms);
 
-            if (pair->initiator_id == s_source_id) {
+            if (pair.initiator_id == s_source_id) {
                 ESP_LOGI(TAG,
                          "DS_TWR_TDOA local slot=%u seq=%u pair=%u-%u",
                          (unsigned)i, (unsigned)sequence,
-                         (unsigned)pair->initiator_id,
-                         (unsigned)pair->responder_id);
+                         (unsigned)pair.initiator_id,
+                         (unsigned)pair.responder_id);
                 const esp_err_t err = uwb_distance_initiate_once(
-                    pair->responder_id, sequence, false);
+                    pair.responder_id, sequence, false);
                 if (err != ESP_OK) {
                     ESP_LOGW(TAG,
                              "DS_TWR_TDOA local pair=%u-%u seq=%u failed: %s",
-                             (unsigned)pair->initiator_id,
-                             (unsigned)pair->responder_id,
+                             (unsigned)pair.initiator_id,
+                             (unsigned)pair.responder_id,
                              (unsigned)sequence, esp_err_to_name(err));
                 }
             } else {
-                (void)uwb_ds_twr_tdoa_send_command(pair, (uint8_t)i,
+                (void)uwb_ds_twr_tdoa_send_command(&pair, (uint8_t)i,
                                                    sequence);
             }
 

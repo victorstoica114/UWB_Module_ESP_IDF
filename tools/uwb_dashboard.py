@@ -59,6 +59,11 @@ DS_TWR_TDOA_RE = re.compile(
     r"raw=(?P<raw>[-+]?\d+(?:\.\d+)?)\s+m\s+"
     r"anchor=(?P<anchor_distance>[-+]?\d+(?:\.\d+)?)\s+m"
 )
+DS_TWR_TDOA_ANCHOR_RE = re.compile(
+    r"\bDS_TWR_TDOA anchor result\s+pair=(?P<initiator>\d+)-(?P<responder>\d+)\s+"
+    r"seq=(?P<seq>\d+)\s+distance=(?P<distance>[-+]?\d+(?:\.\d+)?)\s+m\s+"
+    r"[-+]?\d+(?:\.\d+)?\s+cm\s+raw=(?P<raw>[-+]?\d+(?:\.\d+)?)\s+m"
+)
 CAL_SYNC_SKIP_RE = re.compile(r"\bUWB CAL slot skipped due to sync fail\b")
 TELEMETRY_BINARY_MAGIC = b"UWT1"
 TELEMETRY_BINARY_HEADER_LEN = 12
@@ -411,6 +416,8 @@ class DashboardState:
         self.max_ranging_samples = 200
         self.tdoa_observations: dict[tuple[int, int, int], dict[str, Any]] = {}
         self.tdoa_history: dict[tuple[int, int, int], deque[dict[str, Any]]] = {}
+        self.tdoa_anchor_distances: dict[tuple[int, int], dict[str, Any]] = {}
+        self.tdoa_anchor_history: dict[tuple[int, int], deque[dict[str, Any]]] = {}
         self.max_tdoa_samples = 200
         self.next_log_id = 1
         self.next_accel_id = 1
@@ -438,6 +445,7 @@ class DashboardState:
             self.logs.append(item)
             self.record_accel_locked(item)
             self.record_ranging_locked(item)
+            self.record_tdoa_anchor_locked(item)
             self.record_tdoa_locked(item)
 
     def add_telemetry(self, line: str, addr: tuple[str, int]) -> None:
@@ -634,6 +642,87 @@ class DashboardState:
         self.tdoa_history.setdefault(
             key, deque(maxlen=self.max_tdoa_samples)
         ).append(sample)
+        self.store_tdoa_anchor_distance_locked(
+            initiator_id=initiator_id,
+            responder_id=responder_id,
+            seq=seq,
+            distance_m=anchor_distance_m,
+            raw_distance_m=None,
+            item=item,
+            source="tdoa_obs",
+        )
+
+    def record_tdoa_anchor_locked(self, item: dict[str, Any]) -> None:
+        match = DS_TWR_TDOA_ANCHOR_RE.search(
+            str(item.get("message") or item.get("raw") or "")
+        )
+        if match is None:
+            return
+
+        try:
+            initiator_id = int(match.group("initiator"))
+            responder_id = int(match.group("responder"))
+            seq = int(match.group("seq"))
+            distance_m = float(match.group("distance"))
+            raw_distance_m = float(match.group("raw"))
+        except ValueError:
+            return
+
+        self.store_tdoa_anchor_distance_locked(
+            initiator_id=initiator_id,
+            responder_id=responder_id,
+            seq=seq,
+            distance_m=distance_m,
+            raw_distance_m=raw_distance_m,
+            item=item,
+            source="anchor_result",
+        )
+
+    def store_tdoa_anchor_distance_locked(
+        self,
+        *,
+        initiator_id: int,
+        responder_id: int,
+        seq: int,
+        distance_m: float,
+        raw_distance_m: float | None,
+        item: dict[str, Any],
+        source: str,
+    ) -> None:
+        if initiator_id <= 0 or responder_id <= 0 or initiator_id == responder_id:
+            return
+        if not math.isfinite(distance_m) or distance_m <= 0:
+            return
+
+        anchor_a_id, anchor_b_id = sorted((initiator_id, responder_id))
+        now = float(item.get("received_at") or time.time())
+        key = (anchor_a_id, anchor_b_id)
+        existing = self.tdoa_anchor_distances.get(key)
+        if (
+            source == "tdoa_obs"
+            and existing is not None
+            and existing.get("source") == "anchor_result"
+            and int(existing.get("seq") or -1) == seq
+        ):
+            return
+        sample = {
+            "anchor_a_id": anchor_a_id,
+            "anchor_b_id": anchor_b_id,
+            "initiator_id": initiator_id,
+            "responder_id": responder_id,
+            "seq": seq,
+            "distance_m": distance_m,
+            "raw_distance_m": raw_distance_m,
+            "received_at": now,
+            "log_id": item.get("id"),
+            "source_module_id": item.get("module_id"),
+            "source": source,
+            "raw": item.get("raw") or item.get("message") or "",
+        }
+        self.tdoa_anchor_distances[key] = sample
+        self.tdoa_anchor_history.setdefault(
+            key, deque(maxlen=self.max_tdoa_samples)
+        ).append(sample)
 
     def ranging_snapshot_locked(self, now: float) -> dict[str, Any]:
         distances: dict[str, Any] = {}
@@ -675,6 +764,7 @@ class DashboardState:
 
     def tdoa_snapshot_locked(self, now: float) -> dict[str, Any]:
         observations: dict[str, Any] = {}
+        anchor_distances: dict[str, Any] = {}
         for (tag_id, initiator_id, responder_id), item in sorted(
             self.tdoa_observations.items()
         ):
@@ -713,8 +803,48 @@ class DashboardState:
                     "max_m": max(values) if values else None,
                 },
             }
+        for (anchor_a_id, anchor_b_id), item in sorted(
+            self.tdoa_anchor_distances.items()
+        ):
+            history = list(
+                self.tdoa_anchor_history.get((anchor_a_id, anchor_b_id), [])
+            )
+            values = [
+                float(sample["distance_m"])
+                for sample in history
+                if now - float(sample.get("received_at") or 0.0) <= 10.0
+            ]
+            mean_m = sum(values) / len(values) if values else None
+            std_m = None
+            if len(values) >= 2 and mean_m is not None:
+                variance = sum((value - mean_m) ** 2 for value in values) / (
+                    len(values) - 1
+                )
+                std_m = math.sqrt(max(0.0, variance))
+            anchor_distances[f"{anchor_a_id}:{anchor_b_id}"] = {
+                "anchor_a_id": anchor_a_id,
+                "anchor_b_id": anchor_b_id,
+                "initiator_id": int(item["initiator_id"]),
+                "responder_id": int(item["responder_id"]),
+                "seq": int(item["seq"]),
+                "distance_m": float(item["distance_m"]),
+                "raw_distance_m": item.get("raw_distance_m"),
+                "age_sec": now - float(item["received_at"]),
+                "log_id": item.get("log_id"),
+                "source_module_id": item.get("source_module_id"),
+                "source": item.get("source") or "",
+                "raw": item.get("raw") or "",
+                "stats": {
+                    "samples": len(values),
+                    "mean_m": mean_m,
+                    "std_m": std_m,
+                    "min_m": min(values) if values else None,
+                    "max_m": max(values) if values else None,
+                },
+            }
         return {
             "observations": observations,
+            "anchor_distances": anchor_distances,
             "max_age_sec": 3.0,
         }
 
@@ -1657,6 +1787,7 @@ th { color: var(--muted); font-weight: 700; }
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In DS-TWR-TDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
+            <div><b>Geometry</b><span>DS-TWR-TDOA uses live anchor-anchor ranges, so the anchors do not need to form a perfect square.</span></div>
           </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
@@ -1665,10 +1796,18 @@ th { color: var(--muted); font-weight: 700; }
           <div id="positionToast" class="toast"></div>
           <div class="section" style="margin-top:12px;">
             <h2>Anchor Coordinates</h2>
+            <div id="positionGeometryHint" class="muted" style="margin-bottom:8px;"></div>
             <textarea id="positionAnchorCoords" spellcheck="false">2=2,2
 3=0,2
 4=0,0
 5=2,0</textarea>
+          </div>
+          <div class="section">
+            <h2>Measured Anchor Geometry</h2>
+            <table>
+              <thead><tr><th>Pair</th><th>m</th><th>age</th><th>fit</th></tr></thead>
+              <tbody id="positionGeometryRows"></tbody>
+            </table>
           </div>
           <div class="section">
             <h2>Live Position</h2>
@@ -2191,7 +2330,7 @@ const state = {
   hydratedSettings: false,
   calibrationResult: null,
   ranging: {distances: {}, max_age_sec: 3},
-  tdoa: {observations: {}, max_age_sec: 3},
+  tdoa: {observations: {}, anchor_distances: {}, max_age_sec: 3},
   positionTrail: {},
   positionResults: {},
   positionWasActive: false,
@@ -2732,6 +2871,107 @@ function freshDistanceFor(tagId, anchorId, maxAge) {
   return item;
 }
 
+function anchorPairKey(a, b) {
+  const aa = Number(a);
+  const bb = Number(b);
+  return aa < bb ? `${aa}:${bb}` : `${bb}:${aa}`;
+}
+
+function freshAnchorPairDistance(a, b, maxAge) {
+  const item = state.tdoa?.anchor_distances?.[anchorPairKey(a, b)];
+  if (!item || Number(item.age_sec) > maxAge) return null;
+  return item;
+}
+
+function selectedAnchorPairs(anchorIds) {
+  const pairs = [];
+  for (let i = 0; i < anchorIds.length; i++) {
+    for (let j = i + 1; j < anchorIds.length; j++) {
+      pairs.push([Number(anchorIds[i]), Number(anchorIds[j])]);
+    }
+  }
+  return pairs;
+}
+
+function anchorGeometryResiduals(anchors, distanceItems) {
+  const residuals = {};
+  for (const [key, item] of Object.entries(distanceItems || {})) {
+    const a = anchors[Number(item.anchor_a_id)];
+    const b = anchors[Number(item.anchor_b_id)];
+    const distance = Number(item.distance_m);
+    if (!a || !b || !Number.isFinite(distance)) continue;
+    residuals[key] = Math.hypot(a.x - b.x, a.y - b.y) - distance;
+  }
+  return residuals;
+}
+
+function measuredAnchorGeometry(anchorIds, maxAge) {
+  const ids = anchorIds.map(Number).filter(id => Number.isInteger(id) && id > 0);
+  const distanceItems = {};
+  const missingPairs = [];
+  for (const [a, b] of selectedAnchorPairs(ids)) {
+    const item = freshAnchorPairDistance(a, b, maxAge);
+    if (item) distanceItems[anchorPairKey(a, b)] = item;
+    else missingPairs.push([a, b]);
+  }
+
+  const result = {
+    anchors: {},
+    distanceItems,
+    missingPairs,
+    residuals: {},
+    complete: false,
+    status: "waiting",
+  };
+  if (ids.length < 3) return result;
+
+  const distance = (a, b) => {
+    const item = distanceItems[anchorPairKey(a, b)];
+    return item ? Number(item.distance_m) : NaN;
+  };
+  const d01 = distance(ids[0], ids[1]);
+  const d02 = distance(ids[0], ids[2]);
+  const d12 = distance(ids[1], ids[2]);
+  if (![d01, d02, d12].every(value => Number.isFinite(value) && value > 0)) {
+    return result;
+  }
+
+  const p0 = {x: 0, y: 0};
+  const p1 = {x: d01, y: 0};
+  const x2 = (d02 * d02 + d01 * d01 - d12 * d12) / (2 * d01);
+  const y2sq = d02 * d02 - x2 * x2;
+  const p2 = {x: x2, y: Math.sqrt(Math.max(0, y2sq))};
+  result.anchors[ids[0]] = p0;
+  result.anchors[ids[1]] = p1;
+  result.anchors[ids[2]] = p2;
+  result.complete = missingPairs.length === 0 && y2sq >= -0.02;
+  result.status = result.complete ? "ok" : "inconsistent";
+
+  if (ids.length >= 4) {
+    const d03 = distance(ids[0], ids[3]);
+    const d13 = distance(ids[1], ids[3]);
+    const d23 = distance(ids[2], ids[3]);
+    if ([d03, d13, d23].every(value => Number.isFinite(value) && value > 0)) {
+      const x3 = (d03 * d03 + d01 * d01 - d13 * d13) / (2 * d01);
+      const y3sq = d03 * d03 - x3 * x3;
+      const y3abs = Math.sqrt(Math.max(0, y3sq));
+      const candidates = [{x: x3, y: y3abs}, {x: x3, y: -y3abs}];
+      candidates.sort((left, right) =>
+        Math.abs(Math.hypot(left.x - p2.x, left.y - p2.y) - d23) -
+        Math.abs(Math.hypot(right.x - p2.x, right.y - p2.y) - d23));
+      result.anchors[ids[3]] = candidates[0];
+      result.complete = result.complete && y3sq >= -0.02;
+      result.status = result.complete ? "ok" : "inconsistent";
+    } else {
+      result.complete = false;
+      result.status = "waiting";
+    }
+  }
+
+  result.residuals = anchorGeometryResiduals(result.anchors, distanceItems);
+  return result;
+}
+
 function freshTdoaObservations(tagId, anchorIds, maxAge) {
   const selected = new Set(anchorIds.map(Number));
   return Object.values(state.tdoa?.observations || {})
@@ -2816,9 +3056,16 @@ function tdoaResiduals(position, anchors, observations) {
 function computePositionModel() {
   const settings = positionSettings();
   const active = positionRangingActive(settings);
+  const geometry = settings.solver === "tdoa"
+    ? measuredAnchorGeometry(settings.anchorIds, settings.maxAge)
+    : null;
   const anchors = {};
-  for (const anchorId of settings.anchorIds) {
-    if (settings.coords[anchorId]) anchors[anchorId] = settings.coords[anchorId];
+  if (settings.solver === "tdoa") {
+    Object.assign(anchors, geometry?.anchors || {});
+  } else {
+    for (const anchorId of settings.anchorIds) {
+      if (settings.coords[anchorId]) anchors[anchorId] = settings.coords[anchorId];
+    }
   }
 
   if (!active && state.positionWasActive) {
@@ -2863,7 +3110,7 @@ function computePositionModel() {
   }
 
   state.positionResults = tags;
-  return {settings, active, anchors, tags};
+  return {settings, active, anchors, tags, geometry};
 }
 
 function positionBounds(model) {
@@ -3016,6 +3263,38 @@ function drawPosition(model) {
   }
 }
 
+function renderPositionGeometryPanel(model) {
+  const hint = document.getElementById("positionGeometryHint");
+  const rows = document.getElementById("positionGeometryRows");
+  const coordText = document.getElementById("positionAnchorCoords");
+  if (coordText) coordText.disabled = model.settings.solver === "tdoa";
+  if (hint) {
+    hint.textContent = model.settings.solver === "tdoa"
+      ? "DS-TWR-TDOA ignores manual coordinates and reconstructs relative anchor geometry from live anchor-anchor ranges."
+      : "DS-TWR ranges uses these manual coordinates for the selected anchors.";
+  }
+  if (!rows) return;
+  if (model.settings.solver !== "tdoa") {
+    rows.innerHTML = `<tr><td colspan="4" class="muted">switch to DS-TWR-TDOA to use measured anchor geometry</td></tr>`;
+    return;
+  }
+
+  const geometry = model.geometry || {};
+  const pairRows = selectedAnchorPairs(model.settings.anchorIds).map(([a, b]) => {
+    const key = anchorPairKey(a, b);
+    const item = geometry.distanceItems?.[key];
+    const residual = geometry.residuals?.[key];
+    const direction = item ? `A${esc(item.initiator_id)}→A${esc(item.responder_id)}` : "waiting";
+    return `<tr>
+      <td>A${esc(a)}-A${esc(b)}<br><span class="muted">${direction}</span></td>
+      <td>${item ? fmtFixed(item.distance_m, 3) : "-"}</td>
+      <td class="${item && Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${item ? fmtFixed(item.age_sec, 1) + "s" : "-"}</td>
+      <td>${residual === undefined ? "-" : fmtFixed(residual * 100, 1) + " cm"}</td>
+    </tr>`;
+  });
+  rows.innerHTML = pairRows.join("");
+}
+
 function renderPositionReadout(model) {
   const readout = document.getElementById("positionReadout");
   const rows = document.getElementById("positionDistanceRows");
@@ -3027,6 +3306,7 @@ function renderPositionReadout(model) {
   const enableText = model.settings.solver === "tdoa" ? "Enable DS-TWR-TDOA" : "Enable Ranging";
   document.querySelectorAll("#positionEnableRanging, #positionEnableRangingSide")
     .forEach(button => { button.textContent = enableText; });
+  renderPositionGeometryPanel(model);
 
   if (!model.active) {
     overlay.classList.add("active");
@@ -3041,8 +3321,12 @@ function renderPositionReadout(model) {
   const missingCoords = model.settings.anchorIds.filter(id => !model.anchors[id]);
   if (missingCoords.length) {
     overlay.classList.add("active");
-    overlay.querySelector("h2").textContent = "Anchor coordinates missing";
-    overlay.querySelector("p").textContent = `Add coordinates for anchor IDs: ${missingCoords.join(", ")}.`;
+    overlay.querySelector("h2").textContent = model.settings.solver === "tdoa"
+      ? "Waiting for measured anchor geometry"
+      : "Anchor coordinates missing";
+    overlay.querySelector("p").textContent = model.settings.solver === "tdoa"
+      ? `Waiting for fresh anchor-anchor ranges involving: ${missingCoords.join(", ")}.`
+      : `Add coordinates for anchor IDs: ${missingCoords.join(", ")}.`;
   } else {
     overlay.classList.remove("active");
     overlay.querySelector("h2").textContent = `${solverName} is not active`;
@@ -3695,7 +3979,7 @@ function renderCharger(statuses) {
 function renderInfo(snapshot) {
   state.statuses = snapshot.statuses || [];
   state.ranging = snapshot.ranging || {distances: {}, max_age_sec: 3};
-  state.tdoa = snapshot.tdoa || {observations: {}, max_age_sec: 3};
+  state.tdoa = snapshot.tdoa || {observations: {}, anchor_distances: {}, max_age_sec: 3};
   mergeAccelHistory(snapshot.accel_history || {});
   document.getElementById("logPill").textContent = `${snapshot.log_count} logs`;
   const telemetryPill = document.getElementById("telemetryPill");
