@@ -322,16 +322,19 @@ The firmware logs:
 UWB_DS_TWR_TDOA obs tag=<tag> initiator=<Ai> responder=<Aj> seq=<seq> diff=<m> m ...
 ```
 
-The dashboard `Position` tab can use `DS-TWR-TDOA` as the solver source. It
-takes fresh `diff` observations and solves the tag position on the PC with a
-local least-squares range-difference fit. In this mode the dashboard also
-reconstructs the relative anchor geometry from the live anchor-anchor DS-TWR
-measurements. The first selected anchor is placed at `(0,0)`, the second defines
-the X axis, the third/fourth are trilaterated from the measured edges, and the
-geometry table reports residual error in centimeters. This means the real setup
-can be a slightly skewed quadrilateral instead of a perfect square. This is
-intentionally separate from `DS-TWR ranges`, because the blue distance circles
-only make sense for absolute tag-anchor ranges.
+The dashboard `Position` tab reconstructs the relative anchor geometry from live
+anchor-anchor DS-TWR measurements. The first selected anchor is placed at
+`(0,0)`, the second defines the X axis, the third/fourth are trilaterated from
+the measured edges, and a small least-squares refinement spreads any geometry
+error across all fresh edges. The geometry table reports residual error in
+centimeters, so the real setup can be a slightly skewed quadrilateral instead of
+a perfect square.
+
+With `DS-TWR-TDOA` selected, the dashboard takes fresh `diff` observations and
+solves the tag position on the PC with a local least-squares range-difference
+fit. `DS-TWR ranges` can use the same measured anchor geometry for absolute
+tag-anchor ranges, but the blue distance circles only make sense for absolute
+ranges, not TDOA range differences.
 
 ### Time Units
 

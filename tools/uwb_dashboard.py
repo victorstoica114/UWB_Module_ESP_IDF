@@ -1665,14 +1665,6 @@ th { color: var(--muted); font-weight: 700; }
   margin: 0 0 10px;
   font-size: 15px;
 }
-.position-panel textarea {
-  width: 100%;
-  min-height: 94px;
-  resize: vertical;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.35;
-}
 .position-readout {
   display: grid;
   gap: 8px;
@@ -1795,15 +1787,8 @@ th { color: var(--muted); font-weight: 700; }
           </div>
           <div id="positionToast" class="toast"></div>
           <div class="section" style="margin-top:12px;">
-            <h2>Anchor Coordinates</h2>
-            <div id="positionGeometryHint" class="muted" style="margin-bottom:8px;"></div>
-            <textarea id="positionAnchorCoords" spellcheck="false">2=2,2
-3=0,2
-4=0,0
-5=2,0</textarea>
-          </div>
-          <div class="section">
             <h2>Measured Anchor Geometry</h2>
+            <div class="muted" style="margin-bottom:8px;">Relative anchor coordinates are reconstructed from live anchor-anchor ranges.</div>
             <table>
               <thead><tr><th>Pair</th><th>m</th><th>age</th><th>fit</th></tr></thead>
               <tbody id="positionGeometryRows"></tbody>
@@ -2769,30 +2754,13 @@ function parseIdList(text, expected = null) {
   return expected ? unique.slice(0, expected) : unique;
 }
 
-function parseAnchorCoordinates(text) {
-  const coords = {};
-  for (const rawLine of String(text || "").split(/\n+/)) {
-    const line = rawLine.trim();
-    if (!line || !line.includes("=")) continue;
-    const [rawId, rawPair] = line.split("=", 2);
-    const id = Number(rawId.trim());
-    const parts = rawPair.split(",").map(value => Number(value.trim()));
-    if (Number.isInteger(id) && id > 0 &&
-        parts.length >= 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
-      coords[id] = {x: parts[0], y: parts[1]};
-    }
-  }
-  return coords;
-}
-
 function positionSettings() {
   const anchorCount = Math.max(3, Math.min(4, Number(document.getElementById("positionAnchorCount")?.value || 4)));
   const solver = document.getElementById("positionSolver")?.value === "tdoa" ? "tdoa" : "ranging";
   const anchorIds = parseIdList(document.getElementById("positionAnchors")?.value, anchorCount);
   const tagIds = parseIdList(document.getElementById("positionTags")?.value);
-  const coords = parseAnchorCoordinates(document.getElementById("positionAnchorCoords")?.value);
   const maxAge = Math.max(0.2, Number(document.getElementById("positionMaxAgeSec")?.value || 3));
-  return {anchorCount, solver, anchorIds, tagIds, coords, maxAge};
+  return {anchorCount, solver, anchorIds, tagIds, maxAge};
 }
 
 function selectedPositionModuleIds(settings = positionSettings()) {
@@ -3142,17 +3110,8 @@ function tdoaResiduals(position, anchors, observations) {
 function computePositionModel() {
   const settings = positionSettings();
   const active = positionRangingActive(settings);
-  const geometry = settings.solver === "tdoa"
-    ? measuredAnchorGeometry(settings.anchorIds, settings.maxAge)
-    : null;
-  const anchors = {};
-  if (settings.solver === "tdoa") {
-    Object.assign(anchors, geometry?.anchors || {});
-  } else {
-    for (const anchorId of settings.anchorIds) {
-      if (settings.coords[anchorId]) anchors[anchorId] = settings.coords[anchorId];
-    }
-  }
+  const geometry = measuredAnchorGeometry(settings.anchorIds, settings.maxAge);
+  const anchors = {...(geometry?.anchors || {})};
 
   if (!active && state.positionWasActive) {
     state.positionTrail = {};
@@ -3350,20 +3309,8 @@ function drawPosition(model) {
 }
 
 function renderPositionGeometryPanel(model) {
-  const hint = document.getElementById("positionGeometryHint");
   const rows = document.getElementById("positionGeometryRows");
-  const coordText = document.getElementById("positionAnchorCoords");
-  if (coordText) coordText.disabled = model.settings.solver === "tdoa";
-  if (hint) {
-    hint.textContent = model.settings.solver === "tdoa"
-      ? "DS-TWR-TDOA ignores manual coordinates and reconstructs relative anchor geometry from live anchor-anchor ranges."
-      : "DS-TWR ranges uses these manual coordinates for the selected anchors.";
-  }
   if (!rows) return;
-  if (model.settings.solver !== "tdoa") {
-    rows.innerHTML = `<tr><td colspan="4" class="muted">switch to DS-TWR-TDOA to use measured anchor geometry</td></tr>`;
-    return;
-  }
 
   const geometry = model.geometry || {};
   const pairRows = selectedAnchorPairs(model.settings.anchorIds).map(([a, b]) => {
@@ -3407,12 +3354,8 @@ function renderPositionReadout(model) {
   const missingCoords = model.settings.anchorIds.filter(id => !model.anchors[id]);
   if (missingCoords.length) {
     overlay.classList.add("active");
-    overlay.querySelector("h2").textContent = model.settings.solver === "tdoa"
-      ? "Waiting for measured anchor geometry"
-      : "Anchor coordinates missing";
-    overlay.querySelector("p").textContent = model.settings.solver === "tdoa"
-      ? `Waiting for fresh anchor-anchor ranges involving: ${missingCoords.join(", ")}.`
-      : `Add coordinates for anchor IDs: ${missingCoords.join(", ")}.`;
+    overlay.querySelector("h2").textContent = "Waiting for measured anchor geometry";
+    overlay.querySelector("p").textContent = `Waiting for fresh anchor-anchor ranges involving: ${missingCoords.join(", ")}.`;
   } else {
     overlay.classList.remove("active");
     overlay.querySelector("h2").textContent = `${solverName} is not active`;
@@ -4919,7 +4862,7 @@ function persistedSettingIds() {
     "runtimeUwb", "runtimeBno085", "runtimeGps", "runtimeTelemetryPort",
     "accelTimebase", "accelSampleHz", "accelTargets",
     "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
-    "positionMaxAgeSec", "positionAnchorCoords",
+    "positionMaxAgeSec",
     "uwbTargets", "uwbRadioChannel", "uwbSurveyRxMs", "uwbSurveyDelayMs", "uwbSurveySlotMs",
     "uwbSurveyGapMs", "uwbSurveyLogEvery", "uwbRangingSlotMs",
     "uwbRangingGapMs", "uwbRangingRxMs", "uwbDtInitiator", "uwbDtResponder",
@@ -5043,7 +4986,7 @@ function wireSettings() {
       renderAccelGraphs();
     });
   }
-  ["positionAnchorCount", "positionSolver", "positionAnchors", "positionTags", "positionMaxAgeSec", "positionAnchorCoords"].forEach(id => {
+  ["positionAnchorCount", "positionSolver", "positionAnchors", "positionTags", "positionMaxAgeSec"].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("input", renderPosition);
