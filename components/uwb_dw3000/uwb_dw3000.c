@@ -3838,7 +3838,16 @@ static uint8_t uwb_flex_tdoa_subslot_ms(size_t responder_count,
     if (available_ms > start_delay_ms + guard_ms) {
         available_ms -= start_delay_ms + guard_ms;
     }
-    uint32_t subslot_ms = available_ms / (uint32_t)(responder_count + 1U);
+    uint32_t max_subslot_ms =
+        available_ms / (uint32_t)(responder_count + 1U);
+    if (max_subslot_ms < 1U) {
+        max_subslot_ms = 1U;
+    }
+    uint32_t subslot_ms =
+        app_runtime_config_get()->anchor_survey_command_delay_ms;
+    if (subslot_ms == 0 || subslot_ms > max_subslot_ms) {
+        subslot_ms = max_subslot_ms;
+    }
     if (subslot_ms < 1U) {
         subslot_ms = 1U;
     }
@@ -4412,10 +4421,11 @@ static void uwb_flex_tdoa_handle_response_at_initiator(
     uwb_flex_tdoa_update_distance_cache(cache, initiator_id, responder_id,
                                         distance_mm, frame->sequence);
     ESP_LOGI(TAG,
-             "DS_TWR_TDOA anchor result pair=%u-%u seq=%u distance=%.3f m %.1f cm raw=%.3f m clk_valid=%u",
+             "DS_TWR_TDOA anchor result pair=%u-%u seq=%u distance=%.3f m %.1f cm raw=%.3f m clk_valid=%u clk_ratio=%.3e",
              (unsigned)initiator_id, (unsigned)responder_id,
              (unsigned)frame->sequence, distance_m, distance_m * 100.0,
-             raw_distance_m, frame->clock_offset_valid ? 1U : 0U);
+             raw_distance_m, frame->clock_offset_valid ? 1U : 0U,
+             clock_offset_ratio);
     ESP_LOGD(TAG,
              "FLEX_TDOA anchor timing pair=%u-%u seq=%u round=%.2f reply=%.2f reply_corr=%.2f clk_ratio=%.3e request_anchor=%.3f m",
              (unsigned)initiator_id, (unsigned)responder_id,
