@@ -396,6 +396,23 @@ static volatile bool s_calibration_timer_running;
 static volatile bool s_calibration_timer_irq_armed;
 static volatile bool s_calibration_timer_irq_started;
 static volatile bool s_calibration_timer_start_on_tx_done;
+static volatile TaskHandle_t s_calibration_timer_wait_task;
+
+static bool IRAM_ATTR uwb_calibration_timer_alarm_callback(
+    gptimer_handle_t timer, const gptimer_alarm_event_data_t *edata,
+    void *user_ctx)
+{
+    (void)timer;
+    (void)edata;
+    (void)user_ctx;
+
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    TaskHandle_t task = s_calibration_timer_wait_task;
+    if (task != NULL) {
+        vTaskNotifyGiveFromISR(task, &higher_priority_task_woken);
+    }
+    return higher_priority_task_woken == pdTRUE;
+}
 
 static int gpio_level_active(int active_high)
 {
@@ -482,6 +499,12 @@ static esp_err_t uwb_calibration_timer_init(void)
     ESP_RETURN_ON_ERROR(gptimer_new_timer(&timer_config,
                                           &s_calibration_timer),
                         TAG, "calibration timer create failed");
+    const gptimer_event_callbacks_t callbacks = {
+        .on_alarm = uwb_calibration_timer_alarm_callback,
+    };
+    ESP_RETURN_ON_ERROR(gptimer_register_event_callbacks(
+                            s_calibration_timer, &callbacks, NULL),
+                        TAG, "calibration timer callback register failed");
     ESP_RETURN_ON_ERROR(gptimer_enable(s_calibration_timer), TAG,
                         "calibration timer enable failed");
     ESP_RETURN_ON_ERROR(gptimer_set_raw_count(s_calibration_timer, 0), TAG,
@@ -491,6 +514,7 @@ static esp_err_t uwb_calibration_timer_init(void)
     s_calibration_timer_irq_armed = false;
     s_calibration_timer_irq_started = false;
     s_calibration_timer_start_on_tx_done = false;
+    s_calibration_timer_wait_task = NULL;
     ESP_LOGI(TAG, "UWB calibration timer ready at 1 MHz");
     return ESP_OK;
 }
@@ -519,6 +543,9 @@ static esp_err_t uwb_calibration_timer_reset(void)
     s_calibration_timer_irq_armed = false;
     s_calibration_timer_irq_started = false;
     s_calibration_timer_start_on_tx_done = false;
+    s_calibration_timer_wait_task = NULL;
+    ESP_RETURN_ON_ERROR(gptimer_set_alarm_action(s_calibration_timer, NULL),
+                        TAG, "calibration timer alarm disable failed");
     ESP_RETURN_ON_ERROR(gptimer_set_raw_count(s_calibration_timer, 0), TAG,
                         "calibration timer count clear failed");
     return ESP_OK;
@@ -612,15 +639,47 @@ static void uwb_calibration_timer_wait_until_us(uint32_t target_us)
         uint64_t now_us = 0;
         if (uwb_calibration_timer_get_us(&now_us) != ESP_OK ||
             now_us >= target_us) {
+            s_calibration_timer_wait_task = NULL;
             return;
         }
 
         const uint32_t remaining_us = target_us - (uint32_t)now_us;
-        if (remaining_us >= 2000U) {
-            vTaskDelay(pdMS_TO_TICKS(remaining_us / 1000U));
-        } else {
-            esp_rom_delay_us(remaining_us);
+        if (!s_calibration_timer_running) {
+            ESP_LOGW(TAG,
+                     "calibration timer wait requested while timer is stopped");
+            return;
         }
+
+        const gptimer_alarm_config_t alarm_config = {
+            .alarm_count = target_us,
+            .reload_count = 0,
+            .flags = {
+                .auto_reload_on_alarm = false,
+            },
+        };
+        s_calibration_timer_wait_task = xTaskGetCurrentTaskHandle();
+        if (gptimer_set_alarm_action(s_calibration_timer, &alarm_config) !=
+            ESP_OK) {
+            s_calibration_timer_wait_task = NULL;
+            vTaskDelay(1);
+            continue;
+        }
+
+        if (uwb_calibration_timer_get_us(&now_us) != ESP_OK ||
+            now_us >= target_us) {
+            (void)gptimer_set_alarm_action(s_calibration_timer, NULL);
+            s_calibration_timer_wait_task = NULL;
+            return;
+        }
+
+        TickType_t ticks =
+            pdMS_TO_TICKS((remaining_us + 999U) / 1000U);
+        if (ticks == 0) {
+            ticks = 1;
+        }
+        (void)ulTaskNotifyTake(pdTRUE, ticks);
+        (void)gptimer_set_alarm_action(s_calibration_timer, NULL);
+        s_calibration_timer_wait_task = NULL;
     }
 }
 

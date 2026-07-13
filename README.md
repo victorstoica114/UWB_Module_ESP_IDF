@@ -118,6 +118,12 @@ UWB core. The timing-critical UWB transmit instants are still programmed into
 the DW3000 with delayed TX, so the radio owns the sub-microsecond timing rather
 than the FreeRTOS scheduler.
 
+UWB waits are deliberately yielding. RX/TX waits use the DW3000 IRQ line and
+FreeRTOS task notifications when IRQ is enabled, with `vTaskDelay` as the
+fallback path. Calibration slot alignment uses the dedicated 1 MHz ESP GPTimer
+alarm plus a task notification, so the firmware does not busy-loop while waiting
+for the guard window or slot end.
+
 ## PCB Package
 
 The hardware package is versioned with the firmware so the board definition and
@@ -378,6 +384,10 @@ before RX and start it from the DW3000 IRQ when the SYNC frame arrives. The
 first `cal_guard_us` microseconds of the slot are a guard window. The firmware
 default is `APP_UWB_CALIBRATION_SLOT_GUARD_US = 500 us`, and the dashboard can
 change it at runtime without OTA.
+
+The guard and slot-end waits are implemented with a GPTimer alarm and task
+notification. This preserves microsecond-level slot alignment without spinning
+the UWB task in a CPU busy-wait.
 
 This ESP-side timer does not enter the distance formula. It only aligns the
 slot windows so the lab workflow is deterministic. Distance is still calculated
