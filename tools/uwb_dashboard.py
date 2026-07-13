@@ -1778,11 +1778,9 @@ th { color: var(--muted); font-weight: 700; }
                 <input id="calTimeoutSec" value="240" type="number" min="10" step="5" inputmode="numeric">
               </div>
               <div class="form-actions">
-                <button id="applyCalibration">Start Calibration Mode</button>
                 <button class="primary" id="autoCalibration">Auto Calibrate + Apply</button>
                 <button class="danger" id="cancelCalibration" disabled>Cancel Calibration</button>
               </div>
-              <div id="calToast" class="toast"></div>
               <div id="calAutoToast" class="toast"></div>
             </div>
           </div>
@@ -3639,18 +3637,6 @@ function wireSettings() {
       target_modules: document.getElementById("chargerRawModule").value,
       params,
     }, "chargerRawToast");
-  });
-  document.getElementById("applyCalibration").addEventListener("click", async () => {
-    const params = calibrationParamsFromForm();
-    const data = await postConfig({
-      target_modules: document.getElementById("calTargets").value,
-      params,
-    }, "calToast");
-    if (apiResponseOk(data)) {
-      calibrationJobId = null;
-      const cancelButton = document.getElementById("cancelCalibration");
-      if (cancelButton) cancelButton.disabled = false;
-    }
   });
   document.getElementById("autoCalibration").addEventListener("click", () => {
     postCalibrationAuto({
