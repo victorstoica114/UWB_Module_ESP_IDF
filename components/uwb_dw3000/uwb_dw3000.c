@@ -378,7 +378,16 @@ struct uwb_ds_twr_tdoa_observation {
     bool have_resp;
     bool resp_clock_offset_valid;
     int32_t resp_clock_offset_raw;
+    double resp_clock_offset_ratio;
+    uint32_t resp_clock_filter_samples;
     TickType_t updated_tick;
+};
+
+struct uwb_ds_twr_tdoa_clock_filter {
+    bool valid;
+    uint8_t source_id;
+    double ratio;
+    uint32_t samples;
 };
 
 static uint32_t uwb_dw3000_remaining_ms(TickType_t start_tick,
@@ -3684,6 +3693,47 @@ uwb_ds_twr_tdoa_find_observation(
     return oldest;
 }
 
+static double uwb_ds_twr_tdoa_update_clock_filter(
+    struct uwb_ds_twr_tdoa_clock_filter *filters, size_t filter_count,
+    uint8_t source_id, double sample_ratio, uint32_t *samples)
+{
+    struct uwb_ds_twr_tdoa_clock_filter *slot = NULL;
+    for (size_t i = 0; i < filter_count; ++i) {
+        if (filters[i].valid && filters[i].source_id == source_id) {
+            slot = &filters[i];
+            break;
+        }
+        if (slot == NULL && !filters[i].valid) {
+            slot = &filters[i];
+        }
+    }
+
+    if (slot == NULL) {
+        if (samples != NULL) {
+            *samples = 0;
+        }
+        return sample_ratio;
+    }
+
+    if (!slot->valid) {
+        slot->valid = true;
+        slot->source_id = source_id;
+        slot->ratio = sample_ratio;
+        slot->samples = 1;
+    } else {
+        if (slot->samples < 64U) {
+            slot->samples++;
+        }
+        const double alpha = 1.0 / (double)slot->samples;
+        slot->ratio += (sample_ratio - slot->ratio) * alpha;
+    }
+
+    if (samples != NULL) {
+        *samples = slot->samples;
+    }
+    return slot->ratio;
+}
+
 static bool uwb_ds_twr_tdoa_anchor_pair_valid(const uint8_t *anchor_ids,
                                                size_t anchor_count,
                                                uint8_t initiator_id,
@@ -3843,8 +3893,7 @@ static void uwb_ds_twr_tdoa_log_observation(
     double clock_offset_ratio = 0.0;
     double reply_b_corrected_dtu = reply_b_dtu;
     if (observation->resp_clock_offset_valid) {
-        clock_offset_ratio =
-            uwb_dw3000_clock_offset_ratio(observation->resp_clock_offset_raw);
+        clock_offset_ratio = observation->resp_clock_offset_ratio;
         reply_b_corrected_dtu = reply_b_dtu * (1.0 + clock_offset_ratio);
     }
 
@@ -3854,12 +3903,14 @@ static void uwb_ds_twr_tdoa_log_observation(
     const double raw_diff_m = uwb_distance_tof_to_meters(raw_diff_dtu);
 
     ESP_LOGI(TAG,
-             "UWB_DS_TWR_TDOA obs tag=%u initiator=%u responder=%u seq=%u diff=%.3f m raw=%.3f m anchor=%.3f m clk_valid=%u clk_ratio=%.3e",
+             "UWB_DS_TWR_TDOA obs tag=%u initiator=%u responder=%u seq=%u diff=%.3f m raw=%.3f m anchor=%.3f m clk_valid=%u clk_ratio=%.3e clk_samples=%lu",
              (unsigned)tag_id, (unsigned)observation->initiator_id,
              (unsigned)observation->responder_id,
              (unsigned)observation->sequence, diff_m, raw_diff_m,
              anchor_distance_m,
-             observation->resp_clock_offset_valid ? 1U : 0U, clock_offset_ratio);
+             observation->resp_clock_offset_valid ? 1U : 0U,
+             clock_offset_ratio,
+             (unsigned long)observation->resp_clock_filter_samples);
     ESP_LOGD(TAG,
              "DS_TWR_TDOA obs timing tag=%u pair=%u-%u seq=%u rx_delta=%.2f dtu reply=%.2f dtu reply_corr=%.2f dtu anchor_tof=%.2f dtu clk_raw=%ld",
              (unsigned)tag_id, (unsigned)observation->initiator_id,
@@ -3911,8 +3962,7 @@ static void uwb_flex_tdoa_log_observation(
     double clock_offset_ratio = 0.0;
     double reply_corrected_dtu = reply_dtu;
     if (observation->resp_clock_offset_valid) {
-        clock_offset_ratio =
-            uwb_dw3000_clock_offset_ratio(observation->resp_clock_offset_raw);
+        clock_offset_ratio = observation->resp_clock_offset_ratio;
         reply_corrected_dtu = reply_dtu * (1.0 + clock_offset_ratio);
     }
 
@@ -3922,13 +3972,14 @@ static void uwb_flex_tdoa_log_observation(
     const double raw_diff_m = uwb_distance_tof_to_meters(raw_diff_dtu);
 
     ESP_LOGI(TAG,
-             "UWB_DS_TWR_TDOA obs tag=%u initiator=%u responder=%u seq=%u diff=%.3f m raw=%.3f m anchor=%.3f m clk_valid=%u clk_ratio=%.3e",
+             "UWB_DS_TWR_TDOA obs tag=%u initiator=%u responder=%u seq=%u diff=%.3f m raw=%.3f m anchor=%.3f m clk_valid=%u clk_ratio=%.3e clk_samples=%lu",
              (unsigned)tag_id, (unsigned)observation->initiator_id,
              (unsigned)observation->responder_id,
              (unsigned)observation->sequence, diff_m, raw_diff_m,
              anchor_distance_m,
              observation->resp_clock_offset_valid ? 1U : 0U,
-             clock_offset_ratio);
+             clock_offset_ratio,
+             (unsigned long)observation->resp_clock_filter_samples);
     ESP_LOGD(TAG,
              "FLEX_TDOA obs timing tag=%u pair=%u-%u seq=%u rx_delta=%.2f dtu reply=%.2f dtu reply_corr=%.2f dtu anchor_tof=%.2f dtu clk_raw=%ld",
              (unsigned)tag_id, (unsigned)observation->initiator_id,
@@ -3942,7 +3993,9 @@ static void uwb_flex_tdoa_log_observation(
 
 static void uwb_ds_twr_tdoa_tag_process_frame(
     const struct uwb_distance_frame *frame,
-    struct uwb_ds_twr_tdoa_observation *observations, uint8_t tag_id,
+    struct uwb_ds_twr_tdoa_observation *observations,
+    struct uwb_ds_twr_tdoa_clock_filter *clock_filters,
+    size_t clock_filter_count, uint8_t tag_id,
     const uint8_t *anchor_ids, size_t anchor_count)
 {
     if (frame == NULL) {
@@ -4011,6 +4064,17 @@ static void uwb_ds_twr_tdoa_tag_process_frame(
         observation->have_resp = true;
         observation->resp_clock_offset_valid = frame->clock_offset_valid;
         observation->resp_clock_offset_raw = frame->clock_offset_raw;
+        if (frame->clock_offset_valid) {
+            const double sample_ratio =
+                uwb_dw3000_clock_offset_ratio(frame->clock_offset_raw);
+            observation->resp_clock_offset_ratio =
+                uwb_ds_twr_tdoa_update_clock_filter(
+                    clock_filters, clock_filter_count, responder_id,
+                    sample_ratio, &observation->resp_clock_filter_samples);
+        } else {
+            observation->resp_clock_offset_ratio = 0.0;
+            observation->resp_clock_filter_samples = 0;
+        }
         observation->updated_tick = xTaskGetTickCount();
         uwb_flex_tdoa_log_observation(tag_id, observation);
         break;
@@ -4056,6 +4120,18 @@ static void uwb_ds_twr_tdoa_tag_process_frame(
             observation->have_resp = true;
             observation->resp_clock_offset_valid = frame->clock_offset_valid;
             observation->resp_clock_offset_raw = frame->clock_offset_raw;
+            if (frame->clock_offset_valid) {
+                const double sample_ratio =
+                    uwb_dw3000_clock_offset_ratio(frame->clock_offset_raw);
+                observation->resp_clock_offset_ratio =
+                    uwb_ds_twr_tdoa_update_clock_filter(
+                        clock_filters, clock_filter_count, responder_id,
+                        sample_ratio,
+                        &observation->resp_clock_filter_samples);
+            } else {
+                observation->resp_clock_offset_ratio = 0.0;
+                observation->resp_clock_filter_samples = 0;
+            }
             observation->updated_tick = xTaskGetTickCount();
         }
         break;
@@ -4093,6 +4169,8 @@ static void uwb_ds_twr_tdoa_tag_loop(const uint8_t *anchor_ids,
 {
     struct uwb_ds_twr_tdoa_observation
         observations[UWB_FLEX_TDOA_MAX_OBSERVATIONS] = {0};
+    struct uwb_ds_twr_tdoa_clock_filter
+        clock_filters[UWB_ANCHOR_SURVEY_MAX_ANCHORS] = {0};
     const app_runtime_config_t *config = app_runtime_config_get();
     const uint8_t tag_id = config->tag_id;
     s_status = UWB_DW3000_STATUS_READY;
@@ -4109,8 +4187,10 @@ static void uwb_ds_twr_tdoa_tag_loop(const uint8_t *anchor_ids,
         const esp_err_t err =
             uwb_distance_receive_next(&frame, config->anchor_survey_rx_slice_ms);
         if (err == ESP_OK) {
-            uwb_ds_twr_tdoa_tag_process_frame(&frame, observations, tag_id,
-                                              anchor_ids, anchor_count);
+            uwb_ds_twr_tdoa_tag_process_frame(
+                &frame, observations, clock_filters,
+                UWB_ANCHOR_SURVEY_MAX_ANCHORS, tag_id, anchor_ids,
+                anchor_count);
         } else if (err != ESP_ERR_TIMEOUT) {
             ESP_LOGW(TAG, "DS_TWR_TDOA passive tag RX failed: %s",
                      esp_err_to_name(err));
