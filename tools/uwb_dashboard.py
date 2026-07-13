@@ -48,6 +48,10 @@ CAL_SAMPLE_RE = re.compile(
     r"sample=(?P<sample>\d+) seq=(?P<seq>\d+) "
     r"distance=(?P<distance>[-+]?\d+(?:\.\d+)?) m"
 )
+RANGING_RE = re.compile(
+    r"\bUWB_RANGING result\s+tag=(?P<tag>\d+)\s+anchor=(?P<anchor>\d+)\s+"
+    r"seq=(?P<seq>\d+)\s+distance=(?P<distance>[-+]?\d+(?:\.\d+)?)\s+m"
+)
 CAL_SYNC_SKIP_RE = re.compile(r"\bUWB CAL slot skipped due to sync fail\b")
 TELEMETRY_BINARY_MAGIC = b"UWT1"
 TELEMETRY_BINARY_HEADER_LEN = 12
@@ -395,6 +399,9 @@ class DashboardState:
         self.accel_history: dict[int, deque[dict[str, Any]]] = {}
         self.max_accel_samples = 30000
         self.accel_samples: deque[dict[str, Any]] = deque(maxlen=120000)
+        self.ranging_distances: dict[tuple[int, int], dict[str, Any]] = {}
+        self.ranging_history: dict[tuple[int, int], deque[dict[str, Any]]] = {}
+        self.max_ranging_samples = 200
         self.next_log_id = 1
         self.next_accel_id = 1
         self.client_count = 0
@@ -420,6 +427,7 @@ class DashboardState:
             self.next_log_id += 1
             self.logs.append(item)
             self.record_accel_locked(item)
+            self.record_ranging_locked(item)
 
     def add_telemetry(self, line: str, addr: tuple[str, int]) -> None:
         parsed = self.parse_telemetry(line)
@@ -550,6 +558,74 @@ class DashboardState:
         history.append(sample)
         self.accel_samples.append(sample)
 
+    def record_ranging_locked(self, item: dict[str, Any]) -> None:
+        match = RANGING_RE.search(str(item.get("message") or item.get("raw") or ""))
+        if match is None:
+            return
+
+        try:
+            tag_id = int(match.group("tag"))
+            anchor_id = int(match.group("anchor"))
+            distance_m = float(match.group("distance"))
+            seq = int(match.group("seq"))
+        except ValueError:
+            return
+
+        now = float(item.get("received_at") or time.time())
+        key = (tag_id, anchor_id)
+        sample = {
+            "tag_id": tag_id,
+            "anchor_id": anchor_id,
+            "distance_m": distance_m,
+            "seq": seq,
+            "received_at": now,
+            "log_id": item.get("id"),
+            "source_module_id": item.get("module_id"),
+            "raw": item.get("raw") or item.get("message") or "",
+        }
+        self.ranging_distances[key] = sample
+        self.ranging_history.setdefault(
+            key, deque(maxlen=self.max_ranging_samples)
+        ).append(sample)
+
+    def ranging_snapshot_locked(self, now: float) -> dict[str, Any]:
+        distances: dict[str, Any] = {}
+        for (tag_id, anchor_id), item in sorted(self.ranging_distances.items()):
+            history = list(self.ranging_history.get((tag_id, anchor_id), []))
+            values = [
+                float(sample["distance_m"])
+                for sample in history
+                if now - float(sample.get("received_at") or 0.0) <= 10.0
+            ]
+            mean_m = sum(values) / len(values) if values else None
+            std_m = None
+            if len(values) >= 2 and mean_m is not None:
+                variance = sum((value - mean_m) ** 2 for value in values) / (
+                    len(values) - 1
+                )
+                std_m = math.sqrt(max(0.0, variance))
+            distances[f"{tag_id}:{anchor_id}"] = {
+                "tag_id": tag_id,
+                "anchor_id": anchor_id,
+                "distance_m": float(item["distance_m"]),
+                "seq": int(item["seq"]),
+                "age_sec": now - float(item["received_at"]),
+                "log_id": item.get("log_id"),
+                "source_module_id": item.get("source_module_id"),
+                "raw": item.get("raw") or "",
+                "stats": {
+                    "samples": len(values),
+                    "mean_m": mean_m,
+                    "std_m": std_m,
+                    "min_m": min(values) if values else None,
+                    "max_m": max(values) if values else None,
+                },
+            }
+        return {
+            "distances": distances,
+            "max_age_sec": 3.0,
+        }
+
     def set_client_count(self, count: int, source: str = "default") -> None:
         with self.lock:
             self.client_counts[source] = max(0, count)
@@ -607,6 +683,7 @@ class DashboardState:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
+            now = time.time()
             statuses = list(self.status_by_module.values())
             errors = dict(self.status_errors)
             client_count = self.client_count
@@ -616,6 +693,7 @@ class DashboardState:
             listener_telemetry_ports = list(self.listener_telemetry_ports)
             log_count = len(self.logs)
             next_log_id = self.next_log_id
+            ranging = self.ranging_snapshot_locked(now)
         statuses.sort(key=lambda item: int(item.get("module_id") or 0))
         return {
             "client_count": client_count,
@@ -628,6 +706,7 @@ class DashboardState:
             "statuses": statuses,
             "status_errors": errors,
             "accel_history": {},
+            "ranging": ranging,
         }
 
 
@@ -1307,13 +1386,112 @@ th { color: var(--muted); font-weight: 700; }
   font-size: 12px;
   line-height: 1.4;
 }
+.position-layout {
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(520px, 1fr) 340px;
+  gap: 12px;
+}
+.position-stage {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--line);
+  background: #eef1f5;
+  position: relative;
+}
+.position-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.position-overlay {
+  position: absolute;
+  inset: 0;
+  display: none;
+  place-items: center;
+  padding: 24px;
+  background: rgba(247, 248, 251, 0.88);
+  text-align: center;
+}
+.position-overlay.active { display: grid; }
+.position-overlay-panel {
+  max-width: 560px;
+  border: 1px solid var(--line);
+  background: #fff;
+  padding: 18px;
+}
+.position-overlay-panel h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+.position-overlay-panel p {
+  margin: 0 0 14px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.position-panel {
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 12px;
+}
+.position-panel h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+.position-panel textarea {
+  width: 100%;
+  min-height: 94px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.position-readout {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.position-tag-card {
+  border: 1px solid var(--line);
+  background: #fbfcfe;
+  padding: 8px;
+}
+.position-tag-card b {
+  display: block;
+  font-size: 14px;
+  margin-bottom: 3px;
+}
+.position-tag-card span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.position-legend {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 12px;
+  margin: 8px 0 12px;
+}
+.position-legend span::before {
+  content: "";
+  display: inline-block;
+  width: 18px;
+  height: 2px;
+  margin-right: 5px;
+  vertical-align: middle;
+  background: currentColor;
+}
 @media (max-width: 940px) {
-  .terminal-grid, .settings-grid, .charger-grid, .graphs-layout { grid-template-columns: 1fr; }
+  .terminal-grid, .settings-grid, .charger-grid, .graphs-layout, .position-layout { grid-template-columns: 1fr; }
   .page { height: auto; }
   .terminal { height: 520px; }
   .chart-stack { grid-template-rows: none; }
   .accel-chart { height: 178px; }
   .latest-panel { max-height: none; position: static; }
+  .position-stage { height: 560px; }
 }
 </style>
 </head>
@@ -1333,6 +1511,7 @@ th { color: var(--muted); font-weight: 700; }
     <button class="tab" data-tab="logs34">Logs 3-4</button>
     <button class="tab" data-tab="logs5">Logs 5</button>
     <button class="tab" data-tab="logsAll">All Logs</button>
+    <button class="tab" data-tab="position">Position</button>
     <button class="tab" data-tab="graphs">Graphs</button>
     <button class="tab" data-tab="info">Info</button>
     <button class="tab" data-tab="batteryCharger">Battery Charger</button>
@@ -1354,6 +1533,61 @@ th { color: var(--muted); font-weight: 700; }
     <section id="logsAll" class="page"><div class="terminal-grid all">
       <div class="terminal" data-terminal="all" data-modules="all"></div>
     </div></section>
+    <section id="position" class="page">
+      <div class="position-layout">
+        <div class="position-stage">
+          <canvas id="positionCanvas" class="position-canvas"></canvas>
+          <div id="positionOverlay" class="position-overlay">
+            <div class="position-overlay-panel">
+              <h2>Ranging is not active</h2>
+              <p>Position view uses fresh tag-anchor distances from live ranging logs. Start ranging to clear old data and compute a new live position.</p>
+              <button class="primary" id="positionEnableRanging">Enable Ranging</button>
+            </div>
+          </div>
+        </div>
+        <aside class="position-panel">
+          <h2>Position Setup</h2>
+          <div class="form-grid">
+            <label for="positionAnchorCount">Anchors used</label>
+            <select id="positionAnchorCount"><option value="4">4 anchors</option><option value="3">3 anchors</option></select>
+            <label for="positionAnchors">Anchor IDs</label>
+            <input id="positionAnchors" value="2,3,4,5">
+            <label for="positionTags">Tag IDs</label>
+            <input id="positionTags" value="1">
+            <label for="positionMaxAgeSec">Fresh age s</label>
+            <input id="positionMaxAgeSec" value="3" type="number" min="0.2" step="0.1">
+          </div>
+          <div class="param-legend">
+            <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
+            <div><b>Tags</b><span>Comma separated tag IDs. The dashboard solves each tag locally from fresh distances.</span></div>
+          </div>
+          <div class="form-actions">
+            <button id="positionResetTrail">Reset Trail</button>
+            <button class="primary" id="positionEnableRangingSide">Enable Ranging</button>
+          </div>
+          <div id="positionToast" class="toast"></div>
+          <div class="section" style="margin-top:12px;">
+            <h2>Anchor Coordinates</h2>
+            <textarea id="positionAnchorCoords" spellcheck="false">2=2,2
+3=0,2
+4=0,0
+5=2,0</textarea>
+          </div>
+          <div class="section">
+            <h2>Live Position</h2>
+            <div class="position-legend"><span style="color:#d7352a">tag</span><span style="color:#2b64d8">trail</span><span style="color:#16833a">anchor</span></div>
+            <div id="positionReadout" class="position-readout"></div>
+          </div>
+          <div class="section">
+            <h2>Distances</h2>
+            <table>
+              <thead><tr><th>Tag</th><th>Anchor</th><th>m</th><th>age</th><th>resid.</th></tr></thead>
+              <tbody id="positionDistanceRows"></tbody>
+            </table>
+          </div>
+        </aside>
+      </div>
+    </section>
     <section id="graphs" class="page">
       <div class="graphs-layout">
         <div id="accelCharts" class="chart-stack"></div>
@@ -1858,6 +2092,10 @@ const state = {
   latestAccelRenderMs: 0,
   hydratedSettings: false,
   calibrationResult: null,
+  ranging: {distances: {}, max_age_sec: 3},
+  positionTrail: {},
+  positionResults: {},
+  positionWasActive: false,
 };
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
@@ -2281,6 +2519,367 @@ function fitCanvas(canvas) {
   return {ctx, width: rect.width, height: rect.height};
 }
 
+function parseIdList(text, expected = null) {
+  const ids = String(text || "")
+    .split(/[,\s]+/)
+    .map(value => Number(value.trim()))
+    .filter(value => Number.isInteger(value) && value > 0);
+  const unique = [];
+  for (const id of ids) {
+    if (!unique.includes(id)) unique.push(id);
+  }
+  return expected ? unique.slice(0, expected) : unique;
+}
+
+function parseAnchorCoordinates(text) {
+  const coords = {};
+  for (const rawLine of String(text || "").split(/\n+/)) {
+    const line = rawLine.trim();
+    if (!line || !line.includes("=")) continue;
+    const [rawId, rawPair] = line.split("=", 2);
+    const id = Number(rawId.trim());
+    const parts = rawPair.split(",").map(value => Number(value.trim()));
+    if (Number.isInteger(id) && id > 0 &&
+        parts.length >= 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
+      coords[id] = {x: parts[0], y: parts[1]};
+    }
+  }
+  return coords;
+}
+
+function positionSettings() {
+  const anchorCount = Math.max(3, Math.min(4, Number(document.getElementById("positionAnchorCount")?.value || 4)));
+  const anchorIds = parseIdList(document.getElementById("positionAnchors")?.value, anchorCount);
+  const tagIds = parseIdList(document.getElementById("positionTags")?.value);
+  const coords = parseAnchorCoordinates(document.getElementById("positionAnchorCoords")?.value);
+  const maxAge = Math.max(0.2, Number(document.getElementById("positionMaxAgeSec")?.value || 3));
+  return {anchorCount, anchorIds, tagIds, coords, maxAge};
+}
+
+function selectedPositionModuleIds(settings = positionSettings()) {
+  const ids = [...settings.tagIds.slice(0, 1), ...settings.anchorIds];
+  return [...new Set(ids)].filter(Boolean);
+}
+
+function statusForModule(moduleId) {
+  return state.statuses.find(item => Number(item.module_id) === Number(moduleId));
+}
+
+function moduleInRanging(item) {
+  if (!item) return false;
+  const mode = String(item.runtime_mode_name || item.runtime_mode || "").toLowerCase();
+  return Boolean(item.runtime_uwb_enabled) && mode.includes("ranging");
+}
+
+function positionRangingActive(settings = positionSettings()) {
+  const ids = selectedPositionModuleIds(settings);
+  if (!ids.length) return false;
+  return ids.every(id => moduleInRanging(statusForModule(id)));
+}
+
+function solve2x2(a00, a01, a10, a11, b0, b1) {
+  const det = a00 * a11 - a01 * a10;
+  if (Math.abs(det) < 1e-9) return null;
+  return {
+    x: (b0 * a11 - a01 * b1) / det,
+    y: (a00 * b1 - b0 * a10) / det,
+  };
+}
+
+function trilaterate(anchors, distances) {
+  const usable = Object.entries(distances)
+    .map(([anchorId, distance]) => [Number(anchorId), anchors[Number(anchorId)], Number(distance)])
+    .filter(([, anchor, distance]) => anchor && Number.isFinite(distance) && distance > 0)
+    .sort((a, b) => a[0] - b[0]);
+  if (usable.length < 3) return null;
+
+  const [, base, r0] = usable[0];
+  let nxx = 0;
+  let nxy = 0;
+  let nyy = 0;
+  let rhsX = 0;
+  let rhsY = 0;
+  for (const [, anchor, distance] of usable.slice(1)) {
+    const ax = 2 * (anchor.x - base.x);
+    const ay = 2 * (anchor.y - base.y);
+    const b = r0 * r0 - distance * distance +
+      anchor.x * anchor.x - base.x * base.x +
+      anchor.y * anchor.y - base.y * base.y;
+    nxx += ax * ax;
+    nxy += ax * ay;
+    nyy += ay * ay;
+    rhsX += ax * b;
+    rhsY += ay * b;
+  }
+  return solve2x2(nxx, nxy, nxy, nyy, rhsX, rhsY);
+}
+
+function positionResiduals(position, anchors, distances) {
+  const residuals = {};
+  if (!position) return residuals;
+  for (const [anchorId, distance] of Object.entries(distances)) {
+    const anchor = anchors[Number(anchorId)];
+    if (!anchor) continue;
+    residuals[anchorId] = Math.hypot(position.x - anchor.x, position.y - anchor.y) - Number(distance);
+  }
+  return residuals;
+}
+
+function freshDistanceFor(tagId, anchorId, maxAge) {
+  const item = state.ranging?.distances?.[`${tagId}:${anchorId}`];
+  if (!item || Number(item.age_sec) > maxAge) return null;
+  return item;
+}
+
+function computePositionModel() {
+  const settings = positionSettings();
+  const active = positionRangingActive(settings);
+  const anchors = {};
+  for (const anchorId of settings.anchorIds) {
+    if (settings.coords[anchorId]) anchors[anchorId] = settings.coords[anchorId];
+  }
+
+  if (!active && state.positionWasActive) {
+    state.positionTrail = {};
+    state.positionResults = {};
+  }
+  state.positionWasActive = active;
+
+  const tags = {};
+  if (active) {
+    const now = Date.now() / 1000;
+    for (const tagId of settings.tagIds) {
+      const distances = {};
+      const distanceItems = {};
+      for (const anchorId of settings.anchorIds) {
+        const item = freshDistanceFor(tagId, anchorId, settings.maxAge);
+        if (item && anchors[anchorId]) {
+          distances[anchorId] = Number(item.distance_m);
+          distanceItems[anchorId] = item;
+        }
+      }
+      const position = trilaterate(anchors, distances);
+      const residuals = positionResiduals(position, anchors, distances);
+      tags[tagId] = {tagId, distances, distanceItems, position, residuals};
+      if (position) {
+        const key = String(tagId);
+        const trail = state.positionTrail[key] || [];
+        trail.push({x: position.x, y: position.y, t: now});
+        state.positionTrail[key] = trail.filter(point => now - point.t <= 120).slice(-300);
+      }
+    }
+  }
+
+  state.positionResults = tags;
+  return {settings, active, anchors, tags};
+}
+
+function positionBounds(model) {
+  const points = [];
+  for (const anchor of Object.values(model.anchors)) points.push(anchor);
+  for (const tag of Object.values(model.tags)) {
+    if (tag.position) points.push(tag.position);
+  }
+  for (const trail of Object.values(state.positionTrail)) {
+    for (const point of trail) points.push(point);
+  }
+  if (!points.length) {
+    points.push({x: 0, y: 0}, {x: 2, y: 2});
+  }
+  let minX = Math.min(...points.map(point => point.x));
+  let maxX = Math.max(...points.map(point => point.x));
+  let minY = Math.min(...points.map(point => point.y));
+  let maxY = Math.max(...points.map(point => point.y));
+  const span = Math.max(1, maxX - minX, maxY - minY);
+  const pad = Math.max(0.35, span * 0.14);
+  return {minX: minX - pad, maxX: maxX + pad, minY: minY - pad, maxY: maxY + pad};
+}
+
+function positionTransform(model, width, height) {
+  const bounds = positionBounds(model);
+  const margin = 44;
+  const sx = (width - margin * 2) / Math.max(0.1, bounds.maxX - bounds.minX);
+  const sy = (height - margin * 2) / Math.max(0.1, bounds.maxY - bounds.minY);
+  const scale = Math.max(1, Math.min(sx, sy));
+  const plotW = (bounds.maxX - bounds.minX) * scale;
+  const plotH = (bounds.maxY - bounds.minY) * scale;
+  const ox = (width - plotW) / 2;
+  const oy = (height - plotH) / 2;
+  return {
+    scale,
+    x: value => ox + (value - bounds.minX) * scale,
+    y: value => oy + (bounds.maxY - value) * scale,
+  };
+}
+
+function drawPositionGrid(ctx, tx, width, height) {
+  ctx.fillStyle = "#eef1f5";
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = "#d9dee8";
+  ctx.lineWidth = 1;
+  const gridMin = -10;
+  const gridMax = 20;
+  for (let value = gridMin; value <= gridMax; value += 0.5) {
+    const x = tx.x(value);
+    if (x >= 0 && x <= width) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
+      ctx.stroke();
+    }
+    const y = tx.y(value);
+    if (y >= 0 && y <= height) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawPosition(model) {
+  const canvas = document.getElementById("positionCanvas");
+  if (!canvas) return;
+  const {ctx, width, height} = fitCanvas(canvas);
+  if (width <= 1 || height <= 1) return;
+  const tx = positionTransform(model, width, height);
+  drawPositionGrid(ctx, tx, width, height);
+
+  ctx.strokeStyle = "#98a2b3";
+  ctx.lineWidth = 2;
+  const anchorIds = model.settings.anchorIds.filter(id => model.anchors[id]);
+  if (anchorIds.length >= 2) {
+    ctx.beginPath();
+    anchorIds.forEach((anchorId, index) => {
+      const anchor = model.anchors[anchorId];
+      const x = tx.x(anchor.x);
+      const y = tx.y(anchor.y);
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    if (anchorIds.length >= 3) ctx.closePath();
+    ctx.stroke();
+  }
+
+  for (const tag of Object.values(model.tags)) {
+    for (const [anchorId, distance] of Object.entries(tag.distances || {})) {
+      const anchor = model.anchors[Number(anchorId)];
+      if (!anchor) continue;
+      ctx.beginPath();
+      ctx.strokeStyle = "rgba(43, 100, 216, 0.24)";
+      ctx.lineWidth = 1.5;
+      ctx.arc(tx.x(anchor.x), tx.y(anchor.y), Number(distance) * tx.scale, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  for (const [tagId, trail] of Object.entries(state.positionTrail)) {
+    if (trail.length < 2) continue;
+    ctx.beginPath();
+    ctx.strokeStyle = "rgba(43, 100, 216, 0.72)";
+    ctx.lineWidth = 1.5;
+    trail.forEach((point, index) => {
+      const x = tx.x(point.x);
+      const y = tx.y(point.y);
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  ctx.font = "12px Inter, sans-serif";
+  ctx.textBaseline = "middle";
+  for (const anchorId of anchorIds) {
+    const anchor = model.anchors[anchorId];
+    const x = tx.x(anchor.x);
+    const y = tx.y(anchor.y);
+    ctx.fillStyle = "#16833a";
+    ctx.beginPath();
+    ctx.moveTo(x, y - 11);
+    ctx.lineTo(x - 11, y + 10);
+    ctx.lineTo(x + 11, y + 10);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#17202a";
+    ctx.font = "700 12px Inter, sans-serif";
+    ctx.fillText(`A${anchorId}`, x + 13, y - 12);
+  }
+
+  for (const tag of Object.values(model.tags)) {
+    if (!tag.position) continue;
+    const x = tx.x(tag.position.x);
+    const y = tx.y(tag.position.y);
+    ctx.fillStyle = "#d7352a";
+    ctx.beginPath();
+    ctx.arc(x, y, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = "#17202a";
+    ctx.font = "700 12px Inter, sans-serif";
+    ctx.fillText(`Tag ${tag.tagId}`, x + 11, y - 12);
+  }
+}
+
+function renderPositionReadout(model) {
+  const readout = document.getElementById("positionReadout");
+  const rows = document.getElementById("positionDistanceRows");
+  const overlay = document.getElementById("positionOverlay");
+  if (!readout || !rows || !overlay) return;
+
+  if (!model.active) {
+    overlay.classList.add("active");
+    overlay.querySelector("h2").textContent = "Ranging is not active";
+    overlay.querySelector("p").textContent = "Position view uses fresh tag-anchor distances from live ranging logs. Start ranging to clear old data and compute a new live position.";
+    readout.innerHTML = `<div class="position-tag-card"><b>ranging inactive</b><span>No stored position is shown while the selected modules are not in ranging mode.</span></div>`;
+    rows.innerHTML = "";
+    return;
+  }
+
+  const missingCoords = model.settings.anchorIds.filter(id => !model.anchors[id]);
+  if (missingCoords.length) {
+    overlay.classList.add("active");
+    overlay.querySelector("h2").textContent = "Anchor coordinates missing";
+    overlay.querySelector("p").textContent = `Add coordinates for anchor IDs: ${missingCoords.join(", ")}.`;
+  } else {
+    overlay.classList.remove("active");
+    overlay.querySelector("h2").textContent = "Ranging is not active";
+    overlay.querySelector("p").textContent = "Position view uses fresh tag-anchor distances from live ranging logs. Start ranging to clear old data and compute a new live position.";
+  }
+
+  const tagCards = Object.values(model.tags).map(tag => {
+    const count = Object.keys(tag.distances || {}).length;
+    if (!tag.position) {
+      return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}</b><span>${count}/${model.settings.anchorIds.length} fresh distances</span></div>`;
+    }
+    return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span>${count}/${model.settings.anchorIds.length} fresh distances</span></div>`;
+  });
+  readout.innerHTML = tagCards.join("") || `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
+
+  const distanceRows = [];
+  for (const tag of Object.values(model.tags)) {
+    for (const anchorId of model.settings.anchorIds) {
+      const item = tag.distanceItems?.[anchorId];
+      const residual = tag.residuals?.[anchorId];
+      distanceRows.push(`<tr>
+        <td>T${esc(tag.tagId)}</td>
+        <td>A${esc(anchorId)}</td>
+        <td>${item ? fmtFixed(item.distance_m, 3) : "-"}</td>
+        <td class="${item && Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${item ? fmtFixed(item.age_sec, 1) + "s" : "-"}</td>
+        <td>${residual === undefined ? "-" : fmtFixed(residual * 100, 1) + " cm"}</td>
+      </tr>`);
+    }
+  }
+  rows.innerHTML = distanceRows.join("");
+}
+
+function renderPosition() {
+  const model = computePositionModel();
+  drawPosition(model);
+  renderPositionReadout(model);
+}
+
 function canvasY(value, scale, plotArea) {
   const ratio = (Number(value) - scale.min) / Math.max(1, scale.max - scale.min);
   return plotArea.bottom - ratio * plotArea.height;
@@ -2421,6 +3020,7 @@ function setActiveTab(id) {
   document.querySelectorAll(".tab").forEach(tab => tab.classList.toggle("active", tab.dataset.tab === id));
   document.querySelectorAll(".page").forEach(page => page.classList.toggle("active", page.id === id));
   requestAnimationFrame(renderAllTerminals);
+  requestAnimationFrame(renderPosition);
   scheduleAccelRender();
 }
 
@@ -2866,6 +3466,7 @@ function renderCharger(statuses) {
 
 function renderInfo(snapshot) {
   state.statuses = snapshot.statuses || [];
+  state.ranging = snapshot.ranging || {distances: {}, max_age_sec: 3};
   mergeAccelHistory(snapshot.accel_history || {});
   document.getElementById("logPill").textContent = `${snapshot.log_count} logs`;
   const telemetryPill = document.getElementById("telemetryPill");
@@ -2917,6 +3518,7 @@ function renderInfo(snapshot) {
     </tr>`).join("");
   renderUwbRadio(state.statuses[0] || {});
   renderCharger(state.statuses);
+  renderPosition();
   scheduleAccelRender();
   hydrateSettingsFromStatus(state.statuses[0] || {});
   hydrateChargerSettings();
@@ -3717,6 +4319,8 @@ function persistedSettingIds() {
     "runtimeTargets", "runtimeMode", "runtimeTag", "runtimeAnchors", "runtimeReboot",
     "runtimeUwb", "runtimeBno085", "runtimeGps", "runtimeTelemetryPort",
     "accelTimebase", "accelSampleHz", "accelTargets",
+    "positionAnchorCount", "positionAnchors", "positionTags",
+    "positionMaxAgeSec", "positionAnchorCoords",
     "uwbTargets", "uwbRadioChannel", "uwbSurveyRxMs", "uwbSurveyDelayMs", "uwbSurveySlotMs",
     "uwbSurveyGapMs", "uwbSurveyLogEvery", "uwbRangingSlotMs",
     "uwbRangingGapMs", "uwbRangingRxMs", "uwbDtInitiator", "uwbDtResponder",
@@ -3791,6 +4395,36 @@ function updateChargerRawVisibility() {
   });
 }
 
+async function enablePositionRanging() {
+  const settings = positionSettings();
+  const tagId = settings.tagIds[0];
+  if (!tagId || settings.anchorIds.length < 3) {
+    setToast("positionToast", "Set one tag ID and at least 3 anchors first.", "bad");
+    return;
+  }
+  const anchors = settings.anchorIds.join(",");
+  const params = {
+    mode: "ranging",
+    tag: String(tagId),
+    anchors,
+    uwb: "1",
+    reboot: "1",
+  };
+  const runtimeMode = document.getElementById("runtimeMode");
+  const runtimeTag = document.getElementById("runtimeTag");
+  const runtimeAnchors = document.getElementById("runtimeAnchors");
+  const runtimeUwb = document.getElementById("runtimeUwb");
+  const runtimeReboot = document.getElementById("runtimeReboot");
+  if (runtimeMode) runtimeMode.value = "ranging";
+  if (runtimeTag) runtimeTag.value = String(tagId);
+  if (runtimeAnchors) runtimeAnchors.value = anchors;
+  if (runtimeUwb) runtimeUwb.checked = true;
+  if (runtimeReboot) runtimeReboot.value = "1";
+  await postConfig({target_modules: "all", params}, "positionToast");
+  state.positionTrail = {};
+  setTimeout(fetchSnapshot, 1500);
+}
+
 function wireSettings() {
   clearLegacyChargerConfigSettings();
   restoreSettings();
@@ -3809,6 +4443,18 @@ function wireSettings() {
       renderAccelGraphs();
     });
   }
+  ["positionAnchorCount", "positionAnchors", "positionTags", "positionMaxAgeSec", "positionAnchorCoords"].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("input", renderPosition);
+    el.addEventListener("change", renderPosition);
+  });
+  document.getElementById("positionResetTrail").addEventListener("click", () => {
+    state.positionTrail = {};
+    renderPosition();
+  });
+  document.getElementById("positionEnableRanging").addEventListener("click", enablePositionRanging);
+  document.getElementById("positionEnableRangingSide").addEventListener("click", enablePositionRanging);
   document.querySelectorAll(".cm-input").forEach(el => {
     el.addEventListener("change", () => {
       formatCmInput(el);
