@@ -1778,7 +1778,7 @@ th { color: var(--muted); font-weight: 700; }
                 <input id="calTimeoutSec" value="240" type="number" min="10" step="5" inputmode="numeric">
               </div>
               <div class="form-actions">
-                <button id="applyCalibration">Start Calibration Only</button>
+                <button id="applyCalibration">Start Calibration Mode</button>
                 <button class="primary" id="autoCalibration">Auto Calibrate + Apply</button>
                 <button class="danger" id="cancelCalibration" disabled>Cancel Calibration</button>
               </div>

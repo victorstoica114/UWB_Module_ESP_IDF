@@ -311,7 +311,7 @@ starts, the dashboard sends the same UWB stop command to all configured modules
 so a partial calibration start cannot leave a transmitter running.
 The dashboard Cancel Calibration button is an emergency stop: it marks the
 running job as cancelled when one exists and always sends `uwb=0` plus reboot to
-all configured modules. This also makes it useful after `Start Calibration Only`,
+all configured modules. This also makes it useful after `Start Calibration Mode`,
 which only starts the firmware calibration mode and does not collect, solve, or
 write antenna-delay corrections by itself.
 
