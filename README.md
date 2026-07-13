@@ -77,8 +77,8 @@ reference/external/           optional local clones of third-party references
 
 `components/config/include/board_config.h` is the active board pin map.
 Old GPIO naming is kept only under `reference/legacy_headers`.
-The old PlatformIO project and cloned third-party repositories are kept local
-for inspiration/debugging and are intentionally ignored by Git.
+Old legacy project files and cloned third-party repositories are kept local for
+inspiration/debugging and are intentionally ignored by Git.
 
 `components/config/include/app_config.h` holds versioned non-secret application
 settings: the default runtime mode, persistent identity provisioning, Wi-Fi
@@ -117,6 +117,25 @@ Those are managed by the framework. The timing-critical UWB transmit instants
 are still programmed into the DW3000 with delayed TX, so the radio owns the
 sub-microsecond timing rather than the FreeRTOS scheduler.
 
+## PCB Package
+
+The hardware package is versioned with the firmware so the board definition and
+software assumptions stay together.
+
+| Path | Purpose |
+| --- | --- |
+| `PCB/V1.REV.B/Kicad project/` | Editable KiCad project and local symbols/footprints |
+| `PCB/V1.REV.B/Gerber/Gerber.zip` | Fabrication archive |
+| `PCB/V1.REV.B/BOM/` | BOM exports |
+| `PCB/V1.REV.B/PickAndPlace/` | Assembly placement files |
+| `Schematic/UWB_V1.0_Rev.B.pdf` | Exported schematic PDF |
+
+PCB preview:
+
+![UWB PCB Preview](PCB/V1.REV.B/Kicad%20project/Preview/UWB.png)
+
+## App Modes
+
 The expected UWB workflow split is:
 
 1. `APP_RUNTIME_MODE_UWB_BEACON_SMOKE`: current random beacon TX/RX smoke test
@@ -138,26 +157,489 @@ lab workflow.
 common test parameters can be overridden at runtime through NVS using the
 authenticated `/config/runtime` HTTP endpoint.
 
-For a step-by-step explanation of the current DS-TWR ranging protocol,
-including the message diagram, timing table, and distance formula, see
-[`docs/uwb-ranging-protocol/README.md`](docs/uwb-ranging-protocol/README.md).
+## UWB Ranging Protocol
 
-## PCB Package
+The active ranging implementation is based on Double-Sided Two-Way Ranging
+(DS-TWR). Classic DS-TWR needs three UWB frames: `POLL`, `RESP`, and `FINAL`.
+This firmware adds two report frames:
 
-The hardware package is versioned with the firmware so the board definition and
-software assumptions stay together.
+| Frame | Direction | Purpose |
+| --- | --- | --- |
+| `POLL` | initiator -> responder | Starts one ranging exchange. |
+| `RESP` | responder -> initiator | Confirms `POLL` and carries responder timing. |
+| `FINAL` | initiator -> responder | Completes the DS-TWR timing triangle. |
+| `REPORT` | initiator -> responder | Carries initiator timestamps so the responder can calculate distance. |
+| `REPORT2` | responder -> initiator | Carries responder timestamps and responder-calculated distance so the initiator can verify locally. |
 
-| Path | Purpose |
+When looking only at the responder-calculated result, the useful exchange is
+`POLL`, `RESP`, `FINAL`, and `REPORT`. `REPORT2` is a firmware verification
+frame; it lets the initiator run the same calculation and compare the two
+answers.
+
+### Runtime Shape
+
+The same firmware image runs on every module. At boot, each board reads its
+persistent module ID and runtime config from NVS.
+
+| Module ID | Normal ranging behavior |
 | --- | --- |
-| `PCB/V1.REV.B/Kicad project/` | Editable KiCad project and local symbols/footprints |
-| `PCB/V1.REV.B/Gerber/Gerber.zip` | Fabrication archive |
-| `PCB/V1.REV.B/BOM/` | BOM exports |
-| `PCB/V1.REV.B/PickAndPlace/` | Assembly placement files |
-| `Schematic/UWB_V1.0_Rev.B.pdf` | Exported schematic PDF |
+| `1` | Tag / initiator |
+| `2` | Anchor / responder |
+| `3` | Anchor / responder |
+| `4` | Anchor / responder |
+| `5` | Anchor / responder |
 
-PCB preview:
+The tag ranges against the anchors sequentially:
 
-![UWB PCB Preview](PCB/V1.REV.B/Kicad%20project/Preview/UWB.png)
+```text
+round N
+
+module 1 -> anchor 2
+module 1 -> anchor 3
+module 1 -> anchor 4
+module 1 -> anchor 5
+
+wait ranging_round_gap_ms
+round N + 1
+...
+```
+
+The important timing parameters are exposed by `/status`, can be changed with
+`/config/runtime`, and are also available in the dashboard:
+
+| Name | Default / lab value | Meaning |
+| --- | ---: | --- |
+| `ranging_slot_ms` | `350 ms` | Delay inserted by the tag after each anchor attempt. |
+| `ranging_round_gap_ms` | `500 ms` | Delay after all anchors in one ranging round. |
+| `ranging_rx_slice_ms` | `100 ms` | Passive RX window used by each anchor while waiting for `POLL`. |
+| `dt_rx_timeout_ms` | `250 ms` | Max wait for expected DS-TWR frames. |
+| `dt_resp_delay_ms` | `20 ms` | Scheduled delay from `POLL RX` to `RESP TX`. |
+| `dt_final_delay_ms` | `20 ms` | Scheduled delay from `RESP RX` to `FINAL TX`. |
+| `dt_report_delay_ms` | `10 ms` | Software delay before `REPORT` and `REPORT2`. |
+| `dt_auto_rx_delay_uus` | `500 UUS` | DW3000 hardware delay after TX before auto-RX opens. |
+
+The `dt_*` names come from the older distance-test runtime, but the current
+multi-anchor ranging mode reuses the same DS-TWR implementation.
+
+### Time Units
+
+The DW3000 uses several time units:
+
+| Unit | Meaning |
+| --- | --- |
+| `ms` | Normal milliseconds used by FreeRTOS and runtime config. |
+| `UUS` | UWB microseconds; `1 UUS = 512 / 499.2 MHz = 1.025641 us`. |
+| `DTU` | DW3000 device time unit; about `15.650040064 ps`. |
+
+Useful conversions:
+
+| Value | Approximate real time |
+| --- | ---: |
+| `500 UUS` | `512.82 us`, or `0.513 ms` |
+| `20 ms` | `1,277,952,000 DTU` |
+| `10 ms` | `638,976,000 DTU` |
+
+`UUS` is used for DW3000 automatic TX-to-RX wait. The larger `20 ms` DS-TWR
+turnaround delays are converted to DTU and programmed as delayed TX timestamps.
+
+### Message Sequence
+
+One ranging attempt between tag `1` and one anchor looks like this:
+
+```text
+Tag / initiator, module 1                         Anchor / responder, module N
+
+T1: POLL TX  ------------------------------------>
+                                                   T2: POLL RX
+
+                                                   schedule RESP at:
+                                                   T3 = T2 + dt_resp_delay_ms
+
+                                                   T3: RESP TX
+     auto RX opens after 500 UUS  <---------------
+T4: RESP RX
+
+schedule FINAL at:
+T5 = T4 + dt_final_delay_ms
+
+T5: FINAL TX  ----------------------------------->
+                                                   auto RX opens after 500 UUS
+                                                   T6: FINAL RX
+
+wait dt_report_delay_ms
+
+REPORT TX: T1, T4, T5 --------------------------->
+                                                   REPORT RX
+                                                   calculate distance
+                                                   log UWB_RANGING result
+
+                                                   wait dt_report_delay_ms
+
+                                 <---------------- REPORT2 TX:
+                                                   T2, T3, T6,
+                                                   anchor distance
+
+REPORT2 RX
+calculate distance on tag
+compare tag vs anchor result
+```
+
+The critical `RESP` and `FINAL` instants are owned by the DW3000 radio through
+delayed TX. The firmware computes the target timestamp, writes `DX_TIME`, and
+issues `DTX` or `DTX_W4R`. That keeps the timing stable even if FreeRTOS has
+scheduler jitter.
+
+### Timestamp Ownership
+
+The easiest way to reason about DS-TWR is to track who knows each timestamp.
+Every timestamp below is a hardware timestamp captured or scheduled by DW3000.
+
+After `POLL`:
+
+| Side | What it knows |
+| --- | --- |
+| Initiator/tag | `T1`, timestamp when it transmitted `POLL`. |
+| Responder/anchor | `T2`, timestamp when it received `POLL`. |
+
+`T1` is in the tag clock domain. `T2` is in the anchor clock domain. The two
+absolute values cannot be compared directly.
+
+After `RESP`:
+
+```text
+T3 = T2 + dt_resp_delay_ms
+```
+
+| Side | What it knows |
+| --- | --- |
+| Initiator/tag | `T1`, `T4` |
+| Responder/anchor | `T2`, `T3` |
+
+The tag can compute:
+
+```text
+round_a = T4 - T1
+```
+
+The anchor can compute:
+
+```text
+reply_b = T3 - T2
+```
+
+The tag still cannot calculate a correct distance from only those two values,
+because `reply_b` was measured in the anchor clock domain.
+
+After `FINAL`:
+
+```text
+T5 = T4 + dt_final_delay_ms
+```
+
+| Side | What it knows |
+| --- | --- |
+| Initiator/tag | `T1`, `T4`, `T5` |
+| Responder/anchor | `T2`, `T3`, `T6` |
+
+The tag-side intervals are:
+
+```text
+round_a = T4 - T1
+reply_a = T5 - T4
+```
+
+The anchor-side intervals are:
+
+```text
+reply_b = T3 - T2
+round_b = T6 - T3
+```
+
+At this point all pieces needed for DS-TWR exist, but they are split between
+the two modules. `REPORT` moves `T1`, `T4`, and `T5` to the anchor. The anchor
+already has `T2`, `T3`, and `T6`, so after `REPORT` it can calculate distance.
+
+`REPORT2` then moves `T2`, `T3`, `T6`, and the anchor-calculated distance back
+to the tag. The tag still has its own `T1`, `T4`, and `T5`, so it can calculate
+the same distance locally and log a verification line:
+
+```text
+DS-TWR tag verify ... tag=<distance> anchor=<distance> diff=<cm>
+```
+
+### Distance Formula
+
+The uncorrected DS-TWR calculation uses these intervals:
+
+```text
+round_a = T4 - T1   tag sees POLL TX -> RESP RX
+reply_a = T5 - T4   tag waits RESP RX -> FINAL TX
+
+reply_b = T3 - T2   anchor waits POLL RX -> RESP TX
+round_b = T6 - T3   anchor sees RESP TX -> FINAL RX
+```
+
+Then:
+
+```text
+tof_dtu = (round_a * round_b - reply_a * reply_b)
+          / (round_a + round_b + reply_a + reply_b)
+
+distance_m = tof_dtu * 15.650040064 ps * 299702547 m/s
+```
+
+In the ideal model, `tof` is the real one-way flight time. If both sides shared
+one perfect clock:
+
+```text
+round_a = 2 * tof + reply_b
+round_b = 2 * tof + reply_a
+```
+
+The DS-TWR expression is chosen so the internal reply delays cancel out:
+
+```text
+round_a * round_b - reply_a * reply_b
+```
+
+Substitute the ideal expressions:
+
+```text
+(2 * tof + reply_b) * (2 * tof + reply_a) - reply_a * reply_b
+```
+
+Expand and cancel the `reply_a * reply_b` terms:
+
+```text
+4 * tof^2 + 2 * tof * reply_a + 2 * tof * reply_b
+```
+
+Factor:
+
+```text
+2 * tof * (2 * tof + reply_a + reply_b)
+```
+
+The denominator is:
+
+```text
+round_a + round_b + reply_a + reply_b
+```
+
+Substitute again:
+
+```text
+(2 * tof + reply_b) + (2 * tof + reply_a) + reply_a + reply_b
+```
+
+which factors to:
+
+```text
+2 * (2 * tof + reply_a + reply_b)
+```
+
+The full fraction therefore simplifies to `tof`:
+
+```text
+2 * tof * (2 * tof + reply_a + reply_b)
+----------------------------------------
+2       * (2 * tof + reply_a + reply_b)
+```
+
+This is why the formula has this shape:
+
+```text
+tof = (round_a * round_b - reply_a * reply_b)
+      / (round_a + round_b + reply_a + reply_b)
+```
+
+A simpler expression such as this is tempting:
+
+```text
+tof = (round_a - reply_b) / 2
+```
+
+but `round_a` is measured by the tag clock while `reply_b` is measured by the
+anchor clock. Those clocks are close, but not identical. The DS-TWR formula
+uses both perspectives symmetrically and reduces clock mismatch error. With
+`APP_UWB_DISTANCE_TEST_CLOCK_OFFSET_CORRECTION = 1`, the firmware also uses the
+DW3000 clock-offset measurement from the received frame before converting time
+of flight to meters.
+
+### TX-to-RX and RX-to-TX Timing
+
+The two most common timing questions are:
+
+| Question | Current answer |
+| --- | --- |
+| How long after TX until RX opens? | `500 UUS`, about `0.513 ms` |
+| How long after RX until the next TX? | `20 ms` for `RESP`, `20 ms` for `FINAL` |
+
+The TX-to-RX delay is a DW3000 auto-receive setting. It applies after:
+
+```text
+POLL TX  -> tag opens RX for RESP
+RESP TX  -> anchor opens RX for FINAL
+REPORT TX -> tag opens RX for REPORT2
+```
+
+The RX-to-TX delays are delayed-TX timestamps. They apply after:
+
+```text
+POLL RX  -> anchor schedules RESP TX at +20 ms
+RESP RX  -> tag schedules FINAL TX at +20 ms
+```
+
+So the system is not trying to turn around instantly. The radio has about half
+a millisecond before RX opens after a TX, and about 20 ms between receiving one
+DS-TWR frame and transmitting the next scheduled DS-TWR frame.
+
+### Calibration Slot Timing
+
+The three-module antenna-delay calibration uses deterministic slots so only one
+ordered pair is expected to talk at a time. For `1,2,3`, one complete round is:
+
+```text
+slot 0: 1 -> 2
+slot 1: 1 -> 3
+slot 2: 2 -> 1
+slot 3: 2 -> 3
+slot 4: 3 -> 1
+slot 5: 3 -> 2
+then wait calibration_round_gap_ms
+round N + 1
+```
+
+The slot length is `calibration_min_interval_ms`. In the lab dashboard this is
+normally `350 ms`. The round gap is `calibration_max_interval_ms`; the dashboard
+labels it `Round gap ms`.
+
+If the coordinator is also the initiator for the current pair, for example
+`1 -> 2`, the slot looks like this:
+
+```text
+t = 0 us
+M1 coordinator/init     M2 responder          M3 listener
+     CAL_SYNC  ------->      receive               receive
+     start timer             start timer           start timer
+          |                       |                     |
+          |<------ guard 500 us ------>|                |
+
+t = 500 us
+     POLL  ------------>      RX POLL
+                              schedule RESP delayed TX
+                              RESP at +20 ms
+     <------------- RESP
+
+     schedule FINAL delayed TX
+     FINAL at +20 ms
+     FINAL ------------>
+                              RX FINAL
+
+     wait 10 ms
+     REPORT ----------->
+                              RX REPORT
+                              calculate distance
+     <------------ REPORT2
+     verify anchor result
+
+t = 350 ms
+all modules exit the slot and reset the calibration timer
+```
+
+If the initiator is a follower, for example `2 -> 3`, the coordinator assigns
+the slot with `CAL_CMD`:
+
+```text
+t = 0 us
+M1 coordinator          M2 initiator          M3 responder
+     CAL_SYNC  ------->      receive               receive
+     start timer             start timer           start timer
+
+t = 500 us
+     CAL_CMD ---------> M2
+     "this slot is 2 -> 3"
+
+M2 waits APP_UWB_CALIBRATION_COMMAND_DELAY_MS
+currently 20 ms
+
+     POLL -------------------------------> M3
+                                            RESP delayed +20 ms
+     <------------------------------- RESP
+
+     FINAL delayed +20 ms ---------------->
+     REPORT after 10 ms ------------------>
+                                            calculate distance
+     <------------------------------ REPORT2
+
+t = 350 ms
+all modules exit the slot and reset the calibration timer
+```
+
+`CAL_SYNC` is sent before every slot. The coordinator starts a dedicated 1 MHz
+ESP GPTimer when the SYNC transmission completes. Followers arm the same timer
+before RX and start it from the DW3000 IRQ when the SYNC frame arrives. The
+first `APP_UWB_CALIBRATION_SLOT_GUARD_US` microseconds of the slot are a guard
+window; the default is `500 us`.
+
+This ESP-side timer does not enter the distance formula. It only aligns the
+slot windows so the lab workflow is deterministic. Distance is still calculated
+from DW3000 hardware timestamps with DTU resolution.
+
+SYNC is intentionally not retried inside the same slot. If a follower misses
+SYNC, if the SYNC sequence number jumps, or if the coordinator cannot transmit
+SYNC, firmware logs:
+
+```text
+UWB CAL slot skipped due to sync fail
+```
+
+Dashboard-driven auto calibration treats any sync miss during the collection
+window as invalid and blocks antenna-delay writes.
+
+### Antenna Delay
+
+Antenna delay is separate from protocol delays. It is not a sleep, slot, or
+turnaround time. It is a calibration value written to the DW3000 RX and TX
+antenna-delay registers during radio init.
+
+The firmware reads the active antenna delay from persistent identity NVS. If no
+calibrated value exists, it falls back to `APP_UWB_ANTENNA_DELAY_DEFAULT`.
+
+Wrong antenna delay shifts absolute distance even if packet success is perfect.
+Use `/status` to inspect the live values:
+
+```text
+uwb_active_antenna_delay
+uwb_active_antenna_delay_hex
+uwb_antenna_delay_from_nvs
+```
+
+### Common Log Patterns
+
+| Log pattern | Meaning |
+| --- | --- |
+| `DS-TWR RESP wait failed` | Initiator sent `POLL` but did not receive matching `RESP` before timeout. |
+| `DS-TWR FINAL wait failed` | Responder sent `RESP` but did not receive `FINAL` before timeout. |
+| `DS-TWR REPORT wait failed` | Responder received `FINAL` but did not receive the timestamp report. |
+| `DS-TWR REPORT2 wait failed` | Responder calculated distance, but initiator did not receive verification report. |
+| `UWB distance RX error` | DW3000 reported PHY/RX error instead of a valid frame. |
+| `UWB_RANGING result` | Full exchange completed; distance was calculated by the responder/anchor. |
+| `DS-TWR tag verify` | Initiator recalculated the same exchange and compared against anchor result. |
+| `UWB CAL slot skipped due to sync fail` | Calibration slot synchronization failed; dashboard marks the run invalid. |
+
+Useful code entry points:
+
+| Area | File / function |
+| --- | --- |
+| Runtime mode selection | `components/app_manager/app_manager.c` |
+| Runtime config defaults/NVS | `components/config/app_runtime_config.c` |
+| Ranging service entry point | `components/uwb_ranging_service/uwb_ranging_service.c` |
+| Tag/anchor loops | `components/uwb_dw3000/uwb_dw3000.c` |
+| DS-TWR initiator | `uwb_distance_initiate_once()` |
+| DS-TWR responder | `uwb_distance_respond_to_poll()` |
+| Delayed TX helpers | `uwb_dw3000_send_payload_delayed*()` |
+| Antenna-delay calibration | `components/uwb_dw3000/uwb_dw3000_calibration.inc` |
 
 The board identity is stored in NVS, which plays the role of persistent EEPROM
 storage on ESP32. Normal firmware reads `module_id` from NVS and builds the
@@ -585,6 +1067,8 @@ the selected modules. Per the BQ25792 datasheet, stopping and restarting the
 charge cycle resets the active fast/pre-charge/trickle safety timers and also
 resets top-off timing.
 
+## Local Workflow and VS Code Tasks
+
 Recommended workflow from this folder, in the ESP-IDF v6.0.2 terminal:
 
 ```bat
@@ -610,7 +1094,15 @@ with the local helper instead:
 powershell -ExecutionPolicy Bypass -File tools\serial_log.ps1 -Port COM55 -Seconds 30 -Reset
 ```
 
-In VS Code, use `Terminal > Run Task... > Serial Log`.
+The current VS Code tasks are plain ESP-IDF/helper tasks. Run them from
+`Terminal > Run Task...`:
+
+| Task | Purpose |
+| --- | --- |
+| `Serial Log` | Runs `tools/serial_log.ps1` for a bounded serial capture. |
+| `ESP-IDF OTA Upload` | Runs `tools/ota_upload.py --host-ip <ip>` for one module. |
+| `ESP-IDF OTA Upload All` | Runs `tools/ota_upload.py --target-list tools/ota_targets.local.txt --parallel 5`. |
+| `Wireless Logs` | Runs `tools/wireless_log_listener.py --port <port> --force-color`. |
 
 After Wi-Fi connects, OTA status is available on the board IP:
 
@@ -619,9 +1111,8 @@ curl http://192.168.140.143/status
 curl.exe -H "X-OTA-Token: <APP_OTA_PASSWORD>" --data-binary "@build/uwb_esp_idf.bin" http://192.168.140.143/ota
 ```
 
-In VS Code, use `Terminal > Run Task... > ESP-IDF OTA Upload` for OTA upload.
-The task reads `APP_OTA_PASSWORD` from `secrets.h` and sends
-`build/uwb_esp_idf.bin` to the board.
+For VS Code, use the `ESP-IDF OTA Upload` task. It reads `APP_OTA_PASSWORD`
+from `secrets.h` and sends `build/uwb_esp_idf.bin` to the board.
 
 For the shared firmware workflow, OTA can upload the same binary to multiple
 boards at once. Create a local target file from `tools/ota_targets.example.txt`,
@@ -637,7 +1128,7 @@ On Linux/macOS, use the Python helper:
 python3 tools/ota_upload.py --target-list tools/ota_targets.local.txt --parallel 5
 ```
 
-In VS Code, use `Terminal > Run Task... > ESP-IDF OTA Upload All`.
+For VS Code, use the `ESP-IDF OTA Upload All` task.
 
 Runtime configuration can change the common test settings without rebuilding or
 uploading a new firmware image. The endpoint uses the same `X-OTA-Token` header
@@ -690,7 +1181,7 @@ The listener uses ANSI colors when the terminal supports them. Use
 `--output logs/session.log --quiet` to write the full stream to disk while
 printing only connection and progress summaries.
 
-In VS Code, use `Terminal > Run Task... > Wireless Logs`.
+For VS Code, use the `Wireless Logs` task.
 
 The local dashboard combines the wireless log stream, module status polling, and
 runtime configuration controls in a browser UI:
