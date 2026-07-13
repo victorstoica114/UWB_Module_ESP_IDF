@@ -1652,8 +1652,6 @@ th { color: var(--muted); font-weight: 700; }
                 <input id="uwbDtResponder" value="2" type="number" min="1" step="1">
                 <label for="uwbDtIntervalMs">Interval ms</label>
                 <input id="uwbDtIntervalMs" value="1000" type="number" min="1" step="1">
-                <label for="uwbDtRxTimeoutMs">RX timeout ms</label>
-                <input id="uwbDtRxTimeoutMs" value="250" type="number" min="1" step="1">
                 <label for="uwbDtRespDelayMs">RESP delay ms</label>
                 <input id="uwbDtRespDelayMs" value="20" type="number" min="1" step="1">
                 <label for="uwbDtFinalDelayMs">FINAL delay ms</label>
@@ -1752,13 +1750,22 @@ th { color: var(--muted); font-weight: 700; }
                 <label for="uwbCalSummary">Summary every</label>
                 <input id="uwbCalSummary" value="25" type="number" min="1" step="1">
                 <label for="uwbCalMinMs">Slot ms</label>
-                <input id="uwbCalMinMs" value="350" type="number" min="1" step="1">
+                <input id="uwbCalMinMs" value="100" type="number" min="1" step="1">
                 <label for="uwbCalGuardUs">Guard us</label>
                 <input id="uwbCalGuardUs" value="500" type="number" min="1" step="1">
+                <label for="uwbDtRxTimeoutMs">DS-TWR timeout ms</label>
+                <input id="uwbDtRxTimeoutMs" value="100" type="number" min="1" step="1">
                 <label for="uwbCalMaxMs">Round gap ms</label>
                 <input id="uwbCalMaxMs" value="10" type="number" min="1" step="1">
                 <label for="uwbCalRxMs">RX slice ms</label>
                 <input id="uwbCalRxMs" value="50" type="number" min="1" step="1">
+              </div>
+              <div class="param-legend">
+                <div><b>Summary every</b><span>Log diagnostic calibration statistics every N accepted samples.</span></div>
+                <div><b>Slot ms</b><span>Fixed time budget for one directed pair, for example M4 -> M2.</span></div>
+                <div><b>DS-TWR timeout</b><span>Maximum wait for expected ranging frames inside the DS-TWR exchange.</span></div>
+                <div><b>Round gap</b><span>Delay after all six directed pairs finish, before the next calibration round starts.</span></div>
+                <div><b>RX slice</b><span>Short listen window used by passive calibration nodes while they monitor the rest of the slot.</span></div>
               </div>
               <div class="form-actions">
                 <button class="primary" id="applyCalibrationSettings">Apply Calibration Settings</button>
@@ -2907,13 +2914,18 @@ function renderInfo(snapshot) {
   hydrateChargerSettings();
 }
 
-function setSettingIfFresh(id, value) {
+function setSettingIfFresh(id, value, force = false) {
   const el = document.getElementById(id);
-  if (!el || value === undefined || value === null || localStorage.getItem(settingKey(id)) !== null) return;
+  if (!el || value === undefined || value === null) return;
+  if (!force && localStorage.getItem(settingKey(id)) !== null) return;
+  const token = el.type === "checkbox" ? (Boolean(value) ? "1" : "0") : String(value);
   if (el.type === "checkbox") {
     el.checked = Boolean(value);
   } else {
     el.value = value;
+  }
+  if (force) {
+    localStorage.setItem(settingKey(id), token);
   }
 }
 
@@ -2944,16 +2956,16 @@ function hydrateSettingsFromStatus(item) {
   setSettingIfFresh("uwbDtInitiator", item.runtime_distance_test_initiator_id);
   setSettingIfFresh("uwbDtResponder", item.runtime_distance_test_responder_id);
   setSettingIfFresh("uwbDtIntervalMs", item.runtime_distance_test_interval_ms);
-  setSettingIfFresh("uwbDtRxTimeoutMs", item.runtime_distance_test_rx_timeout_ms);
+  setSettingIfFresh("uwbDtRxTimeoutMs", item.runtime_distance_test_rx_timeout_ms, true);
   setSettingIfFresh("uwbDtRespDelayMs", item.runtime_distance_test_resp_delay_ms);
   setSettingIfFresh("uwbDtFinalDelayMs", item.runtime_distance_test_final_delay_ms);
   setSettingIfFresh("uwbDtReportDelayMs", item.runtime_distance_test_report_delay_ms);
   setSettingIfFresh("uwbDtAutoRxDelayUus", item.runtime_distance_test_auto_rx_delay_uus);
-  setSettingIfFresh("uwbCalSummary", item.runtime_calibration_summary_every);
-  setSettingIfFresh("uwbCalMinMs", item.runtime_calibration_min_interval_ms);
-  setSettingIfFresh("uwbCalGuardUs", item.runtime_calibration_slot_guard_us);
-  setSettingIfFresh("uwbCalMaxMs", item.runtime_calibration_max_interval_ms);
-  setSettingIfFresh("uwbCalRxMs", item.runtime_calibration_rx_slice_ms);
+  setSettingIfFresh("uwbCalSummary", item.runtime_calibration_summary_every, true);
+  setSettingIfFresh("uwbCalMinMs", item.runtime_calibration_min_interval_ms, true);
+  setSettingIfFresh("uwbCalGuardUs", item.runtime_calibration_slot_guard_us, true);
+  setSettingIfFresh("uwbCalMaxMs", item.runtime_calibration_max_interval_ms, true);
+  setSettingIfFresh("uwbCalRxMs", item.runtime_calibration_rx_slice_ms, true);
   setSettingIfFresh("uwbAntennaDelayHex", item.uwb_configured_antenna_delay_hex || item.uwb_active_antenna_delay_hex);
 }
 
@@ -3797,6 +3809,7 @@ function wireSettings() {
         cal_summary: document.getElementById("uwbCalSummary").value,
         cal_slot_ms: document.getElementById("uwbCalMinMs").value,
         cal_guard_us: document.getElementById("uwbCalGuardUs").value,
+        dt_rx_timeout_ms: document.getElementById("uwbDtRxTimeoutMs").value,
         cal_round_gap_ms: document.getElementById("uwbCalMaxMs").value,
         cal_rx_ms: document.getElementById("uwbCalRxMs").value,
       }

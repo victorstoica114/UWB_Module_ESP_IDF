@@ -212,7 +212,7 @@ The important timing parameters are exposed by `/status`, can be changed with
 | `ranging_slot_ms` | `350 ms` | Delay inserted by the tag after each anchor attempt. |
 | `ranging_round_gap_ms` | `500 ms` | Delay after all anchors in one ranging round. |
 | `ranging_rx_slice_ms` | `100 ms` | Passive RX window used by each anchor while waiting for `POLL`. |
-| `dt_rx_timeout_ms` | `250 ms` | Max wait for expected DS-TWR frames. |
+| `dt_rx_timeout_ms` | `100 ms` | Max wait for expected DS-TWR frames. |
 | `dt_resp_delay_ms` | `20 ms` | Scheduled delay from `POLL RX` to `RESP TX`. |
 | `dt_final_delay_ms` | `20 ms` | Scheduled delay from `RESP RX` to `FINAL TX`. |
 | `dt_report_delay_ms` | `10 ms` | Software delay before `REPORT` and `REPORT2`. |
@@ -306,7 +306,7 @@ round N + 1
 ```
 
 The slot length is `calibration_min_interval_ms`. In the lab dashboard this is
-normally `350 ms`. The round gap is `calibration_max_interval_ms`; the dashboard
+normally `100 ms`. The round gap is `calibration_max_interval_ms`; the dashboard
 labels it `Round gap ms` and defaults it to `10 ms`.
 
 If the coordinator is also the initiator for the current pair, for example
@@ -338,7 +338,7 @@ t = 500 us
      <------------ REPORT2
      verify anchor result
 
-t = 350 ms
+t = slot end, normally 100 ms
 all modules exit the slot and reset the calibration timer
 ```
 
@@ -367,7 +367,7 @@ currently 20 ms
                                             calculate distance
      <------------------------------ REPORT2
 
-t = 350 ms
+t = slot end, normally 100 ms
 all modules exit the slot and reset the calibration timer
 ```
 
@@ -736,15 +736,15 @@ For the three-module method, the first ID in the configured set is the
 calibration coordinator. It walks a deterministic six-slot schedule:
 `id0->id1`, `id0->id2`, `id1->id0`, `id1->id2`, `id2->id0`, and `id2->id1`.
 Each slot is `APP_UWB_CALIBRATION_MIN_INTERVAL_MS` long; in the lab this is
-`350 ms`, which is intentionally longer than the complete DS-TWR exchange.
+`100 ms`, which should fit the complete DS-TWR exchange when
+`dt_rx_timeout_ms` is kept short enough for the experiment.
 Before every slot, the coordinator broadcasts a short `CAL_SYNC` frame and all
 participants restart the dedicated 1 MHz calibration timer. The first
 `cal_guard_us` microseconds of the slot are a guard window (`500 us` by
 default), then the assigned ordered pair performs DS-TWR. Because SYNC is
 repeated before every slot, ESP timer drift can only accumulate inside one
-slot. For short slots such as `100 ms`, set `dt_rx_timeout_ms` low enough for
-the experiment; the firmware still attempts the full `POLL`, `RESP`, `FINAL`,
-`REPORT`, and `REPORT2` sequence, so the logs show if the exchange does not fit.
+slot. The firmware still attempts the full `POLL`, `RESP`, `FINAL`, `REPORT`,
+and `REPORT2` sequence, so the logs show if the exchange does not fit.
 
 The coordinator waits `APP_UWB_CALIBRATION_SYNC_PREPARE_MS` before each SYNC
 frame (`20 ms` by default). This is not part of the measured slot; it simply
@@ -767,6 +767,17 @@ After all six directed pairs are measured, the firmware waits
 default is `10 ms`; increase it only if short-gap testing shows sync misses or
 radio cleanup problems between rounds. The dashboard labels these as `Slot ms`
 and `Round gap ms`.
+
+Calibration timing controls in the dashboard:
+
+| Control | Meaning |
+| --- | --- |
+| `Summary every` | Log diagnostic calibration statistics every N accepted samples. It does not change the measurement sequence. |
+| `Slot ms` | Fixed time budget for one directed pair, for example `M4 -> M2`. |
+| `Guard us` | Quiet time at the beginning of each synchronized slot before the assigned pair starts talking. |
+| `DS-TWR timeout ms` | Maximum wait for expected ranging frames inside the DS-TWR exchange. For the current short-slot test it is intentionally `100 ms`, the same as the slot width. |
+| `Round gap ms` | Delay after all six directed pairs finish, before the next calibration round starts. |
+| `RX slice ms` | Short listen window used by passive calibration nodes while they monitor the rest of the slot. Smaller slices wake more often; larger slices reduce loop churn. |
 
 The logs contain directed pair statistics such as `1->2`, `2->1`, `1->3`,
 etc. The dashboard keeps these directions separate and solves the antenna-delay
