@@ -1138,6 +1138,27 @@ th { color: var(--muted); font-weight: 700; }
 .node { fill: #fff; stroke: var(--green); stroke-width: 3; }
 .edge { stroke: #98a2b3; stroke-width: 2; }
 .edge-label { fill: var(--ink); font-size: 14px; font-weight: 700; }
+.cal-results {
+  display: grid;
+  gap: 12px;
+  font-size: 12px;
+}
+.cal-result-block h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.cal-result-table {
+  font-size: 12px;
+  table-layout: fixed;
+}
+.cal-result-table th,
+.cal-result-table td {
+  padding: 6px 5px;
+  overflow-wrap: anywhere;
+}
+.cal-result-table th {
+  white-space: nowrap;
+}
 .toast { margin-top: 10px; color: var(--muted); font-size: 13px; white-space: nowrap; }
 .toast:empty { display: none; }
 .toast:not(:empty) {
@@ -1784,9 +1805,15 @@ th { color: var(--muted); font-weight: 700; }
               <div id="calAutoToast" class="toast"></div>
             </div>
           </div>
-          <div class="section">
-            <h2>Calibration Geometry</h2>
-            <div id="calDiagram" class="diagram"></div>
+          <div>
+            <div class="section">
+              <h2>Calibration Geometry</h2>
+              <div id="calDiagram" class="diagram"></div>
+            </div>
+            <div class="section">
+              <h2>Calibration Results</h2>
+              <div id="calResults" class="cal-results"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -1809,6 +1836,7 @@ const state = {
   accelFetchPending: false,
   latestAccelRenderMs: 0,
   hydratedSettings: false,
+  calibrationResult: null,
 };
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
@@ -3041,6 +3069,204 @@ function apiResponseOk(data) {
   return !results.length || results.every(resultPayloadOk);
 }
 
+function loadCalibrationResult() {
+  try {
+    return JSON.parse(localStorage.getItem("uwbDash.calibrationResult") || "null");
+  } catch (_) {
+    return null;
+  }
+}
+
+function setCalibrationResult(result, persist = false) {
+  state.calibrationResult = result ? {...result, ui_updated_ms: Date.now()} : null;
+  if (persist) {
+    if (state.calibrationResult) {
+      localStorage.setItem("uwbDash.calibrationResult", JSON.stringify(state.calibrationResult));
+    } else {
+      localStorage.removeItem("uwbDash.calibrationResult");
+    }
+  }
+  renderCalibrationResult();
+}
+
+function fmtFixed(value, digits = 2) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  return number.toFixed(digits);
+}
+
+function fmtCmFromM(value, digits = 1) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  return (number * 100).toFixed(digits);
+}
+
+function fmtMaybe(value) {
+  if (value === undefined || value === null || value === "") return "-";
+  if (Array.isArray(value)) return value.join(", ");
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  return String(value);
+}
+
+function sortedPairEntries(value) {
+  return Object.entries(value || {}).sort(([left], [right]) => {
+    const parse = text => (String(text).match(/\d+/g) || []).map(item => Number(item));
+    const a = parse(left);
+    const b = parse(right);
+    return (a[0] - b[0]) || ((a[1] || 0) - (b[1] || 0)) || left.localeCompare(right);
+  });
+}
+
+function calTable(headers, rows) {
+  if (!rows.length) return "";
+  return `<table class="cal-result-table"><thead><tr>${
+    headers.map(header => `<th>${esc(header)}</th>`).join("")
+  }</tr></thead><tbody>${
+    rows.map(row => `<tr>${row.map(cell => `<td>${cell}</td>`).join("")}</tr>`).join("")
+  }</tbody></table>`;
+}
+
+function calBlock(title, html) {
+  if (!html) return "";
+  return `<div class="cal-result-block"><h3>${esc(title)}</h3>${html}</div>`;
+}
+
+function renderCalibrationResult() {
+  const root = document.getElementById("calResults");
+  if (!root) return;
+  const envelope = state.calibrationResult;
+  if (!envelope) {
+    root.innerHTML = `<div class="muted">No calibration result yet</div>`;
+    return;
+  }
+  const result = envelope.result || envelope;
+  const running = Boolean(envelope.running);
+  const statusText = running
+    ? (envelope.state || "running")
+    : result.cancelled
+      ? "cancelled"
+      : result.ok === false
+        ? "error"
+        : result.ok === true
+          ? "ok"
+          : (result.state || "-");
+  const statusClass = result.ok === false || result.cancelled
+    ? "bad"
+    : running
+      ? "warn"
+      : result.ok === true
+        ? "ok"
+        : "";
+  const ids = result.ids || result.participants || result.adjust_ids || [];
+  const summaryRows = [
+    ["Status", `<span class="${statusClass}">${esc(statusText)}</span>`],
+    ["Summary", esc(result.summary || envelope.summary || "-")],
+    ["Method", esc(result.method || "-")],
+    ["Modules", esc(fmtMaybe(ids))],
+    ["Adjust", esc(fmtMaybe(result.adjust_ids))],
+    ["Samples", esc(fmtMaybe(result.sample_count))],
+    ["Complete", esc(fmtMaybe(result.complete))],
+    ["Valid", esc(fmtMaybe(result.valid))],
+    ["Sync misses", esc(fmtMaybe(result.sync_miss_count))],
+    ["Reference guard", esc(fmtMaybe(result.reference_guard_ok))],
+    ["Max residual", result.fit_max_abs_residual_cm === undefined ? "-" : `${esc(fmtFixed(result.fit_max_abs_residual_cm, 2))} cm`],
+  ].filter(([, value]) => value !== "-" && value !== "");
+
+  const blocks = [
+    calBlock("Summary", calTable(["Field", "Value"], summaryRows)),
+  ];
+
+  const applyRows = (result.apply_results || []).map(item => [
+    esc(item.module_id ? `M${item.module_id}` : moduleLabelForResult(item)),
+    esc(item.old_delay ?? "-"),
+    esc(item.correction_dtu ?? "-"),
+    esc(item.new_delay ?? "-"),
+    item.applied ? `<span class="ok">written</span>` : `<span class="warn">${esc(item.reason || "not written")}</span>`,
+  ]);
+  if (applyRows.length) {
+    blocks.push(calBlock("Antenna Delay Writes", calTable(
+      ["Module", "Old", "Correction DTU", "New", "Result"],
+      applyRows
+    )));
+  } else if (result.corrections) {
+    const correctionRows = Object.entries(result.corrections).map(([moduleId, item]) => [
+      esc(`M${moduleId}`),
+      esc(item.float_dtu ?? "-"),
+      esc(item.applied_dtu ?? item ?? "-"),
+    ]);
+    blocks.push(calBlock("Computed Corrections", calTable(
+      ["Module", "Fit DTU", "Rounded DTU"],
+      correctionRows
+    )));
+  }
+
+  const pairRows = sortedPairEntries(result.pairs).map(([pair, item]) => [
+    esc(pair),
+    `${esc(fmtCmFromM(item.known_m))} cm`,
+    `${esc(fmtCmFromM(item.center_m))} cm`,
+    `${esc(fmtCmFromM(item.mean_m))} cm`,
+    `${esc(fmtFixed(item.error_cm, 2))} cm`,
+    esc(fmtFixed(item.error_dtu, 2)),
+  ]);
+  blocks.push(calBlock("Pair Geometry", calTable(
+    ["Pair", "Known", "Median", "Mean", "Error", "Error DTU"],
+    pairRows
+  )));
+
+  const directedRows = sortedPairEntries(result.directed).map(([pair, item]) => [
+    esc(pair),
+    esc(item.count ?? "-"),
+    `${esc(fmtCmFromM(item.median_m))} cm`,
+    `${esc(fmtCmFromM(item.mean_m))} cm`,
+    `${esc(fmtCmFromM(item.std_m))} cm`,
+    `${esc(fmtCmFromM(item.min_m))}-${esc(fmtCmFromM(item.max_m))} cm`,
+  ]);
+  blocks.push(calBlock("Directed Samples", calTable(
+    ["Direction", "n", "Median", "Mean", "Std", "Range"],
+    directedRows
+  )));
+
+  const fitRows = sortedPairEntries(result.directed_fit).map(([pair, item]) => [
+    esc(pair),
+    esc(fmtFixed(item.error_dtu, 2)),
+    esc(fmtFixed(item.fit_dtu, 2)),
+    esc(fmtFixed(item.residual_dtu, 2)),
+    `${esc(fmtFixed(item.residual_cm, 2))} cm`,
+  ]);
+  blocks.push(calBlock("Directed Fit", calTable(
+    ["Direction", "Error DTU", "Fit DTU", "Residual DTU", "Residual"],
+    fitRows
+  )));
+
+  const guardRows = sortedPairEntries(result.reference_guard_failures).map(([pair, item]) => [
+    esc(pair),
+    `${esc(fmtFixed(item.error_cm, 2))} cm`,
+    esc(fmtFixed(item.error_dtu, 2)),
+  ]);
+  blocks.push(calBlock("Reference Guard", calTable(
+    ["Direction", "Error", "Error DTU"],
+    guardRows
+  )));
+
+  const stopItems = [
+    ...(result.stop_results || []),
+    ...(result.cleanup_results || []),
+    ...(result.results && result.summary?.includes("stop") ? result.results : []),
+  ];
+  const stopRows = stopItems.map(item => [
+    esc(moduleLabelForResult(item)),
+    item.ok ? `<span class="ok">OK</span>` : `<span class="bad">ERROR</span>`,
+    esc(item.status ?? "-"),
+    esc(item.error || item.reason || "-"),
+  ]);
+  blocks.push(calBlock("UWB Stop", calTable(
+    ["Target", "Result", "HTTP", "Detail"],
+    stopRows
+  )));
+
+  root.innerHTML = blocks.join("") || `<div class="muted">Calibration is running...</div>`;
+}
+
 function setToast(toastId, message, kind = "", detail = null, autoClear = true) {
   const toast = document.getElementById(toastId);
   if (!toast) return;
@@ -3089,6 +3315,7 @@ async function postCalibrationAuto(payload, toastId) {
   const cancelButton = document.getElementById("cancelCalibration");
   if (button) button.disabled = true;
   if (cancelButton) cancelButton.disabled = true;
+  setCalibrationResult({running: true, state: "starting", summary: "starting calibration..."});
   setToast(toastId, "starting calibration...", "", null, false);
   try {
     const res = await fetch("/api/calibration-auto", {
@@ -3098,6 +3325,7 @@ async function postCalibrationAuto(payload, toastId) {
     });
     const data = await res.json();
     if (!data.ok || !data.job_id) {
+      setCalibrationResult(data, true);
       setToast(toastId, summarizeApiResponse(data), "bad", data, false);
       if (button) button.disabled = false;
       if (cancelButton) cancelButton.disabled = true;
@@ -3105,11 +3333,13 @@ async function postCalibrationAuto(payload, toastId) {
     }
     calibrationJobId = data.job_id;
     if (cancelButton) cancelButton.disabled = false;
+    setCalibrationResult(data);
     setToast(toastId, data.summary || "calibration running...", "", data, false);
     pollCalibrationAuto(data.job_id, toastId, button);
     return data;
   } catch (error) {
     const data = {ok: false, error: String(error)};
+    setCalibrationResult(data, true);
     setToast(toastId, summarizeApiResponse(data), "bad", data, false);
     if (button) button.disabled = false;
     if (cancelButton) cancelButton.disabled = true;
@@ -3128,11 +3358,13 @@ async function postCalibrationCancel(toastId) {
       body: JSON.stringify({job_id: calibrationJobId || ""}),
     });
     const data = await res.json();
+    setCalibrationResult(data, true);
     setToast(toastId, summarizeApiResponse(data), data.ok ? "ok" : "bad", data, false);
     fetchSnapshot();
     return data;
   } catch (error) {
     const data = {ok: false, error: String(error)};
+    setCalibrationResult(data, true);
     setToast(toastId, summarizeApiResponse(data), "bad", data, false);
     return data;
   }
@@ -3151,6 +3383,7 @@ async function pollCalibrationAuto(jobId, toastId, button) {
     if (done) {
       const result = data.result || data;
       const ok = apiResponseOk(result);
+      setCalibrationResult(result, true);
       setToast(toastId, summarizeApiResponse(result), ok ? "ok" : "bad", result, false);
       if (button) button.disabled = false;
       if (cancelButton) cancelButton.disabled = true;
@@ -3160,10 +3393,12 @@ async function pollCalibrationAuto(jobId, toastId, button) {
     }
     calibrationJobId = jobId;
     if (cancelButton) cancelButton.disabled = Boolean(data.cancel_requested);
+    setCalibrationResult(data);
     setToast(toastId, data.summary || "calibration running...", "", data, false);
     calibrationPollTimer = setTimeout(() => pollCalibrationAuto(jobId, toastId, button), 1000);
   } catch (error) {
     const data = {ok: false, error: String(error)};
+    setCalibrationResult(data, true);
     setToast(toastId, summarizeApiResponse(data), "bad", data, false);
     if (button) button.disabled = false;
     if (cancelButton) cancelButton.disabled = true;
@@ -3662,6 +3897,7 @@ document.querySelectorAll(".terminal").forEach(createTerminal);
 document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => setActiveTab(tab.dataset.tab)));
 setActiveTab(state.activeTab);
 wireSettings();
+setCalibrationResult(loadCalibrationResult());
 fetchLogs();
 fetchAccel();
 fetchSnapshot();

@@ -312,6 +312,9 @@ so a partial calibration start cannot leave a transmitter running.
 The dashboard Cancel Calibration button is an emergency stop: it marks the
 running job as cancelled when one exists and always sends `uwb=0` plus reboot to
 all configured modules.
+The Settings tab keeps the last auto-calibration result in a table next to the
+calibration controls, including summary, antenna-delay writes, pair errors,
+directed samples, fit residuals, and UWB stop/cleanup status.
 
 Lab calibration note, 2026-07-11:
 
