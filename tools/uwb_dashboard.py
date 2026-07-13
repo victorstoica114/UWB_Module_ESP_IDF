@@ -3221,6 +3221,28 @@ function drawPositionGrid(ctx, tx, width, height) {
   }
 }
 
+function positionPerimeterAnchorIds(anchorIds, anchors) {
+  const usable = anchorIds
+    .map(Number)
+    .filter(id => anchors[id]);
+  if (usable.length < 3) return usable;
+
+  const center = usable.reduce(
+    (acc, id) => {
+      acc.x += anchors[id].x;
+      acc.y += anchors[id].y;
+      return acc;
+    },
+    {x: 0, y: 0}
+  );
+  center.x /= usable.length;
+  center.y /= usable.length;
+
+  return usable.sort((left, right) =>
+    Math.atan2(anchors[left].y - center.y, anchors[left].x - center.x) -
+    Math.atan2(anchors[right].y - center.y, anchors[right].x - center.x));
+}
+
 function drawPosition(model) {
   const canvas = document.getElementById("positionCanvas");
   if (!canvas) return;
@@ -3232,16 +3254,17 @@ function drawPosition(model) {
   ctx.strokeStyle = "#98a2b3";
   ctx.lineWidth = 2;
   const anchorIds = model.settings.anchorIds.filter(id => model.anchors[id]);
-  if (anchorIds.length >= 2) {
+  const perimeterAnchorIds = positionPerimeterAnchorIds(anchorIds, model.anchors);
+  if (perimeterAnchorIds.length >= 2) {
     ctx.beginPath();
-    anchorIds.forEach((anchorId, index) => {
+    perimeterAnchorIds.forEach((anchorId, index) => {
       const anchor = model.anchors[anchorId];
       const x = tx.x(anchor.x);
       const y = tx.y(anchor.y);
       if (index === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     });
-    if (anchorIds.length >= 3) ctx.closePath();
+    if (perimeterAnchorIds.length >= 3) ctx.closePath();
     ctx.stroke();
   }
 
