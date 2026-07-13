@@ -15,7 +15,8 @@ Current step:
 - DW3000 hardware RXOK/SFD/RX/TX LED blink configured once at radio init
 - first DS-TWR two-module distance test runtime
 - antenna delay calibration runtime for two-module and three-module setups
-- sequential 1-tag/4-anchor DS-TWR ranging runtime
+- anchor-initiated 1-tag/4-anchor DS-TWR ranging runtime with dashboard
+  position view
 - optional BNO085 accelerometer hardware test via `components/bno085_service`
 
 The board boot log confirms 16 MB QIO flash, 8 MB octal PSRAM at 80 MHz, and
@@ -151,8 +152,10 @@ The expected UWB workflow split is:
    calibration entry point in `components/uwb_calibration_service`.
 3. `APP_RUNTIME_MODE_UWB_DISTANCE_TEST`: current two-module DS-TWR ruler check
    entry point in `components/uwb_distance_test_service`.
-4. `APP_RUNTIME_MODE_UWB_RANGING`: current sequential 4-anchor plus 1-tag
-   DS-TWR ranging runtime in `components/uwb_ranging_service`.
+4. `APP_RUNTIME_MODE_UWB_RANGING`: current 4-anchor plus 1-tag DS-TWR
+   ranging runtime in `components/uwb_ranging_service`. The first configured
+   anchor coordinates the slots, anchors initiate, and the tag responds/logs
+   tag-anchor distances for the dashboard.
 5. `APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY`: anchor-to-anchor survey/runtime
    diagnostics in `components/uwb_anchor_survey_service`.
 
@@ -190,21 +193,35 @@ persistent module ID and runtime config from NVS.
 
 | Module ID | Normal ranging behavior |
 | --- | --- |
-| `1` | Tag / initiator |
-| `2` | Anchor / responder |
-| `3` | Anchor / responder |
-| `4` | Anchor / responder |
-| `5` | Anchor / responder |
+| `1` | Tag / responder; waits for anchor-initiated DS-TWR and logs results |
+| `2` | Anchor / coordinator by default when anchors are `2,3,4,5` |
+| `3` | Anchor / follower |
+| `4` | Anchor / follower |
+| `5` | Anchor / follower |
 
-The tag ranges against the anchors sequentially:
+`APP_RUNTIME_MODE_UWB_RANGING` is anchor-initiated. The tag no longer starts
+each exchange. Instead, the first configured anchor ID is the ranging
+coordinator. It walks the configured anchors in order and gives each anchor one
+slot to initiate DS-TWR against the tag. The tag stays in RX, responds to
+`POLL`, calculates the responder-side distance after `REPORT`, and emits the
+dashboard-compatible log line:
+
+```text
+UWB_RANGING result tag=<tag_id> anchor=<anchor_id> seq=<seq> distance=<m> m ...
+```
+
+This keeps the PC/dashboard as the place where tag position is solved, while
+the ESP32 tag only does the per-anchor DS-TWR calculation and reporting.
+
+The anchor coordinator schedules anchors sequentially:
 
 ```text
 round N
 
-module 1 -> anchor 2
-module 1 -> anchor 3
-module 1 -> anchor 4
-module 1 -> anchor 5
+anchor 2 -> tag 1
+anchor 3 -> tag 1
+anchor 4 -> tag 1
+anchor 5 -> tag 1
 
 wait ranging_round_gap_ms
 round N + 1
@@ -216,14 +233,19 @@ The important timing parameters are exposed by `/status`, can be changed with
 
 | Name | Default / lab value | Meaning |
 | --- | ---: | --- |
-| `ranging_slot_ms` | `350 ms` | Delay inserted by the tag after each anchor attempt. |
+| `ranging_slot_ms` | `350 ms` | Time budget for one anchor-initiated DS-TWR exchange. |
 | `ranging_round_gap_ms` | `500 ms` | Delay after all anchors in one ranging round. |
-| `ranging_rx_slice_ms` | `100 ms` | Passive RX window used by each anchor while waiting for `POLL`. |
+| `ranging_rx_slice_ms` | `100 ms` | RX window used by the tag and follower anchors while waiting for UWB frames. |
 | `dt_rx_timeout_ms` | `100 ms` | Max wait for expected DS-TWR frames. |
 | `dt_resp_delay_ms` | `20 ms` | Scheduled delay from `POLL RX` to `RESP TX`. |
 | `dt_final_delay_ms` | `20 ms` | Scheduled delay from `RESP RX` to `FINAL TX`. |
 | `dt_report_delay_ms` | `10 ms` | Software delay before `REPORT` and `REPORT2`. |
 | `dt_auto_rx_delay_uus` | `500 UUS` | DW3000 hardware delay after TX before auto-RX opens. |
+
+Remote anchors receive a short `RANGING_CMD` from the coordinator and wait a
+fixed `5 ms` guard before starting their DS-TWR exchange. The coordinator uses
+the first anchor ID from the configured anchor list, so the order of `anchors`
+matters.
 
 The `dt_*` names come from the older distance-test runtime, but the current
 multi-anchor ranging mode reuses the same DS-TWR implementation.
@@ -636,7 +658,7 @@ uwb_antenna_delay_from_nvs
 | `DS-TWR REPORT wait failed` | Responder received `FINAL` but did not receive the timestamp report. |
 | `DS-TWR REPORT2 wait failed` | Responder calculated distance, but initiator did not receive verification report. |
 | `UWB distance RX error` | DW3000 reported PHY/RX error instead of a valid frame. |
-| `UWB_RANGING result` | Full exchange completed; distance was calculated by the responder/anchor. |
+| `UWB_RANGING result` | Full exchange completed; in ranging mode the tag calculated the responder-side distance for the initiating anchor. |
 | `DS-TWR tag verify` | Initiator recalculated the same exchange and compared against anchor result. |
 | `UWB CAL slot skipped due to sync fail` | Calibration slot synchronization failed; dashboard marks the run invalid. |
 
@@ -884,8 +906,8 @@ is `2.00 cm`.
 
 `APP_RUNTIME_MODE_UWB_RANGING` is the current 1-tag/4-anchor runtime. The same
 firmware image runs on all modules; the runtime config selects tag ID and anchor
-IDs, while persistent NVS identity keeps each module's hostname, module ID, UWB
-role, and calibrated antenna delay.
+IDs, the first anchor ID acts as slot coordinator, and persistent NVS identity
+keeps each module's hostname, module ID, UWB role, and calibrated antenna delay.
 
 If `APP_UWB_DW_LEDS_ENABLED` is set, the DW3000 configures GPIO0 as RXOKLED,
 GPIO1 as SFDLED, GPIO2 as RXLED, and GPIO3 as TXLED once during radio init.

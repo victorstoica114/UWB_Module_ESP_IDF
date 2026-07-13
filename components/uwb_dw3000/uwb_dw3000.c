@@ -41,6 +41,7 @@ enum {
     UWB_DW3000_TX_TIMEOUT_MS = 120,
     UWB_DW3000_TX_POLL_MS = 2,
     UWB_DW3000_PAYLOAD_LEN = 48,
+    UWB_RANGING_COMMAND_DELAY_MS = 5,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -253,6 +254,7 @@ enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_REPORT2 = 6,
     UWB_DISTANCE_FRAME_CAL_CMD = 7,
     UWB_DISTANCE_FRAME_CAL_SYNC = 8,
+    UWB_DISTANCE_FRAME_RANGING_CMD = 9,
 };
 
 enum uwb_dw3000_runtime_mode {
@@ -2577,6 +2579,8 @@ static const char *uwb_distance_type_name(uint8_t type)
         return "CAL_CMD";
     case UWB_DISTANCE_FRAME_CAL_SYNC:
         return "CAL_SYNC";
+    case UWB_DISTANCE_FRAME_RANGING_CMD:
+        return "RANGING_CMD";
     default:
         return "UNKNOWN";
     }
@@ -3349,15 +3353,23 @@ static size_t uwb_anchor_survey_build_pairs(
     return pair_count;
 }
 
+static void uwb_anchor_survey_build_command_type(
+    uint8_t type, const struct uwb_anchor_survey_pair *pair,
+    uint8_t slot_index, uint16_t sequence,
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN])
+{
+    uwb_distance_build_frame(type, pair->initiator_id, sequence, payload);
+    payload[UWB_ANCHOR_SURVEY_CMD_INITIATOR_OFFSET] = pair->initiator_id;
+    payload[UWB_ANCHOR_SURVEY_CMD_RESPONDER_OFFSET] = pair->responder_id;
+    payload[UWB_ANCHOR_SURVEY_CMD_SLOT_OFFSET] = slot_index;
+}
+
 static void uwb_anchor_survey_build_command(
     const struct uwb_anchor_survey_pair *pair, uint8_t slot_index,
     uint16_t sequence, uint8_t payload[UWB_DW3000_PAYLOAD_LEN])
 {
-    uwb_distance_build_frame(UWB_DISTANCE_FRAME_SURVEY_CMD,
-                             pair->initiator_id, sequence, payload);
-    payload[UWB_ANCHOR_SURVEY_CMD_INITIATOR_OFFSET] = pair->initiator_id;
-    payload[UWB_ANCHOR_SURVEY_CMD_RESPONDER_OFFSET] = pair->responder_id;
-    payload[UWB_ANCHOR_SURVEY_CMD_SLOT_OFFSET] = slot_index;
+    uwb_anchor_survey_build_command_type(UWB_DISTANCE_FRAME_SURVEY_CMD, pair,
+                                         slot_index, sequence, payload);
 }
 
 static bool uwb_anchor_survey_parse_command(
@@ -3365,7 +3377,8 @@ static bool uwb_anchor_survey_parse_command(
     struct uwb_anchor_survey_pair *pair, uint8_t *slot_index)
 {
     if (frame == NULL || pair == NULL || slot_index == NULL ||
-        frame->type != UWB_DISTANCE_FRAME_SURVEY_CMD ||
+        (frame->type != UWB_DISTANCE_FRAME_SURVEY_CMD &&
+         frame->type != UWB_DISTANCE_FRAME_RANGING_CMD) ||
         frame->payload_len <= UWB_ANCHOR_SURVEY_CMD_SLOT_OFFSET) {
         return false;
     }
@@ -3718,54 +3731,32 @@ static void uwb_dw3000_anchor_survey_loop(void)
     uwb_anchor_survey_anchor_loop(coordinator_id, anchor_ids, anchor_count);
 }
 
-static void uwb_ranging_tag_loop(const uint8_t *anchor_ids, size_t anchor_count)
+static void
+uwb_ranging_log_tag_result(const struct uwb_distance_measurement *measurement)
 {
-    uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
-    uint32_t round = 0;
-    const app_runtime_config_t *config = app_runtime_config_get();
-
-    s_status = UWB_DW3000_STATUS_READY;
-    ESP_LOGI(TAG,
-             "UWB_RANGING tag active: source_id=%u anchors=[%u,%u,%u,%u] slot=%u ms round_gap=%u ms",
-             (unsigned)s_source_id, (unsigned)anchor_ids[0],
-             (unsigned)anchor_ids[1], (unsigned)anchor_ids[2],
-             (unsigned)anchor_ids[3], (unsigned)config->ranging_slot_ms,
-             (unsigned)config->ranging_round_gap_ms);
-
-    while (true) {
-        ESP_LOGI(TAG, "UWB_RANGING round=%lu start", (unsigned long)round);
-        for (size_t i = 0; i < anchor_count; ++i) {
-            const uint8_t anchor_id = anchor_ids[i];
-            ESP_LOGI(TAG, "UWB_RANGING tag poll anchor=%u seq=%u",
-                     (unsigned)anchor_id, (unsigned)sequence);
-            const esp_err_t err =
-                uwb_distance_initiate_once(anchor_id, sequence, false);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG,
-                         "UWB_RANGING tag anchor=%u seq=%u failed: %s",
-                         (unsigned)anchor_id, (unsigned)sequence,
-                         esp_err_to_name(err));
-            }
-            sequence++;
-            uwb_dw3000_delay_ms(
-                app_runtime_config_get()->ranging_slot_ms);
-        }
-        round++;
-        ESP_LOGI(TAG, "UWB_RANGING round=%lu complete",
-                 (unsigned long)(round - 1UL));
-        uwb_dw3000_delay_ms(
-            app_runtime_config_get()->ranging_round_gap_ms);
+    if (measurement == NULL) {
+        return;
     }
+
+    ESP_LOGI(TAG,
+             "UWB_RANGING result tag=%u anchor=%u seq=%u distance=%.3f m %.1f cm raw=%.3f m clk_valid=%u",
+             (unsigned)measurement->responder_id,
+             (unsigned)measurement->initiator_id,
+             (unsigned)measurement->sequence, measurement->distance_m,
+             measurement->distance_m * 100.0, measurement->raw_distance_m,
+             measurement->clock_offset_valid ? 1U : 0U);
 }
 
-static void uwb_ranging_anchor_loop(void)
+static void uwb_ranging_tag_loop(const uint8_t *anchor_ids, size_t anchor_count)
 {
     const app_runtime_config_t *config = app_runtime_config_get();
+
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
-             "UWB_RANGING anchor active: source_id=%u tag_id=%u rx_slice=%u ms",
-             (unsigned)s_source_id, (unsigned)config->tag_id,
-             (unsigned)config->ranging_rx_slice_ms);
+             "UWB_RANGING passive tag active: source_id=%u anchors=[%u,%u,%u,%u] rx_slice=%u ms",
+             (unsigned)s_source_id, (unsigned)anchor_ids[0],
+             (unsigned)anchor_ids[1], (unsigned)anchor_ids[2],
+             (unsigned)anchor_ids[3], (unsigned)config->ranging_rx_slice_ms);
 
     while (true) {
         config = app_runtime_config_get();
@@ -3776,13 +3767,14 @@ static void uwb_ranging_anchor_loop(void)
             continue;
         }
         if (rx_err != ESP_OK) {
-            ESP_LOGW(TAG, "UWB_RANGING anchor RX failed: %s",
+            ESP_LOGW(TAG, "UWB_RANGING passive tag RX failed: %s",
                      esp_err_to_name(rx_err));
             uwb_dw3000_delay_ms(20);
             continue;
         }
         if (frame.type != UWB_DISTANCE_FRAME_POLL ||
-            frame.source_id != config->tag_id ||
+            !uwb_anchor_survey_id_in_set(anchor_ids, anchor_count,
+                                         frame.source_id) ||
             !uwb_distance_destination_matches(frame.destination_id)) {
             continue;
         }
@@ -3791,19 +3783,205 @@ static void uwb_ranging_anchor_loop(void)
         const esp_err_t err =
             uwb_distance_respond_to_poll(&frame, &measurement);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "UWB_RANGING anchor respond failed tag=%u seq=%u: %s",
+            ESP_LOGW(TAG,
+                     "UWB_RANGING passive tag respond failed anchor=%u seq=%u: %s",
                      (unsigned)frame.source_id, (unsigned)frame.sequence,
                      esp_err_to_name(err));
             continue;
         }
 
         uwb_distance_log_measurement(&measurement);
-        ESP_LOGI(TAG,
-                 "UWB_RANGING result tag=%u anchor=%u seq=%u distance=%.3f m %.1f cm raw=%.3f m clk_valid=%u",
-                 (unsigned)measurement.initiator_id, (unsigned)s_source_id,
-                 (unsigned)measurement.sequence, measurement.distance_m,
-                 measurement.distance_m * 100.0, measurement.raw_distance_m,
-                 measurement.clock_offset_valid ? 1U : 0U);
+        uwb_ranging_log_tag_result(&measurement);
+    }
+}
+
+static esp_err_t uwb_ranging_send_command(
+    const struct uwb_anchor_survey_pair *pair, uint8_t slot_index,
+    uint16_t sequence)
+{
+    if (pair == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+    uwb_anchor_survey_build_command_type(UWB_DISTANCE_FRAME_RANGING_CMD, pair,
+                                         slot_index, sequence, payload);
+
+    const esp_err_t err = uwb_dw3000_send_payload(payload, sizeof(payload),
+                                                  NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "UWB_RANGING command TX failed slot=%u seq=%u anchor=%u tag=%u: %s",
+                 (unsigned)slot_index, (unsigned)sequence,
+                 (unsigned)pair->initiator_id,
+                 (unsigned)pair->responder_id,
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "UWB_RANGING command slot=%u seq=%u anchor=%u tag=%u",
+             (unsigned)slot_index, (unsigned)sequence,
+             (unsigned)pair->initiator_id, (unsigned)pair->responder_id);
+    return ESP_OK;
+}
+
+static bool uwb_ranging_parse_command(
+    const struct uwb_distance_frame *frame, uint8_t coordinator_id,
+    const uint8_t *anchor_ids, size_t anchor_count, uint8_t tag_id,
+    struct uwb_anchor_survey_pair *pair)
+{
+    uint8_t slot_index = 0;
+    if (frame == NULL || pair == NULL ||
+        frame->type != UWB_DISTANCE_FRAME_RANGING_CMD ||
+        frame->source_id != coordinator_id ||
+        !uwb_distance_destination_matches(frame->destination_id) ||
+        !uwb_anchor_survey_parse_command(frame, pair, &slot_index)) {
+        return false;
+    }
+
+    return pair->initiator_id == s_source_id &&
+           pair->responder_id == tag_id &&
+           uwb_anchor_survey_id_in_set(anchor_ids, anchor_count,
+                                       pair->initiator_id);
+}
+
+static void uwb_ranging_anchor_follower_loop(uint8_t coordinator_id,
+                                             const uint8_t *anchor_ids,
+                                             size_t anchor_count,
+                                             uint8_t tag_id)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    s_status = UWB_DW3000_STATUS_READY;
+    ESP_LOGI(TAG,
+             "UWB_RANGING anchor follower active: source_id=%u coordinator=%u tag_id=%u rx_slice=%u ms",
+             (unsigned)s_source_id, (unsigned)coordinator_id,
+             (unsigned)tag_id, (unsigned)config->ranging_rx_slice_ms);
+
+    while (true) {
+        config = app_runtime_config_get();
+        struct uwb_distance_frame frame = {0};
+        const esp_err_t rx_err =
+            uwb_distance_receive_next(&frame, config->ranging_rx_slice_ms);
+        if (rx_err == ESP_ERR_TIMEOUT) {
+            continue;
+        }
+        if (rx_err != ESP_OK) {
+            ESP_LOGW(TAG, "UWB_RANGING follower RX failed: %s",
+                     esp_err_to_name(rx_err));
+            uwb_dw3000_delay_ms(20);
+            continue;
+        }
+
+        struct uwb_anchor_survey_pair pair = {0};
+        if (!uwb_ranging_parse_command(&frame, coordinator_id, anchor_ids,
+                                       anchor_count, tag_id, &pair)) {
+            continue;
+        }
+
+        uwb_dw3000_delay_ms(UWB_RANGING_COMMAND_DELAY_MS);
+        const esp_err_t err =
+            uwb_distance_initiate_once(tag_id, frame.sequence, false);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG,
+                     "UWB_RANGING anchor initiate failed tag=%u seq=%u: %s",
+                     (unsigned)tag_id, (unsigned)frame.sequence,
+                     esp_err_to_name(err));
+        }
+    }
+}
+
+static void uwb_ranging_coordinator_listen_until(TickType_t end_tick,
+                                                 uint8_t coordinator_id,
+                                                 const uint8_t *anchor_ids,
+                                                 size_t anchor_count,
+                                                 uint8_t tag_id)
+{
+    while ((int32_t)(xTaskGetTickCount() - end_tick) < 0) {
+        const TickType_t now = xTaskGetTickCount();
+        const uint32_t remaining_ms =
+            (uint32_t)(end_tick - now) * portTICK_PERIOD_MS;
+        uint32_t slice_ms = app_runtime_config_get()->ranging_rx_slice_ms;
+        if (remaining_ms < slice_ms) {
+            slice_ms = remaining_ms;
+        }
+        if (slice_ms == 0) {
+            break;
+        }
+
+        struct uwb_distance_frame frame = {0};
+        const esp_err_t err = uwb_distance_receive_next(&frame, slice_ms);
+        if (err == ESP_OK) {
+            struct uwb_anchor_survey_pair pair = {0};
+            if (uwb_ranging_parse_command(&frame, coordinator_id, anchor_ids,
+                                          anchor_count, tag_id, &pair)) {
+                ESP_LOGD(TAG,
+                         "UWB_RANGING coordinator ignored self command seq=%u",
+                         (unsigned)frame.sequence);
+            }
+        } else if (err != ESP_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "UWB_RANGING coordinator listen failed: %s",
+                     esp_err_to_name(err));
+            uwb_dw3000_delay_ms(20);
+        }
+    }
+}
+
+static void uwb_ranging_anchor_coordinator_loop(const uint8_t *anchor_ids,
+                                                size_t anchor_count,
+                                                uint8_t tag_id)
+{
+    const uint8_t coordinator_id = anchor_ids[0];
+    const app_runtime_config_t *config = app_runtime_config_get();
+    uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
+    uint32_t round = 0;
+
+    s_status = UWB_DW3000_STATUS_READY;
+    ESP_LOGI(TAG,
+             "UWB_RANGING anchor coordinator active: source_id=%u tag_id=%u anchor_count=%u slot=%u ms round_gap=%u ms command_delay=%u ms",
+             (unsigned)s_source_id, (unsigned)tag_id, (unsigned)anchor_count,
+             (unsigned)config->ranging_slot_ms,
+             (unsigned)config->ranging_round_gap_ms,
+             (unsigned)UWB_RANGING_COMMAND_DELAY_MS);
+
+    while (true) {
+        ESP_LOGI(TAG, "UWB_RANGING round=%lu start", (unsigned long)round);
+        for (size_t i = 0; i < anchor_count; ++i) {
+            config = app_runtime_config_get();
+            const uint8_t anchor_id = anchor_ids[i];
+            const TickType_t slot_end =
+                xTaskGetTickCount() + pdMS_TO_TICKS(config->ranging_slot_ms);
+            const struct uwb_anchor_survey_pair pair = {
+                .initiator_id = anchor_id,
+                .responder_id = tag_id,
+            };
+
+            if (anchor_id == s_source_id) {
+                ESP_LOGI(TAG, "UWB_RANGING local slot=%u seq=%u anchor=%u tag=%u",
+                         (unsigned)i, (unsigned)sequence,
+                         (unsigned)anchor_id, (unsigned)tag_id);
+                const esp_err_t err =
+                    uwb_distance_initiate_once(tag_id, sequence, false);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG,
+                             "UWB_RANGING local anchor=%u tag=%u seq=%u failed: %s",
+                             (unsigned)anchor_id, (unsigned)tag_id,
+                             (unsigned)sequence, esp_err_to_name(err));
+                }
+            } else {
+                (void)uwb_ranging_send_command(&pair, (uint8_t)i, sequence);
+            }
+
+            sequence++;
+            uwb_ranging_coordinator_listen_until(slot_end, coordinator_id,
+                                                 anchor_ids, anchor_count,
+                                                 tag_id);
+        }
+
+        round++;
+        ESP_LOGI(TAG, "UWB_RANGING round=%lu complete",
+                 (unsigned long)(round - 1UL));
+        uwb_dw3000_delay_ms(
+            app_runtime_config_get()->ranging_round_gap_ms);
     }
 }
 
@@ -3815,14 +3993,23 @@ static void uwb_dw3000_ranging_loop(void)
     const uint8_t tag_id = config->tag_id;
 
     ESP_LOGI(TAG,
-             "UWB_RANGING runtime start: source_id=%u tag_id=%u anchors=[%u,%u,%u,%u]",
+             "UWB_RANGING runtime start: source_id=%u tag_id=%u coordinator=%u anchors=[%u,%u,%u,%u]",
              (unsigned)s_source_id, (unsigned)tag_id,
+             (unsigned)anchor_ids[0],
              (unsigned)anchor_ids[0], (unsigned)anchor_ids[1],
              (unsigned)anchor_ids[2], (unsigned)anchor_ids[3]);
 
     if (anchor_count == 0 || anchor_count > UWB_ANCHOR_SURVEY_MAX_ANCHORS) {
         s_status = UWB_DW3000_STATUS_FAILED;
         ESP_LOGE(TAG, "UWB_RANGING invalid anchor configuration");
+        vTaskDelete(NULL);
+        return;
+    }
+    if (uwb_anchor_survey_id_in_set(anchor_ids, anchor_count, tag_id)) {
+        s_status = UWB_DW3000_STATUS_FAILED;
+        ESP_LOGE(TAG,
+                 "UWB_RANGING invalid role configuration: tag_id=%u is also in anchor list",
+                 (unsigned)tag_id);
         vTaskDelete(NULL);
         return;
     }
@@ -3833,7 +4020,13 @@ static void uwb_dw3000_ranging_loop(void)
     }
 
     if (uwb_anchor_survey_id_in_set(anchor_ids, anchor_count, s_source_id)) {
-        uwb_ranging_anchor_loop();
+        if (s_source_id == anchor_ids[0]) {
+            uwb_ranging_anchor_coordinator_loop(anchor_ids, anchor_count,
+                                                tag_id);
+        } else {
+            uwb_ranging_anchor_follower_loop(anchor_ids[0], anchor_ids,
+                                             anchor_count, tag_id);
+        }
         return;
     }
 
