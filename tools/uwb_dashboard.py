@@ -1701,6 +1701,13 @@ th { color: var(--muted); font-weight: 700; }
   vertical-align: middle;
   background: currentColor;
 }
+.position-legend .ring::before {
+  width: 10px;
+  height: 10px;
+  border: 2px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+}
 @media (max-width: 940px) {
   .terminal-grid, .settings-grid, .charger-grid, .graphs-layout, .position-layout { grid-template-columns: 1fr; }
   .page { height: auto; }
@@ -1796,7 +1803,7 @@ th { color: var(--muted); font-weight: 700; }
           </div>
           <div class="section">
             <h2>Live Position</h2>
-            <div class="position-legend"><span style="color:#d7352a">tag</span><span style="color:#2b64d8">trail</span><span style="color:#16833a">anchor</span></div>
+            <div class="position-legend"><span style="color:#d7352a">tag</span><span style="color:#2b64d8">trail</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
             <div id="positionReadout" class="position-readout"></div>
           </div>
           <div class="section">
@@ -2317,6 +2324,7 @@ const state = {
   ranging: {distances: {}, max_age_sec: 3},
   tdoa: {observations: {}, anchor_distances: {}, max_age_sec: 3},
   positionTrail: {},
+  positionAnchorTrail: {},
   positionResults: {},
   positionWasActive: false,
 };
@@ -3107,6 +3115,20 @@ function tdoaResiduals(position, anchors, observations) {
   return residuals;
 }
 
+function updatePositionAnchorTrail(anchors, now) {
+  const activeIds = new Set(Object.keys(anchors).map(String));
+  for (const key of Object.keys(state.positionAnchorTrail)) {
+    if (!activeIds.has(key)) delete state.positionAnchorTrail[key];
+  }
+  for (const [anchorId, anchor] of Object.entries(anchors)) {
+    const trail = state.positionAnchorTrail[anchorId] || [];
+    trail.push({x: anchor.x, y: anchor.y, t: now});
+    state.positionAnchorTrail[anchorId] = trail
+      .filter(point => now - point.t <= 120)
+      .slice(-300);
+  }
+}
+
 function computePositionModel() {
   const settings = positionSettings();
   const active = positionRangingActive(settings);
@@ -3115,13 +3137,15 @@ function computePositionModel() {
 
   if (!active && state.positionWasActive) {
     state.positionTrail = {};
+    state.positionAnchorTrail = {};
     state.positionResults = {};
   }
   state.positionWasActive = active;
 
   const tags = {};
+  const now = Date.now() / 1000;
+  updatePositionAnchorTrail(anchors, now);
   if (active) {
-    const now = Date.now() / 1000;
     for (const tagId of settings.tagIds) {
       const distances = {};
       const distanceItems = {};
@@ -3243,6 +3267,31 @@ function positionPerimeterAnchorIds(anchorIds, anchors) {
     Math.atan2(anchors[right].y - center.y, anchors[right].x - center.x));
 }
 
+function drawAnchorStabilityRings(ctx, tx, anchorIds, anchors) {
+  ctx.save();
+  ctx.setLineDash([3, 4]);
+  for (const anchorId of anchorIds) {
+    const anchor = anchors[anchorId];
+    if (!anchor) continue;
+    const cx = tx.x(anchor.x);
+    const cy = tx.y(anchor.y);
+    const trail = state.positionAnchorTrail[String(anchorId)] || [];
+    const distances = trail
+      .map(point => Math.hypot(tx.x(point.x) - cx, tx.y(point.y) - cy))
+      .filter(value => Number.isFinite(value));
+    distances.sort((a, b) => a - b);
+    const p90 = distances.length ? distances[Math.floor((distances.length - 1) * 0.9)] : 0;
+    const radius = Math.max(10, Math.min(42, p90 + 7));
+
+    ctx.beginPath();
+    ctx.strokeStyle = "rgba(43, 100, 216, 0.34)";
+    ctx.lineWidth = 1.2;
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawPosition(model) {
   const canvas = document.getElementById("positionCanvas");
   if (!canvas) return;
@@ -3295,6 +3344,8 @@ function drawPosition(model) {
     });
     ctx.stroke();
   }
+
+  drawAnchorStabilityRings(ctx, tx, anchorIds, model.anchors);
 
   ctx.font = "12px Inter, sans-serif";
   ctx.textBaseline = "middle";
@@ -5003,6 +5054,7 @@ async function enablePositionRanging() {
   if (runtimeReboot) runtimeReboot.value = "1";
   await postConfig({target_modules: "all", params}, "positionToast");
   state.positionTrail = {};
+  state.positionAnchorTrail = {};
   setTimeout(fetchSnapshot, 1500);
 }
 
@@ -5032,6 +5084,7 @@ function wireSettings() {
   });
   document.getElementById("positionResetTrail").addEventListener("click", () => {
     state.positionTrail = {};
+    state.positionAnchorTrail = {};
     renderPosition();
   });
   document.getElementById("positionEnableRanging").addEventListener("click", enablePositionRanging);
