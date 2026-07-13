@@ -322,6 +322,14 @@ The firmware logs:
 UWB_DS_TWR_TDOA obs tag=<tag> initiator=<Ai> responder=<Aj> seq=<seq> diff=<m> m ...
 ```
 
+The passive tag keeps a small clock-offset filter per responder anchor. The raw
+DW3000 carrier-integrator clock ratio is useful but noisy enough that applying a
+single instantaneous value adds visible jitter to `diff`. The firmware therefore
+uses a capped running average, currently up to 64 samples per responder, before
+converting `reply_b` from the responder clock domain into the tag clock domain.
+The log still includes both `raw` and corrected `diff` so the correction can be
+audited later.
+
 The dashboard `Position` tab reconstructs the relative anchor geometry from live
 anchor-anchor DS-TWR measurements. The first selected anchor is placed at
 `(0,0)`, the second defines the X axis, the third/fourth are trilaterated from
@@ -332,9 +340,13 @@ a perfect square.
 
 With `DS-TWR-TDOA` selected, the dashboard takes fresh `diff` observations and
 solves the tag position on the PC with a local least-squares range-difference
-fit. `DS-TWR ranges` can use the same measured anchor geometry for absolute
-tag-anchor ranges, but the blue distance circles only make sense for absolute
-ranges, not TDOA range differences.
+fit. When both directions of a pair are fresh, the dashboard uses the
+antisymmetric median `(Ai->Aj - Aj->Ai) / 2` and reports the reverse sum as a
+health check. A reverse sum near zero means the two directed observations agree;
+a large reverse sum means the pair has common-mode bias even if each individual
+line looks stable. `DS-TWR ranges` can use the same measured anchor geometry for
+absolute tag-anchor ranges, but the blue distance circles only make sense for
+absolute ranges, not TDOA range differences.
 
 ### Time Units
 
