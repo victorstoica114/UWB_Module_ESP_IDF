@@ -3707,7 +3707,7 @@ static void uwb_ds_twr_tdoa_log_observation(
     if (observation->resp_clock_offset_valid) {
         clock_offset_ratio =
             uwb_dw3000_clock_offset_ratio(observation->resp_clock_offset_raw);
-        reply_b_corrected_dtu = reply_b_dtu * (1.0 - clock_offset_ratio);
+        reply_b_corrected_dtu = reply_b_dtu * (1.0 + clock_offset_ratio);
     }
 
     const double diff_dtu =
