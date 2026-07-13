@@ -1768,7 +1768,7 @@ th { color: var(--muted); font-weight: 700; }
             <label for="positionAnchorCount">Anchors used</label>
             <select id="positionAnchorCount"><option value="4">4 anchors</option><option value="3">3 anchors</option></select>
             <label for="positionSolver">Solver</label>
-            <select id="positionSolver"><option value="ranging">DS-TWR ranges</option><option value="tdoa">DS-TWR-TDOA</option></select>
+            <select id="positionSolver"><option value="tdoa" selected>DS-TWR-TDOA</option><option value="ranging">DS-TWR ranges</option></select>
             <label for="positionAnchors">Anchor IDs</label>
             <input id="positionAnchors" value="2,3,4,5">
             <label for="positionTags">Tag IDs</label>
@@ -4895,6 +4895,7 @@ function restoreSettings() {
     }
   }
   migrateCalibrationPairSetting();
+  migratePositionSolverSetting();
 }
 
 function migrateCalibrationPairSetting() {
@@ -4911,6 +4912,20 @@ function migrateCalibrationPairSetting() {
   }
   localStorage.removeItem(settingKey("calRef"));
   localStorage.removeItem(settingKey("calDut"));
+}
+
+function migratePositionSolverSetting() {
+  const legacyCoordsKey = settingKey("positionAnchorCoords");
+  if (localStorage.getItem(legacyCoordsKey) === null) return;
+  localStorage.removeItem(legacyCoordsKey);
+
+  const solverKey = settingKey("positionSolver");
+  const solverEl = document.getElementById("positionSolver");
+  const savedSolver = localStorage.getItem(solverKey);
+  if (savedSolver === null || savedSolver === "ranging") {
+    if (solverEl) solverEl.value = "tdoa";
+    localStorage.setItem(solverKey, "tdoa");
+  }
 }
 
 function wireSettingPersistence() {
