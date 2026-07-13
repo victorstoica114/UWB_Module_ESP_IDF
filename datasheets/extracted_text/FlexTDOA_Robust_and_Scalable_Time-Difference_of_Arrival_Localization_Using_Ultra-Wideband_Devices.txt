@@ -1,0 +1,1216 @@
+                                                                                                 SPECIAL SECTION ON ADVANCES ON HIGH
+                                                                              PERFORMANCE WIRELESS NETWORKS FOR AUTOMATION AND IIOT
+
+
+Received 11 February 2023, accepted 13 March 2023, date of publication 20 March 2023, date of current version 24 March 2023.
+Digital Object Identifier 10.1109/ACCESS.2023.3259320
+
+
+
+
+FlexTDOA: Robust and Scalable Time-Difference
+of Arrival Localization Using
+Ultra-Wideband Devices
+GEORGE-CRISTIAN PĂTRU 1 , LAURA FLUERATORU                                            1,2 , IULIU VASILESCU               3,
+
+DRAGOŞ NICULESCU 1 , AND DANIEL ROSNER 1
+1 Department of Computer Science, University Politehnica of Bucharest, 060042 Bucharest, Romania
+2 Electrical Engineering Unit, Tampere University, 33720 Tampere, Finland
+3 TIA RESEARCH, 820169 Tulcea, Romania
+
+Corresponding author: George-Cristian Pătru (cristi.patru@upb.ro)
+This work was supported in part by the European Union’s Horizon 2020 Research and Innovation Programme under the Marie Sklodowska
+Curie Grant, A-WEAR: A network for dynamic wearable applications with privacy constraints, under Agreement 813278; and in part by
+the Ministry of European Investments and Projects through the Human Capital Sectoral Operational Program 2014-2020, under Contract
+62461/03.06.2022, SMIS code 153735. The work of George-Cristian Pătru was supported by NXP Romania.
+
+
+
+
+  ABSTRACT In this paper, we propose FlexTDOA, an indoor localization method using ultra-wideband
+  (UWB) radios, and we demonstrate its performance in a functional system. Our method uses time-difference
+  of arrival (TDOA) localization so that the user device remains passive and is able to compute its location
+  simply by listening to the communication between the fixed anchors, ensuring the scalability of the system.
+  The anchors communicate using a custom and flexible time-division multiple-access (TDMA) scheme in
+  which time is divided in slots. In each time slot, one anchor interrogates one or more anchors which respond
+  in the same slot. The anchors do not need to have their clocks synchronized. We implemented FlexTDOA
+  on in-house designed hardware using a commercial UWB module. We evaluate the localization accuracy
+  of FlexTDOA with different system parameters such as the number of responses, the order of responses,
+  and the number of anchors. We simulate and evaluate the effect of the physical speed of the tag on the
+  choice of optimum system parameters. We also compare FlexTDOA against the classic TDOA approach and
+  range-based localization in a deployment of ten anchors and one tag, both with and without obstructions.
+  Results show that FlexTDOA achieves the highest localization accuracy in most of the scenarios, with up to
+  38% reduction in the localization error compared to the classic approach.
+
+
+  INDEX TERMS Ultra-wideband, indoor localization, time-difference of arrival, Internet of Things (IoT).
+
+
+
+I. INTRODUCTION                                                                                   UWB-based localization systems usually consist of a
+Ultra-wideband (UWB) technology has experienced a revival                                      mobile node that needs to be localized, called tag, and several
+during the past few years, mainly for its high-accuracy rang-                                  fixed nodes with known locations, called anchors, which
+ing and localization capabilities. It is estimated that more than                              communicate with the tag and aid the localization process.
+1 billion UWB devices will be shipped by 2025, and that                                        Range-based localization is arguably the most popular local-
+over the next 5–10 years all smartphones will have UWB                                         ization technique since it provides the highest accuracy [3].
+capabilities [1]. With the growing number of users, localiza-                                  In range-based localization, the location is computed based
+tion systems will face high scalability requirements to satisfy                                on distances between each anchor and the tag using multi-
+network demands with acceptable location update rates [2].                                     lateration. To avoid synchronizing the transmitter (TX) and
+                                                                                               the receiver (RX) [4], [5], at least two message exchanges
+   The associate editor coordinating the review of this manuscript and                         between the tag and each anchor are needed to compute one
+approving it for publication was Hans-Peter Bernhard              .                            distance, technique known as TWR. Because of the high
+                                          This work is licensed under a Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 License.
+                                                      For more information, see https://creativecommons.org/licenses/by-nc-nd/4.0/
+28610                                                                                                                                            VOLUME 11, 2023
+G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+number of messages, range-based localization (or multilat-                        and the impact of changing the initiator and/or the order of
+eration) scales poorly with the growing number of tags and                        responses.
+anchors.                                                                             Besides providing an increased robustness to harsh
+   Time-difference of arrival (TDOA) is an alternative local-                     conditions, FlexTDOA distinguishes itself from previous
+ization method which uses the difference between the arrival                      approaches by not using tracking filters to estimate clock
+times of two packets (usually, exchanged by the tag and two                       parameters, such as in [10], [11]. Instead, each receiver uses
+anchors) [6]. For each difference, the tag can be located on a                    carrier frequency offset (CFO) estimation to locally correct
+hyperbola focused at the anchors (in a 2D coordinate system).                     the relative time skew between its clock and the transmitter’s
+By computing the TDOA for more anchor pairs, the tag’s                            clock. This allows administrators to easily add new anchors
+location can be found at the intersection of multiple hyperbo-                    to the system without increasing its complexity. Moreover,
+las [3]. One TDOA variant frequently called downlink (DL)                         the flexible scheduling scheme facilitates the deployment of
+TDOA [7] has gained popularity for its scalability properties.                    the localization system in larger spaces where the anchors
+In this setup, only the anchors transmit periodic messages,                       might be split over multiple rooms and only a subset of
+while the tag records their arrival times and localizes itself.                   anchors should respond to an initiating message. The pro-
+In DL TDOA, the tag can remain passive, i.e., does not need                       posed scheme also preserves the location privacy of the user,
+to transmit any uplink messages. Using passive tags, since                        since the user device remains passive in the localization pro-
+there is no need for the tags to share the channel, DL TDOA                       cess [7]. Therefore, no information of the user presence or
+can scale to an unlimited number of users [8], [9], [10], [11].                   their location is leaked to the infrastructure.
+   The main drawback of TDOA localization is that the                                We make all the measurements available open-source1 ,
+anchors need to be synchronized, usually by estimating the                        in order to facilitate the evaluation of other network parame-
+clock offsets of each anchor relative to a reference clock [11].                  ters than those covered in the paper. The dataset can also be
+A convenient way to obtain the reference clock is to designate                    used to prototype NLOS error-mitigation techniques in the
+a reference anchor that periodically broadcasts a synchro-                        future.
+nization beacon [12]. The rest of the anchors respond to this                        The rest of the paper is organized as follows. Section III
+beacon and track their clock offsets with respect to the refer-                   introduces the basics of the localization methods used
+ence anchor. The disadvantage of this approach is that, if the                    throughout the paper and the particularities of the proposed
+link between the reference anchor and the tag is obstructed,                      scheduling scheme. Section IV presents the setup of the
+the tag will receive the synchronization beacon with a delay                      localization system, such as the hardware used for evalua-
+and all subsequent TDOAs pertaining to that beacon will                           tion, the environment, and the anchor placement. Section V
+be corrupted. This method is therefore not reliable in the                        evaluates the most important parameters of the localization
+presence of obstructions.                                                         system, while Section VI compares range-based localization,
+   In this paper, we propose an alternative TDMA schedul-                         the classic TDOA, and FlexTDOA. Section II reviews related
+ing scheme for TDOA localization called FlexTDOA.                                 work and highlights differences from previous approaches.
+In FlexTDOA, there is no single reference anchor. Instead,                        Finally, Section VII sums up our contributions.
+all the anchors in the system can be configured to take turns
+in transmitting the synchronization beacon. Similarly, the                        II. RELATED WORK
+order of the anchors that respond to the beacon changes in                        In the following, we will review the most important previous
+a round-robin manner. Therefore, depending on the needs                           works on TDOA localization, with a focus on DL TDOA
+of the system, less anchors than the maximum available can                        schemes which offer the best multi-user scalability.
+respond to a beacon, which reduces clock drift errors caused
+by the delay between the first and the last response while                        A. SCALABLE UWB LOCALIZATION
+allowing all anchors to participate in the localization process.                  In [10], a DL TDOA localization system which implements
+FlexTDOA therefore exploits the full channel diversity of the                     a clock synchronization protocol with a reference anchor is
+environment, is not subject to single-link failures, and can                      proposed. The authors mention that the system does not scale
+maintain small errors even in large networks.                                     to large anchor networks. In a setup of eight anchors, the
+   We implemented FlexTDOA in a localization system based                         system obtained a 2D localization root-mean squared error
+on the Qorvo DW3000 UWB chipset [13]. We compare the                              (RMSE) of 14 cm and a 3D RMSE of 28 cm. In a comparable
+proposed system against the classic TDOA approach and the                         setup of seven anchors in LOS, FlexTDOA obtained a 2D
+standard range-based multilateration algorithm in a deploy-                       RMSE of 16.2 cm and a 3D RMSE of 23.5 cm (averaged over
+ment of ten anchors and one tag in an office environment,                         all considered locations), so comparable to the ones in [10].
+in both line-of-sight (LOS) and non-line-of-sight (NLOS)                          In [11], a similar approach to [10] is proposed, in which the
+conditions. We also evaluate the impact of several parameters                     pairwise clock error is tracked using a Kalman filter that can
+on the ranging and localization accuracy, such as: the number                     handle fluctuating reception periods.
+of responses for each synchronization beacon for different
+                                                                                     1 https://zenodo.org/record/7619764
+system update rates, the number of anchors in the system,
+
+
+VOLUME 11, 2023                                                                                                                           28611
+                                                             G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+   In [14], the authors propose a DL TDOA scheme in which                Another important contribution of our work is that we
+the anchors respond only to the previously-transmitted mes-           evaluated the performance of a DL TDOA localization sys-
+sage instead of responding to a single synchronization bea-           tem in NLOS conditions experimentally, since most previ-
+con, as in our case. The mean and maximum localization                ous works either consider only LOS scenarios or base their
+errors obtained with a configuration of four anchors were             observations on simulated data. In [20], the proposed TDOA
+31 cm and 81 cm, respectively.                                        system is also evaluated in NLOS conditions and an anchor
+   Although named concurrent ranging, the works in [15],              selection method based on an empirically-chosen confidence
+[16] essentially implement the classic DL TDOA scheme.                parameter is proposed. However, in [20], the purpose of the
+However, here the focus is on processing all the responses            evaluation is to demonstrate the effectiveness of the anchor
+within a single reception period by exploiting the multipath          selection method, whereas we quantified the effect of the
+information from the channel impulse response of the signal.          channel diversity brought by the scheduling method proposed
+   In [17], a TDOA localization system implemented using              in FlexTDOA. In [22], the authors propose a sensor place-
+UWB devices called ATLAS is introduced. Although the                  ment strategy for cluttered environments that is validated
+system also uses an initiating anchor for synchronization, it is      through experimental data. A UL TDOA localization system
+not clear if the tag is completely passive since it is mentioned      that takes into account NLOS conditions has been proposed
+that only whitelisted tags are processed at a localization            and evaluated experimentally in [23]. In [24], the authors
+server. Therefore, ATLAS relies on centralized processing to          propose an algorithm to select anchor pairs in a UL TDOA
+correct the TDOAs, whereas in FlexTDOA the localization is            by taking into account errors caused by NLOS propagation.
+offloaded to the user device, preserving its location privacy.           In [25], the authors propose a framework designed for scal-
+Iterations of ATLAS have been introduced in [18], [19];               able indoor localization and implement it using UWB radios.
+however, in these works, the tag is active.                           The work in [25] is focused on the software, which enables
+   A localization system named VULoc that follows the prin-           cooperation between both fixed and mobile nodes in order
+ciples of DL TDOA has recently been proposed in [20].                 to achieve seamless localization. In comparison, we focus
+However, in VULoc, the initiator sends one additional mes-            on the specific TDOA localization algorithm, which enables
+sage after all of the anchors have responded, which means             scalable and accurate localization.
+that the tag has to listen to one extra message compared to
+FlexTDOA. Perhaps the most significant difference between             B. CLOCK OFFSET CORRECTION
+VULoc and FlexTDOA is that we also propose a flexi-
+                                                                      In our TDOA scheme, we avoid tracking the clock parame-
+ble, highly-configurable TDMA scheme for anchor transmis-
+                                                                      ters using Kalman filters like in previous works [10], [11].
+sions, whereas in [20] it is mentioned that VULoc does not
+                                                                      Instead, we correct the relative clock offset between two
+need a scheduling protocol because tags are passive. How-
+                                                                      devices directly at the receiver using the CFO estimation fea-
+ever, we argue that in large-scale building deployments there
+                                                                      ture of the DW3000 chipset. The method has been described
+is a need to easily add or remove anchors from the system
+                                                                      in [26] and the systematic error has been derived for single-
+and to schedule their transmissions. As a result, we could
+                                                                      sided two-way ranging (SS-TWR), A-TDOA, and SS-TWR
+easily evaluate the performance of FlexTDOA with up to
+                                                                      with A-TDOA extension. The method has been evaluated
+ten anchors, whereas VULoc was evaluated only with five
+                                                                      experimentally but only for TWR schemes. A similar CFO
+anchors. While VULoc also uses changing initiators, it does
+                                                                      correction is evaluated for a TDOA scheme in [27]. How-
+not evaluate the impact brought by the added channel diver-
+                                                                      ever, the proposed TDOA scheme is based on the alternative
+sity, as we do. In a laboratory setting, VULoc obtained a
+                                                                      double-sided TWR (AltDS-TWR) method, in which the tag
+median error of 15.5 cm and a 90 % error of 23.6 cm. In a
+                                                                      is active, which is different from the DL TDOA schemes
+similar experiment in which the tag was placed in the center of
+                                                                      evaluated in our work. A CFO-assisted synchronization algo-
+the room, FlexTDOA obtained a median error of 15.4 cm and
+                                                                      rithm for TDOA has been proposed in [28], in which the
+a 90 % error of 22.2 cm, so comparable to the errors achieved
+                                                                      TOA at each receiver is compensated using the estimated
+by VULoc.
+                                                                      CFO w.r.t. the reference (master) node. Although the TDOA
+   Although it does not implement a DL TDOA scheme,
+                                                                      scheme from [28] is different from the DL TDOA scheme
+the work in [21] proposes a scalable UL TDOA localiza-
+                                                                      used in our work, the correction method is similar. In addition,
+tion scheme called TALLA. The high-precision synchroniza-
+                                                                      we evaluate the feasibility of the correction method through
+tion necessary for TDOA localization is maintained by a
+                                                                      experiments with commercial UWB systems, whereas in the
+server, which can compute the clock parameters to syn-
+                                                                      cited work the method was evaluated in simulations and using
+chronize to any reference anchor in the system. While this
+                                                                      software-defined radios.
+approach provides great flexibility in the case of large-scale
+deployments, it poses more privacy concerns since the net-
+work has information about the location of all tags in the            III. BACKGROUND
+system. In our approach, since the tag localizes itself, the          In this section, we introduce principles related to the pro-
+network does not have any information about the users’                posed localization methods. For more in-depth details on
+locations.                                                            UWB ranging and localization, we refer the reader to the
+
+28612                                                                                                                              VOLUME 11, 2023
+G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+                                                                                  where c is the speed of light. 1Ti is the time between the
+                                                                                  arrival of the tag’s request at anchor Ai and the anchor’s
+                                                                                  transmission of the response message, as measured by the
+                                                                                  anchor. Similarly, 1TiT is the time between the tag’s trans-
+                                                                                  mission of the request and the arrival of the anchor’s response,
+                                                                                  as measured by the tag.
+                                                                                     Because each device measures its own processing time,
+                                                                                  there is no need to synchronize the clocks of neither the
+FIGURE 1. Localization based on TWR or on DL TDOA (the time periods               anchors nor of the anchors and the tag. However, due to the
+are not to scale).                                                                fact that 1TiT is measured by the tag while 1Ti is measured
+                                                                                  on the anchor, the relative clock skew of the two nodes
+                                                                                  compounded with the significant value of 1Ti can introduce
+papers [29], [30]. In Section III-A and III-B we explain how                      large errors in the measurement. To counter this effect, the
+distance measurements and, respectively, TDOA measure-                            DS-TWR was proposed [31], in which the tag transmits a
+ments are obtained using UWB devices. In Section III-C,                           third message which is used by the anchor to measure the
+we describe the two approaches we use to solve the sys-                           clock skew. Modern radios, such as the one we are using,
+tem of equations in order to estimate the user’s location:                        can directly measure the relative clock skew by analyzing the
+either least-squares minimization between the measured and
+                                                                                  carrier frequency of the received packet. Research shows [32]
+the calculated ranges or an extended Kalman filter (EKF).
+                                                                                  that DS-TWR and SS-TWR attain almost the same precision
+In Section III-D, we describe the scheduling scheme imple-
+                                                                                  with clock skew estimation.
+mented in FlexTDOA.
+                                                                                     SS-TWR based localization (which we will alternatively
+                                                                                  call TWR localization) is attractive because it enables
+A. TWR
+                                                                                  centimeter-level localization and does not need any synchro-
+Range-based localization uses distances between a mobile                          nization between the devices. However, it does not scale well
+target, called tag, and anchors with known locations to com-                      when increasing the number of anchors and tags, since it
+pute the location of the tag. The tag is found at the intersection                needs pair-wise message exchanges between each anchor and
+of circles (in a 2D space) or spheres (in a 3D space) with a                      each tag in the system. DS-TWR is even less scalable than
+radius equal to the anchor–tag distances and centered at the                      SS-TWR because it needs an extra message for the ranging.
+anchors.                                                                          Moreover, because of the asymmetry, in DS-TWR the dis-
+   We use the following notations:                                                tance is computed by the responder (anchor), not the initiator
+   • X⃗A1 , X⃗A2 , . . . , X⃗AN are the locations of anchors                      (tag). Therefore, for navigation, the distance would need to
+     A1 , A2 , . . . , AN , respectively;                                         be sent back to the user in another message. Given these
+   • X⃗T (x, y, z) is the location of the tag;                                    drawbacks, we will use SS-TWR as a comparison baseline
+   • dX⃗ Y⃗ is the true distance between the nodes with locations                 for FlexTDOA.
+     X⃗ , Y⃗ ∈ {X⃗T , X⃗A1 , . . . , X⃗AN };
+   • d̃XY is the measured distance between the nodes X , Y ∈                      B. TDOA
+     {T , A1 , . . . , AN }.                                                      An alternative localization technique uses the time difference
+   The true distance between the tag and anchor Ai is the                         between the arrival of two messages either at one device or at
+Euclidean distance between their locations:                                       multiple clock-synchronized devices [5]. We define the true
+                                                                                  distance difference between anchors Ai and Aj relative to the
+                        dX⃗T X⃗A = ∥X⃗T − X⃗Ai ∥.                       (1)
+                               i                                                  tag as:
+  The measured distance between a tag and an anchor Ai can                                  dX⃗T X⃗A X⃗A = dX⃗T X⃗A − dX⃗T X⃗A                 (4)
+be written as:                                                                                    i   j               j          i
+
+                                                                                                          = ∥X⃗T − X⃗Aj ∥ − ∥X⃗T − X⃗Ai ∥.     (5)
+              d̃TAi = dX⃗T X⃗A + ωTAi , i = 1, . . . , N ,              (2)
+                               i
+                                                                                     The measured distance difference between anchors Ai and
+where ωTAi is the measurement noise, which is modeled as a                        Aj relative to the tag is:
+zero-mean Gaussian random variable with variance σi2 .
+   To avoid synchronizing the anchors and the tag, the dis-                                    d̃TAi Aj = dX⃗T X⃗A X⃗A + ωTAj − ωTAi ,         (6)
+                                                                                                                  i       j
+tances are usually obtained using TWR by exchanging at
+least two messages between the tag and each anchor [29].                          where, similarly to the TWR case, ωTAk is the measurement
+We implemented the SS-TWR variant which uses two mes-                             noise between the tag and anchor Ak , k ∈ {1, . . . , N }, mod-
+sage exchanges between each anchor and the tag, illustrated                       eled as zero-mean Gaussian noise with variance σk2 .
+in Fig. 1. One distance is obtained as:                                              In the noiseless case, any N − 1 distance difference mea-
+                                                                                  surements that form a minimum spanning subtree are suffi-
+                                     1TiT − 1Ti                                   cient for TDOA localization [33]. However, more redundant
+                       d̃TAi = c ·              ,                       (3)
+                                          2                                       measurements can be used to improve the resilience to noise
+
+VOLUME 11, 2023                                                                                                                              28613
+                                                                      G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+in a realistic setup. In TDOA localization, the tag’s posi-                    anchor Aj will contain an error:
+tion is found at the intersection of hyperbolae. This makes
+                                                                                                   1T̂j = kj 1Tj = (1 − ej )1Tj ,                     (10)
+TDOA localization more sensitive to noise than range-based
+(or TOA) localization [3].                                                     where kj and ej are the multiplicative, respectively, the addi-
+   The time difference of arrival can be derived from Eq. (6)                  tive errors of the anchor’s clock.
+by dividing the distance difference by the speed of light:                        The relative CFO between the clocks of the tag and Aj as
+                                                                               measured by the tag is [26]:
+                       dX⃗T X⃗A X⃗A         dX⃗T X⃗A − dX⃗T X⃗A
+           tTAi Aj =
+                                i   j
+                                        =
+                                                   j          i
+                                                                  .   (7)                                  kT
+                            c                          c                                            κTj =      = 1 − ϵTj ,                (11)
+                                                                                                            kj
+   The time differences can be computed either by a passive                    where κTj and ϵTj are the multiplicative, respectively, the addi-
+tag when the anchors transmit simultaneously their messages                    tive relative clock frequency offsets. The DW3000 chipset
+or by the anchors (or a central entity) when an active tag trans-              estimates ϵTj (expressed in ppm), which we use to correct the
+mits a broadcast message which is received by all anchors.                     processing time2 :
+We will, respectively, call the two methods downlink (DL)
+and uplink (UL) TDOA.                                                                                 1Tjcorr = 1Tj (1 − ϵTj ).                       (12)
+   To avoid synchronizing the anchors, we use a DL TDOA
+variant with reference and responding anchors previously                       C. LOCALIZATION ALGORITHMS
+used in [10], [11], [15], [16] The scheme is illustrated in                    So far, we have discussed the basic principles to obtain the
+Fig. 1b. Anchor A0 is the initiator and transmits a broadcast                  ranges or the range differences between the anchors and
+message, received by the tag at time T0 . Anchors A1 to                        the tag. In order to estimate the user’s location, we need
+AN receive the message and then wait a period 1Ti which                        to solve a system of equations based on Eq. (1) and (5).
+includes the processing time and a delay necessary to avoid                    We implemented two localization algorithms, each capable
+overlapping transmissions from successive anchors. The tag                     of operating with either TWR or TDOA data, each suiting
+receives the responses at times T1 to TN .                                     different needs.
+   For the general case in which Ai is the initiator and Aj is                    The first algorithm, AlgMin, solves the localization prob-
+the responder, let us denote by 1Tij ≜ Tj − Ti the difference                  lem for a series of consecutive measurements using squared
+between the time at which the tag receives the response (Tj )                  error minimization. This algorithm does not track the user’s
+and the time at which the tag receives the request (Ti ). In order             location nor does it smooth the location estimates, and it is
+to obtain only the TDOA from Eq. (7), we need to subtract the                  therefore suitable to evaluate the impact of several parameters
+processing time 1Tj and the TOF between anchors Ai and Aj                      (e.g., the number of responses or anchors) on the localization
+(denoted by tij ) from the timestamp difference 1Tij :                         accuracy.
+                                                                                  The second algorithm, AlgEKF, solves the localization
+                 t̃TAi Aj = Tj − Ti − 1Tj − tij ,                     (8)      problem using an EKF, by incrementally updating the
+                                                                               location with each additional available measurement. This
+where t̃TAi Aj is the estimated TDOA between the tag and the                   approach is advantageous because we do not need to wait for
+anchors Ai and Aj . The TOF tij is usually known because the                   the minimum number of measurements (four in the case of
+anchors are placed at fixed, known locations.                                  TWR localization and five for TDOA localization) in order
+   Because 1Tj is measured by Aj but subtracted from the                       to update the tag’s location. However, it smooths the loca-
+timestamp difference 1Tij measured by the tag, the TDOA                        tion estimates and hides the impact of noisy measurements.
+will contain an error due to the relative clock skew between                   Therefore, we use it only when we compare several setups
+anchor Aj and the tag. Because in TDOA localization multiple                   that generate a different number of equations per time slot in
+anchors respond to the same synchronization message, the                       Section V-C.
+processing times are longer for this scheme than in TWR                           Both algorithms start with the known anchor positions
+localization. It is therefore crucial to correct the relative clock            XA1 , X⃗A2 , . . . , X⃗AN and estimate the tag’s location X⃗ˆ T . In our
+                                                                               ⃗
+skew errors in TDOA localization [15]. To eliminate the                        experiments, the anchors’ positions are determined using a
+errors, we leverage the capability of the DW3000 chipset                       self-localization algorithm, which is a variant of AlgEKF
+to estimate the carrier frequency offset (CFO) between the                     using TWR measurements between each pair of anchors, run
+local receiver and the remote transmitter [26]. The interval                   over a period of several minutes. The locations of the anchors
+measured by the tag will contain an error due to the tag                       are determined once, at the beginning of the experiments, and
+running at a different frequency from an ‘‘ideal’’ nominal                     kept fixed thereafter.
+frequency [13]:
+                                                                                  2 The conventions for the additive clock offset are opposite for
+
+               1T̂ij = kT 1Tij = (1 − eT )1Tij ,                      (9)      the DW1000 and DW3000 chipsets. For the DW1000 chipset, which uses
+                                                                               the conventions from [26], if the additive clock offset is positive, then the
+                                                                               receiver’s clock is running at a faster rate than the transmitter clock [34],
+where kT is the multiplicative and eT the additive error of the                while for DW3000 the reverse is true [35]. In this paper, we used the
+tag’s clock. Similarly, the processing time measured by the                    conventions for the DW3000 chipset.
+
+28614                                                                                                                                       VOLUME 11, 2023
+G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+1) AlgMin                                                                         We choose Qk , the uncertainty in the model, large enough
+We use least square error minimization between the measured                       to cover the motion of the tag. In IV-B, we detail the choice
+and the calculated distances. Therefore, for the TWR mea-                         of values for the covariance matrices using in the EKF. The
+surements:                                                                        choice of using a static model was deliberate, in order to eval-
+                                                                                  uate the raw performance of our UWB localization method.
+                                                                                  In a real system, any knowledge about the actual movement
+                  X⃗ˆ T = arg min
+                                  X                2
+                                    dX⃗ X⃗A − d̃TAi ,                  (13)       of the tag can be input into f to improve the accuracy of the
+                                X⃗   i
+                                              i
+                                                                                  system.
+where dX⃗ X⃗A is the calculated Euclidean distance between                           The function h and the vector z depend on the type of
+              i
+the 3D locations X⃗ and X⃗Ai and d̃TAi is the TWR measured                        measurement performed. In the case of TWR:
+distance between the tag T and anchor Ai (Fig. 1).                                                            d            
+   For TDOA measurements, the equivalent minimization                                                   d̃TAi        X⃗k X⃗Ai
+                                                                                                      d̃TA  =  dX⃗k X⃗Aj  .              (16)
+                                                                                                                              
+problem is as follows:                                                                                      j
+                                                                                                         ...          ...
+      X⃗ˆ T = arg min
+                      X                              2
+                         dX⃗ X⃗A − dX⃗ X⃗A − d̃TAi Aj , (14)
+                                                                                                      | {z } | {z }
+                                                                                                          zk
+                   X⃗     i,j
+                                j         i                                                                             hk
+
+                                                                                     In the case of TDOA:
+where d̃TAi Aj = c · t̃TAi Aj and t̃TAi Aj is the TDOA measurement
+                                                                                                             d                       
+performed by the tag T while listening to the two-way com-                                                       X⃗k X⃗Aj − dX⃗k X⃗Ai
+                                                                                               
+                                                                                                 d̃TAi1 Aj1              1            1
+munication between nodes Ai and Aj (Fig. 1b). The TDOA                                         d̃TA A  = 
+                                                                                                     i2 j2    dX⃗k X⃗A − dX⃗k X⃗A  .         (17)
+                                                                                                                        j2          i2
+measurement t̃TAi Aj is computed using Eq. (8), where tij is                                        ...                    ...
+obtained from the payload of the packets transmitted by the                                    | {z } |                    {z          }
+anchors.                                                                                            zk                       hk
+   The algorithm needs a good initialization to avoid converg-                       In both cases, we use the classical prediction and update
+ing to a local minimum of the function that is optimized [36].                    steps of the EKF filter to compute the tag’s current position
+In practice, we first initialize the algorithm using the starting                 X⃗k , starting from the tag’s previous position estimate X⃗k−1
+position of the tag and for subsequent initializations we use                     and the new measurements:
+the position of the tag estimated by AlgMin in the previous
+iteration.                                                                                       X⃗′ k = X⃗k−1                                 (18)
+                                                                                                 P′ k = Pk−1 + Qk
+2) AlgEKF
+                                                                                                  Kk = P′ k HkT (Hk P′ k HkT + Rk )−1
+The location of the moving tag is computed iteratively using
+an EKF. Again, we implemented two filters one for the TWR                                         X⃗k = X⃗′ k + Kk (zk − hk (X⃗′ k ))
+and one for the TDOA. In both cases, the state of the filter                                      Pk = (I − Kk Hk )P′ k ,                      (19)
+is constituted by the position of the tag. The EKF assumes
+a system that can be described by the following general                           where Pk is the covariance matrix quantifying the uncertainty
+equations:                                                                        in our estimation and Hk is the Jacobian of the function h.
+                                                                                  The rest of the notations are defined above. Compared to the
+                       X⃗k = f (X⃗k−1 , Uk ) + wk                                 general EKF case for a system of equations, ours is simpler
+                        zk = hk (X⃗k ) + vk ,                          (15)       given that f is the identity function and its Jacobian is the unit
+                                                                                  matrix I .
+where:                                                                               The EKF update step can be done with a single measure-
+  • X ⃗k is the position of the tag estimated at moment k;                        ment at a time (zk is a single distance) or with multiple
+  • f (X⃗k−1 , Uk ) is the motion model for the tag dependent                     measurements at a time. To minimize the latency, we update
+     on input command Uk and previous state;                                      the tag’s position with every incoming measurement.
+  • wk is Gaussian noise N (0, Qk ) due to the uncertainty in                        For the self-localization of the anchors, we use AlgEKF
+     the motion model, where Qk is the covariance matrix of                       with TWR measurements. The algorithm works similarly to
+     the motion model;                                                            the tag’s localization, with the following differences: (1) the
+  • zk is the vector of measurements (either TWR or                               state variable X⃗k contains the 3D location of all anchors,
+     TDOA);                                                                       (2) we use a much smaller covariance Qk to account for
+  • hk (⃗x ) is a function that computes the expected value of                    the fact that the anchors are fixed, and (3) we perform an
+     the measurements given the state (position) X⃗ of the tag;                   update using multiple ranges at a time (instead of updating
+  • vk ∼ N (0, Rk ) is Gaussian noise modeling the uncer-                         the location for every incoming measurement). For simplicity,
+     tainty in the measurements, where Rk is the covariance                       we align the resulted coordinate frame such that anchor A0 has
+     matrix quantifying the uncertainty in our measurements.                      the location (0, 0, 0), anchor A1 is on the Oy axis, anchor
+  In our case, we do not assume a known motion model,                             A2 is located in the Oxy plane with a positive x, and A3 has
+so f (X⃗k−1 , Uk ) = X⃗k−1 , corresponding to a static tag.                       a negative z coordinate.
+
+VOLUME 11, 2023                                                                                                                               28615
+                                                                     G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+                                                                              FIGURE 3. Localization packet format used by the anchors and the tag.
+
+
+FIGURE 2. TDMA schedule used for both TDOA and TWR localization. Each         the TDMA parameters are decided by the system administra-
+slot in a frame belongs to a node which is the initiator in that slot and     tor and can be changed at runtime: M, K , the slot assignment,
+decides which K nodes to interrogate (depending on the current scheme).
+                                                                              the list of nodes that are allowed to be interrogated (for exam-
+D. SCHEDULING                                                                 ple, to avoid the interrogation of a passive tag). To change the
+                                                                              parameters, the system administrator connects via USB to any
+In the ‘‘classic’’ TDOA approach, there is a single desig-
+                                                                              of the nodes, uploads the new configuration into the node,
+nated reference anchor which broadcasts the synchronization
+                                                                              and requests the node to broadcast it. The node broadcasts
+message. The rest of the anchors respond to the broadcast
+                                                                              the information using a special packet format. All the nodes
+in a predefined order. Instead, we propose, implement, and
+                                                                              that hear the new configuration will rebroadcast it for several
+evaluate a flexible TDOA scheduling scheme in which all the
+                                                                              seconds. In a real system, we could envision an algorithm that
+anchors in the system can play the role of the initiator and the
+                                                                              makes the decisions instead of the administrator.
+order of responses can also change.
+                                                                                 All localization messages exchanged by the anchors or
+   We propose and implement a time-division multiple access
+                                                                              the tag have the format shown in Fig. 3. It consists of: the
+(TDMA), scheme shown in Fig. 2, which can be configured
+                                                                              message type (request or response), the source ID, the list
+for either TWR or TDOA localization. At this point, we do not
+                                                                              of interrogated anchors (in case of a request), and a payload
+differentiate between anchors and tags and instead consider
+                                                                              in which the sender can include a previously-acquired TWR
+all of them equally-participating nodes. The distinction will
+                                                                              measurement. Each packet contains the current slot ID, which
+be made according to the implemented localization method.
+                                                                              is a 32-bit counter incremented continuously. This counter
+   The TDMA scheme is organized in time slots, which are
+                                                                              is used by the nodes to determine the current slot in the
+comprised of a broadcast message sent by an initiating node,
+                                                                              frame (modulo M) and to stay synchronized with the TDMA
+which we will call a request, and K responses from other
+                                                                              schedule.
+nodes, where K < N and N is the number of nodes in
+                                                                                 In the current implementation, the node IDs, K , and M are
+the system. Each response will provide a TWR measurement
+                                                                              8-bit packet fields and variables, which implies a maximum
+between the initiator node and the responding node and a
+                                                                              of 256 devices and 255 slots in a frame. A larger network can
+TDOA measurement for each of the other nodes listening to
+                                                                              be accommodated by choosing larger packet fields. At the
+the exchange. Inside a time slot, each transmission by a node
+                                                                              moment, a slot can only be assigned to one node. For a
+occurs in a subslot with duration tsubslot . At the beginning of
+                                                                              network spread over a larger area, this should be changed
+a time slot there is a guard time, followed by the request of
+                                                                              so that nodes that are sufficiently far apart (i.e., not in radio
+the initiating node. The request includes the number of nodes
+                                                                              range) can reuse the same slot.
+that will respond, their ID, and the order of their response. All
+                                                                                 To configure the TDMA scheme to perform TWR localiza-
+the listening nodes in the system process the request. If the
+                                                                              tion, the tag will be set as initiator in all slots and the anchors
+initiator requested a response from the listening node in the
+                                                                              will be the responders. In one time slot with K responses,
+subslot with index k ∈ {1, . . . , K }, the node will wait a period
+                                                                              the tag obtains K raw distance measurements which are
+of (k − 1) × tsubslot and then answer. During the last part of a
+                                                                              input to the multilateration system to estimate the tag’s
+time slot, the initiator processes the responses.
+                                                                              location.
+   The time slots are organized in frames (Fig. 2). Each frame
+                                                                                 To perform DL TDOA localization, only the anchors will
+contains M time slots, each of them assigned to one of the
+                                                                              be initiators, interrogating other anchors, while the tag will be
+nodes (anchors or tags). For instance, if slot i is assigned
+                                                                              a passive listener. Depending on how we choose the initiators
+to node j, then, in all frames, node j will be the initiator in
+                                                                              and the responders, we can derive four variants of TDOA
+slot i, and will decide which K nodes to interrogate based
+                                                                              localization:
+on the currently-selected scheme. More than one slot can be
+assigned to the same node and there may be nodes that have                       •   Fixed initiator, fixed responders (FI-FR), or the ‘‘clas-
+no slot assigned (e.g., a tag that is passively listening and only                   sic’’ TDOA, with a designated reference anchor (or
+using TDOA measurements for localization).                                           initiator), where the other anchors in the system respond
+   The network starts with the default programmed param-                             in a fixed order according to their index. In this case,
+eters. The nodes first listen for a few seconds before trans-                        all slots in a frame are assigned to a single anchor (the
+mitting. From any received message, they can determine the                           initiator). In every slot, the initiator interrogates the same
+current slot and synchronize with the TDMA schedule. All                             list of (responding) anchors.
+
+28616                                                                                                                                      VOLUME 11, 2023
+G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+   • Fixed initiator, changing responders (FI-CR) with a des-
+     ignated reference anchor, where the responding anchors
+     change in a round-robin (RR) manner. In this case, in the
+     first slot, the initiator will pick K anchors to interrogate
+     (from the allowed list), in the next slot the next K , and
+     so on, wrapping around.
+   • Changing initiator, fixed responders (CI-FR), in which
+     the initiator changes every time slot in a RR manner and
+     the rest of the anchors respond in a (fixed) ascending
+     order of their index. In this case, there are multiple
+     initiators (anchors that have slots assigned) and each of
+     them interrogate the same fixed list of responders.
+   • Changing initiator, changing responders (CI-CR),
+                                                                                  FIGURE 4. Custom build UWB Node: a completed hardware and software
+     in which both the initiator and the responder order                          UWB node which is battery powered and capable to expose ranging
+     change every time slot in a RR manner. This is the                           information over multiple serial communication interfaces.
+     scheme used in FlexTDOA. Multiple initiators interro-
+     gate K other nodes at a time from the pool of allowed
+     responders.                                                                     The power management is implemented using an
+   We note that the TDMA scheme also allows the anchors                           MCP73830 IC, which is a 1 A Single-Cell Li-Ion battery
+to localize themselves. The initiator measures the dis-                           charge management controller. This allows easy charging
+tance between itself and each responder (other anchors)                           over the USB port. The MCU and the radio are powered
+using TWR. These distances are then transmitted as piggy-                         through a 500 mA LDO voltage regulator, NCV8705.
+back payloads of future messages (requests or responses)
+of the initiator. As a result, simply by listening to the                         B. SYSTEM SETTINGS
+message exchanges, the localization engine can compute                            We configured the UWB transceiver to operate on channel 5
+the location of each anchor in the local coordinate sys-                          (6.5 GHz) with a preamble length of 128 symbols, a 6.8 Mb/s
+tem using the self-localization algorithm described in                            data rate, and a pulse repetition frequency of 64 MHz.
+Section III-C.                                                                       The duration of one time slot in the TDMA scheme shown
+                                                                                  in Fig. 2 is computed as:
+IV. EVALUATION SYSTEM                                                                                req       req            resp      resp
+In this section, we present the localization system used to                         tTS = tguard + tsubslot + tprocess + K · tsubslot + tprocess (20)
+evaluate the TWR and TDOA algorithms. In Section IV-A,
+                                                                                  where:
+we describe the hardware used; in Section IV-B, we present
+the settings used for the UWB radio, scheduling algorithm,                           • tguard = 250 µs is the guard time at the beginning of the
+
+and EKF. In Section IV-C, we describe the environment in                               time slot necessary to wait for the responders to go into
+which we acquired the measurements and the placement of                                the receive mode;
+                                                                                        req
+the anchors.                                                                         • tsubslot = 2000 µs is the period it takes the initiator to
+                                                                                       send a request;
+                                                                                        req
+A. HARDWARE                                                                          • tprocess = 250 µs is the period during which the initiator
+For the experimental evaluation, we designed and fabricated                            enters the receive mode and the responders process the
+our own UWB node, shown in Fig. 4. We used the Qorvo                                   request message;
+DWM3000 wireless transceiver [13], which implements the                              • K is the number of responses;
+                                                                                        resp
+IEEE 802.15.4 standard [37].                                                         • tsubslot = 250 µs is the duration of one response in a
+   At the core of the UWB node is an Arm Cortex-M4                                     subslot;
+                                                                                        resp
+based STM32F429ZIT6 microcontroller with 2 MB of Flash                               • tprocess = K · 600 µs is the time allocated for the initiator
+memory, 256 KB of SRAM memory and a frequency of                                       to process the responses.
+168 MHz [38]. All the ranging and scheduling algorithms                              The subslots have different durations for sending a syn-
+are running on the on-board MCU and the ranging results                           chronization beacon or a response because of additional time
+are transmitted over an USB 2.0 port. However, the board                          needed to prepare request message sent it over UWB radio
+can be configured to transmit the information over any other                      and send measurement data over serial port. Table 1 shows
+interface, like I2 C, SPI or UART. The entire software stack                      the duration of one time slot for each number of responders.
+was written in-house.                                                                For both EKF filters (based on TWR and TDOA mea-
+   The UWB node is powered by a single Li-ion rechargeable                        surements) we chose a variance of the model uncertainty of
+battery with a capacity of 6Wh, providing over 15h of auton-                      σQ2 = 100 cm2 , which accounts for the motion of the tag
+omy. This allowed us to easily place the nodes independently                      between measurements and assumes a maximum speed of
+of available power sources.                                                       the tag of 10 cm/s. We chose a variance of σR2 = 10 cm2 for
+
+VOLUME 11, 2023                                                                                                                                28617
+                                                               G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+TABLE 1. Duration of one time slot (tTS ) for each number of               In all of the experiments, we precisely align the actuator
+responders K .
+                                                                        with the local coordinate system using a laser rangefinder and
+                                                                        a laser level.
+
+                                                                        V. EVALUATION OF SYSTEM PARAMETERS
+                                                                        In this section, we evaluate the impact of several factors on
+                                                                        the localization accuracy: the order of response of an anchor,
+                                                                        the number of responses in a time slot for the maximum
+                                                                        update rate of the localization system and for lower update
+                                                                        rates, and the number of anchors available. We evaluate
+                                                                        these parameters for localization algorithms that use distance
+                                                                        measurements (obtained using TWR), which we call ‘‘TWR
+                                                                        localization,’’ and for the proposed FlexTDOA system, called
+                                                                        simply ‘‘TDOA localization.’’ The goal of the comparison
+                                                                        between TWR and TDOA localization is to evaluate the
+                                                                        impact of system parameters of both distance and TDOA
+                                                                        measurements.
+                                                                           Unless explicitly mentioned, we use the AlgMin algorithm
+                                                                        described in Section III-C to estimate the user’s location.
+                                                                        The localization error is computed as the Euclidean distance
+FIGURE 5. Office setup.                                                 between the 3D GT location and the estimated location:
+                                                                                          q
+                                                                                    e = (x − x̂)2 + (y − ŷ)2 + (z − ẑ)2 ,       (21)
+the measurement noise, which was based on the measurement               where (x, y, z) and (x̂, ŷ, ẑ) are the Cartesian coordinates of
+noise we obtained during experiments.                                   the GT, respectively, the estimated location.
+   For the EKF filter used for the self-localization of the                We use boxplots to illustrate the error distributions. In a
+anchors, we used σQ2 = 1 cm2 because the anchors are static.            boxplot, such as the ones in Fig. 8, the box is drawn from
+The location of the anchors is determined once, at the begin-           the first to the third quartiles (or, respectively, the 25th and
+ning of the experiments and kept fixed thereafter.                      the 75th percentiles), which is also known as the interquartile
+                                                                        range (IQR). Boxplots drawn for samples that can take nega-
+C. ENVIRONMENT AND ANCHOR PLACEMENT                                     tive and positive values (e.g., the distance and TDOA errors)
+We evaluate the localization systems in the office shown                have whiskers that extend from the 5th to the 95th percentiles.
+in Fig. 5. The 3D anchor placement is shown more clearly                For strictly positive errors (for instance, the localization errors
+in Fig. 6. Five of the anchors (A0 to A3 and A9 ) are fixed             which are computed as the Euclidean distance between the
+on the ceiling using metallic bars, while the rest of the               estimated and the ground truth locations), the whiskers extend
+anchors are either placed on the ground (A4 ) or on tables              from the 0th to the 95th percentiles. The reasoning is that,
+(A5 to A8 ). The location of the anchors is determined using            when we plot the distribution of absolute errors, we are
+the self-localization algorithm described in Section III-C.             interested in the minimum value of the error. We omit plotting
+We validated the resulting locations using a laser level and            the outliers for simplicity. We will frequently report the 95th
+a laser rangefinder, both with mm-level precision.                      percentile, which we will alternatively call the 95% error (or
+   To accurately measure the ground truth (GT) of the tag,              P95 ) for short, which represents the value below which 95%
+we have built a custom electronic linear actuator shown in              of the errors are found.
+Fig. 7. We used a 140 cm-long aluminum rail, a stepper motor,
+a timing belt, an aluminum trolley carrying the tag, and a              A. ORDER OF RESPONSE
+driver connected via USB to the computer. The speed of                  First, we investigate how the TWR or TDOA measurement
+actuator is 10 cm/s and the positioning resolution is 0.1 mm.           error changes depending on the order of the response in a time
+   The actuator continuously sends the current position over            slot. In Section III-B, we mentioned that it is important to
+the USB serial port. To measure the GT of the node in                   correct the processing times to account for the relative clock
+our positioning system, we placed the actuator at a known               skew between a transmitter and a receiver. With a longer time
+location relative to the anchor A0 , which is the origin of the         period elapsed between the initiator’s request and an anchor’s
+coordinate system. Unless stated, the actuator moves only               response, the error in a TWR or a TDOA measurement will
+along the x axis of the coordinate system, between the x axis           increase because the additive relative clock offset ϵTj will
+coordinates of approx. (110, 270) cm, as shown in Fig. 6.               be multiplied by a longer processing time 1Tj in Eq. (12).
+We have two experiments in which the actuator is placed in a            Although we compensate for these errors using CFO estima-
+3D orientation.                                                         tion, the correction is imperfect. Therefore, we expect to see
+
+28618                                                                                                                                VOLUME 11, 2023
+G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+                  FIGURE 6. Setup of the anchors and the tag in the (a) xy and (b) xz planes. The anchors are denoted by A0 to A9 .
+                  We evaluate the localization accuracy at four positions of the linear actuator, along which the tag moves, denoted by P1
+                  to P4.
+
+
+
+
+                                                                                  both the initiating anchor and the responding nodes rotate
+                                                                                  every timeslot in a RR manner (CI-CR scheduling). We run
+                                                                                  each experiment for 3 min and compute the TWR and TDOA
+                                                                                  errors for each possible index of response.
+                                                                                     Fig. 8 shows the TWR and TDOA error distributions for
+                                                                                  each order of response. Table 2 shows the statistics of the
+                                                                                  errors in the first and last response: the mean, standard devi-
+                                                                                  ation (σ ), IQR, and whisker spread (P95 − P5 ). The whisker
+                                                                                  spread of TDOA errors increases with 14.7 cm between the
+                                                                                  last and the first in the list of responses. TWR errors are
+                                                                                  less affected by the order of response than TDOA errors: the
+                                                                                  whisker spread of TWR errors increases with only 4.1 cm
+                                                                                  between the last and first order of response. The results are
+                                                                                  in line with the theory: with a longer waiting time between
+                                                                                  the initiator’s message and the response, the error due to
+                                                                                  the relative clock skew increases and the measurements are
+FIGURE 7. Ground truth linear actuator: An aluminum trolley that carries          corrupted by noise. Over many measurements, the mean
+the tag and returns over USB the position of the tag relatively to the zero       error remains small, in absolute terms, regardless of order
+point of the actuator.
+                                                                                  of response. What increases significantly is the noise in each
+                                                                                  measurement. This suggests that, for a relatively static tag,
+                                                                                  a larger number of responses and averaging would increase
+larger TWR and TDOA errors for higher response indexes in                         the accuracy (since it uses the time more efficiently), while for
+a time slot.                                                                      a fast moving tag, where averaging is not possible without a
+   To evaluate the magnitude of the errors, we perform an                         motion model, a smaller number of responses would perform
+experiment in which the tag is kept unmoved, in order to                          better. We further explore this trade-off in Section V-C.
+avoid any accuracy loss due to the movement of the tag.
+We configure the system to compute either the distance (using                      B. NUMBER OF RESPONSES
+TWR) between each anchor and the tag or the TDOA between                          Since the TWR and TDOA measurement error increases with
+the tag and each pair of anchors. We use the maximum                              the order of response in the time slot, we investigate to what
+number of anchors (N = 10) and of responses (K = 9 for                            extent the localization accuracy changes with the number
+TDOA and K = 10 for TWR). To compute the distances,                               of responses in a time slot. In schemes with a fixed order
+the tag is always the initiator and the anchors respond to its                    of responses (FI-FR and CI-FR), the number of responding
+broadcast. The order in which the anchors respond changes                         anchors is given by the number of anchors in the system (so
+every time slot using round-robin (RR) scheduling. To com-                        that all anchors can participate in the localization process).
+pute the TDOA, the tag only listens to the messages and                           In schemes with a changing order of response, however,
+
+VOLUME 11, 2023                                                                                                                              28619
+                                                                       G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+        FIGURE 8. The distribution of (a) TWR and (b) TDOA errors (expressed in cm using the speed of light) against the order of response
+        aggregated over all anchors.
+
+
+
+
+        FIGURE 9. Localization error of TWR and TDOA localization depending on the number of responses in a slot. The error increases for more
+        responses due to the longer period between the first and the last response, which increases the effect of clock drift estimation error.
+
+
+
+
+TABLE 2. Statistics of raw measurement errors in the first and last (9th )      localization. The 95% TDOA localization error has a slightly
+response: mean, standard deviation (σ ), IQR, and difference between the
+                                                                                larger increase than the IQR with nine vs. one responses,
+95th (P95 ) and 5th (P5 ) percentiles.
+                                                                                of 5.2 cm.
+                                                                                   The results seem counter-intuitive: more responses in a
+                                                                                slot yield more measurements per unit of time, which should
+                                                                                decrease the error. This is not the case because of several
+                                                                                reasons. (1) Even in the worst case (one response in a slot), the
+                                                                                system generates about 300 measurements per second. This
+                                                                                is enough to approach the maximum theoretical performance
+                                                                                given the relatively slow speed of the tag of 10 cm/s. So, for
+                                                                                a slow tag, we get a better performance with few precise
+                                                                                measurements than with many noisy measurements. (2) Even
+we can decrease the number of responses to be smaller than                      with a lower number of responses in a slot, all anchors remain
+the number of anchors in the system and still have all the                      engaged as initiators and pick their responders round-robin
+anchors participate, only in different time slots.                              from all other anchors, thus preserving the diversity. We fur-
+   For this evaluation, we keep the same setup as in Section V-                 ther investigate the effect of K , under additional constraints,
+A, so using N = 10 anchors, but we vary the number of                           in the next section.
+responses K ∈ {1, . . . , 9} and let the tag move on the trolley.
+   Fig. 9 shows the localization error of TWR and TDOA                          C. NUMBER OF RESPONSES FOR DIFFERENT TAG SPEEDS
+localization with a varying number of responses. As expected,                   Although using only one response per time slot yields the
+the localization error is the smallest for the minimum number                   smallest error spread, this configuration has at least two
+of responses. However, the increase in the mean and IQR of                      disadvantages. First, over a fixed time period, the num-
+the localization error with a higher number of responses is                     ber of TDOA measurements decreases with the number of
+almost negligible: less than 3 cm between the maximum and                       responses per time slot, because of the overhead added by
+the minimum number of responses for both TDOA and TWR                           the initiator’s request. This trend is illustrated in Fig. 10,
+
+28620                                                                                                                                        VOLUME 11, 2023
+G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+                                                                                  location for every incoming measurement. We prefer using
+                                                                                  the AlgEKF over the AlgMin because the latter needs a
+                                                                                  minimum of four TDOA equations for one location update.
+                                                                                  If that were the case, would have to update each experiment
+                                                                                  at different rates, which can bias the results.
+                                                                                  1) SAME TRANSMISSION TIME
+                                                                                  We first evaluate how the 3D localization error changes
+                                                                                  when the total transmission time (TTX ) is constant and the
+FIGURE 10. (a) The number of TWR/TDOA measurements (Nmeas )                       number of responses varies. In all three experiments, dur-
+obtained per second vs. the number of responses (K ) in a slot and (b) the
+ratio between Nmeas and the number of messages (Nmsg ) obtained per               ing each repetition period, we have approximately 10.0 ms
+second vs. K .                                                                    of transmission time (1 slot with 9 responses, 2 slots
+                                                                                  with 4 responses, or 3 slots with 1 response). The rest
+                                                                                  is idle time. Given our tag’s speed of 10 cm/s and the
+which shows the number of distance or TDOA measurements                           repetition period of 20 ms, 0.5 s, and 1.0 s, we essen-
+(Nmeas ) obtained per second for K ∈ 1, . . . , 9 responses. With                 tially simulate tag speeds of 20 cm/s, 5 m/s, and 10 m/s,
+K = 9, the number of measurements per second is approx.                           respectively.
+3× larger than with K = 1. Second, because of the same                               Fig. 12 shows the error distributions for all combinations
+reason, the energy consumed by the tag to receive a certain                       of number of responses and number of TDOA measurements
+number of TDOAs increases as the number of responses                              per repetition period ((K , Nmeas )) and for all repetition peri-
+decreases. We can compute the ratio between the number                            ods (Trep ). When Trep is the lowest, the highest localization
+of measurements and the number of exchanged messages                              accuracy is obtained for the minimum number of responses,
+(Nmsg ) over the same time period, which is an indicator of the                   K = 1, as in Section V-B. However, as Trep increases, so does
+efficiency of the tag. This ratio (denoted by Rm ) is illustrated                 the average localization error for K = 1. At Trep = 1 s, for
+in Fig. 10b. With K = 4, the efficiency is 1.6× higher than                       K = 1, the mean error is 10 cm/s higher and the spread is
+with K = 1, but the slope declines as K increases.                                almost double compared to K = 9.
+   In a real system, the system administrator will face the                          The error is so high for K = 1 because the number of
+question of choosing K to optimize the location accuracy                          TDOAs obtained every second is lower than the minimum
+under the specific conditions: available power to the system,                     number of TDOAs needed to obtain a location. Because the
+available air time for transmissions, and maximum speed                           EKF updates the tag’s location for every incoming mea-
+of the tag. To give an insight on the trade-offs involved,                        surement, we do not need to wait for the minimum num-
+we evaluate how the 3D localization error changes with K                          ber of TDOAs. However, the location estimate suffers as a
+when we keep constant over the same time period either the                        result.
+total transmission time (TTX ) or the number of exchanged                            It is interesting to note that, for Trep = 0.5 s, the localiza-
+messages (Nmsg ).                                                                 tion error is lower for K = 4 and Nmeas = 8 than for K =
+   Additionally, to measure the effect on errors of a tag that                    Nmeas = 9. This means that one extra TDOA cannot com-
+is moving faster than our ground truth trolley, we deliber-                       pensate for the higher clock drift errors of K = 9 responses.
+ately slow down our system by introducing some idle time.                         However, at Trep = 1 s the update rate becomes low enough
+To achieve all this, we group one or more time slots plus                         such that the mean 3D error is approximately equal for K =
+some the necessary idle time in a frame which has a fixed                         4 and K = 9. In this case, the error spread is actually smaller
+length. We call this the repetition period (Fig. 11). In our                      for the highest number of responses. Therefore, at a high tag
+experiments, it takes the values Trep ∈ {0.02, 0.5, 1} s.                         speed (low update rate), it is preferable to use a high number
+By increasing the repetition period with additional idle time,                    of responses.
+we simulate the scenario in which the tag is listening for                        2) SAME NUMBER OF MESSAGES
+localization messages at a lower rate or, equivalently, the
+                                                                                  We consider that the energy consumed by the tag is propor-
+situation in which the tag is moving at a higher speed.
+                                                                                  tional to the number of received messages3 denoted by Nmsg .
+   In both experiments, we used N = 10 anchors and varied
+                                                                                  Therefore, we want to find out which configuration is optimal
+the number of responses K ∈ {1, 4, 9}. We therefore want
+                                                                                  for a fixed number of messages (or energy consumption).
+to find the repetition time (or tag speed) for which more
+                                                                                  Note that, although the number of messages is fixed, the
+TDOA measurements compensate for the clock drift error
+incurred by a higher number of responses either when we                              3 Although the transmission time T
+                                                                                                                          TX is higher for the ‘‘Same Nmsg ’’
+have a fixed time budget (TTX ) or a fixed energy budget                          configuration than for the others in Fig. 11, the transmission time also
+(Nmsg ). We consider that the number of received messages                         includes the time during which the responding anchors process the initiator’s
+is proportional to the energy consumed by the tag.                                request and the guard time between the anchors’ responses. Because this
+                                                                                  time is known, we put the tag in the idle mode between the reception of two
+   For the evaluation, we perform the localization using the                      successive responses, such that the time during which the tag is in the receive
+AlgEKF algorithm from Section III-C, which updates the                            mode is shorter than TTX .
+
+VOLUME 11, 2023                                                                                                                                           28621
+                                                                       G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+               FIGURE 11. To evaluate the optimal K under various simulated situations (time constraints, energy constraints, and tag
+               speed), we create localization frames of fixed duration Trep , containing NTS time slots and the required idle time. Each
+               time slot contains one request and K responses. We do two experiments: (1) we vary NTS and K while keeping the total air
+               time (TTX = NTS · tTS ) constant, thus simulating time constraints, and (2) we vary NTS and K but we keep the total number
+               of messages exchanged (Nmsg = NTS · (K + 1)) constant, thus simulating energy constraints. In both cases, we vary the idle
+               time to simulate a tag moving at various speeds.
+
+
+
+
+                                                                                TABLE 4. Setup for experiments with the same number of messages
+                                                                                (Nmsg ).
+
+
+
+
+FIGURE 12. Error distributions for the same TX time (TTX ). By increasing
+Trep , we simulate a higher speed of the tag.
+
+
+TABLE 3. Setup for experiments with approximately the same
+transmission time (TTX ).
+
+
+
+
+                                                                                FIGURE 13. Error distributions for the same number of transmitted
+                                                                                messages (Nmsg ).
+
+
+number of TDOAs that can be extracted from these messages
+increases with the number of responses in one time slot.                        mean and 8 cm in the spread for K = 9 compared to K = 1.
+   We keep the number of messages (Nmsg ) fixed during each                     However, at Trep = 1.0 s, the mean localization error is 10 cm
+repetition period and we vary the repetition time as in the                     lower and the IQR twice as small for K = 9 compared
+previous experiment. Fig. 13 shows the error distributions                      to K = 1. Therefore, it is preferable to use the maximum
+for a fixed number of exchanged messages. Similar to the                        number of responses in most cases.
+previous case, for a high update rate, K = 1 is the optimal
+number of responses. However, as Trep increases, it is more                     D. NUMBER OF ANCHORS
+beneficial to have more TDOAs than to minimize the clock                        During the previous experiments, we kept the highest number
+drift error. At Trep = 0.5 s, the mean error and the error                      of anchors available (N = 10). However, depending on the
+spread in all three configurations are approximately equal.                     deployment, it might be unfeasible to have that many anchors
+Beyond this Trep value, it pays off to maximize the number                      available in the tracking area. Therefore, we evaluate the 3D
+of responses per time slot.                                                     localization error (computed as in Eq. (21)) when varying the
+   In a real deployment, the number of responses cannot                         number of anchors participating in the localization between
+be adjusted based on each user’s needs, since the mobile                        5 and 10.
+devices are passive and the localization system may not even                       As illustrated in the anchor setup from Fig. 6, the first four
+be aware of their presence. Therefore, we should aim to                         anchors (which are used in the smallest configuration) are
+find the optimal number of responses that covers a wide                         placed close the ceiling and the fifth anchor on the ground,
+range of user movement patterns, update rates, and accuracy                     to ensure enough spread on the z axis. The first four anchors
+constraints. Based on our data, we suggest that using up to                     are placed on the perimeter of the tracking area and the fifth
+K = 9 responses is preferable to using the minimum number                       anchor approximately in its center. For the configurations
+of responses for several reasons. First, at the maximum rate,                   with more anchors, we add one anchor in the order of its index
+the decrease in the localization accuracy is only 3 cm in the                   (e.g., the setup with 6 anchors uses the anchors A0 to A5 ).
+
+28622                                                                                                                                        VOLUME 11, 2023
+G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+        FIGURE 14. The 3D localization error of range-based localization depending on the number of devices.
+
+
+
+
+In order to eliminate the influence of the number of responses                    VI. COMPARISON OF LOCALIZATION METHODS
+on the localization error, we set the number of responses to                      In this section, we compare the localization accuracy of the
+K = 4 (which is the minimum number of responses for the                           considered localization methods. In Section VI-A, we first
+minimum number of anchors N = 5).                                                 compare the four variants of TDOA localization presented in
+   Fig. 14 shows the 3D localization error for TWR and                            Section III-D: FI-FR (or the classic TDOA), FI-CR, CI-FR,
+TDOA localization when varying the number of anchors.                             and CI-CR (or FlexTDOA). The goal is to evaluate the
+The general trend is that the localization error decreases for                    improvement brought by changing only the initiator, only the
+more anchors. However, the decrease is much smaller for                           list of responders, or both. In Section VI-B, we compare only
+TWR than for TDOA localization. For TDOA localization,                            the classic TDOA, FlexTDOA, and TWR localization in a
+the mean localization error with 10 anchors is 1.7 cm smaller                     NLOS scenario. Throughout this section, we use the AlgMin
+than with 5 anchors, while the 95% error decreases with                           algorithm to estimate the user’s location.
+2.1 cm. For TWR localization, the gains in the localization
+accuracy are even smaller.                                                        A. FIXED VS. CHANGING INITIATOR AND/OR RESPONSE
+   There is an anomaly in TDOA localization, in which the                         ORDER
+errors are the highest for N = 6 anchors, and not for the                         In the classic (FI-FR) TDOA scheme, there is a designated
+minimum number of anchors, as one would expect. These                             reference anchor (analogous to our initiator) which broad-
+errors are caused by the unfavorable geometry of this con-                        casts a message. All the anchors in the system respond in a
+figuration, since anchors A4 and A5 are placed quite close                        predefined order with a certain time delay in order to avoid
+to each other. This configuration results in large localization                   overlapping answers at the receiver. This approach is not ideal
+errors when the tag is furthest away from these anchors.                          because it does not fully exploit the channel diversity of all
+We also noticed that TDOA localization is more sensitive                          anchor pairs. Moreover, if the tag does not have a good link to
+to a poor anchor placement than TWR localization. This                            the reference anchor, all the measured TDOAs will be biased
+means that the deployment should be done according to                             or noisy.
+a simulation of the expected localization errors for differ-                         As we mentioned in Section III-D, we can derive three
+ent configurations. Strategies for optimal anchor placement                       other TDOA schemes from the classic approach (denoted
+are outside the scope of the paper, but we refer the reader                       by FI-FR): with a fixed initiator but changing the order
+to [22], [39] for analyses of sensor placement in TDOA                            in which anchors respond (FI-CR), changing the initiating
+localization.                                                                     anchor every time slot but keeping the order of the responding
+   The improvement brought by using more anchors might                            anchors fixed (CI-FR), and changing both the initiator and the
+seem modest, since we could perhaps expect the localization                       order of responses every time slot (CI-CR, implemented in
+accuracy to improve more dramatically with more anchors.                          FlexTDOA). In the FI schemes, anchor A1 will be the initiator.
+However, the improvement is bounded by the accuracy of the                        The FI-FR experiences the lowest and CI-CR the highest
+technology, which is reflected in the distance/TDOA errors                        channel diversity. Therefore, we expect these schemes to have
+from Fig. 8. Since the measurements for different numbers                         the worst and, respectively, the best localization accuracy,
+of anchors were acquired in ideal conditions, i.e., with LOS                      assuming that all anchors have equally good propagation
+between each pair of nodes, adding more devices cannot                            conditions to the tag. However, in case the link between some
+improve the localization accuracy beyond the capabilities of                      anchors and the tag leads to higher errors, the CI-CR will be at
+the technology itself. However, having more anchors than                          a disadvantage because those anchors can become initiators
+the minimum necessary is more beneficial in challenging                           and corrupt all the TDOAs in one time slot.
+conditions, where part of the nodes are in NLOS with each                            In this part, we evaluate to what extent the chan-
+other. We will evaluate this scenario in Section VI-B.                            nel diversity improves the localization accuracy in LOS
+
+VOLUME 11, 2023                                                                                                                             28623
+                                                                         G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+                                                                                  TABLE 5. Median (P50 ) and 95th percentile (P95 ) of the 3D localization
+                                                                                  error for all combinations of changing/fixed initiators and order of
+                                                                                  responses. The errors are presented for the positions P1, P2, and P3,
+                                                                                  shown in Fig. 6.
+
+
+
+
+FIGURE 15. Comparison between FI-FR (classic TDOA), FI-CR, CI-FR, and
+CI-CR (FlexTDOA) in LOS at location P1.
+
+
+
+
+conditions. We evaluate the localization errors for (N , K ) ∈
+{(5, 4), (7, 6), (10, 9)}4 at three positions of the rail on which
+the tag moves, denoted by P1, P2, and P3 in Fig. 6. Position
+P1 is in the center of the room, parallel to the XY plane, where
+we should have the highest accuracy. Position P2 and P3 are
+inclined relative to the XY plane, so that we can evaluate the
+errors at multiple tag heights.
+   Each experiment, i.e., for each location, for every method
+and for each (N , K ) combination, lasts one minute and a
+half, which gives us approx. 7000 location estimates obtained
+with AlgMin. When aggregating the measurements over the
+3 locations of the rail, we obtain approx. 21,000 location
+estimates in LOS for each method and (N , K ) combination.
+                                                                                  FIGURE 16. Distributions of the localization errors of classic TDOA (FI-FR)
+The number of actual TDOA measurements in each experi-                            and FlexTDOA (CI-CR), in LOS, aggregated over all the evaluated positions
+ment depends on the (N , K ) configuration; for instance, for                     (P1, P2, P3).
+(N , K ) = (10, 9), we obtain approx. 80,000 TDOAs in one
+run of the experiment.
+   Fig. 15 compares the four TDOA variants at location
+P1. The FI schemes have the highest localization errors for
+five and seven anchors, but the lowest for ten anchors. One
+explanation for the reverse trend in the case of ten anchors is
+the fact that, in this case, some of the anchors on the ground or
+on the tables will become initiators and they do not have ideal
+propagation conditions to all other anchors. Therefore, in this
+scenario, the localization errors will be slightly higher for                     FIGURE 17. Photos of the setups used to obtain NLOS measurements.
+the CI schemes than for the FI schemes, where the initiating                      The setup in Fig. 17a, which corresponds to the actuator position P1 from
+                                                                                  Fig. 6, includes one aluminum panel placed as an obstruction between
+anchor is placed at an ideal location.                                            anchor A1 and the tag. The setup in Fig. 17a, which corresponds to the
+   We observe that changing the order of responders does not                      actuator position P4 from Fig. 6, includes two aluminum panels placed as
+                                                                                  obstructions. The rightmost aluminum panel blocks the LOS between the
+bring a significant improvement to the localization accuracy.                     tag and A1 and partially A5 . The leftmost aluminum panel blocks A0 and
+Instead, the initiator plays a crucial role in the localization                   A9 . There is significant interference due to multipath propagation for A4 ,
+                                                                                  A7 and A8 .
+process because all the TDOAs in a time slot are computed
+with respect to its time frame. Any error in timestamping
+the initiator’s message at the tag will affect all the TDOAs
+in that time slot. For this reason, from now on, we will                          locations: P1, P2, and P3. Fig. 16 shows the distributions
+consider only the FI-FR and CI-CR schemes, which we will                          of the localization errors for the same methods, aggregated
+alternatively call the classic TDOA and FlexTDOA, respec-                         over all considered locations. In LOS, where the channel
+tively. FlexTDOA is our proposed method for improving                             between all anchors and the tag should be ‘‘ideal’’ (i.e., with-
+TDOA localization.                                                                out obstructions), the FlexTDOA yields a similar or slightly
+   Table 5 shows the localization errors of the classic TDOA                      better accuracy compared to the classic TDOA.
+(FI-FR) and FlexTDOA (CI-CR) at the three considered
+                                                                                  B. NLOS PROPAGATION
+  4 In each case, K = N − 1 so that, even for a fixed order of responses, all     Obstacles between the nodes of a localization system are
+anchors get to participate in the localization process.                           common in real-life scenarios. In this part, we evaluate
+
+28624                                                                                                                                          VOLUME 11, 2023
+G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+TABLE 6. Median (P50 ) and 95th percentile (P95 ) of the 3D localization
+error in the FI-CR and CI-CR TDOA schemes, in NLOS, in positions P1 and
+P4 (from Fig. 6), using the obstructions shown in Fig. 17a and Fig. 17b,
+respectively.
+
+
+
+
+                                                                                  FIGURE 18. Distributions of localization errors in NLOS using TWR, classic
+                                                                                  TDOA (FI-FR), and FlexTDOA (CI-CR), aggregated over both NLOS scenarios
+                                                                                  (at location P1, with one obstruction, and at location P4, with two
+                                                                                  obstructions).
+
+
+
+the NLOS performance of the three localization approaches
+considered so far: based on TWR, the classic TDOA, and                            diversity to improve the robustness of the location estimate if
+FlexTDOA.                                                                         the initiating anchor is obstructed.
+   We performed measurements at two positions of the rail on                         Even though TWR-based localization provides the most
+which the tag moves. The positions are denoted by P1 and P4                       accurate location estimates, it scales poorly with the increas-
+in Fig. 6. At P1, we placed a panel covered in aluminum foil                      ing number of tags. For N = 9 anchors, the minimum dura-
+between the anchor A1 and the tag, shown in Fig. 17a. At P4,                      tion of a time slot needed to obtain measurements between all
+we placed two such panels, shown in Fig. 17b. The panel on                        anchors and the tag is approx. 10 ms (see Table 3). Therefore,
+the left can obstruct multiple anchors depending on the tag’s                     with TWR, at most 100 tags could be localized per second.
+position on the actuator. The panel on the right obstructs the                    In fact, the number of tags would likely be smaller given
+direct path to anchor A1 at all times.                                            that such a scheme would need a multiple access protocol to
+   We perform the experiments for N ∈ {5, 7, 10} anchors.                         synchronize their access to the channel. TDOA-based local-
+For TDOA localization, we use K = N − 1 responses. For                            ization, on the other hand, can scale to an unlimited num-
+TWR, we use K = N responses. For each algorithm and                               ber of tags. Using the same example, each tag could obtain
+each (N , K ) combination, we have approx. 14,000 location                        100 measurements per second independent of the number of
+estimates in NLOS (7,000 at each position of the rail).                           tags in the area.
+   At the moment, we do not implement any NLOS mitigation
+procedure and we take into account all the measurements.                          VII. CONCLUSION
+   Table 6 shows the median and the 95th percentile (P95 )                        In this paper, we presented a new flexible TDMA scheduling
+3D localization errors of each method at the positions P1 and                     scheme for TDOA localization that fully exploits the channel
+P4. Fig. 18 shows the distribution of 3D localization errors                      diversity in the environment. We compared FlexTDOA, the
+aggregated over both locations. FlexTDOA achieves lower                           proposed method, against the classic TDOA implementation
+errors than the classic TDOA in all NLOS scenarios. With                          with a fixed reference anchor and responder list and against
+five anchors, FlexTDOA has only a modest improvement of                           range-based localization in a deployment of up to ten anchors
+5 cm to 7 cm in the median and P95 errors compared to the                         and one tag in an office environment.
+classic TDOA. However, the improvement is more evident                               FlexTDOA achieves lower localization errors than the clas-
+for seven and ten anchors, where FlexTDOA reduces the P95                         sic TDOA in most scenarios, with and without obstructions.
+error by 19% and 38%, respectively, compared to the classic                       In LOS, the improvement in the median accuracy brought by
+TDOA.                                                                             FlexTDOA compared to the classic TDOA is modest (2 cm to
+   As expected, TWR has the smallest errors in all scenarios.                     3 cm) because the initiator in the classic TDOA already has a
+This happens because, in TWR-based localization, an obsta-                        good link to the tag. However, the robustness brought by the
+cle placed between an anchor and the tag introduces an error                      increased diversity is evident in NLOS. In NLOS, FlexTDOA
+only in the distance between them. Therefore, the bias in the                     reduces 95th percentile of the localization error with up to
+location estimate using TWR can be reduced if the rest of the                     38% compared to the classic TDOA. Overall, FlexTDOA
+distance measurements have small errors.                                          achieves a median localization error of 13 cm to 17 cm in
+   On the other hand, in TDOA localization, if the obstacle                       LOS and 15 cm to 22 cm when one or more anchors are in
+is between the initiating anchor and the tag, it incurs an                        NLOS with the tag (the error depends on how many anchors
+error in all the TDOAs from that time slot. This is where                         are used).
+FlexTDOA is more advantageous than the classic TDOA:                                 While TWR localization yields the highest accuracy
+by changing the initiating anchor, we ensure enough channel                       among all methods, it has poor scalability with a growing
+
+VOLUME 11, 2023                                                                                                                                      28625
+                                                                              G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+number of anchors and responders. In contrast, FlexTDOA                                [17] J. Tiemann, F. Eckermann, and C. Wietfeld, ‘‘ATLAS—An open-source
+can scale to an unlimited number of tags.                                                   TDOA-based ultra-wideband localization system,’’ in Proc. Int. Conf.
+                                                                                            Indoor Positioning Indoor Navigat. (IPIN), Oct. 2016, pp. 1–6.
+   In the future, we will scale up the proposed system to a                            [18] J. Tiemann and C. Wietfeld, ‘‘Scalable and precise multi-UAV indoor
+multi-room or building environment. This will require sev-                                  navigation using TDOA-based UWB localization,’’ in Proc. Int. Conf.
+eral issues to be addressed: pairs of anchors that are not in                               Indoor Positioning Indoor Navigat. (IPIN), Sep. 2017, pp. 1–7.
+                                                                                       [19] J. Tiemann, Y. Elmasry, L. Koring, and C. Wietfeld, ‘‘ATLAS FaST: Fast
+communication range, system calibration (self-localization)                                 and simple scheduled TDOA for reliable ultra-wideband localization,’’ in
+for the sparsely connected network, and an efficient TDMA                                   Proc. Int. Conf. Robot. Autom. (ICRA), May 2019, pp. 2554–2560.
+scheme which reuses slots for out-of-range nodes.                                      [20] J. Yang, B. Dong, and J. Wang, ‘‘VULoc: Accurate UWB localization for
+                                                                                            countless targets without synchronization,’’ Proc. ACM Interact., Mobile,
+                                                                                            Wearable Ubiquitous Technol., vol. 6, no. 3, pp. 1–25, Sep. 2022.
+ACKNOWLEDGMENT                                                                         [21] D. Vecchia, P. Corbalán, T. Istomin, and G. P. Picco, ‘‘TALLA: Large-scale
+The authors would like to acknowledge the support of NXP                                    TDoA localization with ultra-wideband radios,’’ in Proc. Int. Conf. Indoor
+                                                                                            Positioning Indoor Navigat. (IPIN), Sep. 2019, pp. 1–8.
+Romania for providing valuable insights regarding trends for
+                                                                                       [22] W. Zhao, A. Goudar, and A. P. Schoellig, ‘‘Finding the right place:
+the IoT solutions.                                                                          Sensor placement for UWB time difference of arrival localization in
+                                                                                            cluttered indoor environments,’’ IEEE Robot. Autom. Lett., vol. 7, no. 3,
+                                                                                            pp. 6075–6082, Jul. 2022.
+REFERENCES
+                                                                                       [23] A. Prorok, P. Tomé, and A. Martinoli, ‘‘Accommodation of NLOS for
+ [1] Unleashing the Potential of UWB: Regulatory Considerations, FiRa Con-                  ultra-wideband TDOA localization in single- and multi-robot systems,’’
+     sortium, Beaverton, OR, USA, Aug. 2022.                                                in Proc. Int. Conf. Indoor Positioning Indoor Navigat., Sep. 2011, pp. 1–9.
+ [2] F. Zafari, A. Gkelias, and K. K. Leung, ‘‘A survey of indoor localization         [24] B. Van Herbruggen, J. Fontaine, and E. D. Poorter, ‘‘Anchor pair selection
+     systems and technologies,’’ IEEE Commun. Surveys Tuts., vol. 21, no. 3,                for error correction in time difference of arrival (TDoA) ultra wideband
+     pp. 2568–2599, 3rd Quart., 2017.                                                       (UWB) positioning systems,’’ in Proc. Int. Conf. Indoor Positioning Indoor
+ [3] A. Urruela, J. Sala, and J. Riba, ‘‘Average performance analysis of circular           Navigat. (IPIN), Nov. 2021, pp. 1–8.
+     and hyperbolic geolocation,’’ IEEE Trans. Veh. Technol., vol. 55, no. 1,          [25] B. Teague, Z. Liu, F. Meyer, A. Conti, and M. Z. Win, ‘‘Network localiza-
+     pp. 52–66, Jan. 2006.                                                                  tion and navigation with scalable inference and efficient operation,’’ IEEE
+ [4] M. Ridolfi, A. Kaya, R. Berkvens, M. Weyn, W. Joseph, and E. D. Poorter,               Trans. Mobile Comput., vol. 21, no. 6, pp. 2072–2087, Jun. 2022.
+     ‘‘Self-calibration and collaborative localization for UWB positioning sys-        [26] I. Dotlic, A. Connell, and M. McLaughlin, ‘‘Ranging methods utilizing
+     tems: A survey and future research directions,’’ ACM Comput. Surv.,                    carrier frequency offset estimation,’’ in Proc. 15th Workshop Positioning,
+     vol. 54, no. 4, pp. 1–27, May 2022.                                                    Navigat. Commun. (WPNC), Oct. 2018, pp. 1–6.
+ [5] D. Dardari, A. Conti, U. Ferner, A. Giorgetti, and M. Z. Win, ‘‘Ranging           [27] J. Sidorenko, V. Schatz, N. Scherer-Negenborn, M. Arens, and
+     with ultrawide bandwidth signals in multipath environments,’’ Proc. IEEE,              U. Hugentobler, ‘‘Error corrections for ultrawideband ranging,’’ IEEE
+     vol. 97, no. 2, pp. 404–426, Feb. 2009.                                                Trans. Instrum. Meas., vol. 69, no. 11, pp. 9037–9047, Nov. 2020.
+ [6] F. Gustafsson and F. Gunnarsson, ‘‘Positioning using time-difference of           [28] Z. Ebadi, C. Hannotier, H. Steendam, F. Horlin, and F. Quitin, ‘‘An over-
+     arrival measurements,’’ in Proc. IEEE Int. Conf. Acoust., Speech, Signal               the-air CFO-assisted synchronization algorithm for TDOA-based local-
+     Process. (ICASSP), vol. 6, Apr. 2003, p. 553.                                          ization systems,’’ in Proc. IEEE 92nd Veh. Technol. Conf. (VTC-Fall),
+ [7] L. Santoro, M. Nardello, D. Brunelli, and D. Fontanelli, ‘‘Scale                       Nov. 2020, pp. 1–5.
+     up to infinity: The UWB indoor global positioning system,’’ in                    [29] S. Gezici, Z. Tian, G. B. Giannakis, H. Kobayashi, A. F. Molisch,
+     Proc. IEEE Int. Symp. Robotic Sensors Environ. (ROSE), Oct. 2021,                      H. V. Poor, and Z. Sahinoglu, ‘‘Localization via ultra-wideband radios:
+     pp. 1–8.                                                                               A look at positioning aspects for future sensor networks,’’ IEEE Signal
+ [8] J. Tiemann, F. Eckermann, and C. Wietfeld, ‘‘Multi-user interference and               Process. Mag., vol. 22, no. 4, pp. 70–84, Jul. 2005.
+     wireless clock synchronization in TDOA-based UWB localization,’’ in               [30] M. Z. Win and R. A. Scholtz, ‘‘Ultra-wide bandwidth time-hopping spread-
+     Proc. Int. Conf. Indoor Positioning Indoor Navigat. (IPIN), Oct. 2016,                 spectrum impulse radio for wireless multiple-access communications,’’
+     pp. 1–6.                                                                               IEEE Trans. Commun., vol. 48, no. 4, pp. 679–689, Apr. 2000.
+ [9] J. Friedrich, J. Tiemann, and C. Wietfeld, ‘‘Accurate multi-zone UWB              [31] D. Neirynck, E. Luk, and M. McLaughlin, ‘‘An alternative double-sided
+     TDOA localization utilizing cascaded wireless clock synchronization,’’ in              two-way ranging method,’’ in Proc. 13th Workshop Positioning, Navigat.
+     Proc. Int. Conf. Indoor Positioning Indoor Navigat. (IPIN), Nov. 2021,                 Commun. (WPNC), Oct. 2016, pp. 1–4.
+     pp. 1–8.                                                                          [32] J. Tiemann, J. Friedrich, and C. Wietfeld, ‘‘Experimental evaluation of
+[10] A. Ledergerber, M. Hamer, and R. D’Andrea, ‘‘A robot self-localization                 IEEE 802.15.4z UWB ranging performance under interference,’’ Sensors,
+     system using one-way ultra-wideband communication,’’ in Proc.                          vol. 22, no. 4, p. 1643, Feb. 2022.
+     IEEE/RSJ Int. Conf. Intell. Robots Syst. (IROS), Sep. 2015,                       [33] J. O. Smith and J. S. Abel, ‘‘Closed-form least-squares source location
+     pp. 3131–3137.                                                                         estimation from range-difference measurements,’’ IEEE Trans. Acoust.,
+[11] M. Hamer and R. D’Andrea, ‘‘Self-calibrating ultra-wideband                            Speech, Signal Process., vol. ASSP-35, no. 12, pp. 1661–1669, Dec. 1987.
+     network supporting multi-robot localization,’’ IEEE Access, vol. 6,               [34] DW1000 Device Driver Application Programming Interface (API) Guide:
+     pp. 22292–22304, 2018.                                                                 Using API Functions to Configure and Program the DW1000 Transceiver
+[12] J. Tiemann and C. Wietfeld, ‘‘Scalability, real-time capabilities, and energy          Version 2.7, Decawave, Burlingame, CA, USA, 2021.
+     efficiency in ultra-wideband localization,’’ IEEE Trans. Ind. Informat.,          [35] DW3xxx Device Driver Application Programming Interface (API) Guide:
+     vol. 15, no. 12, pp. 6313–6321, Dec. 2019.                                             Using API Functions to Configure and Program the DW3000 and
+[13] Qorvo. DWM3000 6.5 & 8.0 GHz Ultra-Wideband (UWB) Mod-                                 QM33120 UWB Transceiver Version 2.2, Decawave, Burlingame, CA,
+     ule. Accessed: Nov. 15, 2022. [Online]. Available: https://www.qorvo.                  USA, 2021.
+     com/products/p/DWM3000                                                            [36] F. Gustafsson and F. Gunnarsson, ‘‘Mobile positioning using wireless
+[14] M. Pelka and H. Hellbrück, ‘‘S-TDoA—Sequential time difference of                      networks: Possibilities and fundamental limitations based on available
+     arrival—A scalable and synchronization free approach forl positioning,’’               wireless network measurements,’’ IEEE Signal Process. Mag., vol. 22,
+     in Proc. IEEE Wireless Commun. Netw. Conf., Apr. 2016, pp. 1–6.                        no. 4, pp. 41–53, Jul. 2005.
+[15] B. Großwindhager, M. Stocker, M. Rath, C. A. Boano, and K. Römer,                 [37] IEEE Standard for Low-Rate Wireless Networks, IEEE Standard 802.15.4-
+     ‘‘SnapLoc: An ultra-fast UWB-based indoor localization system for an                   2020 (Revision of IEEE Standard 802.15.4-2015), 2020, pp. 1–800.
+     unlimited number of tags,’’ in Proc. 18th Int. Conf. Inf. Process. Sensor         [38] ST Microelectronics. STM32F429ZI—High-Performance Advanced Line,
+     Netw., Apr. 2019, pp. 61–72.                                                           Arm Cortex-M4 Core With DSP and FPU, 2 Mbytes of Flash Memory, 180
+[16] P. Corbalán, G. P. Picco, and S. Palipana, ‘‘Chorus: UWB concurrent                    MHz CPU, Art Accelerator, ChromART Accelerator, FMC With SDRAM,
+     transmissions for GPS-like passive localization of countless targets,’’ in             TFT. Accessed: Nov. 15, 2022. [Online]. Available: https://www.st.com/
+     Proc. 18th Int. Conf. Inf. Process. Sensor Netw., Apr. 2019, pp. 133–144.              en/microcontrollers-microprocessors/stm32f429zi.html
+
+28626                                                                                                                                                 VOLUME 11, 2023
+G.-C. Pătru et al.: FlexTDOA: Robust and Scalable TDOA Localization Using UWB Devices
+
+
+
+
+[39] J. T. Isaacs, D. J. Klein, and J. P. Hespanha, ‘‘Optimal sensor placement for                            IULIU VASILESCU was born in Tulcea, Romania.
+     time difference of arrival localization,’’ in Proc. 48th IEEE Conf. Decis.                               He received the Ph.D. degree in computer science
+     Control (CDC), 28th Chin. Control Conf., Dec. 2009, pp. 7878–7884.                                       and robotics from the Massachusetts Institute of
+                                                                                                              Technology (MIT), Boston, MA, USA, in 2009.
+                                                                                                              He worked on underwater autonomous robots,
+                                                                                                              underwater optical communications, underwater
+                                                                                                              imaging, and underwater acoustic communication
+                                                                                                              and localization. He pioneered the use of under-
+                                                                                                              water robots in synergy with underwater sensor
+                                                                                                              networks.
+                         GEORGE-CRISTIAN PĂTRU is currently pursu-
+                         ing the Ph.D. degree in the IIoT and robotics
+                         with the Automatic Control and Computer Sci-
+                         ence Faculty, University Politehnica of Bucharest.                                  DRAGOŞ NICULESCU received the Ph.D. degree
+                         He has gained experience over the last four years                                   in computer science from Rutgers University,
+                         in hardware development while working with sev-                                     NJ, USA, in 2004, with a thesis on sensor net-
+                         eral hardware-centric start-ups. In his role as a                                   works routing and positioning. He spent five
+                         technical mentor, he helped them quickly build                                      years as a Researcher with the NEC Laborato-
+                         and scale live prototypes. Such prototypes include                                  ries America. Princeton, NJ, working on the sim-
+                         LoRaWAN-based IIoT sensors, custom-built sen-                                       ulation and implementation of mesh networks,
+sors with high autonomy, the IoT-based monitoring in smart buildings,                                        VoIP, and Wi-Fi-related protocols. He is currently
+specialized wearable devices, autonomous drones, and terrestrial robots.                                     with the University Politehnica of Bucharest teach-
+                                                                                                             ing courses in mobile computing and services
+                                                                                     for mobile networking and also researching mobile protocols, UWB, and
+                                                                                     802.11 networking.
+
+
+
+                                                                                                                DANIEL ROSNER received the Ph.D. degree in
+                                                                                                                computer science and engineering, on assisted
+                         LAURA FLUERATORU received the M.Sc. degree                                             living technologies for ubiquitous health, with
+                         in electrical engineering from ETH Zürich,                                             a focus on IoT devices. He has ample expe-
+                         Switzerland, in 2019. She is currently pursu-                                          rience in developing the IoT and IIoT (Indus-
+                         ing the double Ph.D. degree with the University                                        trial Internet of Things) hardware and software
+                         Politehnica of Bucharest, Romania, and Tampere                                         systems while working with start-ups, aiming to
+                         University, Finland, as a Marie Skłodowska-Curie                                       develop their prototypes or validate their tech-
+                         Fellow in the A-WEAR project. During her stud-                                         nology assumptions. He is an Associate Profes-
+                         ies, she gained experience in both industry and                                        sor with the Automatic Control and Computer
+                         research from internships with EPF Lausanne,                Science Faculty, University Politehnica of Bucharest. His latest research
+                         Schindler Group, and NXP Semiconductors. Her                projects featured IoT infrastructure deployment solutions, energy monitoring
+research interests include indoor localization, ultrawideband technology,            for smart homes, and embedded software solutions for automotive-grade
+wireless and mobile communications, embedded systems, and machine                    microcontrollers.
+learning.
+
+
+
+
+VOLUME 11, 2023                                                                                                                                           28627
+
