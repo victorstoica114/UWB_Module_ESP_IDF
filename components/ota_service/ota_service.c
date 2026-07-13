@@ -49,6 +49,12 @@ enum {
     OTA_SERVICE_STATUS_RESPONSE_SIZE = 16000,
 };
 
+#if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
+#define OTA_SERVICE_HTTPD_TASK_CORE 0
+#else
+#define OTA_SERVICE_HTTPD_TASK_CORE 0
+#endif
+
 #define OTA_SERVICE_TOKEN_HEADER "X-OTA-Token"
 
 static httpd_handle_t s_http_server;
@@ -2261,6 +2267,7 @@ static esp_err_t start_http_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 8192;
+    config.core_id = OTA_SERVICE_HTTPD_TASK_CORE;
     config.max_uri_handlers = 6;
 
     esp_err_t err = httpd_start(&s_http_server, &config);

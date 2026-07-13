@@ -105,17 +105,18 @@ most Wi-Fi and TCP work:
 | `uwb_dw3000` | 1 | Owns DW3000 init, SPI access, RX/TX, ranging, survey, and calibration loops. |
 | `status_led` | 1 | Lightweight GPIO blink task. |
 | `wifi_service` | 0 | Owns Wi-Fi STA connect/reconnect management. |
-| `ota_service` | 0 | Starts authenticated OTA and runtime-config HTTP handling. |
+| `ota_service` / `httpd` | 0 | Starts authenticated OTA, `/status`, and runtime-config HTTP handling. |
 | `bno085` | 0 | Optional BNO085 accelerometer test when enabled. |
 | `bq25792` | 0 | Low-rate charger monitor; uses background I2C access so BNO085 can win bus arbitration. |
 | `wireless_log` | unpinned | Drains the log queue and mirrors logs over TCP; FreeRTOS may run it on either core. |
 | `wireless_tel` | 1 | Drains high-rate telemetry into batched TCP writes. |
 | short-lived reboot tasks | unpinned | Temporary restart helpers after OTA or runtime-config changes. |
 
-ESP-IDF also creates internal Wi-Fi, TCP/IP, event-loop, and HTTP-server tasks.
-Those are managed by the framework. The timing-critical UWB transmit instants
-are still programmed into the DW3000 with delayed TX, so the radio owns the
-sub-microsecond timing rather than the FreeRTOS scheduler.
+ESP-IDF also creates internal Wi-Fi, TCP/IP, and event-loop tasks. The HTTP
+server task is pinned to core 0 so `/status` and runtime config do not share the
+UWB core. The timing-critical UWB transmit instants are still programmed into
+the DW3000 with delayed TX, so the radio owns the sub-microsecond timing rather
+than the FreeRTOS scheduler.
 
 ## PCB Package
 
