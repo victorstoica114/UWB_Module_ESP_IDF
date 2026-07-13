@@ -1667,19 +1667,6 @@ th { color: var(--muted); font-weight: 700; }
           </div>
           <div>
             <div class="section">
-              <h2>Calibration Timing</h2>
-              <div class="form-grid">
-                <label for="uwbCalSummary">Summary every</label>
-                <input id="uwbCalSummary" value="25" type="number" min="1" step="1">
-                <label for="uwbCalMinMs">Slot ms</label>
-                <input id="uwbCalMinMs" value="350" type="number" min="1" step="1">
-                <label for="uwbCalMaxMs">Round gap ms</label>
-                <input id="uwbCalMaxMs" value="200" type="number" min="1" step="1">
-                <label for="uwbCalRxMs">RX slice ms</label>
-                <input id="uwbCalRxMs" value="50" type="number" min="1" step="1">
-              </div>
-            </div>
-            <div class="section">
               <h2>Antenna Delay</h2>
               <div class="form-grid">
                 <label for="uwbAntennaDelayHex">Delay hex</label>
@@ -1758,6 +1745,25 @@ th { color: var(--muted); font-weight: 700; }
                 <button class="primary" id="applyTelemetryPort">Apply Telemetry Port</button>
               </div>
               <div id="telemetryPortToast" class="toast"></div>
+            </div>
+            <div class="section">
+              <h2>Calibration Settings</h2>
+              <div class="form-grid">
+                <label for="uwbCalSummary">Summary every</label>
+                <input id="uwbCalSummary" value="25" type="number" min="1" step="1">
+                <label for="uwbCalMinMs">Slot ms</label>
+                <input id="uwbCalMinMs" value="350" type="number" min="1" step="1">
+                <label for="uwbCalGuardUs">Guard us</label>
+                <input id="uwbCalGuardUs" value="500" type="number" min="1" step="1">
+                <label for="uwbCalMaxMs">Round gap ms</label>
+                <input id="uwbCalMaxMs" value="10" type="number" min="1" step="1">
+                <label for="uwbCalRxMs">RX slice ms</label>
+                <input id="uwbCalRxMs" value="50" type="number" min="1" step="1">
+              </div>
+              <div class="form-actions">
+                <button class="primary" id="applyCalibrationSettings">Apply Calibration Settings</button>
+              </div>
+              <div id="calTimingToast" class="toast"></div>
             </div>
             <div class="section">
               <h2>Antenna Delay Calibration</h2>
@@ -2945,6 +2951,7 @@ function hydrateSettingsFromStatus(item) {
   setSettingIfFresh("uwbDtAutoRxDelayUus", item.runtime_distance_test_auto_rx_delay_uus);
   setSettingIfFresh("uwbCalSummary", item.runtime_calibration_summary_every);
   setSettingIfFresh("uwbCalMinMs", item.runtime_calibration_min_interval_ms);
+  setSettingIfFresh("uwbCalGuardUs", item.runtime_calibration_slot_guard_us);
   setSettingIfFresh("uwbCalMaxMs", item.runtime_calibration_max_interval_ms);
   setSettingIfFresh("uwbCalRxMs", item.runtime_calibration_rx_slice_ms);
   setSettingIfFresh("uwbAntennaDelayHex", item.uwb_configured_antenna_delay_hex || item.uwb_active_antenna_delay_hex);
@@ -3651,10 +3658,12 @@ function calibrationParamsFromForm() {
     mode: "calibration",
     cal_method: method,
     cal_samples: document.getElementById("calSamples").value,
-    cal_summary: document.getElementById("calSamples").value,
+    cal_summary: document.getElementById("uwbCalSummary").value,
     cal_slot_ms: document.getElementById("uwbCalMinMs").value,
+    cal_guard_us: document.getElementById("uwbCalGuardUs").value,
     cal_round_gap_ms: document.getElementById("uwbCalMaxMs").value,
     cal_rx_ms: document.getElementById("uwbCalRxMs").value,
+    dt_rx_timeout_ms: document.getElementById("uwbDtRxTimeoutMs").value,
     reboot: "1",
   };
   if (method === "two") {
@@ -3680,7 +3689,7 @@ function persistedSettingIds() {
     "uwbRangingGapMs", "uwbRangingRxMs", "uwbDtInitiator", "uwbDtResponder",
     "uwbDtIntervalMs", "uwbDtRxTimeoutMs", "uwbDtRespDelayMs",
     "uwbDtFinalDelayMs", "uwbDtReportDelayMs", "uwbDtAutoRxDelayUus",
-    "uwbCalSummary", "uwbCalMinMs", "uwbCalMaxMs", "uwbCalRxMs",
+    "uwbCalSummary", "uwbCalMinMs", "uwbCalGuardUs", "uwbCalMaxMs", "uwbCalRxMs",
     "uwbAntennaDelayHex", "uwbAdvancedReboot",
     "chargerAdcTargets", "chargerLimitTargets", "chargerTimerTargets",
     "chargerRawModule", "chargerShowRawTools", "chargerRawReg", "chargerRawValue",
@@ -3781,6 +3790,18 @@ function wireSettings() {
       }
     }, "telemetryPortToast");
   });
+  document.getElementById("applyCalibrationSettings").addEventListener("click", () => {
+    postConfig({
+      target_modules: document.getElementById("runtimeTargets").value,
+      params: {
+        cal_summary: document.getElementById("uwbCalSummary").value,
+        cal_slot_ms: document.getElementById("uwbCalMinMs").value,
+        cal_guard_us: document.getElementById("uwbCalGuardUs").value,
+        cal_round_gap_ms: document.getElementById("uwbCalMaxMs").value,
+        cal_rx_ms: document.getElementById("uwbCalRxMs").value,
+      }
+    }, "calTimingToast");
+  });
   document.getElementById("applyAccelSample").addEventListener("click", () => {
     const sampleHz = document.getElementById("accelSampleHz").value;
     postConfig({
@@ -3813,6 +3834,7 @@ function wireSettings() {
         dt_auto_rx_delay_uus: document.getElementById("uwbDtAutoRxDelayUus").value,
         cal_summary: document.getElementById("uwbCalSummary").value,
         cal_slot_ms: document.getElementById("uwbCalMinMs").value,
+        cal_guard_us: document.getElementById("uwbCalGuardUs").value,
         cal_round_gap_ms: document.getElementById("uwbCalMaxMs").value,
         cal_rx_ms: document.getElementById("uwbCalRxMs").value,
         reboot: document.getElementById("uwbAdvancedReboot").value,

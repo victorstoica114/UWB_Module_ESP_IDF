@@ -289,6 +289,110 @@ delayed TX. The firmware computes the target timestamp, writes `DX_TIME`, and
 issues `DTX` or `DTX_W4R`. That keeps the timing stable even if FreeRTOS has
 scheduler jitter.
 
+### Calibration Slot Timing
+
+The three-module antenna-delay calibration uses deterministic slots so only one
+ordered pair is expected to talk at a time. For `1,2,3`, one complete round is:
+
+```text
+slot 0: 1 -> 2
+slot 1: 1 -> 3
+slot 2: 2 -> 1
+slot 3: 2 -> 3
+slot 4: 3 -> 1
+slot 5: 3 -> 2
+then wait calibration_round_gap_ms
+round N + 1
+```
+
+The slot length is `calibration_min_interval_ms`. In the lab dashboard this is
+normally `350 ms`. The round gap is `calibration_max_interval_ms`; the dashboard
+labels it `Round gap ms` and defaults it to `10 ms`.
+
+If the coordinator is also the initiator for the current pair, for example
+`1 -> 2`, the slot looks like this:
+
+```text
+t = 0 us
+M1 coordinator/init     M2 responder          M3 listener
+     CAL_SYNC  ------->      receive               receive
+     start timer             start timer           start timer
+          |                       |                     |
+          |<------ guard 500 us ------>|                |
+
+t = 500 us
+     POLL  ------------>      RX POLL
+                              schedule RESP delayed TX
+                              RESP at +20 ms
+     <------------- RESP
+
+     schedule FINAL delayed TX
+     FINAL at +20 ms
+     FINAL ------------>
+                              RX FINAL
+
+     wait 10 ms
+     REPORT ----------->
+                              RX REPORT
+                              calculate distance
+     <------------ REPORT2
+     verify anchor result
+
+t = 350 ms
+all modules exit the slot and reset the calibration timer
+```
+
+If the initiator is a follower, for example `2 -> 3`, the coordinator assigns
+the slot with `CAL_CMD`:
+
+```text
+t = 0 us
+M1 coordinator          M2 initiator          M3 responder
+     CAL_SYNC  ------->      receive               receive
+     start timer             start timer           start timer
+
+t = 500 us
+     CAL_CMD ---------> M2
+     "this slot is 2 -> 3"
+
+M2 waits APP_UWB_CALIBRATION_COMMAND_DELAY_MS
+currently 20 ms
+
+     POLL -------------------------------> M3
+                                            RESP delayed +20 ms
+     <------------------------------- RESP
+
+     FINAL delayed +20 ms ---------------->
+     REPORT after 10 ms ------------------>
+                                            calculate distance
+     <------------------------------ REPORT2
+
+t = 350 ms
+all modules exit the slot and reset the calibration timer
+```
+
+`CAL_SYNC` is sent before every slot. The coordinator starts a dedicated 1 MHz
+ESP GPTimer when the SYNC transmission completes. Followers arm the same timer
+before RX and start it from the DW3000 IRQ when the SYNC frame arrives. The
+first `cal_guard_us` microseconds of the slot are a guard window. The firmware
+default is `APP_UWB_CALIBRATION_SLOT_GUARD_US = 500 us`, and the dashboard can
+change it at runtime without OTA.
+
+This ESP-side timer does not enter the distance formula. It only aligns the
+slot windows so the lab workflow is deterministic. Distance is still calculated
+from DW3000 hardware timestamps with DTU resolution.
+
+SYNC is intentionally not retried inside the same slot. If a follower misses
+SYNC, if the SYNC sequence number jumps, or if the coordinator cannot transmit
+SYNC, firmware logs:
+
+```text
+UWB CAL slot skipped due to sync fail
+```
+
+Dashboard-driven auto calibration treats any sync miss during the collection
+window as invalid and blocks antenna-delay writes.
+
 ### Timestamp Ownership
 
 The easiest way to reason about DS-TWR is to track who knows each timestamp.
@@ -494,109 +598,6 @@ So the system is not trying to turn around instantly. The radio has about half
 a millisecond before RX opens after a TX, and about 20 ms between receiving one
 DS-TWR frame and transmitting the next scheduled DS-TWR frame.
 
-### Calibration Slot Timing
-
-The three-module antenna-delay calibration uses deterministic slots so only one
-ordered pair is expected to talk at a time. For `1,2,3`, one complete round is:
-
-```text
-slot 0: 1 -> 2
-slot 1: 1 -> 3
-slot 2: 2 -> 1
-slot 3: 2 -> 3
-slot 4: 3 -> 1
-slot 5: 3 -> 2
-then wait calibration_round_gap_ms
-round N + 1
-```
-
-The slot length is `calibration_min_interval_ms`. In the lab dashboard this is
-normally `350 ms`. The round gap is `calibration_max_interval_ms`; the dashboard
-labels it `Round gap ms`.
-
-If the coordinator is also the initiator for the current pair, for example
-`1 -> 2`, the slot looks like this:
-
-```text
-t = 0 us
-M1 coordinator/init     M2 responder          M3 listener
-     CAL_SYNC  ------->      receive               receive
-     start timer             start timer           start timer
-          |                       |                     |
-          |<------ guard 500 us ------>|                |
-
-t = 500 us
-     POLL  ------------>      RX POLL
-                              schedule RESP delayed TX
-                              RESP at +20 ms
-     <------------- RESP
-
-     schedule FINAL delayed TX
-     FINAL at +20 ms
-     FINAL ------------>
-                              RX FINAL
-
-     wait 10 ms
-     REPORT ----------->
-                              RX REPORT
-                              calculate distance
-     <------------ REPORT2
-     verify anchor result
-
-t = 350 ms
-all modules exit the slot and reset the calibration timer
-```
-
-If the initiator is a follower, for example `2 -> 3`, the coordinator assigns
-the slot with `CAL_CMD`:
-
-```text
-t = 0 us
-M1 coordinator          M2 initiator          M3 responder
-     CAL_SYNC  ------->      receive               receive
-     start timer             start timer           start timer
-
-t = 500 us
-     CAL_CMD ---------> M2
-     "this slot is 2 -> 3"
-
-M2 waits APP_UWB_CALIBRATION_COMMAND_DELAY_MS
-currently 20 ms
-
-     POLL -------------------------------> M3
-                                            RESP delayed +20 ms
-     <------------------------------- RESP
-
-     FINAL delayed +20 ms ---------------->
-     REPORT after 10 ms ------------------>
-                                            calculate distance
-     <------------------------------ REPORT2
-
-t = 350 ms
-all modules exit the slot and reset the calibration timer
-```
-
-`CAL_SYNC` is sent before every slot. The coordinator starts a dedicated 1 MHz
-ESP GPTimer when the SYNC transmission completes. Followers arm the same timer
-before RX and start it from the DW3000 IRQ when the SYNC frame arrives. The
-first `APP_UWB_CALIBRATION_SLOT_GUARD_US` microseconds of the slot are a guard
-window; the default is `500 us`.
-
-This ESP-side timer does not enter the distance formula. It only aligns the
-slot windows so the lab workflow is deterministic. Distance is still calculated
-from DW3000 hardware timestamps with DTU resolution.
-
-SYNC is intentionally not retried inside the same slot. If a follower misses
-SYNC, if the SYNC sequence number jumps, or if the coordinator cannot transmit
-SYNC, firmware logs:
-
-```text
-UWB CAL slot skipped due to sync fail
-```
-
-Dashboard-driven auto calibration treats any sync miss during the collection
-window as invalid and blocks antenna-delay writes.
-
 ### Antenna Delay
 
 Antenna delay is separate from protocol delays. It is not a sleep, slot, or
@@ -715,7 +716,8 @@ Each measurement slot starts with a short UWB `CAL_SYNC` frame from the
 reference. The reference starts a dedicated 1 MHz ESP GPTimer when that SYNC
 transmission completes; the DUT arms the same timer before RX and starts it from
 the DW3000 IRQ when the SYNC frame arrives. Both sides then wait the fixed
-`APP_UWB_CALIBRATION_SLOT_GUARD_US` guard window before POLL/RESP/FINAL begins.
+`cal_guard_us` guard window before POLL/RESP/FINAL begins. The firmware default
+comes from `APP_UWB_CALIBRATION_SLOT_GUARD_US`, currently `500 us`.
 The DUT logs sample distance, mean, standard deviation, error against the known
 distance, and a first-pass suggested antenna delay. Swap `REFERENCE_ID` and
 `DUT_ID` to calibrate the other board.
@@ -737,10 +739,12 @@ Each slot is `APP_UWB_CALIBRATION_MIN_INTERVAL_MS` long; in the lab this is
 `350 ms`, which is intentionally longer than the complete DS-TWR exchange.
 Before every slot, the coordinator broadcasts a short `CAL_SYNC` frame and all
 participants restart the dedicated 1 MHz calibration timer. The first
-`APP_UWB_CALIBRATION_SLOT_GUARD_US` microseconds of the slot are a guard window
-(`500 us` by default), then the assigned ordered pair performs DS-TWR. Because
-SYNC is repeated before every slot, ESP timer drift can only accumulate inside
-one slot.
+`cal_guard_us` microseconds of the slot are a guard window (`500 us` by
+default), then the assigned ordered pair performs DS-TWR. Because SYNC is
+repeated before every slot, ESP timer drift can only accumulate inside one
+slot. For short slots such as `100 ms`, set `dt_rx_timeout_ms` low enough for
+the experiment; the firmware still attempts the full `POLL`, `RESP`, `FINAL`,
+`REPORT`, and `REPORT2` sequence, so the logs show if the exchange does not fit.
 
 The coordinator waits `APP_UWB_CALIBRATION_SYNC_PREPARE_MS` before each SYNC
 frame (`20 ms` by default). This is not part of the measured slot; it simply
@@ -759,8 +763,10 @@ the collection window marks the run invalid and blocks antenna-delay writes, eve
 if enough diagnostic samples are later collected.
 
 After all six directed pairs are measured, the firmware waits
-`APP_UWB_CALIBRATION_MAX_INTERVAL_MS` before the next round. The dashboard
-labels these as `Slot ms` and `Round gap ms`.
+`APP_UWB_CALIBRATION_MAX_INTERVAL_MS` before the next round. The firmware
+default is `10 ms`; increase it only if short-gap testing shows sync misses or
+radio cleanup problems between rounds. The dashboard labels these as `Slot ms`
+and `Round gap ms`.
 
 The logs contain directed pair statistics such as `1->2`, `2->1`, `1->3`,
 etc. The dashboard keeps these directions separate and solves the antenna-delay
@@ -1153,7 +1159,8 @@ Calibration examples:
 ```sh
 python3 tools/runtime_config.py --target-list tools/ota_targets.local.txt \
   --mode calibration --cal-method three --cal-three 1,2,3 \
-  --cal-d01-mm 2000 --cal-d02-mm 2000 --cal-d12-mm 2828 --reboot
+  --cal-d01-mm 2000 --cal-d02-mm 2000 --cal-d12-mm 2828 \
+  --cal-slot-ms 100 --cal-guard-us 500 --reboot
 
 python3 tools/runtime_config.py --target-list tools/ota_targets.local.txt \
   --mode survey --tag 1 --anchors 2,3,4,5 --coord 1 --reboot

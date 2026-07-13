@@ -457,6 +457,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_calibration_min_interval_ms\":%lu,"
         "\"runtime_calibration_max_interval_ms\":%lu,"
         "\"runtime_calibration_rx_slice_ms\":%lu,"
+        "\"runtime_calibration_slot_guard_us\":%lu,"
         "\"runtime_uwb_enabled\":%s,"
         "\"runtime_bno085_accel_enabled\":%s,"
         "\"runtime_bno085_accel_interval_ms\":%lu,"
@@ -730,6 +731,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)runtime_config->calibration_min_interval_ms,
         (unsigned long)runtime_config->calibration_max_interval_ms,
         (unsigned long)runtime_config->calibration_rx_slice_ms,
+        (unsigned long)runtime_config->calibration_slot_guard_us,
         runtime_config->uwb_enabled ? "true" : "false",
         runtime_config->bno085_accel_enabled ? "true" : "false",
         (unsigned long)runtime_config->bno085_accel_interval_ms,
@@ -1923,6 +1925,8 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         APPLY_U32_PARAM("cal_round_gap_ms", calibration_max_interval_ms);
         APPLY_U32_PARAM("cal_max_ms", calibration_max_interval_ms);
         APPLY_U32_PARAM("cal_rx_ms", calibration_rx_slice_ms);
+        APPLY_U32_PARAM("cal_guard", calibration_slot_guard_us);
+        APPLY_U32_PARAM("cal_guard_us", calibration_slot_guard_us);
         APPLY_BOOL_PARAM("uwb", uwb_enabled);
         APPLY_BOOL_PARAM("bno085", bno085_accel_enabled);
         APPLY_BOOL_PARAM("bno085_accel", bno085_accel_enabled);

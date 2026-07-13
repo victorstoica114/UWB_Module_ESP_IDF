@@ -54,6 +54,7 @@ static const char *TAG = "app_runtime_config";
 #define KEY_CAL_MIN "cal_min"
 #define KEY_CAL_MAX "cal_max"
 #define KEY_CAL_RX "cal_rx"
+#define KEY_CAL_GUARD "cal_guard"
 #define KEY_UWB_ENABLED "uwb_enabled"
 #define KEY_BNO085_ACCEL "bno085_accel"
 #define KEY_BNO085_RATE "bno_rate"
@@ -73,6 +74,11 @@ static bool id_valid(uint8_t id)
 static bool ms_valid(uint32_t value)
 {
     return value > 0 && value <= 60000U;
+}
+
+static bool us_valid(uint32_t value)
+{
+    return value > 0 && value <= 1000000U;
 }
 
 static bool bno085_ms_valid(uint32_t value)
@@ -265,6 +271,7 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->calibration_min_interval_ms = APP_UWB_CALIBRATION_MIN_INTERVAL_MS;
     config->calibration_max_interval_ms = APP_UWB_CALIBRATION_MAX_INTERVAL_MS;
     config->calibration_rx_slice_ms = APP_UWB_CALIBRATION_RX_SLICE_MS;
+    config->calibration_slot_guard_us = APP_UWB_CALIBRATION_SLOT_GUARD_US;
     config->uwb_enabled = APP_UWB_ENABLED != 0;
     config->bno085_accel_enabled = APP_BNO085_ACCEL_ENABLED_DEFAULT != 0;
     config->bno085_accel_interval_ms = APP_BNO085_ACCEL_INTERVAL_MS;
@@ -303,6 +310,7 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         !ms_valid(config->calibration_min_interval_ms) ||
         !ms_valid(config->calibration_max_interval_ms) ||
         !ms_valid(config->calibration_rx_slice_ms) ||
+        !us_valid(config->calibration_slot_guard_us) ||
         !bno085_ms_valid(config->bno085_accel_interval_ms) ||
         !bno085_ms_valid(config->bno085_log_interval_ms) ||
         !radio_channel_valid(config->radio_channel) ||
@@ -433,6 +441,8 @@ static void read_config_from_nvs(app_runtime_config_t *config)
     found |= read_u32(handle, KEY_CAL_MAX,
                       &config->calibration_max_interval_ms);
     found |= read_u32(handle, KEY_CAL_RX, &config->calibration_rx_slice_ms);
+    found |= read_u32(handle, KEY_CAL_GUARD,
+                      &config->calibration_slot_guard_us);
     found |= read_bool(handle, KEY_UWB_ENABLED, &config->uwb_enabled);
     found |= read_bool(handle, KEY_BNO085_ACCEL,
                        &config->bno085_accel_enabled);
@@ -604,6 +614,8 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
                             config->calibration_max_interval_ms));
     WRITE_OR_GOTO(write_u32(handle, KEY_CAL_RX,
                             config->calibration_rx_slice_ms));
+    WRITE_OR_GOTO(write_u32(handle, KEY_CAL_GUARD,
+                            config->calibration_slot_guard_us));
     WRITE_OR_GOTO(write_bool(handle, KEY_UWB_ENABLED, config->uwb_enabled));
     WRITE_OR_GOTO(write_bool(handle, KEY_BNO085_ACCEL,
                              config->bno085_accel_enabled));

@@ -50,6 +50,7 @@ typedef struct {
     uint32_t calibration_min_interval_ms;
     uint32_t calibration_max_interval_ms;
     uint32_t calibration_rx_slice_ms;
+    uint32_t calibration_slot_guard_us;
     bool uwb_enabled;
     bool bno085_accel_enabled;
     uint32_t bno085_accel_interval_ms;

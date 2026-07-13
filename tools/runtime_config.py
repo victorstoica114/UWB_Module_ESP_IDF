@@ -180,6 +180,7 @@ def collect_params(args: argparse.Namespace) -> dict[str, str]:
     add_optional(params, "cal_round_gap_ms", args.cal_round_gap_ms)
     add_optional(params, "cal_max_ms", args.cal_max_ms)
     add_optional(params, "cal_rx_ms", args.cal_rx_ms)
+    add_optional(params, "cal_guard_us", args.cal_guard_us)
 
     for item in args.sets:
         if "=" not in item:
@@ -262,6 +263,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cal-round-gap-ms", dest="cal_round_gap_ms")
     parser.add_argument("--cal-max-ms", dest="cal_max_ms")
     parser.add_argument("--cal-rx-ms", dest="cal_rx_ms")
+    parser.add_argument("--cal-guard-us", dest="cal_guard_us")
     return parser.parse_args()
 
 

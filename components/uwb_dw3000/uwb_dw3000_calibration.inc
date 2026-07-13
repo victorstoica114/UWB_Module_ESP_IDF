@@ -256,12 +256,17 @@ static uint32_t uwb_calibration_slot_us(const app_runtime_config_t *config)
     return config->calibration_min_interval_ms * 1000U;
 }
 
-static uint32_t uwb_calibration_guard_us(uint32_t slot_us)
+static uint32_t uwb_calibration_guard_us(const app_runtime_config_t *config,
+                                         uint32_t slot_us)
 {
-    if (slot_us <= APP_UWB_CALIBRATION_SLOT_GUARD_US) {
+    uint32_t guard_us = APP_UWB_CALIBRATION_SLOT_GUARD_US;
+    if (config != NULL && config->calibration_slot_guard_us > 0) {
+        guard_us = config->calibration_slot_guard_us;
+    }
+    if (slot_us <= guard_us) {
         return slot_us / 2U;
     }
-    return APP_UWB_CALIBRATION_SLOT_GUARD_US;
+    return guard_us;
 }
 
 static uint32_t uwb_calibration_slot_remaining_ms(uint32_t slot_end_us)
@@ -319,6 +324,10 @@ static void uwb_calibration_finish_slot(uint32_t slot_us)
     (void)uwb_calibration_timer_reset();
 }
 
+/*
+ * This delay is outside the measured slot. It gives followers time to finish
+ * slot cleanup and arm RX before the coordinator broadcasts the next CAL_SYNC.
+ */
 static void uwb_calibration_prepare_sync_slot(void)
 {
     if (APP_UWB_CALIBRATION_SYNC_PREPARE_MS > 0) {
@@ -416,11 +425,12 @@ static void uwb_calibration_two_module_loop(void)
 
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
-             "UWB CAL two-module active: source_id=%u reference_id=%u dut_id=%u known=%u mm slot=%u ms delay=0x%04x",
+             "UWB CAL two-module active: source_id=%u reference_id=%u dut_id=%u known=%u mm slot=%u ms guard=%u us delay=0x%04x",
              (unsigned)s_source_id, (unsigned)reference_id,
              (unsigned)dut_id,
              (unsigned)config->calibration_known_distance_mm,
              (unsigned)config->calibration_min_interval_ms,
+             (unsigned)config->calibration_slot_guard_us,
              (unsigned)s_antenna_delay);
 
     if (reference_id == 0 || dut_id == 0 || reference_id == dut_id) {
@@ -438,7 +448,7 @@ static void uwb_calibration_two_module_loop(void)
         while (true) {
             config = app_runtime_config_get();
             const uint32_t slot_us = uwb_calibration_slot_us(config);
-            const uint32_t guard_us = uwb_calibration_guard_us(slot_us);
+            const uint32_t guard_us = uwb_calibration_guard_us(config, slot_us);
             const uint16_t slot_sequence = sequence++;
             uwb_calibration_prepare_sync_slot();
             esp_err_t err = uwb_calibration_send_sync(slot_sequence);
@@ -474,7 +484,7 @@ static void uwb_calibration_two_module_loop(void)
     while (true) {
         config = app_runtime_config_get();
         const uint32_t slot_us = uwb_calibration_slot_us(config);
-        const uint32_t guard_us = uwb_calibration_guard_us(slot_us);
+        const uint32_t guard_us = uwb_calibration_guard_us(config, slot_us);
         uint16_t slot_sequence = 0;
         esp_err_t err =
             uwb_calibration_wait_for_sync(reference_id, &slot_sequence);
@@ -704,8 +714,8 @@ static void uwb_calibration_three_handle_command(
              (unsigned)pair.responder_id,
              (unsigned)APP_UWB_CALIBRATION_COMMAND_DELAY_MS);
     uwb_dw3000_delay_ms(APP_UWB_CALIBRATION_COMMAND_DELAY_MS);
-    const esp_err_t err = uwb_distance_initiate_once(
-        pair.responder_id, frame->sequence, false);
+    const esp_err_t err =
+        uwb_distance_initiate_once(pair.responder_id, frame->sequence, false);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "UWB CAL initiated pair=%u->%u seq=%u failed: %s",
                  (unsigned)pair.initiator_id, (unsigned)pair.responder_id,
@@ -790,10 +800,11 @@ static void uwb_calibration_three_module_loop(void)
 
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
-             "UWB CAL three-module EDM active: source_id=%u ids=[%u,%u,%u] coordinator=%u slot=%u ms round_gap=%u ms rx_slice=%u ms known_edge=%u mm delay=0x%04x",
+             "UWB CAL three-module EDM active: source_id=%u ids=[%u,%u,%u] coordinator=%u slot=%u ms guard=%u us round_gap=%u ms rx_slice=%u ms known_edge=%u mm delay=0x%04x",
              (unsigned)s_source_id, (unsigned)ids[0], (unsigned)ids[1],
              (unsigned)ids[2], (unsigned)coordinator_id,
              (unsigned)config->calibration_min_interval_ms,
+             (unsigned)config->calibration_slot_guard_us,
              (unsigned)config->calibration_max_interval_ms,
              (unsigned)config->calibration_rx_slice_ms,
              (unsigned)config->calibration_known_distance_mm,
@@ -826,7 +837,7 @@ static void uwb_calibration_three_module_loop(void)
         while (true) {
             config = app_runtime_config_get();
             const uint32_t slot_us = uwb_calibration_slot_us(config);
-            const uint32_t guard_us = uwb_calibration_guard_us(slot_us);
+            const uint32_t guard_us = uwb_calibration_guard_us(config, slot_us);
             uint16_t sync_sequence = 0;
             const esp_err_t err =
                 uwb_calibration_wait_for_sync(coordinator_id, &sync_sequence);
@@ -857,9 +868,10 @@ static void uwb_calibration_three_module_loop(void)
     const size_t pair_count = uwb_calibration_three_build_pairs(ids, pairs);
     uint32_t round = 0;
     ESP_LOGI(TAG,
-             "UWB CAL deterministic coordinator active: source_id=%u pair_count=%u slot=%u ms round_gap=%u ms",
+             "UWB CAL deterministic coordinator active: source_id=%u pair_count=%u slot=%u ms guard=%u us round_gap=%u ms",
              (unsigned)s_source_id, (unsigned)pair_count,
              (unsigned)config->calibration_min_interval_ms,
+             (unsigned)config->calibration_slot_guard_us,
              (unsigned)config->calibration_max_interval_ms);
 
     while (true) {
@@ -868,7 +880,7 @@ static void uwb_calibration_three_module_loop(void)
             config = app_runtime_config_get();
             const struct uwb_anchor_survey_pair *pair = &pairs[i];
             const uint32_t slot_us = uwb_calibration_slot_us(config);
-            const uint32_t guard_us = uwb_calibration_guard_us(slot_us);
+            const uint32_t guard_us = uwb_calibration_guard_us(config, slot_us);
             const uint16_t slot_sequence = sequence++;
             uwb_calibration_prepare_sync_slot();
             esp_err_t err = uwb_calibration_send_sync(slot_sequence);
