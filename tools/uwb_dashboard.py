@@ -2826,6 +2826,27 @@ function solve2x2(a00, a01, a10, a11, b0, b1) {
   };
 }
 
+function solveLinearSystem(matrix, rhs) {
+  const n = rhs.length;
+  const a = matrix.map((row, index) => [...row, rhs[index]]);
+  for (let col = 0; col < n; col++) {
+    let pivot = col;
+    for (let row = col + 1; row < n; row++) {
+      if (Math.abs(a[row][col]) > Math.abs(a[pivot][col])) pivot = row;
+    }
+    if (Math.abs(a[pivot][col]) < 1e-10) return null;
+    if (pivot !== col) [a[pivot], a[col]] = [a[col], a[pivot]];
+    const div = a[col][col];
+    for (let j = col; j <= n; j++) a[col][j] /= div;
+    for (let row = 0; row < n; row++) {
+      if (row === col) continue;
+      const factor = a[row][col];
+      for (let j = col; j <= n; j++) a[row][j] -= factor * a[col][j];
+    }
+  }
+  return a.map(row => row[n]);
+}
+
 function trilaterate(anchors, distances) {
   const usable = Object.entries(distances)
     .map(([anchorId, distance]) => [Number(anchorId), anchors[Number(anchorId)], Number(distance)])
@@ -2905,6 +2926,70 @@ function anchorGeometryResiduals(anchors, distanceItems) {
   return residuals;
 }
 
+function refineMeasuredAnchorGeometry(anchorIds, anchors, distanceItems) {
+  const ids = anchorIds.map(Number);
+  const variables = [];
+  for (const id of ids.slice(2)) {
+    if (anchors[id]) {
+      variables.push({id, axis: "x"});
+      variables.push({id, axis: "y"});
+    }
+  }
+  if (!variables.length) return anchors;
+
+  const indexFor = new Map(
+    variables.map((variable, index) => [`${variable.id}:${variable.axis}`, index])
+  );
+  for (let iter = 0; iter < 20; iter++) {
+    const n = variables.length;
+    const normal = Array.from({length: n}, () => Array(n).fill(0));
+    const rhs = Array(n).fill(0);
+    let used = 0;
+
+    for (const item of Object.values(distanceItems || {})) {
+      const a = anchors[Number(item.anchor_a_id)];
+      const b = anchors[Number(item.anchor_b_id)];
+      const measured = Number(item.distance_m);
+      if (!a || !b || !Number.isFinite(measured) || measured <= 0) continue;
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      const predicted = Math.max(1e-6, Math.hypot(dx, dy));
+      const residual = predicted - measured;
+      const gradient = Array(n).fill(0);
+
+      const ax = indexFor.get(`${item.anchor_a_id}:x`);
+      const ay = indexFor.get(`${item.anchor_a_id}:y`);
+      const bx = indexFor.get(`${item.anchor_b_id}:x`);
+      const by = indexFor.get(`${item.anchor_b_id}:y`);
+      if (ax !== undefined) gradient[ax] = dx / predicted;
+      if (ay !== undefined) gradient[ay] = dy / predicted;
+      if (bx !== undefined) gradient[bx] = -dx / predicted;
+      if (by !== undefined) gradient[by] = -dy / predicted;
+
+      for (let r = 0; r < n; r++) {
+        rhs[r] += -gradient[r] * residual;
+        for (let c = 0; c < n; c++) normal[r][c] += gradient[r] * gradient[c];
+      }
+      used++;
+    }
+
+    if (used < variables.length) break;
+    for (let i = 0; i < n; i++) normal[i][i] += 1e-6;
+    const step = solveLinearSystem(normal, rhs);
+    if (!step) break;
+
+    let stepNorm = 0;
+    for (let i = 0; i < variables.length; i++) {
+      const variable = variables[i];
+      const delta = Math.max(-0.25, Math.min(0.25, Number(step[i]) || 0));
+      anchors[variable.id][variable.axis] += delta;
+      stepNorm += delta * delta;
+    }
+    if (Math.sqrt(stepNorm) < 0.0005) break;
+  }
+  return anchors;
+}
+
 function measuredAnchorGeometry(anchorIds, maxAge) {
   const ids = anchorIds.map(Number).filter(id => Number.isInteger(id) && id > 0);
   const distanceItems = {};
@@ -2968,6 +3053,7 @@ function measuredAnchorGeometry(anchorIds, maxAge) {
     }
   }
 
+  refineMeasuredAnchorGeometry(ids, result.anchors, distanceItems);
   result.residuals = anchorGeometryResiduals(result.anchors, distanceItems);
   return result;
 }
