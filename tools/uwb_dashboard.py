@@ -1016,8 +1016,14 @@ button {
   padding: 6px 10px;
   cursor: pointer;
 }
+button:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
 button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
-button.danger { color: var(--red); }
+button.danger { background: var(--red); border-color: var(--red); color: #fff; }
+button.danger:hover:not(:disabled) { background: #a61b15; border-color: #a61b15; }
+button.danger:disabled { background: #f8d7da; border-color: #efb5bc; color: #9f1d1d; }
 .term-body {
   min-height: 0;
   overflow: auto;
@@ -1774,7 +1780,7 @@ th { color: var(--muted); font-weight: 700; }
               <div class="form-actions">
                 <button id="applyCalibration">Start Calibration Only</button>
                 <button class="primary" id="autoCalibration">Auto Calibrate + Apply</button>
-                <button id="cancelCalibration" disabled>Cancel Calibration</button>
+                <button class="danger" id="cancelCalibration" disabled>Cancel Calibration</button>
               </div>
               <div id="calToast" class="toast"></div>
               <div id="calAutoToast" class="toast"></div>
@@ -3634,9 +3640,17 @@ function wireSettings() {
       params,
     }, "chargerRawToast");
   });
-  document.getElementById("applyCalibration").addEventListener("click", () => {
+  document.getElementById("applyCalibration").addEventListener("click", async () => {
     const params = calibrationParamsFromForm();
-    postConfig({target_modules: document.getElementById("calTargets").value, params}, "calToast");
+    const data = await postConfig({
+      target_modules: document.getElementById("calTargets").value,
+      params,
+    }, "calToast");
+    if (apiResponseOk(data)) {
+      calibrationJobId = null;
+      const cancelButton = document.getElementById("cancelCalibration");
+      if (cancelButton) cancelButton.disabled = false;
+    }
   });
   document.getElementById("autoCalibration").addEventListener("click", () => {
     postCalibrationAuto({
@@ -3856,6 +3870,18 @@ class DashboardHttpServer(ThreadingHTTPServer):
         targets = self.resolve_targets(target_modules)
         return [self.send_runtime_config(target, params) for target in targets]
 
+    def stop_all_uwb(
+        self,
+        *,
+        progress: (
+            Callable[[str, dict[str, Any] | None, str | None], None] | None
+        ) = None,
+        summary: str = "stopping all UWB modules...",
+    ) -> list[dict[str, Any]]:
+        if progress is not None:
+            progress(summary, {"target_modules": "all"}, "stopping")
+        return self.apply_runtime_config({"uwb": "0", "reboot": "1"}, "all")
+
     def next_log_id_value(self) -> int:
         with self.state.lock:
             return int(self.state.next_log_id)
@@ -3964,25 +3990,27 @@ class DashboardHttpServer(ThreadingHTTPServer):
         return []
 
     def cancel_calibration_auto(self, job_id: Any = None) -> dict[str, Any]:
+        active_job_id: str | None = None
+        payload: dict[str, Any] = {}
+        running = False
+        state: str | None = None
+        warning: str | None = None
         with self.calibration_job_lock:
             job = self.calibration_job
             if job is None:
-                return {"ok": False, "error": "no calibration job"}
-            if job_id and str(job_id) != str(job.get("job_id")):
-                return {"ok": False, "error": "calibration job not found"}
-            if not job.get("running"):
-                return {
-                    "ok": True,
-                    "summary": "calibration is not running",
-                    "job_id": job.get("job_id"),
-                    "state": job.get("state"),
-                }
-            job["cancel_requested"] = True
-            job["state"] = "cancelling"
-            job["summary"] = "cancelling calibration..."
-            job["updated_sec"] = time.time()
-            payload = dict(job.get("payload") or {})
-            active_job_id = str(job.get("job_id"))
+                warning = "no calibration job; emergency UWB stop still sent"
+            elif job_id and str(job_id) != str(job.get("job_id")):
+                warning = "calibration job not found; emergency UWB stop still sent"
+            else:
+                active_job_id = str(job.get("job_id"))
+                payload = dict(job.get("payload") or {})
+                running = bool(job.get("running"))
+                state = str(job.get("state") or "")
+                if running:
+                    job["cancel_requested"] = True
+                    job["state"] = "cancelling"
+                    job["summary"] = "cancelling calibration..."
+                    job["updated_sec"] = time.time()
 
         try:
             participant_ids = [
@@ -3993,22 +4021,31 @@ class DashboardHttpServer(ThreadingHTTPServer):
         except Exception:
             participant_ids = []
 
-        target_modules: Any = participant_ids if participant_ids else "all"
-        stop_results = self.apply_runtime_config(
-            {"uwb": "0", "reboot": "1"}, target_modules
-        )
+        stop_results = self.stop_all_uwb()
         ok = all(item.get("ok") for item in stop_results)
-        self.update_calibration_job(
-            active_job_id,
-            state="cancelling",
-            summary="cancelling calibration; UWB stop requested",
-            detail={"participants": participant_ids, "stop_results": stop_results},
+        if active_job_id is not None:
+            self.update_calibration_job(
+                active_job_id,
+                state="cancelling" if running else state,
+                summary="cancelling calibration; emergency UWB stop requested",
+                detail={
+                    "participants": participant_ids,
+                    "target_modules": "all",
+                    "stop_results": stop_results,
+                },
+            )
+        summary = (
+            "calibration cancel requested; emergency UWB stop sent"
+            if running
+            else "emergency UWB stop sent"
         )
         return {
             "ok": ok,
             "job_id": active_job_id,
-            "summary": "calibration cancel requested; UWB stop sent",
+            "summary": summary,
             "participants": participant_ids,
+            "target_modules": "all",
+            "warning": warning,
             "results": stop_results,
         }
 
@@ -4313,10 +4350,15 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 )
             excluded_results = self.apply_runtime_config(excluded_params, excluded_ids)
             if not all(item.get("ok") for item in excluded_results):
+                cleanup_results = self.stop_all_uwb(
+                    progress=progress,
+                    summary="excluded module setup failed; stopping all UWB modules...",
+                )
                 return {
                     "ok": False,
                     "summary": "excluded module setup failed",
                     "results": excluded_results,
+                    "cleanup_results": cleanup_results,
                 }
 
         if progress is not None:
@@ -4329,10 +4371,15 @@ class DashboardHttpServer(ThreadingHTTPServer):
             params, setup_targets
         )
         if not all(item.get("ok") for item in config_results):
+            cleanup_results = self.stop_all_uwb(
+                progress=progress,
+                summary="calibration setup failed; stopping all UWB modules...",
+            )
             return {
                 "ok": False,
                 "summary": "calibration setup failed",
                 "results": config_results,
+                "cleanup_results": cleanup_results,
             }
 
         if progress is not None:

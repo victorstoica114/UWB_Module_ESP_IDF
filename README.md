@@ -306,10 +306,14 @@ that a clean calibration can finish one or two directed samples short.
 When dashboard auto calibration finishes, it stops UWB on the calibration
 participants by writing `uwb=0` and rebooting them. Antenna-delay writes made by
 the same job are staged in NVS first, so this final reboot also applies the new
-delay while leaving the DW3000 held in reset.
-The dashboard Cancel Calibration button uses the same stop path and marks the
-running job as cancelled, so a bad geometry entry does not have to wait for the
-collection timeout.
+delay while leaving the DW3000 held in reset. If setup fails before collection
+starts, the dashboard sends the same UWB stop command to all configured modules
+so a partial calibration start cannot leave a transmitter running.
+The dashboard Cancel Calibration button is an emergency stop: it marks the
+running job as cancelled when one exists and always sends `uwb=0` plus reboot to
+all configured modules. This also makes it useful after `Start Calibration Only`,
+which only starts the firmware calibration mode and does not collect, solve, or
+write antenna-delay corrections by itself.
 
 Lab calibration note, 2026-07-11:
 
