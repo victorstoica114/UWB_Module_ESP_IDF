@@ -165,6 +165,8 @@ static esp_err_t app_manager_start_selected_runtime(void)
         return uwb_ranging_service_start();
     case APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY:
         return uwb_anchor_survey_service_start();
+    case APP_RUNTIME_MODE_UWB_DS_TWR_TDOA:
+        return uwb_dw3000_start_ds_twr_tdoa();
     default:
         ESP_LOGE(TAG, "Unsupported application runtime mode: %d",
                  (int)runtime_mode);

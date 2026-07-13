@@ -158,10 +158,13 @@ The expected UWB workflow split is:
    tag-anchor distances for the dashboard.
 5. `APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY`: anchor-to-anchor survey/runtime
    diagnostics in `components/uwb_anchor_survey_service`.
+6. `APP_RUNTIME_MODE_UWB_DS_TWR_TDOA`: experimental DS-TWR-TDOA runtime. Anchors
+   keep running DS-TWR between themselves, while the tag only listens on UWB and
+   sends range-difference observations to the dashboard over Wi-Fi logs.
 
 The beacon smoke mode, distance-test mode, antenna-delay calibration workflows,
-anchor survey, and multi-anchor ranging runtime are implemented for the current
-lab workflow.
+anchor survey, multi-anchor ranging, and experimental DS-TWR-TDOA runtimes are
+implemented for the current lab workflow.
 
 `APP_RUNTIME_MODE` remains the firmware default. The effective runtime mode and
 common test parameters can be overridden at runtime through NVS using the
@@ -249,6 +252,65 @@ matters.
 
 The `dt_*` names come from the older distance-test runtime, but the current
 multi-anchor ranging mode reuses the same DS-TWR implementation.
+
+### DS-TWR-TDOA Runtime
+
+`APP_RUNTIME_MODE_UWB_DS_TWR_TDOA` is the first experimental radio-passive tag
+runtime. The configured anchors run the normal DS-TWR exchange pair-by-pair. The
+tag does not call any UWB TX function in this mode; it only listens to the
+anchor frames and logs one TDOA observation when it has heard `POLL`, `RESP`, and
+`REPORT2` for the same anchor pair and sequence.
+
+The coordinator is the first configured anchor ID. For anchors `2,3,4,5`, one
+round walks all unordered anchor pairs:
+
+```text
+2 -> 3
+2 -> 4
+2 -> 5
+3 -> 4
+3 -> 5
+4 -> 5
+```
+
+For one anchor pair `Ai -> Aj`, the tag hears:
+
+```text
+Ai POLL  -----> Aj
+   \             \
+    \             tag RX timestamp R_poll
+
+Aj RESP  <----- Ai
+   \             \
+    \             tag RX timestamp R_resp
+
+Aj REPORT2 ----> Ai
+                 carries T2, T3, T6 and measured anchor distance Ai-Aj
+```
+
+`REPORT2` already contains the responder-side timestamps and the measured
+anchor-anchor distance. The tag combines that with its local receive timestamps:
+
+```text
+reply_b      = T3 - T2                         // Aj clock
+tof_ij       = distance(Ai, Aj) / c
+rx_delta_tag = R_resp - R_poll                 // tag clock
+
+range_diff_ij = c * (rx_delta_tag - reply_b_corrected - tof_ij)
+              = distance(tag, Aj) - distance(tag, Ai)
+```
+
+The firmware logs:
+
+```text
+UWB_DS_TWR_TDOA obs tag=<tag> initiator=<Ai> responder=<Aj> seq=<seq> diff=<m> m ...
+```
+
+The dashboard `Position` tab can use `DS-TWR-TDOA` as the solver source. It
+takes fresh `diff` observations and solves the tag position on the PC with a
+local least-squares range-difference fit. This is intentionally separate from
+`DS-TWR ranges`, because the blue distance circles only make sense for absolute
+tag-anchor ranges.
 
 ### Time Units
 
@@ -904,10 +966,13 @@ edge, such as M1-M2 while calibrating M4, exceeds this error threshold, the
 dashboard refuses NVS writes even when `Auto apply` is enabled. The lab default
 is `2.00 cm`.
 
-`APP_RUNTIME_MODE_UWB_RANGING` is the current 1-tag/4-anchor runtime. The same
-firmware image runs on all modules; the runtime config selects tag ID and anchor
-IDs, the first anchor ID acts as slot coordinator, and persistent NVS identity
-keeps each module's hostname, module ID, UWB role, and calibrated antenna delay.
+`APP_RUNTIME_MODE_UWB_RANGING` is the current absolute-range 1-tag/4-anchor
+runtime. `APP_RUNTIME_MODE_UWB_DS_TWR_TDOA` is the experimental radio-passive
+tag runtime that reuses anchor-to-anchor DS-TWR frames and solves from
+range-difference observations in the dashboard. The same firmware image runs on
+all modules; the runtime config selects tag ID and anchor IDs, the first anchor
+ID acts as slot coordinator, and persistent NVS identity keeps each module's
+hostname, module ID, UWB role, and calibrated antenna delay.
 
 If `APP_UWB_DW_LEDS_ENABLED` is set, the DW3000 configures GPIO0 as RXOKLED,
 GPIO1 as SFDLED, GPIO2 as RXLED, and GPIO3 as TXLED once during radio init.
