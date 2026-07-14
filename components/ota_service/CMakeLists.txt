@@ -1,7 +1,8 @@
 idf_component_register(SRCS "ota_service.c"
                        INCLUDE_DIRS "include"
                        PRIV_INCLUDE_DIRS "${PROJECT_DIR}"
-                       PRIV_REQUIRES app_update bno085_service charger_service config
+                       PRIV_REQUIRES app_update bno085_service boot_guard
+                                     charger_service config
                                      esp_app_format esp_http_server
                                      esp_partition esp_system freertos gps_service log
                                      max77958_service

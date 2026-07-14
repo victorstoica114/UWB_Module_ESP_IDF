@@ -10,6 +10,7 @@ Current step:
 - verified status LED blink on GPIO42 via `components/app_manager`
 - Wi-Fi STA connection via `components/wifi_service`
 - local HTTP OTA via `components/ota_service`
+- bootloop recovery guard and ESP-IDF OTA rollback via `components/boot_guard`
 - authenticated HTTP runtime configuration via `components/ota_service`
 - DW3000 UWB SPI/reset bring-up and random TX/RX beacon smoke test via `components/uwb_dw3000`
 - DW3000 hardware RXOK/SFD/RX/TX LED blink configured once at radio init
@@ -60,6 +61,7 @@ Project layout:
 main/                         app_main entry point
 components/config/            board, app, and UWB configuration headers
 components/app_manager/       app startup and status LED behavior
+components/boot_guard/        OTA rollback confirmation and bootloop recovery
 components/wifi_service/      Wi-Fi STA connection
 components/ota_service/       local authenticated HTTP OTA
 components/wireless_log_service/  TCP wireless mirror for ESP-IDF logs
@@ -105,6 +107,7 @@ most Wi-Fi and TCP work:
 | --- | --- | --- |
 | `uwb_dw3000` | 1 | Owns DW3000 init, SPI access, RX/TX, ranging, survey, and calibration loops. |
 | `status_led` | 1 | Lightweight GPIO blink task. |
+| `boot_guard` | unpinned | Confirms stable boots after Wi-Fi/OTA are online and holds recovery state across resets. |
 | `wifi_service` | 0 | Owns Wi-Fi STA connect/reconnect management. |
 | `ota_service` / `httpd` | 0 | Starts authenticated OTA, `/status`, and runtime-config HTTP handling. |
 | `bno085` | 0 | Optional BNO085 accelerometer test when enabled. |
@@ -124,6 +127,42 @@ FreeRTOS task notifications when IRQ is enabled, with `vTaskDelay` as the
 fallback path. Calibration slot alignment uses the dedicated 1 MHz ESP GPTimer
 alarm plus a task notification, so the firmware does not busy-loop while waiting
 for the guard window or slot end.
+
+## Boot Recovery
+
+The firmware has two recovery layers so a bad OTA or a crash loop should not
+make a module disappear from Wi-Fi permanently.
+
+| Layer | What it handles | Mechanism |
+| --- | --- | --- |
+| ESP-IDF OTA rollback | A new OTA image crashes or resets before it proves it can boot. | `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` marks a fresh OTA image as `pending_verify`. The app calls `esp_ota_mark_app_valid_cancel_rollback()` only after Wi-Fi and OTA HTTP are online for `APP_BOOT_GUARD_STABLE_DELAY_MS`. If a reset happens first, the bootloader rolls back to the previous valid OTA slot. |
+| Local recovery mode | A valid app, serial-flashed app, or bad runtime config keeps rebooting. | `components/boot_guard` stores a small state record in RTC no-init memory. After `APP_BOOT_GUARD_FAILURE_THRESHOLD` unstable resets, the next boot starts only identity/runtime config, Wi-Fi, wireless log, telemetry, and OTA. UWB, GPS, charger, USB-C PD, and BNO085 are skipped. |
+
+Normal boot order is intentionally conservative: Wi-Fi, wireless log, telemetry,
+and OTA start before UWB or I2C peripherals. Recovery mode uses the same path but
+stops before the risky services and holds the DW3000 in reset.
+
+`/status` exposes the recovery state:
+
+| Field | Meaning |
+| --- | --- |
+| `boot_recovery_mode` | `true` when only the minimal recovery services are running. |
+| `boot_guard_failure_count` | Consecutive unstable resets counted in RTC memory. |
+| `boot_guard_recovery_threshold` | Failure count that latches recovery mode. |
+| `boot_guard_ota_state` | Current OTA state, such as `valid` or `pending_verify`. |
+| `boot_guard_pending_verify` | The running app still needs to be marked valid. |
+| `boot_guard_last_reset_reason_name` | Last reset reason reported by ESP-IDF. |
+
+Recovery can be cleared after uploading a known-good firmware or runtime config:
+
+```sh
+curl -X POST -H "X-OTA-Token: <APP_OTA_PASSWORD>" \
+  "http://<module-ip>/config/recovery?clear=1&reboot=1"
+```
+
+Important: rollback lives in the bootloader. OTA updates replace only the app
+partition, so each module needs one full serial flash after enabling rollback.
+After that, future OTA images are protected by the rollback flow.
 
 ## PCB Package
 

@@ -16,6 +16,7 @@
 #include "app_identity.h"
 #include "app_runtime_config.h"
 #include "bno085_service.h"
+#include "boot_guard.h"
 #include "charger_service.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -47,7 +48,7 @@ enum {
     OTA_SERVICE_REBOOT_DELAY_MS = 1200,
     OTA_SERVICE_MAX_TOKEN_LEN = 128,
     OTA_SERVICE_MAX_QUERY_LEN = 768,
-    OTA_SERVICE_STATUS_RESPONSE_SIZE = 22000,
+    OTA_SERVICE_STATUS_RESPONSE_SIZE = 24000,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -461,6 +462,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "POST /config/antenna-delay?clear=1[&reboot=1]\n"
         "POST /config/runtime?mode=ranging&tag=1&anchors=2,3,4,5[&reboot=1]\n"
         "POST /config/runtime?clear=1[&reboot=1]\n"
+        "POST /config/recovery?clear=1[&reboot=1]\n"
         "POST /config/charger?adc=1&adc_sample=2\n"
         "POST /config/charger?charge_current_ma=500&charge_voltage_mv=4200\n"
         "POST /config/charger?fast_charge_timer_enabled=1&fast_charge_timer_hours=12\n"
@@ -547,6 +549,17 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"next_update_partition\":\"%s\","
         "\"ota_in_progress\":%s,"
         "\"ota_auth_configured\":%s,"
+        "\"boot_recovery_mode\":%s,"
+        "\"boot_guard_boot_count\":%lu,"
+        "\"boot_guard_failure_count\":%lu,"
+        "\"boot_guard_recovery_threshold\":%lu,"
+        "\"boot_guard_stable_delay_ms\":%lu,"
+        "\"boot_guard_last_reset_reason\":%u,"
+        "\"boot_guard_last_reset_reason_name\":\"%s\","
+        "\"boot_guard_ota_state\":\"%s\","
+        "\"boot_guard_pending_verify\":%s,"
+        "\"boot_guard_validated\":%s,"
+        "\"boot_guard_rollback_possible\":%s,"
         "\"runtime_config_from_nvs\":%s,"
         "\"runtime_mode\":%u,"
         "\"runtime_mode_name\":\"%s\","
@@ -900,6 +913,17 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         partition_label_or_unknown(boot), partition_label_or_unknown(next),
         s_ota_in_progress ? "true" : "false",
         ota_token_configured() ? "true" : "false",
+        boot_guard_recovery_mode() ? "true" : "false",
+        (unsigned long)boot_guard_boot_count(),
+        (unsigned long)boot_guard_failure_count(),
+        (unsigned long)boot_guard_recovery_threshold(),
+        (unsigned long)boot_guard_stable_delay_ms(),
+        (unsigned)boot_guard_last_reset_reason(),
+        boot_guard_last_reset_reason_name(),
+        boot_guard_ota_state_name(boot_guard_running_ota_state()),
+        boot_guard_new_app_pending_verify() ? "true" : "false",
+        boot_guard_new_app_validated() ? "true" : "false",
+        boot_guard_rollback_possible() ? "true" : "false",
         runtime_config->from_nvs ? "true" : "false",
         (unsigned)runtime_config->runtime_mode,
         app_runtime_config_runtime_mode_to_string(
@@ -2766,11 +2790,82 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
     return response_err;
 }
 
+static esp_err_t recovery_config_post_handler(httpd_req_t *req)
+{
+    if (!ota_request_authorized(req)) {
+        ESP_LOGW(TAG, "Rejected recovery config: missing or invalid token");
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED,
+                                   "Missing or invalid OTA token");
+    }
+
+    if (s_ota_in_progress) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "OTA already in progress");
+    }
+
+    const size_t query_len = httpd_req_get_url_query_len(req);
+    if (query_len == 0 || query_len >= OTA_SERVICE_MAX_QUERY_LEN) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Use ?clear=1[&reboot=1]");
+    }
+
+    char query[OTA_SERVICE_MAX_QUERY_LEN] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid query string");
+    }
+
+    const bool clear_requested = ota_query_option_enabled(query, "clear");
+    const bool reboot_requested = ota_query_option_enabled(query, "reboot");
+    if (!clear_requested) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Use ?clear=1[&reboot=1]");
+    }
+
+    const esp_err_t err = boot_guard_clear_recovery();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Recovery clear failed: %s", esp_err_to_name(err));
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Recovery clear failed");
+    }
+
+    char response[320];
+    const int len = snprintf(
+        response, sizeof(response),
+        "{"
+        "\"ok\":true,"
+        "\"cleared\":true,"
+        "\"boot_recovery_mode\":%s,"
+        "\"boot_guard_failure_count\":%lu,"
+        "\"rebooting\":%s"
+        "}\n",
+        boot_guard_recovery_mode() ? "true" : "false",
+        (unsigned long)boot_guard_failure_count(),
+        reboot_requested ? "true" : "false");
+    if (len < 0 || len >= (int)sizeof(response)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "response too long");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    const esp_err_t response_err = httpd_resp_send(req, response, len);
+
+    if (reboot_requested) {
+        s_status = OTA_SERVICE_STATUS_REBOOTING;
+        xTaskCreate(reboot_task, "recovery_reboot",
+                    OTA_SERVICE_RESTART_TASK_STACK_WORDS, NULL,
+                    OTA_SERVICE_RESTART_TASK_PRIORITY, NULL);
+    }
+
+    return response_err;
+}
+
 static void reboot_task(void *arg)
 {
     (void)arg;
 
     vTaskDelay(pdMS_TO_TICKS(OTA_SERVICE_REBOOT_DELAY_MS));
+    (void)boot_guard_mark_stable();
     ESP_LOGI(TAG, "Restarting device");
     esp_restart();
 }
@@ -2926,7 +3021,7 @@ static esp_err_t start_http_server(void)
     config.server_port = 80;
     config.stack_size = 8192;
     config.core_id = OTA_SERVICE_HTTPD_TASK_CORE;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 10;
 
     esp_err_t err = httpd_start(&s_http_server, &config);
     if (err != ESP_OK) {
@@ -2964,6 +3059,12 @@ static esp_err_t start_http_server(void)
         .handler = runtime_config_post_handler,
         .user_ctx = NULL,
     };
+    const httpd_uri_t recovery_config_uri = {
+        .uri = "/config/recovery",
+        .method = HTTP_POST,
+        .handler = recovery_config_post_handler,
+        .user_ctx = NULL,
+    };
     const httpd_uri_t charger_config_uri = {
         .uri = "/config/charger",
         .method = HTTP_POST,
@@ -2989,6 +3090,9 @@ static esp_err_t start_http_server(void)
     }
     if (err == ESP_OK) {
         err = register_uri_handler_checked(&runtime_config_uri);
+    }
+    if (err == ESP_OK) {
+        err = register_uri_handler_checked(&recovery_config_uri);
     }
     if (err == ESP_OK) {
         err = register_uri_handler_checked(&charger_config_uri);

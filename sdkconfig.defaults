@@ -7,6 +7,10 @@ CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_BOOT_INIT=y
 CONFIG_SPIRAM_USE_MALLOC=y
 
+# Keep OTA updates recoverable: a freshly flashed OTA image must prove that it
+# can boot and bring up Wi-Fi/OTA before it is marked valid.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # Start with OTA-capable layout and a SPIFFS data partition.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

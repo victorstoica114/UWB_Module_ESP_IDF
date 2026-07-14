@@ -9,6 +9,7 @@
 #include "app_runtime_config.h"
 #include "bno085_service.h"
 #include "board_config.h"
+#include "boot_guard.h"
 #include "charger_service.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
@@ -34,6 +35,9 @@ static const char *TAG = "app_manager";
 enum {
     STATUS_LED_TASK_STACK_WORDS = 2048,
     STATUS_LED_TASK_PRIORITY = 5,
+    BOOT_GUARD_TASK_STACK_WORDS = 3072,
+    BOOT_GUARD_TASK_PRIORITY = 4,
+    BOOT_GUARD_OTA_WAIT_MS = 500,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -43,6 +47,50 @@ enum {
 #endif
 
 static bool s_app_started;
+
+static void boot_guard_stability_task(void *arg)
+{
+    (void)arg;
+
+    const TickType_t start_tick = xTaskGetTickCount();
+    const TickType_t stable_delay_ticks =
+        pdMS_TO_TICKS(boot_guard_stable_delay_ms());
+    const TickType_t wait_ticks = pdMS_TO_TICKS(BOOT_GUARD_OTA_WAIT_MS);
+
+    while (true) {
+        const TickType_t elapsed_ticks = xTaskGetTickCount() - start_tick;
+        const bool delay_elapsed = elapsed_ticks >= stable_delay_ticks;
+        const bool ota_ready =
+            ota_service_get_status() == OTA_SERVICE_STATUS_RUNNING;
+        if (delay_elapsed && ota_ready) {
+            break;
+        }
+        vTaskDelay(wait_ticks);
+    }
+
+    const esp_err_t err = boot_guard_mark_stable();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Boot guard stable mark failed: %s",
+                 esp_err_to_name(err));
+    } else if (boot_guard_recovery_mode()) {
+        ESP_LOGW(TAG, "Recovery boot is stable; waiting for OTA or clear command");
+    } else {
+        ESP_LOGI(TAG, "Boot guard marked application stable");
+    }
+
+    vTaskDelete(NULL);
+}
+
+static void boot_guard_start_stability_task(void)
+{
+    const BaseType_t created =
+        xTaskCreate(boot_guard_stability_task, "boot_guard",
+                    BOOT_GUARD_TASK_STACK_WORDS, NULL,
+                    BOOT_GUARD_TASK_PRIORITY, NULL);
+    if (created != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create boot guard stability task");
+    }
+}
 
 static int status_led_level(bool led_on)
 {
@@ -199,6 +247,12 @@ void app_manager_start(void)
     ESP_LOGI(TAG, "Status LED blink started on GPIO%d, core %d",
              BOARD_CONFIG_STATUS_LED_GPIO, STATUS_LED_TASK_CORE);
 
+    const esp_err_t boot_guard_err = boot_guard_init();
+    if (boot_guard_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize boot guard: %s",
+                 esp_err_to_name(boot_guard_err));
+    }
+
     const esp_err_t identity_err = app_identity_init();
     if (identity_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize app identity: %s",
@@ -209,12 +263,6 @@ void app_manager_start(void)
     if (runtime_config_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize runtime config: %s",
                  esp_err_to_name(runtime_config_err));
-    }
-
-    const esp_err_t gps_err = gps_service_start();
-    if (gps_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start GPS service: %s",
-                 esp_err_to_name(gps_err));
     }
 
     const esp_err_t wifi_err = wifi_service_start();
@@ -235,16 +283,31 @@ void app_manager_start(void)
                  esp_err_to_name(wireless_telemetry_err));
     }
 
-    const esp_err_t runtime_err = app_manager_start_selected_runtime();
-    if (runtime_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start selected runtime: %s",
-                 esp_err_to_name(runtime_err));
-    }
-
     const esp_err_t ota_err = ota_service_start();
     if (ota_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start OTA service: %s",
                  esp_err_to_name(ota_err));
+    }
+
+    boot_guard_start_stability_task();
+
+    if (boot_guard_recovery_mode()) {
+        ESP_LOGW(TAG,
+                 "Boot recovery mode active; Wi-Fi, wireless log, telemetry, and OTA are running, risky services are skipped");
+        (void)uwb_dw3000_hold_in_reset();
+        return;
+    }
+
+    const esp_err_t gps_err = gps_service_start();
+    if (gps_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start GPS service: %s",
+                 esp_err_to_name(gps_err));
+    }
+
+    const esp_err_t runtime_err = app_manager_start_selected_runtime();
+    if (runtime_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start selected runtime: %s",
+                 esp_err_to_name(runtime_err));
     }
 
     const esp_err_t charger_err = charger_service_start();
