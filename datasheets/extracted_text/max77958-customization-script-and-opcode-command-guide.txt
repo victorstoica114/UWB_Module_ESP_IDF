@@ -1,0 +1,1965 @@
+MAX77958
+Customization Script and OPCode Command
+Guide
+Rev 0; 7/20
+
+
+
+
+Abstract
+The MAX77958 Customization Script and OPCode Command Guide explains how system
+designers can use the MAX77958 and describes the control registers that can be configured by
+OPCode commands.
+
+
+
+
+Maxim Integrated                                                               Page 1 of 41
+Table of Contents
+Standard Firmware .................................................................................................................... 4
+Customization Script .................................................................................................................. 5
+   Customization Commands...................................................................................................... 6
+   Event List ............................................................................................................................... 8
+   Customization Script GUI Interface........................................................................................12
+   Customization Script Download Flowchart .............................................................................13
+OPCode Commands .................................................................................................................14
+   Simplified Block Diagram of the OPCode Command Process ...............................................14
+   OPCode Command Format ...................................................................................................14
+OPCode Example .....................................................................................................................16
+OPCode Register Information ...................................................................................................17
+   0x01: BC CTRL1 Config Read ...............................................................................................17
+   0x02: BC CTRL1 Config Write ...............................................................................................18
+   0x05: Control1 Read..............................................................................................................18
+   0x06: Control1 Write ..............................................................................................................19
+   0x0B: CC Control1 Read .......................................................................................................19
+   0x0C: CC Control1 Write .......................................................................................................20
+   0x11: CC Control4 Read .......................................................................................................20
+   0x12: CC Control4 Write ........................................................................................................20
+   0x23: GPIO Control Read ......................................................................................................21
+   0x24: GPIO Control Write ......................................................................................................22
+   0x27: GPIO0 GPIO1 ADC Read ............................................................................................22
+   0x2F: Get Sink Cap ...............................................................................................................23
+   0x30: Current Src Cap ...........................................................................................................23
+   0x31: Get Source Cap ...........................................................................................................24
+   0x32: Src Cap Request .........................................................................................................25
+   0x33: Set Src Cap .................................................................................................................25
+   0x35: Read the Response for Get Request ...........................................................................26
+   0x36: Send Get Response.....................................................................................................27
+   0x37: Send Swap Request ....................................................................................................27
+
+
+Maxim Integrated                                                                                                            Page 2 of 41
+   0x38: Send Swap Response ................................................................................................28
+   0x3A: APDO SrcCap Request ...............................................................................................29
+   0x3C: Set PPS ......................................................................................................................30
+   0x3E: SNK PDO Request ......................................................................................................32
+   0x3F: SNK PDO Set ..............................................................................................................32
+   0x4A: Get PD Message .........................................................................................................33
+   0x55: Customer Configuration Read ......................................................................................34
+   0x56: Customer Configuration Write ......................................................................................36
+
+   0x85: Master I2C Control Read .............................................................................................37
+
+   0x86: Master I2C Control Write..............................................................................................38
+Firmware Update ......................................................................................................................38
+   Firmware update through AP .................................................................................................38
+   Firmware Update Flowchart...................................................................................................39
+
+
+
+
+Maxim Integrated                                                                                                      Page 3 of 41
+Standard Firmware
+The standard firmware controls all USB Type-C and power delivery related functions. This part of
+the firmware is expected to be familiar to for all system designers as it follows the USB Type-C
+and PD 3.0 specification.
+Another portion of the MTP is reserved for the customization scripts; system designers can
+program this area to make the MAX77958 satisfy the system definition.
+If the standard firmware is updated, the customization script will be automatically removed. When
+updating the standard firmware and customization script, standard firmware needs to be updated
+first.
+The MAX77958 can be customized to operate with specific applications using customization
+scripts and OPCode commands.
+Customization scripts are recommended for autonomous systems without an application
+processor and OPCode commands are recommended for systems with an application processor.
+
+
+Detailed descriptions of each method are illustrated in the following sections.
+
+
+
+
+Maxim Integrated                                                                    Page 4 of 41
+Customization Script
+The customization script is the core of the configurability of the MAX77958 when used in the
+autonomous configuration. It allows the user to configure either a GPIO state or perform an I2C
+action when an event is detected on the USB Type-C interface. The customization script is written
+in the graphical user interface (GUI). The software translates the customization script to
+hexadecimal format and writes it to the IC configuration area. The configuration by GUI must be
+stored in the MTP area of the IC to start operating as per the customization commands.
+
+
+Figure 1 shows the simple implementation of the customization script. Developers can define the
+functions and the sequences for each Event Id listed on the Event Item List using the MAX77958
+GUI. The GUI provides users not only the interface to create the customized code but also the
+functionality to detect syntax errors in the script usage.
+
+            User Programming
+
+
+ Customization Script                              Convert to bin file (Used to download to EV kit.via GUI)
+
+
+
+
+                                                    Convert to hex file (used to download to target via AP)
+
+
+
+
+Figure 1. User Programming of Customization Script.
+
+
+
+
+Maxim Integrated                                                                            Page 5 of 41
+Customization Commands
+Table 1 lists the syntax operation of customization commands recognized by the GUI.
+
+Table 1. Commands for peripheral device
+     TYPE                    COMMAND                                 DESCRIPTION
+ Comment           ;                              Any character after “;” is ignored
+ Directives        .event [ID] or .event [name]   The directive is to indicate the start point of action.
+                                                  See the Event Item List regarding the
+                                                  number/name of Event.
+
+                                                  ID: Event ID, name: Name of Event List
+                   .end                           The directive is to indicate the end point of action.
+                                                  One Event should be started ".event_[ ]" and
+                                                  ended ".end".
+                   .dev_map [name] [id]           Mapping device name to device id. available to use
+                                                  name or id in the script.
+
+                                                  name: the name mapped to the id.
+                                                  id: I2C slave address declared in Custom Config
+                                                  (0x56 OPCode)
+                   .label [name]                  The directive is to indicate the destination of
+                                                  goto_if_equal(….), goto_if_greater, goto_if_less
+                                                  command and goto(...) command.
+
+
+
+
+Maxim Integrated                                                                           Page 6 of 41
+Table 2 lists the commands recognized by the GUI for customizing the behavior of the IC.
+
+Table 2. Commands for operation
+     TYPE                    COMMAND                                       DESCRIPTION
+ I2C               i2c_write8(dev_id,      address,      Function to write 8-bit hex data
+ Command           data)
+ GPIO              gpio_write(gpio no, state)            Function to write values to a specific GPIO
+ Command
+ Register          reg_write(register_name, data,        Function to write values to a specific internal
+ Command           mask)                                 register
+                   reg_read(register_name, mask)         Function to read values from a specific internal
+                                                         register
+ Common            delay_ms(time)                        Time delay during (time) ms.
+                                                         Time = 1~5 (min: 1, max: 5)
+                                                         The delay may cause a timeout issue with PD
+                                                         communication, so use this API with care.
+ Flow  Control     goto(label_name)                      Jump statement used to go to to a specific label,
+ Command                                                 cannot be used to jump to another event.
+                   goto_if_equal_r(var_read,   data_b,   Jump statement used to go to a specific label if the
+                   label_name)                           read value var_read and data_b are equal, cannot
+                                                         be used to jump to another event.
+                   goto_if_greater_r(var_read, data_b,   Jump statement used to go to a specific label if the
+                   label_name)                           read value var_read is greater than or equal to
+                                                         data_b cannot be used to jump to another event.
+                   goto_if_less_r(var_read,    data_b,   Jump statement used to go to a specific label if the
+                   label_name)                           read value var_read is less than or equal to data_b,
+                                                         cannot be used to jump to another event.
+
+
+
+
+Maxim Integrated                                                                               Page 7 of 41
+Event List
+The events related to changes on the physical pins on the USB Type-C connector, MAX77958
+pins, or registers as well as requirements according to PD messages are summarized in Table 3.
+
+Table 3. Event List
+                                                                                       SAMPLE
+ ID      NAME           TRIGGERED BY                   TYPICAL USE                CUSTOMIZATION
+                                                                                     COMMANDS
+                    Hard_reset PD message                                        .dev_map chg 0
+                                                1.    Hard     Reset:    When
+                    in SOURCE Mode or                                            .event
+                                                MAX77958 is under the
+                    PR_Swap PD message                                           REQ_TURN_ON_V
+                                                SOURCE Mode and is
+                    when VBUS is lower than                                      BUS
+      REQ_TURN_                                 required to turn on VBUS
+  0                 vSafe0V                                                         i2c_write8(chg,
+      ON_VBUS                                   2. PR_Swap: MAX77958 is
+                                                                                 0x16, 0x8A); I2C
+                                                requested to become the new
+                                                                                 Mode         Enable,
+                                                SOURCE and is required to
+                                                                                 TURN ON VBUS
+                                                turn on VBUS
+                                                                                 .end
+                    Hard_reset PD message       1.    Hard     Reset:     When   .dev_map chg 0
+                    in SOURCE Mode or           MAX77958 is under the            .event
+                    PR_Swap PD message          SOURCE Mode and is               REQ_TURN_OFF_
+                    when VBUS is higher than    required to turn off VBUS        VBUS
+      REQ_TURN_
+  1                 vSafe5V, USB port is        2. PR_Swap or USB port              i2c_write8(chg,
+      OFF_VBUS
+                    disconnected, or enters     disconnect or enter contract     0x16, 0x82); I2C
+                    contract as SINK            as SINK: MAX77958 is the old     Mode         Enable,
+                                                SOURCE and is required to        TURN OFF VBUS
+                                                turn off VBUS                    .end
+                    Entering             the                                     .dev_map chg 0
+                    Attached.SNK state, Rp is                                    .event
+                    detected on one of the                                       DET_ATTACHED_
+                    CCx                                                          SNK
+      DET_ATTAC
+                                                SINK Mode: System can pull          i2c_write8(chg,
+  4   HED_SNK
+                                                current from VBUS                0x16, 0x85) ); I2C
+                                                                                 Mode         Enable,
+                                                                                 Charger on, DCDC
+                                                                                 on
+                                                                                 .end
+                    Entering             the                                     .dev_map chg 0
+                    Attached.SRC state, Rd is                                    .event
+                    detected on one of the                                       DET_ATTACHED_
+                    CCx                         SOURCE Mode: External            SRC
+      DET_ATTAC
+  5                                             device requests power from          i2c_write8(chg,
+      HED_SRC
+                                                VBUS                             0x16, 0x8A); I2C
+                                                                                 Mode Enable, OTG
+                                                                                 on
+                                                                                 .end
+                    Entering the unattached                                      .event
+      DET_UNATT     DRP mode, CCx is open       DRP.Mode          (UnAttached    DET_UNATTACHE
+  6   ACHED_DR                                  state) MAX77958 is waiting for   D_DRP
+      P                                         an attached port.                   gpio_write(4, 1)
+                                                                                 .end
+                    Detected            Audio                                    .event
+                    Accessory, Ra is detected                                    DET_AUDIO_ACC
+      DET_AUDIO     on both CC lines                                             ESSORY
+                                                Audio signal path enable: DN
+  7   _ACCESSO
+                                                to DN1, DP to DP2 switches
+      RY                                                                         reg_write(BC_CTR
+                                                                                 L1_CTRL2,
+                                                                                 0x0900, 0x3F00)
+
+Maxim Integrated                                                                        Page 8 of 41
+                                                                                         .end
+                    Detected           Debug                                             .event
+                    Accessory, Rd is detected                                            DET_DEBUG_SRC
+                    on both CC lines
+      DET_DEBUG                                    Debug path enable: DN to
+  8                                                                                      reg_write(BC_CTR
+      _SRC                                         DN1, DP to DP2 switches
+                                                                                         L1_CTRL2,
+                                                                                         0x0900, 0x3F00)
+                                                                                         .end
+                    Detected           Debug                                             .event
+                    Accessory, Rp is detected                                            DET_DEBUG_SNK
+                    on both CC lines
+      DET_DEBUG                                    Debug path enable: DN to
+  9                                                                                      reg_write(BC_CTR
+      _SNK                                         DN1, DP to DP2 switches
+                                                                                         L1_CTRL2,
+                                                                                         0x0900, 0x3F00)
+                                                                                         .end
+                    Detected Rp or Rd on                                                 .event
+      DET_CC1_A     CC1                            Notify CC1 is         active     to   DET_CC1_ACTIVE
+ 11
+      CTIVE                                        external MUX                             gpio_write(1, 1)
+                                                                                         .end
+                    Detected Rp or Rd on                                                 .event
+      DET_CC2_A     CC2                            Notify CC2 is         active     to   DET_CC2_ACTIVE
+ 12
+      CTIVE                                        external MUX                             gpio_write(1, 0)
+                                                                                         .end
+                    MAX77958 is under SINK                                               .dev_map chg 0
+                    mode, detected 56kΩ Rp                                               .event
+                    (500mA source)                                                       DET_SINKCCI_0P
+      DET_SINKC                                    Set charger input current limit       5
+ 16
+      CI_0P5                                       to 500mA                                 i2c_write8(chg,
+                                                                                         0x1E, 0x0B);
+                                                                                         0.5A
+                                                                                         .end
+                    MAX77958 is under SINK                                               .dev_map chg 0
+                    mode, detected 22kΩ Rp                                               .event
+      DET_SINKCCI   (1.5A source)                  Set charger input current limit       DET_SINKCCI_1P5
+ 17
+      _1P5                                         to 1.5A                                  i2c_write8(chg,
+                                                                                         0x1E, 0x1F)
+                                                                                         .end
+                    MAX77958 is under SINK                                               .dev_map chg 0
+                    mode, detected 10kΩ Rp                                               .event
+                    (3.0A source)                                                        DET_SINKCCI_3P0
+      DET_SINKCCI                                  Set charger input current limit
+ 18                                                                                         i2c_write8(chg,
+      _3P0                                         to 3.0A                               0x1E, 0x3D) ;
+                                                                                         CHGIN_ILIM 3A
+                                                                                         .end
+                    Detected VBUS is higher than                                         .event
+      DET_VSAFE5    vSafe5V                                                              DET_VSAFE5V
+ 24                                                Indication VBUS is present
+      V                                                                                     gpio_write(3, 1)
+                                                                                         .end
+                    Detected VBUS is lower than                                          .event
+                                                   Indication VBUS is not present
+      DET_VSAFE0    vSafe0V                                                              DET_VSAFE0V
+ 25                                                and Enable External discharge
+      V                                                                                     gpio_write(3, 0)
+                                                   circuit on the VBUS Path
+                                                                                         .end
+                    Detected Moisture                                                    .event
+      DET_MOISTU                                   Notify moisture is present on the     DET_MOISTURE
+ 37
+      RE                                           Type-C connector                         gpio_write(8, 1)
+                                                                                         .end
+                    Detected Dry                                                         .event DET_DRY
+                                                   Notify no moisture is present on
+ 38   DET_DRY                                                                               gpio_write(8, 0)
+                                                   the Type-C connector
+                                                                                         .end
+
+
+Maxim Integrated                                                                                Page 9 of 41
+                     In sink mode, received hard-                                         .dev_map chg 0
+                     reset PD Message                 Required charger input current      .event
+                                                      limit to minimum value the sink     REC_PD_HARDRES
+       REC_PD_HAR
+ 40                                                   shall not draw more than            ET_SNK
+       DRESET_SNK
+                                                      iSafe0mA when VBUS is driven to        i2c_write8(chg,
+                                                      vSafe0V                             0x1E, 0x00); 100mA
+                                                                                           end
+                     In sink mode, hard-reset                                             .dev_map chg 0
+                     sequence completed                                                   .event
+                                                                                          DONE_PD_HARDRE
+       DONE_PD_HA                                     Required charger current limit to
+                                                                                          SET_SNK
+ 41    RDRESET_SN                                     acquired value, the sink can
+                                                                                             i2c_write8(chg,
+       K                                              draw current expected
+                                                                                          0x1E, 0x3D);
+                                                                                          CHGIN_ILIM 3A
+                                                                                          .end
+                                                                                          .dev_map chg 0
+                     MAX77958 Power on                                                    .event DONE_POR
+                     sequence completed                                                      i2c_write8(chg,
+                                                      Configure external device
+                                                                                          0x16, 0x80); I2C
+ 50    DONE_POR                                       register to be initial setting
+                                                                                          Mode Enable,
+                                                                                          Charger=OTG=DCD
+                                                                                          C off
+                                                                                          .end
+                     Detected GPIO# of                                                    .dev_map chg 0
+                     MAX77958 going from high         Indication for GPIO# changes        .event
+ 51~   DET_GPIO#_L
+                     to low                           from high to low                    DET_GPIO8_LOW
+  59   OW
+                                                                                          gpio_write(7, 1)
+                                                                                          .end
+                     MAX77958 Power on                Set the external device to the      .dev_map chg 0
+                     sequence completed, PD           initial state                       .event USBPD_IDLE
+                     communication changes to                                                i2c_write8(chg,
+                     the idle state, waiting for PD                                       0x16, 0x80); I2C
+ 60    USBPD_IDLE
+                     message.                                                             Mode Enable,
+                                                                                          Charger=OTG=DCD
+                                                                                          C off
+                                                                                          .end
+                     When MAX77958 is                 Set external charger OTG            .event
+                     configured source mode,          voltage and current limit based     SNK_REQ_POS0
+ 66~   SNK_REQ_PO
+                     MAX77958 advertises the          on the system definition.              i2c_write8(chg,
+  71   S#
+                     PDO options.                                                         0x1F, 0x8F)
+                                                                                          .end
+                     Detected SDP or CDP              Set USB Switch to close             .event
+                                                                                          REQ_SWITCH_CON
+                                                                                          TROL_SDP_CDP
+       REQ_SWITCH
+ 73    _CONTROL_S
+                                                                                          reg_write(BC_CTRL1
+       DP_CDP
+                                                                                          _CTRL2, 0x0900,
+                                                                                          0x3F00)
+                                                                                          .end
+                     Detected DCP                     Set USB Switch to open              .event
+                                                                                          REQ_SWITCH_CON
+                                                                                          TROL_DCP
+       REQ_SWITCH
+ 74    _CONTROL_D
+                                                                                          reg_write(BC_CTRL1
+       CP
+                                                                                          _CTRL2, 0x0020,
+                                                                                          0x0020)
+                                                                                          .end
+       REQ_SWITCH    Detected Data Contact            Set USB Switch to close             .event
+ 75    _CONTROL_D    Detection Timeout                                                    REQ_SWITCH_CON
+       CDTO                                                                               TROL_DCDTO
+
+
+
+
+Maxim Integrated                                                                               Page 10 of 41
+                                                                                    reg_write(BC_CTRL1
+                                                                                    _CTRL2, 0x0900,
+                                                                                    0x3F00)
+                                                                                    .end
+                    When SrcCap Current is     Set input current limit to the       .event
+                    detected 0<SrcCur<0.5A     minimum value                        DET_SINKPDI_0P0_
+      DET_SINKPDI                                                                   TO_0P5
+ 83
+      _0P0_TO_0P5                                                                      i2c_write8(chg,
+                                                                                    0x1E, 0x02)
+                                                                                    .end
+                    When SrcCap Current is     Set input current limit to 0.5A      .event
+                    detected 0.5A<=SrcCur<1A                                        DET_SINKPDI_0P5_
+      DET_SINKPDI                                                                   TO_1P0
+ 84
+      _0P5_TO_1P0                                                                      i2c_write8(chg,
+                                                                                    0x1E, 0x0B)
+                                                                                    .end
+                    When SrcCap Current is     Set input current limit to 1.0A      .event
+                    detected 1A<=SrcCur<1.5A                                        DET_SINKPDI_1P0_
+      DET_SINKPDI                                                                   TO_1P5
+ 85
+      _1P0_TO_1P5                                                                      i2c_write8(chg,
+                                                                                    0x1E, 0x15)
+                                                                                    .end
+                    When SrcCap Current is     Set input current limit to 1.5A      .event
+                    detected 1.5A<=SrcCur<2A                                        DET_SINKPDI_1P5_
+      DET_SINKPDI                                                                   TO_2P0
+ 86
+      _1P5_TO_2P0                                                                      i2c_write8(chg,
+                                                                                    0x1E, 0x1F)
+                                                                                    .end
+                    When SrcCap Current is     Set input current limit to 2.0A      .event
+                    detected 2A<=SrcCur<2.5A                                        DET_SINKPDI_2P0_
+      DET_SINKPDI                                                                   TO_2P5
+ 87
+      _2P0_TO_2P5                                                                      i2c_write8(chg,
+                                                                                    0x1E, 0x29)
+                                                                                    .end
+                    When SrcCap Current is     Set input current limit to 2.5A      .event
+                    detected 2.5A<=SrcCur<3A                                        DET_SINKPDI_2P5_
+      DET_SINKPDI                                                                   TO_3P0
+ 88
+      _2P5_TO_3P0                                                                      i2c_write8(chg,
+                                                                                    0x1E, 0x33)
+                                                                                    .end
+                    When SrcCap Current is     Set input current limit to 3.0A      .event
+                    detected 3A<=SrcCur<3.5A                                        DET_SINKPDI_3P0_
+      DET_SINKPDI                                                                   TO_3P5
+ 89
+      _3P0_TO_3P5                                                                      i2c_write8(chg,
+                                                                                    0x1E, 0x3D)
+                                                                                    .end
+                    When SrcCap Current is     Set input current limit to 3.5A      .event
+                    detected 3.5A<=SrcCur<4A                                        DET_SINKPDI_3P5_
+      DET_SINKPDI                                                                   TO_4P0
+ 90
+      _3P5_TO_4P0                                                                      i2c_write8(chg,
+                                                                                    0x1E, 0x47)
+                                                                                    .end
+                    When SrcCap Current is     For the input current limit higher   .event
+                    detected SrcCur>=4A        than 4A, set it according to the     DET_SINKPDI_UPP
+      DET_SINKPDI                              customer definition                  ER_4P0
+ 91
+      _UPPER_4P0                                                                       i2c_write8(chg,
+                                                                                    0x1E, 0x51)
+                                                                                    .end
+
+
+
+
+Maxim Integrated                                                                         Page 11 of 41
+Customization Script GUI Interface
+
+
+
+
+Figure 2. Description of the Customization Script Generation Interface
+
+
+
+
+Maxim Integrated                                                         Page 12 of 41
+Customization Script Download Flowchart
+The following flowchart describes the process of using the GUI to edit or create a customization
+script and convert the script to programmable data in the IC.
+
+
+
+
+Figure 3. Downloading Customization Script
+
+
+
+
+Maxim Integrated                                                                 Page 13 of 41
+OPCode Commands
+All configuration and control commands to the MAX77958 are sent and received as a packet using
+an OPCode to identify the packet. The MAX77958 contains a 32-byte buffers for reading and
+writing OPCode commands.
+
+
+Simplified Block Diagram of the OPCode Command Process
+
+
+
+
+Figure 4. OPCode Command Process
+      1) The host AP sends the OPCode Command.
+      2) The MAX77958 FW processes the received command.
+      3) When the process of the command by the firmware is finished, a USB Type-C Interrupt
+         occurs.
+      4) MAX77958 sends INT to notify the host AP that the processing of the command was
+         completed.
+
+OPCode Command Format
+Messages sent to the MAX77958
+The 0x21 register requires an OPCode command. 0x22 to 0x41 registers contain optional
+messages written by the user, which should be between 0 and 32 bytes in length. These registers
+are not cleared automatically, the values remain until they are overwritten with new messages by
+the application processor. The 0x41 register should contain a last message that is recognizable
+by the MAX77958.
+     Example 1: OPCode command that does not have a message register
+            Write 0x21 register: OPCode command
+            Write 0x41 register: by default, 0 is recognized by the MAX77958
+     Example 2: OPCode command that has one message register
+            Write 0x21 register: OPCode command
+            Write 0x22 register: optional message
+            Write 0x41 register: by default, 0 is recognized by the MAX77958
+     Example 3: OPCode command with two message registers
+
+
+Maxim Integrated                                                                 Page 14 of 41
+           Write 0x21 register: OPCode command
+           Write 0x22 register: first message
+           Write 0x23 register: second message
+           Write 0x41 register: by default, 0 is recognized by the MAX77958
+
+
+Messages received from MAX77958
+The 0x51 register contains the OPCode command identifying the message type. 0x52 to 0x71
+registers contain messages returned by the MAX77958. These registers are not cleared
+automatically, values remain until overwritten with new messages by the MAX77958. After
+APCmdRes Interrupt occurs, the message returned by the MAX77958 can be read in a flexible
+from 0 to 32 bytes.
+     Example 1: OPCode command that has a returned message register
+           Read 0x51 register: OPCode command returned by MAX77958
+           Read 0x52 register: message returned by MAX77958
+     Example 2: OPCode command that has two returned message registers
+           Read 0x51 register: OPCode command returned by MAX77958
+           Read 0x52 register: first message returned by MAX77958
+           Read 0x53 register: second message returned by MAX77958
+
+                                       USB-
+ ADDR                      DEFAULT               AP
+             NAME                        C             B7   B6   B5   B4   B3   B2   B1   B0
+ [HEX]                      [HEX]               TYPE
+                                       TYPE
+ 0x20       Reserved         0x00       RO      RW                     0x00
+ 0x21    AP_DATAOUT0         0x00       RO      RW               AP Request Opcode
+ 0x22    AP_DATAOUT1         0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x23    AP_DATAOUT2         0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x24    AP_DATAOUT3         0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x25    AP_DATAOUT4         0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x26    AP_DATAOUT5         0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x27    AP_DATAOUT6         0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x28    AP_DATAOUT7         0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x29    AP_DATAOUT8         0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x2A    AP_DATAOUT9         0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x2B    AP_DATAOUT10        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x2C    AP_DATAOUT11        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x2D    AP_DATAOUT12        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x2E    AP_DATAOUT13        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x2F    AP_DATAOUT14        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x30    AP_DATAOUT15        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x31    AP_DATAOUT16        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x32    AP_DATAOUT17        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x33    AP_DATAOUT18        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x34    AP_DATAOUT19        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x35    AP_DATAOUT20        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x36    AP_DATAOUT21        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x37    AP_DATAOUT22        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x38    AP_DATAOUT23        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x39    AP_DATAOUT24        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+ 0x3A    AP_DATAOUT25        0x00       RO      RW     B7   B6   B5 B4 B3 B2         B1   B0
+
+Maxim Integrated                                                                Page 15 of 41
+ 0x3B      AP_DATAOUT26        0x00      RO      RW    B7   B6   B5   B4      B3   B2   B1   B0
+ 0x3C      AP_DATAOUT27        0x00      RO      RW    B7   B6   B5   B4      B3   B2   B1   B0
+ 0x3D      AP_DATAOUT28        0x00      RO      RW    B7   B6   B5   B4      B3   B2   B1   B0
+ 0x3E      AP_DATAOUT29        0x00      RO      RW    B7   B6   B5   B4      B3   B2   B1   B0
+ 0x3F      AP_DATAOUT30        0x00      RO      RW    B7   B6   B5   B4      B3   B2   B1   B0
+ 0x40      AP_DATAOUT31        0x00      RO      RW    B7   B6   B5   B4      B3   B2   B1   B0
+ 0x41      AP_DATAOUT32        0x00      RO      RW    B7   B6   B5   B4      B3   B2   B1   B0
+ 0x42-
+               Not used        0x00      RO      RO                    0x00
+ 0x50
+ 0x51       AP_DATAIN0         0x00      RW      RO         MAX77958 response Opcode
+ 0x52       AP_DATAIN1         0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x53       AP_DATAIN2         0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x54       AP_DATAIN3         0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x55       AP_DATAIN4         0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x56       AP_DATAIN5         0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x57       AP_DATAIN6         0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x58       AP_DATAIN7         0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x59       AP_DATAIN8         0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x5A       AP_DATAIN9         0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x5B       AP_DATAIN10        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x5C       AP_DATAIN11        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x5D       AP_DATAIN12        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x5E       AP_DATAIN13        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x5F       AP_DATAIN14        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x60       AP_DATAIN15        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x61       AP_DATAIN16        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x62       AP_DATAIN17        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x63       AP_DATAIN18        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x64       AP_DATAIN19        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x65       AP_DATAIN20        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x66       AP_DATAIN21        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x67       AP_DATAIN22        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x68       AP_DATAIN23        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x69       AP_DATAIN24        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x6A       AP_DATAIN25        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x6B       AP_DATAIN26        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x6C       AP_DATAIN27        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x6D       AP_DATAIN28        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x6E       AP_DATAIN29        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x6F       AP_DATAIN30        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x70       AP_DATAIN31        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+ 0x71       AP_DATAIN32        0x00      RW      RO    B7   B6 B5 B4 B3 B2 B1                B0
+
+
+
+OPCode Example
+This is an example of using OPCode in AP and how to write OPCode.
+   •     A DRP shall transition to either Unattached.SNK or Unattached.SRC.
+   •     Request Sink Mode setting from AP to MAX77958 via Customer Configuration
+         OPCode(0x56)
+         // I2C address, Register Address, OPCode Command
+         I2C_WRITE(0x4A, 0x21, 0x56)
+
+
+Maxim Integrated                                                                   Page 16 of 41
+        // I2C address, Register Address, Sink mode only
+        I2C_WRITE(0x4A, 0x22, 0x50)
+        // I2C address, Register Address, USB VID 0x0B6A
+        I2C_WRITE(0x4A, 0x23, 0x6A)
+        I2C_WRITE(0x4A, 0x24, 0x0B)
+        // I2C address, Register Address, USB PID 0x6860
+        I2C_WRITE(0x4A, 0x25, 0x60)
+        I2C_WRITE(0x4A, 0x26, 0x68)
+        // I2C address, Register Address, SRC PDO voltage 5000mV
+        I2C_WRITE(0x4A, 0x27, 0x00)
+        I2C_WRITE(0x4A, 0x28, 0x64)
+        // I2C address, Register Address, SRC PDO Max Current 1500mV
+        I2C_WRITE(0x4A, 0x29, 0x00)
+        I2C_WRITE(0x4A, 0x2A, 0x96)
+        // I2C address, Register Address , End of command
+        // End of command shall be written to be recognized by MAX77958
+        I2C_WRITE(0x4A, 0x41, 0x00)
+   •    MAX77958’s firmware sets the Sink Mode only
+   •    TYPE-C FSM of MAX77958 shall set Unattached.SNK
+   •    When APCmdRes Interrupt occurs, AP can check the setting result from 0x52 to 0x71
+        register.
+        // Slave address, Register Address, Respond Data
+        I2C_READ(0x4A, 0x51, 0x56)
+
+
+
+OPCode Register Information
+This is read/write register information of OPCode.
+
+
+0x01: BC CTRL1 Config Read
+          BITFIELD          BC_CTRL1                 RESET                0X81
+ ADDR
+             b7       b6     b5         b4             b3    b2        b1             b0
+ 0x21                                                0x01
+
+ 0x51                                                0x01
+
+
+
+
+Maxim Integrated                                                                 Page 17 of 41
+                      RS
+ 0x52      DCDCpl              RSVD          RSVD         NikonDet     RSVD     CHGDetMan         CHGDetEn
+                      VD
+
+                               RESE
+     BITFIELD         BIT                           DESCRIPTION                           DECODE
+                                 T
+                                                                                0 = 2000ms
+        DCDCpl        7           1      Data Contact Detection Wait Time
+                                                                                1 = 900ms
+         RSVD         6:4         0      Reserved
+                                                                                0 = Not enabled
+  Nikon Detection     3           0      Nikon Charger Detection
+                                                                                1 = Enabled
+         RSVD         2           0      Reserved
+                                                                                0 = Not enabled
+                                         Force Manual Run of Charger
+   CHGDetMan          1           0                                             1 = Request manual run of
+                                         Detection, Bit Auto Resets to 0
+                                                                                charger detection
+                                                                                0 = Not enabled
+                                                                                1 = Enabled, charger
+    CHGDetEn          0           1      Enable Charger Detection               detection runs every time
+                                                                                VBUS > VVBDET and DetAbrt =
+                                                                                0
+
+
+
+0x02: BC CTRL1 Config Write
+          BITFIELD                    BC_CTRL1                RESET                       0X81
+ ADDR
+                b7        b6            b5           b4           b3           b2          b1          b0
+ 0x21     0x02
+                                                                                         CHGDet      CHGDet
+ 0x22      DCDCpl     RSVD             RSVD       RSVD        NikonDet     RSVD
+                                                                                          Man          En
+
+ 0x51     0x02
+
+
+
+0x05: Control1 Read
+           BITFIELD                     CONTROL1                       RESET                 0X00
+ ADDR
+              b7            b6             b5               b4           b3         b2        b1        b0
+  0x21     0x05
+
+  0x51     0x05
+
+  0x52       RSVD      RSVD            COMP2Sw                                  COMN1Sw
+
+
+     BITFIELD               BIT        RESET          DESCRIPTION                         DECODE
+       RSVD                 7:6          0       Reserved
+                                                                                000 = Open
+                                                 Control     of        COMP2    001 = COMP2 connected to
+     COMP2Sw                5:3          0
+                                                 Switches                       DN2(USB)
+                                                                                010 to 111 = Open
+
+
+
+Maxim Integrated                                                                                 Page 18 of 41
+                                                                             000 = Open
+                                              Control    of         COMN1    001 = COMN1 connected to
+     COMN1Sw             2:0         0
+                                              Switches                       DN1(USB)
+                                                                             010 to 111 = Open
+
+
+
+0x06: Control1 Write
+         BITFIELD               CONTROL1                  RESET                     0X00
+ ADDR
+               b7      b6            b5          b4            b3           b2         b1          b0
+ 0x21    0x06
+ 0x22     RSVD      RSVD         COMP2Sw                               COMN1Sw
+
+ 0x51    0x06
+
+
+
+0x0B: CC Control1 Read
+         BITFIELD              CC_CONTROL1                    RESET                    0X81
+ ADDR
+            b7       b6           b5       b4                   b3           b2         b1         b0
+ 0x21    0x0B
+
+ 0x51    0x0B
+                    CCTr
+                                            CCDbgSr      CCDbgSnk       CCAudE      CCSrcE      CCSnkE
+ 0x52    CCVcnEn    ySnk        RSVD
+                                              cEn           En            n           n           n
+                     En
+
+     BITFIELD       BIT        RESET            DESCRIPTION                        DECODE
+
+                                                                        0 = Force VCONN off (both
+                                                                        external boost converter and
+                                                                        VCONN switch)
+     CCVcnEn         7           1        Force State of VCONN
+
+                                                                        1 = Automatic operation based
+                                                                        on State Machine
+
+                                          Allow Transition to TrySnk    0 = Try SINK is disabled
+   CCTrySnkEn        6           0
+                                          States                        1 = Try SINK is enabled
+        RSVD         5           0        Reserved
+                                          Enable Detection of Type-C    0 = Disabled
+   CCDbgSrcEn        4           0
+                                          Debug Source Adapter          1 = Enabled
+                                          Enable Detection of Type-C    0 = Disabled
+   CCDbgSnkEn        3           0
+                                          Debug Sink Adapter            1 = Enabled
+                                          Enable Detection of Type-C    0 = Disabled
+     CCAudEn         2           0
+                                          Audio Adapter                 1 = Enabled
+                                          Enable Detection of Type-C    0 = Disabled
+     CCSrcEn         1           0
+                                          Source Adapter                1 = Enabled
+     CCSnkEn         0           1                                      0 = Disabled
+
+
+Maxim Integrated                                                                            Page 19 of 41
+                                       Enable Detection of Type-C
+                                                                     1 = Enabled
+                                       Sink Adapter
+
+
+
+0x0C: CC Control1 Write
+         BITFIELD           CC_CONTROL1                RESET                     0X81
+ ADDR
+            b7         b6        b5           b4         b3           b2           b1         b0
+ 0x21    0x0C
+                     CCTryS               CCDbgS      CCDbgS        CCAudE                 CCSnkE
+ 0x22    CCVcnEn               RSVD                                             CCSrcEn
+                     nkEn                 rcEn        nkEn          n                      n
+
+ 0x51    0x0C
+
+
+
+0x11: CC Control4 Read
+          BITFIELD            CC_CONTROL4               RESET                      0X00
+ ADDR
+             b7       b6         b5       b4              b3           b2           b1         b0
+ 0x21    0x11
+
+ 0x51    0x11
+         CCVcnOcp    RSV
+ 0x52                         RSVD          RSVD       RSVD          RSVD       CCDrpPhase
+         En          D
+
+
+     BITFIELD         BIT      RESET          DESCRIPTION                       DECODE
+
+                                                                     0 = VCONN
+                                                                     OCP does have impact on
+                                                                     VCONN SW and BOOST
+
+   CCVcnOcpEn          7         0       VCONN OCP enable
+
+                                                                     1 = VCONN OCP turn-off VCONN
+                                                                     SW and BOOST after 12ms
+
+
+        RSVD          6:1        0       Reserved
+                                                                     00 = 35%
+                                         Percent of time device      01 = 40%
+                                         is acting                   10 = 45%
+    CCDrpPhase        1:0        0       as Unattached.SRC
+                                         when CCSNKSRC=1
+                                         and CCSRCSNK=1              11 = 50%
+
+
+
+
+0x12: CC Control4 Write
+         BITFIELD           CC_CONTROL4                RESET                     0X00
+ ADDR
+            b7         b6        b5           b4         b3           b2           b1         b0
+
+
+
+Maxim Integrated                                                                        Page 20 of 41
+ 0x21     0x12
+          CCVcnOc
+ 0x22                  RSVD          RSVD        RSVD         RSVD          RSVD             CCDrpPhase
+             pEn
+
+ 0x51     0x12
+
+
+
+0x23: GPIO Control Read
+                    NAME                 GPIO_READ                   RESET
+     ADDR
+                     b7         b6          b5          b4             b3           b2        b1       b0
+        0x21                                                  0x23
+
+
+        0x51                                                  0x23
+                                                                                             GPIO
+                              GPIO3                                               GPIO1              GPIO0
+                    GPIO3                GPIO2       GPIO2           GPIO1                     0
+        0x52                  Directio                                            Directio           Directio
+                    Output               Output     Direction        Output                  Outpu
+                                 n                                                   n                  n
+                                                                                               t
+                                                                                             GPIO
+                              GPIO7                                               GPIO5              GPIO4
+                    GPIO7                GPIO6       GPIO6           GPIO5                     4
+        0x53                  Directio                                            Directio           Directio
+                    Output               Output     Direction        Output                  Outpu
+                                 n                                                   n                  n
+                                                                                               t
+                                                                                             GPIO
+                                                                                                     GPIO8
+                                                                                               8
+        0x54        RSVD      RSVD       RSVD        RSVD            RSVD         RSVD               Directio
+                                                                                             Outpu
+                                                                                                        n
+                                                                                               t
+
+                                         RESE     DESCRIPTI
+         BITFIELD               BIT                                                  DECODE
+                                           T         ON
+                                                  GPIO3              0 = Low
+        GPIO3_OUT                7          0
+                                                  Output             1 = High
+                                                  GPIO3              0 = Input
+     GPIO3_Direction             6          0
+                                                  Direction          1 = Output
+                                                  GPIO2              0 = Low
+        GPIO2_OUT                5          0
+                                                  Output             1 = High
+                                                  GPIO2              0 = Input
+     GPIO2_Direction             4          0
+                                                  Direction          1 = Output
+                                                  GPIO1              0 = Low
+        GPIO1_OUT                3          0
+                                                  Output             1 = High
+                                                  GPIO1              0 = Input
+     GPIO1_Direction             2          0
+                                                  Direction          1 = Output
+                                                  GPIO0              0 = Low
+        GPIO0_OUT                1          0
+                                                  Output             1 = High
+                                                  GPIO0              0 = Input
+     GPIO0_Direction             0          0
+                                                  Direction          1 = Output
+                                                  GPIO7              0 = Low
+        GPIO7_OUT                7          0
+                                                  Output             1 = High
+
+
+Maxim Integrated                                                                               Page 21 of 41
+                                                        GPIO7           0 = Input
+     GPIO7_Direction             6             0
+                                                        Direction       1 = Output
+                                                        GPIO6           0 = Low
+         GPIO6_OUT               5             0
+                                                        Output          1 = High
+                                                        GPIO6           0 = Input
+     GPIO6_Direction             4             0
+                                                        Direction       1 = Output
+                                                        GPIO5           0 = Low
+         GPIO5_OUT               3             0
+                                                        Output          1 = High
+                                                        GPIO5           0 = Input
+     GPIO5_Direction             2             0
+                                                        Direction       1 = Output
+                                                        GPIO4           0 = Low
+         GPIO4_OUT               1             0
+                                                        Output          1 = High
+                                                        GPIO4           0 = Input
+     GPIO4_Direction             0             0
+                                                        Direction       1 = Output
+                                                        GPIO8           0 = Low
+         GPIO8_OUT               1             0
+                                                        Output          1 = High
+                                                        GPIO8           0 = Input
+     GPIO8_Direction             0             0
+                                                        Direction       1 = Output
+
+
+
+0x24: GPIO Control Write
+                       NAME               GPIO_WRITE                       RESET
+         ADDR
+                        b7           b6            b5         b4           b3        b2        b1         b0
+         0x21                                                       0x24
+                       GPIO3     GPIO3         GPIO2        GPIO2      GPIO1       GPIO1      GPIO0     GPIO0
+         0x22
+                       Output   Direction      Output      Direction   Output     Direction   Output   Direction
+                       GPIO7     GPIO7         GPIO6        GPIO6      GPIO5       GPIO5      GPIO4     GPIO4
+         0x23
+                       Output   Direction      Output      Direction   Output     Direction   Output   Direction
+                                                                                              GPIO8     GPIO8
+         0x24          RSVD      RSVD          RSVD         RSVD       RSVD         RSVD
+                                                                                              Output   Direction
+
+
+         0x51                                                       0x24
+
+
+
+0x27: GPIO0 GPIO1 ADC Read
+            NAME                     SBU_READ                          RESET                  0X00
+ ADDR
+                b7      b6                b5                  b4           b3        b2        b1         b0
+  0x21                                                       0x27
+
+
+  0x51                                                       0x27
+  0x52                                                      SBU1
+
+
+
+Maxim Integrated                                                                                 Page 22 of 41
+  0x53                                               SBU2
+
+
+     BITFIELD              BIT    RESET   DESCRIPTION                          DECODE
+                                          Indicates value
+         SBU1              7:0      0     on VBUS Input of       The value of SBU1 ADC range
+                                          SBU1
+
+                                          Indicates value
+         SBU2              7:0      0     on VBUS Input of       The value of SBU2 ADC range
+                                          SBU2
+
+
+
+0x2F: Get Sink Cap
+The Get_Sink_Cap (get sink capabilities) message can be sent by a port to request the sink
+capabilities and dual-role power capability of its port partner. The port responds by returning a
+Sink_Capabilities message.
+           BITFIELD               GET_SRC_CAP                    RESET
+ ADDR
+              b7            b6         b5            b4            b3         b2         b1      b0
+  0x21     0x2F
+
+  0x51     0x2F
+
+  0x52     NumOfPDO                              PwrRole         DataRole   RSVD      RSVD     RSVD
+
+  0x53     PDO1[7:0]
+  0x54     PDO1[15:8]
+  0x55     PDO1[23:16]
+  0x56     PDO1[31:24]
+   •••     •••••••••••••
+           PDOx[7:0]
+           PDOx[15:8]
+           PDOx[23:16]
+           PDOx[31:24]
+
+
+      BITFIELD             BIT    RESET         DESCRIPTION                           DECODE
+                                          Number     of   Power     Data
+     NumOfPDO               7:5
+                                          Objects
+                                          Power Role        of    Current   0 = Sink
+      PwrRole               4
+                                          Source                            1 = Source
+                                                                            0 = UFP
+      DataRole              3             Data Role of Current Source
+                                                                            1 = DFP
+         RSVD               2:0           Reserved
+
+
+
+0x30: Current Src Cap
+
+Maxim Integrated                                                                          Page 23 of 41
+The PDO is requested by sink and accepted by source among source capabilities.
+            BITFIELD         CUR_SEL_SRC_CAP         RESET
+ ADDR
+               b7            b6     b5     b4          b3          b2        b1              b0
+  0x21      0x30
+
+  0x51      0x30
+ 0x52         RSVD      RSVD       SEL_PDO_POS                   NumOfPDO
+ 0x53       PDO1[7:0]
+ 0x54       PDO1[15:8]
+ 0x55       PDO1[23:16]
+ 0x56       PDO1[31:24]
+ •••        •••••••••••••
+            PDOx[7:0]
+            PDOx[15:8]
+            PDOx[23:16]
+            PDOx[31:24]
+
+
+        BITFIELD            BIT     RESET   DESCRIPTION                          DECODE
+         RSVD                7:6            Reserved
+                                                                 0b : Unselected – Should send request
+                                                                 message using OPCODE 0x32,
+                                            Selected Position    SrcCap Request
+   SEL_PDO_POS               5:3
+                                            of POD
+                                                                 1b – 7b : Selected PDO number
+
+
+                                            Number of Power
+     NumOfPDO                2:0
+                                            Data Objects
+
+
+
+
+0x31: Get Source Cap
+The Get_Source_Cap (get source capabilities) message can be sent by a port to request the
+source capabilities and dual-role power capability of its port partner. The port responds by
+returning a Source_Capabilities message. The port responds by returning a Source_Capabilities
+Message Addr.
+             BITFIE
+                                   GET_SRC_CAP                  RESET
+ ADDR          LD
+               b7           b6         b5              b4         b3        b2        b1           b0
+  0x21      0x31
+
+  0x51      0x31
+                                                   PwrRol       DataRol
+  0x52      NumOfPDO                                                      RSVD      RSVD          RSVD
+                                                     e             e
+  0x53      PDO1[7:0]
+  0x54      PDO1[15:8]
+
+
+Maxim Integrated                                                                          Page 24 of 41
+  0x55     PDO1[23:16]
+  0x56     PDO1[31:24]
+   •••     •••••••••••••
+           PDOx[7:0]
+           PDOx[15:8]
+           PDOx[23:16]
+           PDOx[31:24]
+
+
+     BITFIELD            BIT     RESET          DESCRIPTION                           DECODE
+
+                                          Number     of    Power      Data
+    NumOfPDO             7:5
+                                          Objects
+
+                                          Power Role           of   Current   0 = Sink
+      PwrRole              4
+                                          Source                              1 = Source
+                                                                              0 = UFP
+     DataRole              3              Data Role of Current Source
+                                                                              1 = DFP
+       RSVD              2:0              Reserved
+
+
+
+0x32: Src Cap Request
+Send the request message as the response of Source_Capablities message to port partner.
+           BITFIELD              SRC_CAP_REQ                        RESET
+  ADDR
+              b7           b6         b5                  b4          b3        b2         b1      b0
+  0x21     0x32
+  0x22       RSVD        RSVD         RSVD           RSVD           RSVD             Req_PDO_Pos
+
+  0x51     0x32
+
+
+      BITFIELD             BIT   RESET           DESCRIPTION                           DECODE
+         RSVD              7:3             Reserved
+   Req_PDO_Pos             2:0             Request Position of POD
+
+
+
+0x33: Set Src Cap
+Set the current device’s source capabilities.
+           BITFIELD              SET_SRC_CAP                        RESET
+  ADDR
+              b7           b6         b5                  b4          b3        b2         b1      b0
+  0x21     0x33
+  0x22      RSVD       RSVD           RSVD           RSVD            RSVD             NumOfPDO
+  0x23     PDO1[7:0]
+  0x24     PDO1[15:8]
+  0x25     PDO1[23:16]
+  0x26     PDO1[31:24]
+
+
+Maxim Integrated                                                                            Page 25 of 41
+   •••     •••••••••••••
+           PDOx[7:0]
+           PDOx[15:8]
+           PDOx[23:16]
+           PDOx[31:24]
+
+  0x51     0x33
+
+
+     BITFIELD              BIT      RESET        DESCRIPTION                DECODE
+         RSVD              7:3              Reserved
+                                            Number of Power Data
+    NumOfPDO               2:0
+                                            Objects
+
+
+
+0x35: Read the Response for Get Request
+Read the response for the Get Request message by the port partner.
+This OPCode should be used after PDMsg (0x35–0x39) interrupt happens.
+           BITFIELD           READ_GET_REQ_RESP            RESET
+ ADDR
+              b7           b6         b5        b4           b3       b2       b1        b0
+  0x21     0x35
+
+  0x51     0x35
+  0x52     RespMsgType                            MsgDataLen
+  0x53     Data Objcet(s) or Extended Message Header[7:0]
+  0x54     Data Object(s) or Extended Message Header[15:8]
+  0x55     Data Object(s) or Data
+  0x56     Data Object(s) or Data
+  0x57     Data Object(s) or Data
+  0x58     Data Object(s) or Data
+   •••     •••••••••••••
+           Data Object(s) or Data
+           Data Object(s) or Data
+           Data Object(s) or Data
+           Data Object(s) or Data
+
+
+     BITFIELD              BIT      RESET       DESCRIPTION                 DECODE
+                                                                    0x00                     –
+                                                                    Source_Cap_Extended
+                                                                    0x01 – Status
+   RespMsgType             7:5              Response Message Type   0x02 – Battery_Cap
+                                                                    0x03 – Battery_Status
+                                                                    0x04 – Manufacturer_Info
+
+
+
+
+Maxim Integrated                                                                 Page 26 of 41
+                                            Message Data Length
+    MsgDataLen          4:0                 Bytes except Message
+                                            Header
+
+
+
+0x36: Send Get Response
+Send the response for Get Request message to port partner
+          BITFIELD              SEND_GET_RESP            RESET
+ ADDR
+              b7         b6           b5          b4       b3            b2       b1         b0
+  0x21    0x36
+  0x22    RespMsgType                           MsgDataLen
+  0x23    Data Objcet(s) or Extended Message Header[7:0]
+  0x24    Data Object(s) or Extended Message Header[15:8]
+  0x25    Data Object(s) or Data
+  0x26    Data Object(s) or Data
+  0x27    Data Object(s) or Data
+  0x28    Data Object(s) or Data
+  0x29    •••••••••••••
+  0x2A    Data Object(s) or Data
+          Data Object(s) or Data
+          Data Object(s) or Data
+          Data Object(s) or Data
+
+  0x51    0x36
+
+
+      BITFIELD          BIT    RESET            DESCRIPTION                    DECODE
+                                                                       0x00                       –
+                                                                       Source_Cap_Extended
+                                                                       0x01 – Status
+    RespMsgType         7:5                Response Message Type       0x02 – Battery_Cap
+                                                                       0x03 – Battery_Status
+                                                                       0x04 – Manufacturer_Info
+
+                                           Message Data Length Bytes
+    MsgDataLen          4:0
+                                           except Message Header
+
+
+
+
+0x37: Send Swap Request
+Send the Swap Request message to port partner
+           NAME                    SWAP_REQ                 RESET
+ ADDR
+            b7         b6             b5             b4        b3        b2       b1         b0
+  0x21                                              0x37
+
+
+
+Maxim Integrated                                                                    Page 27 of 41
+  0x22                                                                         Swap_Name
+
+
+  0x51                                          0x37
+  0x52                                         Result
+
+
+    BITFIELD        BIT      RESET    DESCRIPTION                      DECODE
+                                                        0x00 : N/A
+                                                        0x01 : DR SWAP
+   Swap_Name        1:0               Swap
+                                                        0x02 : PR SWAP
+                                                        0x03 : VCONN SWAP
+                                                        0x00 : Wait
+                                                        0x01 : Accepted from port partner
+                                                        0x02 : Rejected from port partner
+                                                        0xFA : Not Support
+      Result        7:0               Result of Swap
+                                                        0xFC : No Connection
+                                                        0xFD : Already Running
+                                                        0xFE : Moisture detection is enabled
+                                                        0xFF : Fail to send request
+
+
+
+0x38: Send Swap Response
+Set the Swap Response for the Swap Request message
+          NAME            SWAP_REQ_RESPONSE             RESET                  0x00
+ ADDR
+               b7   b6           b5             b4        b3          b2       b1           b0
+  0x21                                          0x38
+  0x22                          PR_SWP_Resp             DR_SWP_Resp          VCONN_SWP_Resp
+
+
+  0x51                                          0x38
+
+
+    BITFIELD        BIT      RESET    DESCRIPTION                      DECODE
+                                                        0x00 : Accept Sink Role, Reject Source
+                                                        Role
+                                      Response of PR    0x01 : Accept Source Role, Reject Sink
+  PR_SWP_Resp       5:4                                 Role
+                                      Swap
+                                                        0x02 : Accept Dual Role(Sink or Source)
+                                                        0x03 : Wait
+                                                        0x00 : Accept UFP Role, Reject DFP
+                                                        Role
+                                      Response of DR    0x01 : Accept DFP Role, Reject UFP
+  DR_SWP_Resp       3:2                                 Role
+                                      Swap
+                                                        0x02 : Accept Dual Role(UFP or DFP)
+                                                        0x03 : Wait
+
+
+
+
+Maxim Integrated                                                                 Page 28 of 41
+                                                            0x00 : Accept Turn Off VCONN, Reject
+                                                            Turn On VCONN
+                                     Response        of     0x01 : Accept Turn On VCONN, Reject
+ VCONN_SWP_Resp          1:0                                Turn Off VCONN
+                                     VCONN Swap
+                                                            0x02 : Accept Turn Off/On VCONN
+                                                            0x03 : Wait
+
+
+
+0x3A: APDO SrcCap Request
+                       NAME     APDO_SRCCAP_REQUEST                       RESET
+    ADDR
+                        b7     b6          b5                 b4              b3   b2       b1      b0
+     0x21                                          0x3A
+     0x22                                  REQ_APDO_POS
+     0x23                              OUTPUT_VOLTAGE_LOW
+     0x24                              OUTPUT_VOLTAGE_HIGH
+     0x25              RSVD                     OPERATING_CURRENT
+
+
+     0x51                                          0x3A
+     0x52                                          Result
+            BITFIELD           BIT    RESET       DESCRIPTION                      DECODE
+                                                  Request
+      REQ_APDO_POS             7:0                                        PDO Position
+                                                  Position of PDO
+                                                                          0x0000 =       Min     Output
+                                                                          Voltage,
+                                                                          0x0001 = 20mV (Low 0x01,
+                                                                          High 0x00),
+                                                                          0x0002 = 40mV (Low 0x02,
+                                                                          High 0x00),
+
+                                                                          0x0003 = 60mV,
+
+                                                  Low    bit    of
+  OUTPUT_VOLTAGE_LOW           7:0                                        0x0004 = 80mV,
+                                                  Output Voltage
+
+                                                                          0x0005 = 100mV,
+
+                                                                          …
+
+                                                                          0x00FA = 5000mV (Low
+                                                                          0xFA, High 0x00),
+
+                                                                          …
+
+                                                                          0x01C2 = 9000mV (Low
+                                                  High    bit   of        0xC2, High 0x01),
+  OUTPUT_VOLTAGE_HIGH          7:0
+                                                  Output Voltage
+                                                                          …
+
+
+
+Maxim Integrated                                                                         Page 29 of 41
+                                                                 0x03E8 = 20000mV (Low
+                                                                 0xE8, High 0x03)
+                                                                 0x00 = Max Operating
+                                                                 Current,
+                                                                 0x01 = 50mA
+                                                                 0x02 = 100mA
+                                                                 0x03 = 150mA
+                                                                 …
+                                                                 0x1E = 1500mA
+   OPERATING_CURRENT       7:0               Operate Current     …
+                                                                 0x28 = 2000mA
+                                                                 …
+                                                                 0x3C = 3000mA
+                                                                 …
+                                                                 0x7C = 6200mA
+                                                                 0x7D – 0xFF = Reserved
+                                                                 0x00 = Sent APDO Request
+                                                                 Message
+                                                                 0x01 = Error, Invalid APDO
+                                                                 position
+                                                                 0x02 = Error, Invalid Output
+                                                                 Voltage
+                                                                 0x03     =   Error,   Invalid
+           Result          7:0               Result              Operating Current
+                                                                 0x04 = Error, PPS Function
+                                                                 Off
+                                                                 0x05 = Error, Not in SNK
+                                                                 Ready State
+                                                                 0x06 = Error, PD 2.0
+                                                                 Contract
+                                                                 0x07 = Error, SinkTxNg
+
+
+
+0x3C: Set PPS
+                    NAME           SET_PPS               RESET               0x00
+      ADDR
+                     b7     b6       b5        b4         b3         b2         b1       b0
+       0x21                                     0x3C
+                                                                                        PPS
+       0x22         RSVD   RSVD     RSVD     RSVD        RSVD      RSVD       RSVD
+                                                                                        On
+       0x23                       DEFAULT_OUTPUT_VOLTAGE_LOW
+       0x24                       DEFAULT_OUTPUT_VOLTAGE_HIGH
+       0x25         RSVD               DEFAULT_OPERATING_CURRENT
+
+
+       0x51                                     0x3C
+       0x52                                     Result
+
+
+
+
+Maxim Integrated                                                               Page 30 of 41
+                                        DESC
+          BITFIELD        BIT   RESET   RIPTIO                 DECODE
+                                          N
+
+                                                   0x0000 = Min Output Voltage,
+
+                                                   0x0001 = 20mV (Low 0x01, High
+                                                   0x00),
+                                                   0x0002 = 40mV (Low 0x02, High
+                                        Low bit    0x00),
+                                        of
+ DEFAULT_OUTPUT_VOLTAGE
+                          7:0           Default    0x0003 = 60mV,
+          _LOW
+                                        Output
+                                        Voltage
+                                                   0x0004 = 80mV,
+
+
+                                                   0x0005 = 100mV,
+
+
+                                                   …
+
+                                                   0x00FA = 5000mV (Low 0xFA, High
+                                                   0x00),
+
+                                                   …
+                                        High bit
+                                        of
+ DEFAULT_OUTPUT_VOLTAGE                            0x01C2 = 9000mV (Low 0xC2, High
+                          7:0           Default
+          _HIGH                                    0x01),
+                                        Output
+                                        Voltage
+                                                   …
+
+                                                   0x03E8 = 20000mV (Low 0xE8, High
+                                                   0x03)
+                                                   0x00 = Max Operating Current,
+                                                   0x01 = 50mA,
+                                                   0x02 = 100mA,
+                                                   0x03 = 150mA,
+                                                   …
+                                        Default    0x1E = 1500mA,
+   DEFAULT_OPERATING_                   Operat-
+                          7:0     0                …
+        CURRENT                         ing
+                                        Current    0x28 = 2000mA,
+                                                   …
+                                                   0x3C = 3000mA,
+                                                   …
+                                                   0x7C = 6200mA,
+                                                   0x7D – 0xFF = Reserved
+                                                   0x00 = PPS Off,
+            Result        7:0     0     Result     0x01 = PPS On,
+                                                   0x06 = DP Configured State
+
+
+Maxim Integrated                                                        Page 31 of 41
+0x3E: SNK PDO Request
+           BITFIELD        SNK_PDO_REQUEST_READ            RESET
+ ADDR
+              b7          b6          b5              b4     b3     b2         b1      b0
+  0x21     0x3E
+             Read
+  0x22       SNK         RSVD        RSVD         RSVD     RSVD    RSVD    RSVD      RSVD
+             PDO
+
+
+  0x51     0x3E
+  0x52     Number of PDOs
+  0x53     PDO1[7:0]
+  0x54     PDO1[15:8]
+  0x55     PDO1[23:16]
+  0x56     PDO1[31:24]
+   •••     ••••••••
+           PDOx[7:0]
+           PDOx[15:8]
+           PDOx[23:16]
+           PDOx[31:24]
+
+
+     BITFIELD            BIT      RESET        DESCRIPTION                DECODE
+         RSVD             6:0              Reserved
+                                                                   0x0 = RAM
+  Read SNK PDO            7                Read SNK PDO
+                                                                   0x1 = MTP
+
+
+
+0x3F: SNK PDO Set
+The maximum SNK PDO number is 5.
+
+           BITFIELD             SNK_PDO_SET_SET            RESET
+ ADDR
+                b7        b6         b5               b4    b3      b2         b1      b0
+  0x21     0x3F
+
+           Write SNK     RSV
+  0x22                              RSVD          RSVD     RSVD           NumOfPDO
+             PDO          D
+
+  0x23     PDO1[7:0]
+  0x23     PDO1[15:8]
+  0x24     PDO1[23:16]
+  0x25     PDO1[31:24]
+
+
+
+Maxim Integrated                                                                Page 32 of 41
+  0x26      ••••••••
+   •••      PDOx[7:0]
+            PDOx[15:8]
+            PDOx[23:16]
+            PDOx[31:24]
+
+
+  0x51      0x3F
+
+             Write SNK    RSV
+  0x52                                   RSVD          RSVD      RSVD              NumOfPDO
+               PDO         D
+
+
+
+         BITFIELD         BIT     RESET              DESCRIPTION                   DECODE
+                                                                            0x0 = RAM
+   Write SNK PDO           7                Write SNK PDO
+                                                                            0x1 = MTP
+          RSVD            6:3               Reserved
+
+                                            Number     of    Power   Data
+     NumOfPDO             2:0
+                                            Objects
+
+
+
+
+0x4A: Get PD Message
+Get sent or received PD message.
+            BITFIELD             GETPDMSG               RESET
+ ADDR
+               b7         b6         b5         b4          b3       b2       b1          b0
+  0x21      0x4A
+  0x22                                                                                  RX/TX
+
+  0x51      0x4A
+  0x52        RSVD             MsgType                               MsgDataLen
+  0x53      MsgHeader[7:0]
+  0x54      MsgHeader[15:8]
+  0x55      Data Objcet(s) or Extended Message Header[7:0]
+  0x56      Data Object(s) or Extended Message Header[15:8]
+  0x57      Data Object(s) or Data
+  0x58      Data Object(s) or Data
+  0x59      Data Object(s) or Data
+  0x5A      Data Object(s) or Data
+   •••      •••••••••••••
+            Data Object(s) or Data
+            Data Object(s) or Data
+            Data Object(s) or Data
+
+
+Maxim Integrated                                                                        Page 33 of 41
+           Data Object(s) or Data
+
+
+     BITFIELD            BIT        RESET     DESCRIPTION                 DECODE
+                                            RX    or     TX   0b = RX Message
+         RX/TX            0
+                                            Message           1b = TX Message
+                                                              00b = Control Message
+                                                              01b = Data Message
+        MsgType          6:5                Message Type
+                                                              10b = Extended Message (for PD
+                                                              version 3.0)
+
+                                            Message   Data
+                                            Length   Bytes
+    MsgDataLen           4:0
+                                            except Message
+                                            Header
+
+
+
+0x55: Customer Configuration Read
+                      CUSTOM_CONFIG_I
+          BITFIELD                               RESET
+ ADDR                      NFO
+             b7       b6   b5     b4               b3          b2         b1               b0
+ 0x21     0x55
+
+
+ 0x51     0x55
+          Moisture     Memory       TypeC_S                   Audio   DbgTargetS      DbgTargetS
+ 0x52                                          TrySNKMode
+          Detection    Update       tate                      Acc     NK              RC
+ 0x53     VID[7:0]
+ 0x54     VID[15:8]
+ 0x55     PID[7:0]
+ 0x56     PID[15:8]
+ 0x57                                              RSVD
+ 0x58     SRC_PDO_V[7:0]
+ 0x59     SRC_PDO_V[15:8]
+ 0x5A     SRC_PDO_MaxI[7:0]
+ 0x5B     SRC_PDO_MaxI[15:8]
+ 0x5C                                              RSVD
+ 0x5D                                              RSVD
+ 0x5E                                              RSVD
+ 0x5F                                              RSVD
+ 0x60                                              RSVD
+ 0x61                                              RSVD
+ 0x62                                              RSVD
+ 0x63                                              RSVD
+ 0x64                                              RSVD
+ 0x65     SID1[7:0]
+ 0x66     SID2[7:0]
+
+
+Maxim Integrated                                                                      Page 34 of 41
+ 0x67    SID3[7:0]
+ 0x68    SID4[7:0]
+
+
+     BITFIELD         BIT   RESET    DESCRIPTION                       DECODE
+                                    Debug Target         0 = Disable
+  DbgTargetSRC        0       0
+                                    Source Mode          1 = Enable
+                                    Debug Target         0 = Disable
+  DbgTargetSNK        1       0
+                                    Sink Mode            1 = Enable
+                                    Audio Accesory       0 = Disable
+     AudioAcc         2       0
+                                    Mode                 1 = Enable
+                                    CC Try SNK           0 = Disable
+   TrySNKMode         3       0
+                                    Mode                 1 = Enable
+                                                         0 = SRC
+                                    TypeC State
+   TypeC_State        5:4     2                          1 = SNK
+                                    Machine
+                                                         2 = DRP
+
+                                                         0 = RAM
+                                    Apply MTP
+  Memory Update       6       0
+                                    Memory               1 = Update Customer Configuration
+                                                         Area of Memory
+                                    Enable Moisture      0 = Disable
+ Moisture Detection   7       0
+                                    Detection            1 = Enable
+                      15:
+        VID                 0B6A    Custom VID
+                       0
+                      15:
+        PID                 6860    Custom PID
+                       0
+                                    SRC PDO
+                                    Voltage
+                                    Output voltage in
+                      15:                                Valid range is 0~5000mV. (in 50mV
+   SRC_PDO_V                 64     units of 50 mV.
+                       0                                 step)
+                                    Valid values are
+                                    0-400 (0-20000
+                                    mV).
+                                    SRC PDO Max
+                                    Current
+                                    PDO Type is set
+                                    to 0 (fixed), or 2
+                                    (variable), then
+                                    this field
+                                    represents the
+                                    maximum
+                      15:           operating current    Valid range is 0~5000mA. (in 10mA
+  SRC_PDO_MaxI               96
+                       0            in units of 10mA.    step)
+                                    If PDO Type is
+                                    not set to 0
+                                    (fixed), 2
+                                    (variable), or 3
+                                    (PPS), then this
+                                    field shall be
+                                    ignored by
+                                    testers.
+
+
+
+Maxim Integrated                                                                Page 35 of 41
+                                         I2C Slave
+                                         Address 1
+                                         Used when
+                                         defining
+        SID1          7:0      69        dev_map in
+                                         customization
+                                         command on
+                                         GUI. (.dev_map
+                                         chg 0)
+                                         I2C Slave
+                                         Address 2
+                                         Used when
+                                         defining
+        SID2          7:0      69        dev_map in
+                                         customization
+                                         command on
+                                         GUI. (.dev_map
+                                         chg 1)
+                                         I2C Slave
+                                         Address 3
+                                         Used when
+                                         defining
+        SID3          7:0      35        dev_map in
+                                         customization
+                                         command on
+                                         GUI. (.dev_map
+                                         chg 2)
+                                         I2C Slave
+                                         Address 4
+                                         Used when
+                                         defining
+        SID4          7:0      28        dev_map in
+                                         customization
+                                         command on
+                                         GUI. (.dev_map
+                                         chg 3)
+
+
+
+0x56: Customer Configuration Write
+         BITFIELD       CUSTOM_CONFIG_INFO           RESET
+ ADDR
+               b7       b6          b5       b4           b3     b2         b1         b0
+ 0x21    0x56
+          Moisture    Memory                         TrySNK               DbgTarg    DbgTarg
+ 0x22                               TypeC_State                AudioAcc
+          Detection   Update                          Mode                 etSNK      etSRC
+ 0x23    VID[7:0]
+ 0x24    VID[15:8]
+ 0x25    PID[7:0]
+ 0x26    PID[15:8]
+ 0x27                                             RSVD
+ 0x28    SRC_PDO_V[7:0]
+ 0x29    SRC_PDO_V[15:8]
+ 0x2A    SRC_PDO_MaxI[7:0]
+
+
+
+Maxim Integrated                                                                 Page 36 of 41
+ 0x2B     SRC_PDO_MaxI[15:8]
+ 0x2C                                            RSVD
+ 0x2D                                            RSVD
+ 0x2E                                            RSVD
+ 0x2F                                            RSVD
+ 0x30                                            RSVD
+ 0x31                                            RSVD
+ 0x32                                            RSVD
+ 0x33                                            RSVD
+ 0x34                                            RSVD
+ 0x35     SID1[7:0]
+ 0x36     SID2[7:0]
+ 0x37     SID3[7:0]
+ 0x38     SID4[7:0]
+
+
+ 0x51     0x55
+
+
+
+0x85: Master I2C Control Read
+ ADDR          NAME         MASTER_I2C_READ                     RESET
+                 b7   b6        b5              b4                b3         b2         b1      b0
+  0x21                                             0x85
+
+
+  0x51                                             0x85
+  0x52                                           SID[7:0]
+  0x53                                          REG[7:0]
+  0x54                                          LEN[7:0]
+  0x55                                       Data0[7:0]
+  0x56                                       Data1[7:0]
+  0x57                                       Data2[7:0]
+  0x58                                       Data3[7:0]
+   •••                                          •••••••••••••
+  0x63                                      Data14[7:0]
+  0x64                                      Data15[7:0]
+  0x65                                      Data16[7:0]
+
+
+    BITFIELD          BIT      RESET   DESCRIPTION                            DECODE
+         SID          7:0              Slave Address            Slave Address
+         REG          7:0              Register                 Indicate the read register
+         LEN          7:0              Length                   Length for the read register
+         Data0        7:0              Read Data                1st Read Data
+
+
+Maxim Integrated                                                                         Page 37 of 41
+         Data1          7:0               Read Data             2nd Read Data
+         Data2          7:0               Read Data             3rd Read Data
+         Data3          7:0               Read Data             4th Read Data
+           •••                            •••                   •••
+         Data14         7:0               Read Data             15th Read Data
+         Data15         7:0               Read Data             16th Read Data
+         Data16         7:0               Read Data             17th Read Data
+
+
+
+0x86: Master I2C Control Write
+  ADDR           NAME         MASTER_I2C_WRITE                  RESET
+                  b7    b6         b5            b4                   b3   b2     b1       b0
+  0x21                                             0x86
+  0x22                                           SID[7:0]
+  0x23                                           REG[7:0]
+  0x24                                           LEN[7:0]
+  0x25                                          Data0[7:0]
+  0x26                                          Data1[7:0]
+  0x27                                          Data2[7:0]
+  0x28                                          Data3[7:0]
+   •••                                          •••••••••••••
+  0x33                                          Data14[7:0]
+  0x34                                          Data15[7:0]
+  0x35                                          Data16[7:0]
+
+
+  0x51                                             0x86
+
+
+
+Firmware Update
+The firmware can be updated through the AP, MAX77958 GUI, or MAX77958 dongle board.
+
+Firmware update through AP
+At boot time, the AP compares the firmware version within the hex file to the target to determine
+if the firmware needs to be updated.
+
+
+
+
+Maxim Integrated                                                                  Page 38 of 41
+Firmware Update Flowchart
+
+
+
+
+Figure 5. Flowchart of Firmware Update
+
+
+Issues with RAM, decrypting data, or MTP read/write operations can prevent Secure FW mode
+from proceeding.
+
+
+
+
+Maxim Integrated                                                           Page 39 of 41
+Firmware Update through GUI Interface
+
+
+      1. Select Firmware Update Menu on GUI
+
+
+
+
+Figure 6. Firmware Update Procedure
+
+
+      2. Firmware Version verification.
+      The firmware version updated from 06.41 to 06.46
+
+
+
+
+Figure 7. Firmware Version Readback
+
+
+
+
+Maxim Integrated                                         Page 40 of 41
+Revision History
+REVISION          REVISION                                                                                   PAGES
+                                                            DESCRIPTION
+NUMBER             DATE                                                                                     CHANGED
+
+     0               7/20           Initial release                                                              —
+
+
+
+
+©2020 by Maxim Integrated Products, Inc. All rights reserved. Information in this publication concerning the devices,
+applications, or technology described is intended to suggest possible uses and may be superseded. MAXIM INTEGRATED
+PRODUCTS, INC. DOES NOT ASSUME LIABILITY FOR OR PROVIDE A REPRESENTATION OF ACCURACY OF THE
+INFORMATION, DEVICES, OR TECHNOLOGY DESCRIBED IN THIS DOCUMENT. MAXIM ALSO DOES NOT ASSUME
+LIABILITY FOR INTELLECTUAL PROPERTY INFRINGEMENT RELATED IN ANY MANNER TO USE OF INFORMATION,
+DEVICES, OR TECHNOLOGY DESCRIBED HEREIN OR OTHERWISE. The information contained within this document has
+been verified according to the general principles of electrical and mechanical engineering or registered trademarks of Maxim
+Integrated Products, Inc. All other product or service names are the property of their respective owners.
+
+
+Maxim Integrated                                                                                         Page 41 of 41
+

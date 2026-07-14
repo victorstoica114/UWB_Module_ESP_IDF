@@ -20,6 +20,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gps_service.h"
+#include "max77958_service.h"
 #include "uwb_config.h"
 #include "uwb_dw3000.h"
 #include "wifi_service.h"
@@ -46,7 +47,7 @@ enum {
     OTA_SERVICE_REBOOT_DELAY_MS = 1200,
     OTA_SERVICE_MAX_TOKEN_LEN = 128,
     OTA_SERVICE_MAX_QUERY_LEN = 768,
-    OTA_SERVICE_STATUS_RESPONSE_SIZE = 16000,
+    OTA_SERVICE_STATUS_RESPONSE_SIZE = 22000,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -89,6 +90,59 @@ static const char *ota_status_to_string(enum ota_service_status status)
 static const char *partition_label_or_unknown(const esp_partition_t *partition)
 {
     return partition != NULL ? partition->label : "unknown";
+}
+
+static void format_u32_array_json(const uint32_t *values, size_t count,
+                                  char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return;
+    }
+    size_t offset = 0;
+    int written = snprintf(buffer, buffer_size, "[");
+    if (written < 0 || (size_t)written >= buffer_size) {
+        buffer[0] = '\0';
+        return;
+    }
+    offset = (size_t)written;
+    for (size_t i = 0; i < count; ++i) {
+        written = snprintf(&buffer[offset], buffer_size - offset,
+                           "%s%lu", i == 0 ? "" : ",",
+                           (unsigned long)values[i]);
+        if (written < 0 || (size_t)written >= buffer_size - offset) {
+            buffer[0] = '\0';
+            return;
+        }
+        offset += (size_t)written;
+    }
+    if (offset + 2U <= buffer_size) {
+        (void)snprintf(&buffer[offset], buffer_size - offset, "]");
+    }
+}
+
+static void format_bytes_hex(const uint8_t *data, size_t data_len,
+                             char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return;
+    }
+    buffer[0] = '\0';
+    if (data == NULL) {
+        return;
+    }
+    size_t offset = 0;
+    for (size_t i = 0; i < data_len; ++i) {
+        if (offset + 3U > buffer_size) {
+            break;
+        }
+        const int written =
+            snprintf(&buffer[offset], buffer_size - offset, "%02X", data[i]);
+        if (written < 0) {
+            buffer[0] = '\0';
+            return;
+        }
+        offset += (size_t)written;
+    }
 }
 
 static bool ota_token_configured(void)
@@ -201,6 +255,51 @@ static bool ota_parse_bool_text(const char *text, bool *value)
         return true;
     }
     return false;
+}
+
+static bool ota_parse_pd_fixed_pdo_list(char *text, uint16_t *voltages_mv,
+                                        uint16_t *currents_ma,
+                                        size_t max_count, size_t *count)
+{
+    if (text == NULL || voltages_mv == NULL || currents_ma == NULL ||
+        count == NULL || max_count == 0) {
+        return false;
+    }
+
+    size_t local_count = 0;
+    char *save = NULL;
+    for (char *token = strtok_r(text, ",", &save); token != NULL;
+         token = strtok_r(NULL, ",", &save)) {
+        if (local_count >= max_count) {
+            return false;
+        }
+
+        char *separator = strchr(token, ':');
+        if (separator == NULL) {
+            separator = strchr(token, '/');
+        }
+        if (separator == NULL) {
+            return false;
+        }
+        *separator = '\0';
+
+        uint16_t mv = 0;
+        uint16_t ma = 0;
+        if (!ota_parse_u16(token, &mv) ||
+            !ota_parse_u16(separator + 1, &ma)) {
+            return false;
+        }
+
+        voltages_mv[local_count] = mv;
+        currents_ma[local_count] = ma;
+        local_count++;
+    }
+
+    if (local_count == 0) {
+        return false;
+    }
+    *count = local_count;
+    return true;
 }
 
 static bool ota_parse_bno085_sample_hz(const char *text, uint32_t *interval_ms)
@@ -364,7 +463,11 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "POST /config/runtime?clear=1[&reboot=1]\n"
         "POST /config/charger?adc=1&adc_sample=2\n"
         "POST /config/charger?charge_current_ma=500&charge_voltage_mv=4200\n"
-        "POST /config/charger?fast_charge_timer_enabled=1&fast_charge_timer_hours=12\n";
+        "POST /config/charger?fast_charge_timer_enabled=1&fast_charge_timer_hours=12\n"
+        "POST /config/max77958?refresh=1\n"
+        "POST /config/max77958?sink_pdos=5000:3000,9000:3000,15000:3000\n"
+        "POST /config/max77958?source_pdo_pos=2\n"
+        "POST /config/max77958?apdo_pos=1&apdo_voltage_mv=9000&apdo_current_ma=2000\n";
 
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
@@ -387,6 +490,24 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     char charger_raw_hex[(CHARGER_SERVICE_REGISTER_MAP_SIZE * 2U) + 1U] = {0};
     charger_service_format_raw_hex(&charger_snapshot, charger_raw_hex,
                                    sizeof(charger_raw_hex));
+    max77958_service_snapshot_t pd_snapshot = {0};
+    max77958_service_get_snapshot(&pd_snapshot);
+    char pd_raw_hex[(MAX77958_SERVICE_REGISTER_MAP_SIZE * 2U) + 1U] = {0};
+    max77958_service_format_raw_hex(&pd_snapshot, pd_raw_hex,
+                                    sizeof(pd_raw_hex));
+    char pd_last_response_hex[(MAX77958_SERVICE_AP_DATA_BYTES * 2U) + 1U] = {0};
+    format_bytes_hex(pd_snapshot.last_response,
+                     sizeof(pd_snapshot.last_response),
+                     pd_last_response_hex, sizeof(pd_last_response_hex));
+    char pd_source_pdos_json[128] = {0};
+    format_u32_array_json(pd_snapshot.source_pdos,
+                          pd_snapshot.source_pdo_count,
+                          pd_source_pdos_json,
+                          sizeof(pd_source_pdos_json));
+    char pd_sink_pdos_json[96] = {0};
+    format_u32_array_json(pd_snapshot.sink_pdos,
+                          pd_snapshot.sink_pdo_count,
+                          pd_sink_pdos_json, sizeof(pd_sink_pdos_json));
 
     char *response = malloc(OTA_SERVICE_STATUS_RESPONSE_SIZE);
     if (response == NULL) {
@@ -612,6 +733,91 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_last_write_error\":%d,"
         "\"charger_last_write_error_name\":\"%s\","
         "\"charger_raw_hex\":\"%s\","
+        "\"pd_monitor_enabled\":%s,"
+        "\"pd_present\":%s,"
+        "\"pd_read_ok\":%s,"
+        "\"pd_raw_valid\":%s,"
+        "\"pd_config_write_supported\":%s,"
+        "\"pd_config_writes_enabled\":%s,"
+        "\"pd_last_error\":%d,"
+        "\"pd_last_error_name\":\"%s\","
+        "\"pd_read_count\":%lu,"
+        "\"pd_error_count\":%lu,"
+        "\"pd_last_read_duration_ms\":%lu,"
+        "\"pd_last_update_age_ms\":%lu,"
+        "\"pd_device_id\":\"0x%02x\","
+        "\"pd_device_rev\":\"0x%02x\","
+        "\"pd_fw_rev\":%u,"
+        "\"pd_fw_sub_ver\":%u,"
+        "\"pd_uic_int\":\"0x%02x\","
+        "\"pd_cc_int\":\"0x%02x\","
+        "\"pd_pd_int\":\"0x%02x\","
+        "\"pd_action_int\":\"0x%02x\","
+        "\"pd_usbc_status1\":\"0x%02x\","
+        "\"pd_usbc_status2\":\"0x%02x\","
+        "\"pd_sys_msg_name\":\"%s\","
+        "\"pd_bc_status\":\"0x%02x\","
+        "\"pd_dp_status\":\"0x%02x\","
+        "\"pd_cc_status0\":\"0x%02x\","
+        "\"pd_cc_status1\":\"0x%02x\","
+        "\"pd_pd_status0\":\"0x%02x\","
+        "\"pd_pd_status1\":\"0x%02x\","
+        "\"pd_uic_int_mask\":\"0x%02x\","
+        "\"pd_cc_int_mask\":\"0x%02x\","
+        "\"pd_pd_int_mask\":\"0x%02x\","
+        "\"pd_action_int_mask\":\"0x%02x\","
+        "\"pd_sw_reset\":\"0x%02x\","
+        "\"pd_i2c_cnfg\":\"0x%02x\","
+        "\"pd_vbadc_code\":%u,"
+        "\"pd_vbus_min_mv\":%u,"
+        "\"pd_vbus_max_mv\":%u,"
+        "\"pd_vbus_mid_mv\":%u,"
+        "\"pd_vbus_above_range\":%s,"
+        "\"pd_vbus_detected\":%s,"
+        "\"pd_chg_typ\":%u,"
+        "\"pd_chg_typ_name\":\"%s\","
+        "\"pd_pr_chg_typ\":%u,"
+        "\"pd_dcd_timeout\":%s,"
+        "\"pd_cc_pin\":%u,"
+        "\"pd_cc_pin_name\":\"%s\","
+        "\"pd_cci\":%u,"
+        "\"pd_cci_name\":\"%s\","
+        "\"pd_vconn_enabled\":%s,"
+        "\"pd_cc_stat\":%u,"
+        "\"pd_cc_stat_name\":\"%s\","
+        "\"pd_det_abrt\":%s,"
+        "\"pd_data_role_dfp\":%s,"
+        "\"pd_power_role_source\":%s,"
+        "\"pd_vconn_source\":%s,"
+        "\"pd_psrdy_as_sink\":%s,"
+        "\"pd_ctrl1_valid\":%s,"
+        "\"pd_ctrl1_raw\":\"0x%02x\","
+        "\"pd_ctrl1_comp2_sw\":%u,"
+        "\"pd_ctrl1_comn1_sw\":%u,"
+        "\"pd_usb2_switch_closed\":%s,"
+        "\"pd_source_caps_valid\":%s,"
+        "\"pd_source_pdo_count\":%u,"
+        "\"pd_selected_source_pdo_pos\":%u,"
+        "\"pd_source_pdos\":%s,"
+        "\"pd_sink_pdos_valid\":%s,"
+        "\"pd_sink_pdo_count\":%u,"
+        "\"pd_sink_pdos_from_mtp\":%s,"
+        "\"pd_sink_pdos\":%s,"
+        "\"pd_pps_default_valid\":%s,"
+        "\"pd_pps_default_enabled\":%s,"
+        "\"pd_pps_default_mv\":%u,"
+        "\"pd_pps_default_ma\":%u,"
+        "\"pd_operation_count\":%lu,"
+        "\"pd_operation_error_count\":%lu,"
+        "\"pd_last_operation_age_ms\":%lu,"
+        "\"pd_last_opcode\":\"0x%02x\","
+        "\"pd_last_response_opcode\":\"0x%02x\","
+        "\"pd_last_result_code\":%u,"
+        "\"pd_last_result_name\":\"%s\","
+        "\"pd_last_operation_error\":%d,"
+        "\"pd_last_operation_error_name\":\"%s\","
+        "\"pd_last_response_hex\":\"%s\","
+        "\"pd_raw_hex\":\"%s\","
         "\"runtime_radio_channel\":%u,"
         "\"runtime_wireless_telemetry_port\":%lu,"
         "\"uwb_status\":\"%s\","
@@ -896,6 +1102,91 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         charger_snapshot.last_write_error,
         esp_err_to_name((esp_err_t)charger_snapshot.last_write_error),
         charger_raw_hex,
+        pd_snapshot.monitor_enabled ? "true" : "false",
+        pd_snapshot.present ? "true" : "false",
+        pd_snapshot.read_ok ? "true" : "false",
+        pd_snapshot.raw_valid ? "true" : "false",
+        pd_snapshot.config_write_supported ? "true" : "false",
+        pd_snapshot.config_writes_enabled ? "true" : "false",
+        pd_snapshot.last_error,
+        esp_err_to_name((esp_err_t)pd_snapshot.last_error),
+        (unsigned long)pd_snapshot.read_count,
+        (unsigned long)pd_snapshot.error_count,
+        (unsigned long)pd_snapshot.last_read_duration_ms,
+        (unsigned long)pd_snapshot.last_update_age_ms,
+        (unsigned)pd_snapshot.device_id,
+        (unsigned)pd_snapshot.device_rev,
+        (unsigned)pd_snapshot.fw_rev,
+        (unsigned)pd_snapshot.fw_sub_ver,
+        (unsigned)pd_snapshot.uic_int,
+        (unsigned)pd_snapshot.cc_int,
+        (unsigned)pd_snapshot.pd_int,
+        (unsigned)pd_snapshot.action_int,
+        (unsigned)pd_snapshot.usbc_status1,
+        (unsigned)pd_snapshot.usbc_status2,
+        max77958_service_sys_msg_to_string(pd_snapshot.usbc_status2),
+        (unsigned)pd_snapshot.bc_status,
+        (unsigned)pd_snapshot.dp_status,
+        (unsigned)pd_snapshot.cc_status0,
+        (unsigned)pd_snapshot.cc_status1,
+        (unsigned)pd_snapshot.pd_status0,
+        (unsigned)pd_snapshot.pd_status1,
+        (unsigned)pd_snapshot.uic_int_mask,
+        (unsigned)pd_snapshot.cc_int_mask,
+        (unsigned)pd_snapshot.pd_int_mask,
+        (unsigned)pd_snapshot.action_int_mask,
+        (unsigned)pd_snapshot.sw_reset,
+        (unsigned)pd_snapshot.i2c_cnfg,
+        (unsigned)pd_snapshot.vbadc_code,
+        (unsigned)pd_snapshot.vbus_min_mv,
+        (unsigned)pd_snapshot.vbus_max_mv,
+        (unsigned)pd_snapshot.vbus_mid_mv,
+        pd_snapshot.vbus_above_range ? "true" : "false",
+        pd_snapshot.vbus_detected ? "true" : "false",
+        (unsigned)pd_snapshot.chg_typ,
+        max77958_service_chg_typ_to_string(pd_snapshot.chg_typ),
+        (unsigned)pd_snapshot.pr_chg_typ,
+        pd_snapshot.dcd_timeout ? "true" : "false",
+        (unsigned)pd_snapshot.cc_pin,
+        max77958_service_cc_pin_to_string(pd_snapshot.cc_pin),
+        (unsigned)pd_snapshot.cci,
+        max77958_service_cci_to_string(pd_snapshot.cci),
+        pd_snapshot.vconn_enabled ? "true" : "false",
+        (unsigned)pd_snapshot.cc_stat,
+        max77958_service_cc_stat_to_string(pd_snapshot.cc_stat),
+        pd_snapshot.det_abrt ? "true" : "false",
+        pd_snapshot.data_role_dfp ? "true" : "false",
+        pd_snapshot.power_role_source ? "true" : "false",
+        pd_snapshot.vconn_source ? "true" : "false",
+        pd_snapshot.psrdy_as_sink ? "true" : "false",
+        pd_snapshot.ctrl1_valid ? "true" : "false",
+        (unsigned)pd_snapshot.ctrl1_raw,
+        (unsigned)pd_snapshot.ctrl1_comp2_sw,
+        (unsigned)pd_snapshot.ctrl1_comn1_sw,
+        pd_snapshot.usb2_switch_closed ? "true" : "false",
+        pd_snapshot.source_caps_valid ? "true" : "false",
+        (unsigned)pd_snapshot.source_pdo_count,
+        (unsigned)pd_snapshot.selected_source_pdo_pos,
+        pd_source_pdos_json[0] != '\0' ? pd_source_pdos_json : "[]",
+        pd_snapshot.sink_pdos_valid ? "true" : "false",
+        (unsigned)pd_snapshot.sink_pdo_count,
+        pd_snapshot.sink_pdos_from_mtp ? "true" : "false",
+        pd_sink_pdos_json[0] != '\0' ? pd_sink_pdos_json : "[]",
+        pd_snapshot.pps_default_valid ? "true" : "false",
+        pd_snapshot.pps_default_enabled ? "true" : "false",
+        (unsigned)pd_snapshot.pps_default_mv,
+        (unsigned)pd_snapshot.pps_default_ma,
+        (unsigned long)pd_snapshot.operation_count,
+        (unsigned long)pd_snapshot.operation_error_count,
+        (unsigned long)pd_snapshot.last_operation_age_ms,
+        (unsigned)pd_snapshot.last_opcode,
+        (unsigned)pd_snapshot.last_response_opcode,
+        (unsigned)pd_snapshot.last_result_code,
+        max77958_service_apdo_result_to_string(pd_snapshot.last_result_code),
+        pd_snapshot.last_operation_error,
+        esp_err_to_name((esp_err_t)pd_snapshot.last_operation_error),
+        pd_last_response_hex,
+        pd_raw_hex,
         (unsigned)runtime_radio_channel(runtime_config),
         (unsigned long)runtime_config->wireless_telemetry_port,
         uwb_dw3000_status_to_string(uwb_dw3000_get_status()),
@@ -1709,6 +2000,363 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
     return httpd_resp_send(req, response, len);
 }
 
+static esp_err_t max77958_config_post_handler(httpd_req_t *req)
+{
+    if (!ota_request_authorized(req)) {
+        ESP_LOGW(TAG, "Rejected MAX77958 config: missing or invalid token");
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED,
+                                   "Missing or invalid OTA token");
+    }
+
+    if (s_ota_in_progress) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "OTA already in progress");
+    }
+
+    const size_t query_len = httpd_req_get_url_query_len(req);
+    if (query_len == 0 || query_len >= OTA_SERVICE_MAX_QUERY_LEN) {
+        return httpd_resp_send_err(
+            req, HTTPD_400_BAD_REQUEST,
+            "Use MAX77958 config query parameters");
+    }
+
+    char query[OTA_SERVICE_MAX_QUERY_LEN] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid query string");
+    }
+
+    bool handled = false;
+    uint32_t operation_count = 0;
+    esp_err_t first_error = ESP_OK;
+    esp_err_t query_err = ESP_OK;
+    max77958_service_ap_result_t result = {0};
+
+    if (ota_query_option_enabled(query, "refresh")) {
+        max77958_service_request_refresh();
+        handled = true;
+    }
+
+    if (ota_query_option_enabled(query, "bc_trigger") ||
+        ota_query_option_enabled(query, "trigger_bc")) {
+        const esp_err_t err = max77958_service_trigger_bc_detection(&result);
+        operation_count++;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    }
+
+    char usb2_text[16] = {0};
+    query_err = httpd_query_key_value(query, "usb2_closed", usb2_text,
+                                      sizeof(usb2_text));
+    if (query_err == ESP_ERR_NOT_FOUND) {
+        query_err = httpd_query_key_value(query, "usb2_switch_closed",
+                                          usb2_text, sizeof(usb2_text));
+    }
+    if (query_err == ESP_OK) {
+        bool closed = false;
+        if (!ota_parse_bool_text(usb2_text, &closed)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid usb2_closed");
+        }
+        result = (max77958_service_ap_result_t){0};
+        const esp_err_t err = max77958_service_set_usb2_switch(closed,
+                                                               &result);
+        operation_count++;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    } else if (query_err != ESP_ERR_NOT_FOUND) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid usb2_closed");
+    }
+
+    char source_pos_text[16] = {0};
+    query_err = httpd_query_key_value(query, "source_pdo_pos",
+                                      source_pos_text,
+                                      sizeof(source_pos_text));
+    if (query_err == ESP_ERR_NOT_FOUND) {
+        query_err = httpd_query_key_value(query, "source_pos",
+                                          source_pos_text,
+                                          sizeof(source_pos_text));
+    }
+    if (query_err == ESP_OK) {
+        uint8_t pos = 0;
+        if (!ota_parse_u8(source_pos_text, &pos)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid source_pdo_pos");
+        }
+        result = (max77958_service_ap_result_t){0};
+        const esp_err_t err =
+            max77958_service_request_source_pdo(pos, &result);
+        operation_count++;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    } else if (query_err != ESP_ERR_NOT_FOUND) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid source_pdo_pos");
+    }
+
+    char sink_pdos_text[160] = {0};
+    query_err = httpd_query_key_value(query, "sink_pdos", sink_pdos_text,
+                                      sizeof(sink_pdos_text));
+    if (query_err == ESP_OK) {
+        uint16_t voltages[MAX77958_SERVICE_MAX_SINK_PDOS] = {0};
+        uint16_t currents[MAX77958_SERVICE_MAX_SINK_PDOS] = {0};
+        size_t pdo_count = 0;
+        if (!ota_parse_pd_fixed_pdo_list(
+                sink_pdos_text, voltages, currents,
+                MAX77958_SERVICE_MAX_SINK_PDOS, &pdo_count)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid sink_pdos");
+        }
+        bool mtp = false;
+        char mtp_text[16] = {0};
+        const esp_err_t mtp_err = httpd_query_key_value(
+            query, "sink_pdos_mtp", mtp_text, sizeof(mtp_text));
+        if (mtp_err == ESP_OK) {
+            if (!ota_parse_bool_text(mtp_text, &mtp)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid sink_pdos_mtp");
+            }
+        } else if (mtp_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid sink_pdos_mtp");
+        }
+
+        result = (max77958_service_ap_result_t){0};
+        const esp_err_t err = max77958_service_set_sink_fixed_pdos(
+            voltages, currents, pdo_count, mtp, &result);
+        operation_count++;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    } else if (query_err != ESP_ERR_NOT_FOUND) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid sink_pdos");
+    }
+
+    const bool pps_requested =
+        ota_query_has_key(query, "pps_enabled") ||
+        ota_query_has_key(query, "pps_voltage_mv") ||
+        ota_query_has_key(query, "pps_current_ma");
+    if (pps_requested) {
+        bool enabled = false;
+        uint16_t voltage_mv = 5000;
+        uint16_t current_ma = 3000;
+        char text[32] = {0};
+
+        query_err = httpd_query_key_value(query, "pps_enabled", text,
+                                          sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_bool_text(text, &enabled)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid pps_enabled");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid pps_enabled");
+        }
+
+        query_err = httpd_query_key_value(query, "pps_voltage_mv", text,
+                                          sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_u16(text, &voltage_mv)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid pps_voltage_mv");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid pps_voltage_mv");
+        }
+
+        query_err = httpd_query_key_value(query, "pps_current_ma", text,
+                                          sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_u16(text, &current_ma)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid pps_current_ma");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid pps_current_ma");
+        }
+
+        result = (max77958_service_ap_result_t){0};
+        const esp_err_t err = max77958_service_set_pps_default(
+            enabled, voltage_mv, current_ma, &result);
+        operation_count++;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    }
+
+    const bool apdo_requested =
+        ota_query_has_key(query, "apdo_pos") ||
+        ota_query_has_key(query, "apdo_voltage_mv") ||
+        ota_query_has_key(query, "apdo_current_ma");
+    if (apdo_requested) {
+        uint8_t pos = 0;
+        uint16_t voltage_mv = 0;
+        uint16_t current_ma = 0;
+        char text[32] = {0};
+
+        if (httpd_query_key_value(query, "apdo_pos", text,
+                                  sizeof(text)) != ESP_OK ||
+            !ota_parse_u8(text, &pos) ||
+            httpd_query_key_value(query, "apdo_voltage_mv", text,
+                                  sizeof(text)) != ESP_OK ||
+            !ota_parse_u16(text, &voltage_mv) ||
+            httpd_query_key_value(query, "apdo_current_ma", text,
+                                  sizeof(text)) != ESP_OK ||
+            !ota_parse_u16(text, &current_ma)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid APDO request");
+        }
+
+        result = (max77958_service_ap_result_t){0};
+        const esp_err_t err =
+            max77958_service_request_apdo(pos, voltage_mv, current_ma,
+                                          &result);
+        operation_count++;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    }
+
+    if (ota_query_option_enabled(query, "read_sink") ||
+        ota_query_has_key(query, "read_sink_mtp")) {
+        bool mtp = false;
+        char mtp_text[16] = {0};
+        const esp_err_t mtp_err = httpd_query_key_value(
+            query, "read_sink_mtp", mtp_text, sizeof(mtp_text));
+        if (mtp_err == ESP_OK) {
+            if (!ota_parse_bool_text(mtp_text, &mtp)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid read_sink_mtp");
+            }
+        } else if (mtp_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid read_sink_mtp");
+        }
+        result = (max77958_service_ap_result_t){0};
+        const esp_err_t err = max77958_service_read_sink_pdos(mtp, &result);
+        operation_count++;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    }
+
+    char reg_text[16] = {0};
+    query_err = httpd_query_key_value(query, "reg", reg_text,
+                                      sizeof(reg_text));
+    if (query_err == ESP_OK) {
+        if (!ota_query_option_enabled(query, "confirm")) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Raw MAX77958 write needs confirm=1");
+        }
+        uint8_t reg = 0;
+        uint8_t value = 0;
+        char value_text[16] = {0};
+        if (!ota_parse_u8(reg_text, &reg) ||
+            httpd_query_key_value(query, "value", value_text,
+                                  sizeof(value_text)) != ESP_OK ||
+            !ota_parse_u8(value_text, &value)) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid raw register write");
+        }
+        const esp_err_t err = max77958_service_write_register(reg, value);
+        operation_count++;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    } else if (query_err != ESP_ERR_NOT_FOUND) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid reg");
+    }
+
+    if (!handled) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "No MAX77958 operation requested");
+    }
+
+    max77958_service_request_refresh();
+    vTaskDelay(pdMS_TO_TICKS(80));
+
+    max77958_service_snapshot_t snapshot = {0};
+    max77958_service_get_snapshot(&snapshot);
+    ESP_LOGW(TAG,
+             "MAX77958 config: ops=%lu err=%s present=%s VBUS~%umV BC=%s CC=%s source_pos=%u src_pdos=%u sink_pdos=%u last_op=0x%02X result=%u",
+             (unsigned long)operation_count, esp_err_to_name(first_error),
+             snapshot.present ? "yes" : "no",
+             (unsigned)snapshot.vbus_mid_mv,
+             max77958_service_chg_typ_to_string(snapshot.chg_typ),
+             max77958_service_cc_stat_to_string(snapshot.cc_stat),
+             (unsigned)snapshot.selected_source_pdo_pos,
+             (unsigned)snapshot.source_pdo_count,
+             (unsigned)snapshot.sink_pdo_count,
+             (unsigned)snapshot.last_opcode,
+             (unsigned)snapshot.last_result_code);
+
+    char response[1000];
+    const int len = snprintf(
+        response, sizeof(response),
+        "{"
+        "\"ok\":%s,"
+        "\"operation_count\":%lu,"
+        "\"error\":%d,"
+        "\"error_name\":\"%s\","
+        "\"pd_present\":%s,"
+        "\"pd_vbus_mid_mv\":%u,"
+        "\"pd_vbus_detected\":%s,"
+        "\"pd_chg_typ_name\":\"%s\","
+        "\"pd_cc_stat_name\":\"%s\","
+        "\"pd_usb2_switch_closed\":%s,"
+        "\"pd_source_pdo_count\":%u,"
+        "\"pd_selected_source_pdo_pos\":%u,"
+        "\"pd_sink_pdo_count\":%u,"
+        "\"pd_last_opcode\":\"0x%02x\","
+        "\"pd_last_response_opcode\":\"0x%02x\","
+        "\"pd_last_result_code\":%u,"
+        "\"pd_last_result_name\":\"%s\","
+        "\"pd_last_operation_error_name\":\"%s\""
+        "}\n",
+        first_error == ESP_OK ? "true" : "false",
+        (unsigned long)operation_count, first_error,
+        esp_err_to_name(first_error),
+        snapshot.present ? "true" : "false",
+        (unsigned)snapshot.vbus_mid_mv,
+        snapshot.vbus_detected ? "true" : "false",
+        max77958_service_chg_typ_to_string(snapshot.chg_typ),
+        max77958_service_cc_stat_to_string(snapshot.cc_stat),
+        snapshot.usb2_switch_closed ? "true" : "false",
+        (unsigned)snapshot.source_pdo_count,
+        (unsigned)snapshot.selected_source_pdo_pos,
+        (unsigned)snapshot.sink_pdo_count,
+        (unsigned)snapshot.last_opcode,
+        (unsigned)snapshot.last_response_opcode,
+        (unsigned)snapshot.last_result_code,
+        max77958_service_apdo_result_to_string(snapshot.last_result_code),
+        esp_err_to_name((esp_err_t)snapshot.last_operation_error));
+
+    if (len < 0 || len >= (int)sizeof(response)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "response too long");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, response, len);
+}
+
 static esp_err_t runtime_config_post_handler(httpd_req_t *req)
 {
     if (!ota_request_authorized(req)) {
@@ -2262,13 +2910,23 @@ static esp_err_t ota_post_handler(httpd_req_t *req)
     return response_err;
 }
 
+static esp_err_t register_uri_handler_checked(const httpd_uri_t *uri)
+{
+    esp_err_t err = httpd_register_uri_handler(s_http_server, uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP handler register failed for %s: %s", uri->uri,
+                 esp_err_to_name(err));
+    }
+    return err;
+}
+
 static esp_err_t start_http_server(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.stack_size = 8192;
     config.core_id = OTA_SERVICE_HTTPD_TASK_CORE;
-    config.max_uri_handlers = 6;
+    config.max_uri_handlers = 8;
 
     esp_err_t err = httpd_start(&s_http_server, &config);
     if (err != ESP_OK) {
@@ -2312,16 +2970,37 @@ static esp_err_t start_http_server(void)
         .handler = charger_config_post_handler,
         .user_ctx = NULL,
     };
+    const httpd_uri_t max77958_config_uri = {
+        .uri = "/config/max77958",
+        .method = HTTP_POST,
+        .handler = max77958_config_post_handler,
+        .user_ctx = NULL,
+    };
 
-    ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &root_uri));
-    ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &status_uri));
-    ESP_ERROR_CHECK(httpd_register_uri_handler(s_http_server, &ota_uri));
-    ESP_ERROR_CHECK(
-        httpd_register_uri_handler(s_http_server, &antenna_delay_uri));
-    ESP_ERROR_CHECK(
-        httpd_register_uri_handler(s_http_server, &runtime_config_uri));
-    ESP_ERROR_CHECK(
-        httpd_register_uri_handler(s_http_server, &charger_config_uri));
+    err = register_uri_handler_checked(&root_uri);
+    if (err == ESP_OK) {
+        err = register_uri_handler_checked(&status_uri);
+    }
+    if (err == ESP_OK) {
+        err = register_uri_handler_checked(&ota_uri);
+    }
+    if (err == ESP_OK) {
+        err = register_uri_handler_checked(&antenna_delay_uri);
+    }
+    if (err == ESP_OK) {
+        err = register_uri_handler_checked(&runtime_config_uri);
+    }
+    if (err == ESP_OK) {
+        err = register_uri_handler_checked(&charger_config_uri);
+    }
+    if (err == ESP_OK) {
+        err = register_uri_handler_checked(&max77958_config_uri);
+    }
+    if (err != ESP_OK) {
+        httpd_stop(s_http_server);
+        s_http_server = NULL;
+        return err;
+    }
 
     s_running = true;
     s_status = OTA_SERVICE_STATUS_RUNNING;

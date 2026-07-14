@@ -148,6 +148,12 @@ def charger_url(target: str) -> str:
     return f"http://{target}/config/charger"
 
 
+def max77958_url(target: str) -> str:
+    if re.match(r"^https?://", target):
+        return target.rstrip("/") + "/config/max77958"
+    return f"http://{target}/config/max77958"
+
+
 def antenna_delay_url(target: str) -> str:
     if re.match(r"^https?://", target):
         return target.rstrip("/") + "/config/antenna-delay"
@@ -1529,11 +1535,22 @@ th { color: var(--muted); font-weight: 700; }
 .charger-status-table .col-measurements { width: 22%; }
 .charger-status-table .col-write { width: 11%; }
 .charger-power-cell { font-size: 12px; line-height: 1.35; }
+.pd-status-table { table-layout: fixed; }
+.pd-status-table th,
+.pd-status-table td { overflow-wrap: anywhere; }
+.pd-status-table .col-module { width: 13%; }
+.pd-status-table .col-link { width: 18%; }
+.pd-status-table .col-contract { width: 21%; }
+.pd-status-table .col-pdos { width: 27%; }
+.pd-status-table .col-ops { width: 21%; }
+.pd-pdo-list { margin: 4px 0 0; padding-left: 18px; }
+.pd-pdo-list li { margin: 2px 0; }
 .ok { color: var(--green); font-weight: 700; }
 .warn { color: var(--orange); font-weight: 700; }
 .bad { color: var(--red); font-weight: 700; }
 .settings-grid { display: grid; grid-template-columns: minmax(340px, 520px) minmax(420px, 1fr); gap: 14px; align-items: start; }
 .charger-grid { grid-template-columns: minmax(620px, 1.25fr) minmax(360px, 0.75fr); }
+.pd-grid { grid-template-columns: minmax(680px, 1.2fr) minmax(380px, 0.8fr); }
 .section { border: 1px solid var(--line); padding: 12px; margin-bottom: 12px; background: #fff; }
 .section h2 { margin: 0 0 11px; font-size: 15px; }
 .hidden { display: none !important; }
@@ -1897,7 +1914,7 @@ th { color: var(--muted); font-weight: 700; }
   background: transparent;
 }
 @media (max-width: 940px) {
-  .terminal-grid, .settings-grid, .charger-grid, .graphs-layout, .position-layout { grid-template-columns: 1fr; }
+  .terminal-grid, .settings-grid, .charger-grid, .pd-grid, .graphs-layout, .position-layout { grid-template-columns: 1fr; }
   .profile-grid { grid-template-columns: 1fr; }
   .page { height: auto; }
   .terminal { height: 520px; }
@@ -1928,6 +1945,7 @@ th { color: var(--muted); font-weight: 700; }
     <button class="tab" data-tab="graphs">Graphs</button>
     <button class="tab" data-tab="info">Info</button>
     <button class="tab" data-tab="batteryCharger">Battery Charger</button>
+    <button class="tab" data-tab="usbPd">USB-C PD</button>
     <button class="tab" data-tab="rangingSettings">Ranging Settings</button>
     <button class="tab" data-tab="uwbSettings">UWB Settings</button>
     <button class="tab" data-tab="settings">Settings</button>
@@ -2258,6 +2276,168 @@ th { color: var(--muted); font-weight: 700; }
                 <button class="danger" id="applyChargerRaw">Apply Raw Register</button>
               </div>
               <div id="chargerRawToast" class="toast"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section id="usbPd" class="page">
+      <div class="settings">
+        <div class="settings-grid pd-grid">
+          <div>
+            <div class="section">
+              <h2>Live USB-C PD Status</h2>
+              <table class="pd-status-table">
+                <colgroup>
+                  <col class="col-module">
+                  <col class="col-link">
+                  <col class="col-contract">
+                  <col class="col-pdos">
+                  <col class="col-ops">
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>Module</th><th>USB-C</th><th>Contract</th><th>PDOs</th><th>Operations</th>
+                  </tr>
+                </thead>
+                <tbody id="pdRows"></tbody>
+              </table>
+            </div>
+            <div class="section pd-raw-tool hidden">
+              <h2>Raw Registers</h2>
+              <div class="form-grid">
+                <label for="pdRawModule">Module</label>
+                <select id="pdRawModule">
+                  <option value="1">module 1</option>
+                  <option value="2">module 2</option>
+                  <option value="3">module 3</option>
+                  <option value="4">module 4</option>
+                  <option value="5">module 5</option>
+                </select>
+              </div>
+              <div id="pdRawRegisters" class="reg-grid"></div>
+            </div>
+          </div>
+          <div>
+            <div class="section">
+              <h2>Contract</h2>
+              <div class="form-grid">
+                <label for="pdContractTargets">Targets</label>
+                <select id="pdContractTargets">
+                  <option value="all">all modules</option>
+                  <option value="1">module 1</option>
+                  <option value="2">module 2</option>
+                  <option value="3">module 3</option>
+                  <option value="4">module 4</option>
+                  <option value="5">module 5</option>
+                </select>
+                <label>Loaded</label>
+                <div id="pdContractSelectionStatus" class="field-note">waiting for status</div>
+                <label for="pdSourcePdoPos">Source PDO</label>
+                <input id="pdSourcePdoPos" value="1" type="number" min="1" max="7" step="1">
+                <label for="pdUsb2SwitchClosed">USB2 switch</label>
+                <div class="checkbox-row"><input id="pdUsb2SwitchClosed" type="checkbox"><span>D+/D- pass-through closed</span></div>
+              </div>
+              <div class="param-legend">
+                <div><b>Source PDO</b><span>Requests one advertised fixed supply profile by position. This is the normal way to ask for 5 V, 9 V, 15 V, and similar fixed rails.</span></div>
+                <div><b>USB2 switch</b><span>Controls MAX77958 CTRL1 pass-through switches for D+ and D-.</span></div>
+              </div>
+              <div class="form-actions">
+                <button class="primary" id="applyPdSource">Request Source PDO</button>
+                <button id="applyPdUsb2">Apply USB2 Switch</button>
+                <button id="refreshPd">Refresh</button>
+                <button id="triggerPdBc">Trigger BC Detect</button>
+              </div>
+              <div id="pdContractToast" class="toast"></div>
+            </div>
+            <div class="section">
+              <h2>Sink PDOs</h2>
+              <div class="form-grid">
+                <label for="pdSinkTargets">Targets</label>
+                <select id="pdSinkTargets">
+                  <option value="all">all modules</option>
+                  <option value="1">module 1</option>
+                  <option value="2">module 2</option>
+                  <option value="3">module 3</option>
+                  <option value="4">module 4</option>
+                  <option value="5">module 5</option>
+                </select>
+                <label>Loaded</label>
+                <div id="pdSinkSelectionStatus" class="field-note">waiting for status</div>
+                <label for="pdSinkPdos">PDO list</label>
+                <input id="pdSinkPdos" value="5000:3000,9000:3000,15000:3000" placeholder="mV:mA,mV:mA">
+                <label for="pdSinkPdosMtp">Store</label>
+                <div class="checkbox-row"><input id="pdSinkPdosMtp" type="checkbox"><span>write MTP, not only RAM</span></div>
+              </div>
+              <div class="param-legend">
+                <div><b>PDO list</b><span>Comma separated fixed sink capabilities in millivolts and milliamps, for example 5000:3000,9000:3000.</span></div>
+                <div><b>MTP</b><span>Writes the non-volatile MAX77958 profile. Keep unchecked while experimenting.</span></div>
+              </div>
+              <div class="form-actions">
+                <button class="primary" id="applyPdSinkPdos">Apply Sink PDOs</button>
+                <button id="readPdSinkRam">Read RAM</button>
+                <button id="readPdSinkMtp">Read MTP</button>
+              </div>
+              <div id="pdSinkToast" class="toast"></div>
+            </div>
+            <div class="section">
+              <h2>PPS / APDO</h2>
+              <div class="form-grid">
+                <label for="pdPpsTargets">Targets</label>
+                <select id="pdPpsTargets">
+                  <option value="all">all modules</option>
+                  <option value="1">module 1</option>
+                  <option value="2">module 2</option>
+                  <option value="3">module 3</option>
+                  <option value="4">module 4</option>
+                  <option value="5">module 5</option>
+                </select>
+                <label>Loaded</label>
+                <div id="pdPpsSelectionStatus" class="field-note">waiting for status</div>
+                <label for="pdPpsEnabled">Default PPS</label>
+                <div class="checkbox-row"><input id="pdPpsEnabled" type="checkbox"><span>enabled</span></div>
+                <label for="pdPpsVoltageMv">Default voltage mV</label>
+                <input id="pdPpsVoltageMv" value="5000" type="number" min="3300" max="21000" step="20">
+                <label for="pdPpsCurrentMa">Default current mA</label>
+                <input id="pdPpsCurrentMa" value="1000" type="number" min="0" max="5000" step="50">
+                <label for="pdApdoPos">APDO position</label>
+                <input id="pdApdoPos" value="1" type="number" min="1" max="7" step="1">
+                <label for="pdApdoVoltageMv">APDO voltage mV</label>
+                <input id="pdApdoVoltageMv" value="5000" type="number" min="3300" max="21000" step="20">
+                <label for="pdApdoCurrentMa">APDO current mA</label>
+                <input id="pdApdoCurrentMa" value="1000" type="number" min="0" max="5000" step="50">
+              </div>
+              <div class="param-legend">
+                <div><b>Default PPS</b><span>Saved policy applied at boot. Use it only with a source that advertises PPS/APDO.</span></div>
+                <div><b>APDO request</b><span>Runtime programmable supply request. Voltage is encoded in 20 mV units, current in 50 mA units.</span></div>
+              </div>
+              <div class="form-actions">
+                <button class="primary" id="applyPdPpsDefault">Apply PPS Default</button>
+                <button id="requestPdApdo">Request APDO</button>
+              </div>
+              <div id="pdPpsToast" class="toast"></div>
+            </div>
+            <div class="section">
+              <h2>Service Tools</h2>
+              <div class="checkbox-row"><input id="pdShowRawTools" type="checkbox"><span>show raw register tools</span></div>
+              <div class="param-legend">
+                <div><b>Raw tools</b><span>For datasheet-level MAX77958 experiments only. Normal voltage setup should use PDO/PPS controls above.</span></div>
+              </div>
+            </div>
+            <div class="section pd-raw-tool hidden">
+              <h2>Raw Register Write</h2>
+              <div class="form-grid">
+                <label for="pdRawReg">Register</label>
+                <input id="pdRawReg" value="0x00">
+                <label for="pdRawValue">Value</label>
+                <input id="pdRawValue" value="0x00">
+                <label for="pdRawConfirm">Confirm</label>
+                <div class="checkbox-row"><input id="pdRawConfirm" type="checkbox"><span>allow raw write</span></div>
+              </div>
+              <div class="form-actions">
+                <button class="danger" id="applyPdRaw">Apply Raw Register</button>
+              </div>
+              <div id="pdRawToast" class="toast"></div>
             </div>
           </div>
         </div>
@@ -2808,6 +2988,34 @@ const BQ_REG_NAMES = {
   0x46: "D- ADC LSB",
   0x47: "DPDM Driver",
   0x48: "Part Information",
+};
+const MAX77958_REG_NAMES = {
+  0x00: "Device ID",
+  0x01: "Device Revision",
+  0x02: "FW Revision",
+  0x03: "FW Sub Version",
+  0x04: "UIC INT",
+  0x05: "CC INT",
+  0x06: "PD INT",
+  0x07: "Action INT",
+  0x08: "USBC Status 1",
+  0x09: "USBC Status 2",
+  0x0A: "BC Status",
+  0x0B: "DP Status",
+  0x0C: "CC Status 0",
+  0x0D: "CC Status 1",
+  0x0E: "PD Status 0",
+  0x0F: "PD Status 1",
+  0x10: "UIC INT Mask",
+  0x11: "CC INT Mask",
+  0x12: "PD INT Mask",
+  0x13: "Action INT Mask",
+  0x21: "AP Data Out 0",
+  0x41: "AP Data Out 32",
+  0x51: "AP Data In 0",
+  0x71: "AP Data In 32",
+  0x80: "SW Reset",
+  0xE0: "I2C Config",
 };
 
 function storageKey(id, name) { return `uwbDash.${id}.${name}`; }
@@ -4694,6 +4902,139 @@ function renderCharger(statuses) {
   renderChargerRegisters();
 }
 
+function pdRawBytes(item) {
+  const raw = String(item?.pd_raw_hex || "");
+  if (!raw || raw.length % 2) return [];
+  const bytes = [];
+  for (let index = 0; index < raw.length; index += 2) {
+    const value = Number.parseInt(raw.slice(index, index + 2), 16);
+    if (!Number.isFinite(value)) return [];
+    bytes.push(value);
+  }
+  return bytes;
+}
+
+function pdPdoNumber(value) {
+  if (typeof value === "number") return value >>> 0;
+  if (typeof value === "string") return Number.parseInt(value, 0) >>> 0;
+  return 0;
+}
+
+function pdFixedPdoParts(value) {
+  const pdo = pdPdoNumber(value);
+  if (((pdo >>> 30) & 0x03) !== 0) return null;
+  return {
+    mv: ((pdo >>> 10) & 0x03ff) * 50,
+    ma: (pdo & 0x03ff) * 10,
+  };
+}
+
+function pdPdoLabel(value, index = 0, selectedPos = 0) {
+  const pdo = pdPdoNumber(value);
+  const type = (pdo >>> 30) & 0x03;
+  const prefix = index > 0 ? `${index}${index === selectedPos ? " selected" : ""}: ` : "";
+  const fixed = pdFixedPdoParts(pdo);
+  if (fixed) return `${prefix}${(fixed.mv / 1000).toFixed(2)} V / ${fixed.ma} mA`;
+  if (type === 3) return `${prefix}APDO/PPS raw 0x${pdo.toString(16).toUpperCase().padStart(8, "0")}`;
+  return `${prefix}PDO type ${type} raw 0x${pdo.toString(16).toUpperCase().padStart(8, "0")}`;
+}
+
+function pdPdoInputText(pdos) {
+  if (!Array.isArray(pdos) || !pdos.length) return "";
+  return pdos.map(item => {
+    const fixed = pdFixedPdoParts(item);
+    return fixed ? `${fixed.mv}:${fixed.ma}` : "";
+  }).filter(Boolean).join(",");
+}
+
+function pdPdoListHtml(pdos, selectedPos = 0) {
+  if (!Array.isArray(pdos) || !pdos.length) return `<span class="muted">none read yet</span>`;
+  return `<ol class="pd-pdo-list">${pdos.map((pdo, index) =>
+    `<li>${esc(pdPdoLabel(pdo, index + 1, selectedPos))}</li>`
+  ).join("")}</ol>`;
+}
+
+function pdStatusPresent(item) {
+  return item && item.module_id && item.pd_monitor_enabled !== false &&
+    (item.pd_present !== undefined ||
+     item.pd_device_id !== undefined ||
+     item.pd_source_pdos !== undefined ||
+     item.pd_raw_hex !== undefined);
+}
+
+function pdPresentClass(item) {
+  if (!item?.pd_monitor_enabled) return "muted";
+  return item.pd_present ? "ok" : "bad";
+}
+
+function renderPdRows(statuses) {
+  const rows = document.getElementById("pdRows");
+  if (!rows) return;
+  rows.innerHTML = (statuses || []).map(item => {
+    if (!item.pd_monitor_enabled) {
+      return `<tr>
+        <td><b>${esc(item.hostname)}</b><br><span class="muted">${esc(item.ip || item.target || "")}</span></td>
+        <td colspan="4"><span class="muted">MAX77958 monitor off</span></td>
+      </tr>`;
+    }
+    const presentClass = pdPresentClass(item);
+    const vbusText = item.pd_vbus_detected
+      ? `${fmtMv(item.pd_vbus_mid_mv)} (${fmtMv(item.pd_vbus_min_mv)}-${fmtMv(item.pd_vbus_max_mv)})`
+      : "not detected";
+    const sourcePdos = Array.isArray(item.pd_source_pdos) ? item.pd_source_pdos : [];
+    const sinkPdos = Array.isArray(item.pd_sink_pdos) ? item.pd_sink_pdos : [];
+    return `<tr>
+      <td><b>${esc(item.hostname)}</b><br><span class="muted">${esc(item.ip || item.target || "")}</span></td>
+      <td><span class="${presentClass}">${item.pd_present ? "MAX77958 present" : "not found"}</span><br>
+        dev ${esc(item.pd_device_id || "-")} rev ${esc(item.pd_device_rev || "-")} fw ${esc(item.pd_fw_rev ?? "-")}.${esc(item.pd_fw_sub_ver ?? "-")}<br>
+        VBUS ${esc(vbusText)}${item.pd_vbus_above_range ? ` <span class="warn">above range</span>` : ""}<br>
+        BC ${esc(item.pd_chg_typ_name || "-")} · CC ${esc(item.pd_cc_pin_name || "-")} / ${esc(item.pd_cc_stat_name || "-")}<br>
+        <span class="muted">sys ${esc(item.pd_sys_msg_name || "-")} · UIC ${esc(item.pd_uic_int || "-")} PD ${esc(item.pd_pd_int || "-")}</span></td>
+      <td>selected source PDO ${esc(item.pd_selected_source_pdo_pos || "-")}<br>
+        data role ${item.pd_data_role_dfp ? "DFP" : "UFP"} · power role ${item.pd_power_role_source ? "source" : "sink"}<br>
+        PS_RDY as sink ${item.pd_psrdy_as_sink ? "yes" : "no"}<br>
+        USB2 switch <span class="${item.pd_usb2_switch_closed ? "ok" : "muted"}">${item.pd_usb2_switch_closed ? "closed" : "open"}</span><br>
+        PPS default ${item.pd_pps_default_enabled ? `${fmtMv(item.pd_pps_default_mv)} / ${fmtMa(item.pd_pps_default_ma)}` : "off"}</td>
+      <td><b>Source</b> <span class="${item.pd_source_caps_valid ? "ok" : "muted"}">${esc(item.pd_source_pdo_count ?? 0)} PDOs</span>
+        ${pdPdoListHtml(sourcePdos, Number(item.pd_selected_source_pdo_pos || 0))}
+        <b>Sink</b> <span class="${item.pd_sink_pdos_valid ? "ok" : "muted"}">${esc(item.pd_sink_pdo_count ?? 0)} PDOs ${item.pd_sink_pdos_from_mtp ? "MTP" : "RAM"}</span>
+        ${pdPdoListHtml(sinkPdos, 0)}</td>
+      <td>ops ${esc(item.pd_operation_count ?? "-")} · err ${esc(item.pd_operation_error_count ?? "-")}<br>
+        last op ${esc(item.pd_last_opcode || "-")} -> ${esc(item.pd_last_response_opcode || "-")}<br>
+        result ${esc(item.pd_last_result_code ?? "-")} ${esc(item.pd_last_result_name || "")}<br>
+        <span class="muted">err ${esc(item.pd_last_operation_error_name || item.pd_last_error_name || "-")}
+        · reads ${esc(item.pd_read_count ?? "-")} · age ${fmtAgeMs(item.pd_last_update_age_ms)}</span></td>
+    </tr>`;
+  }).join("");
+}
+
+function renderPdRegisters() {
+  const grid = document.getElementById("pdRawRegisters");
+  const select = document.getElementById("pdRawModule");
+  if (!grid || !select) return;
+  const moduleId = Number(select.value || 1);
+  const item = state.statuses.find(status => Number(status.module_id) === moduleId);
+  const bytes = pdRawBytes(item);
+  if (!item) {
+    grid.innerHTML = `<div class="muted">module ${moduleId} has no status yet</div>`;
+    return;
+  }
+  if (!bytes.length) {
+    grid.innerHTML = `<div class="muted">no raw register map available</div>`;
+    return;
+  }
+  grid.innerHTML = bytes.map((value, reg) => `
+    <div class="reg-cell">
+      <b>${hexByte(reg)} = ${hexByte(value)}</b>
+      <span>${esc(MAX77958_REG_NAMES[reg] || "Reserved")}</span>
+    </div>`).join("");
+}
+
+function renderPd(statuses) {
+  renderPdRows(statuses);
+  renderPdRegisters();
+}
+
 function renderInfo(snapshot) {
   state.statuses = snapshot.statuses || [];
   state.ranging = snapshot.ranging || {distances: {}, max_age_sec: 3};
@@ -4749,10 +5090,12 @@ function renderInfo(snapshot) {
     </tr>`).join("");
   renderUwbRadio(state.statuses[0] || {});
   renderCharger(state.statuses);
+  renderPd(state.statuses);
   renderPosition();
   scheduleAccelRender();
   hydrateSettingsFromStatus(state.statuses[0] || {});
   hydrateChargerSettings();
+  hydratePdSettings();
 }
 
 function setSettingIfFresh(id, value, force = false) {
@@ -5285,6 +5628,10 @@ async function postChargerConfig(payload, toastId) {
   return postJsonEndpoint("/api/charger-config", payload, toastId);
 }
 
+async function postMax77958Config(payload, toastId) {
+  return postJsonEndpoint("/api/max77958-config", payload, toastId);
+}
+
 function settingKey(id) { return `uwbDash.setting.${id}`; }
 
 const chargerAdcFields = [
@@ -5517,6 +5864,158 @@ async function resetChargerCycle(targetSelectId, toastId) {
   }
 }
 
+const pdContractFields = [
+  {id: "pdSourcePdoPos", param: "source_pdo_pos", label: "Source PDO", get: item => item.pd_selected_source_pdo_pos || 1},
+  {id: "pdUsb2SwitchClosed", param: "usb2_closed", label: "USB2 switch", get: item => item.pd_usb2_switch_closed},
+];
+const pdSinkFields = [
+  {id: "pdSinkPdos", param: "sink_pdos", label: "Sink PDOs", get: item => pdPdoInputText(item.pd_sink_pdos)},
+  {id: "pdSinkPdosMtp", param: "sink_pdos_mtp", label: "MTP", get: item => item.pd_sink_pdos_from_mtp},
+];
+const pdPpsFields = [
+  {id: "pdPpsEnabled", param: "pps_enabled", label: "PPS enable", get: item => item.pd_pps_default_enabled},
+  {id: "pdPpsVoltageMv", param: "pps_voltage_mv", label: "PPS voltage", get: item => item.pd_pps_default_mv || 5000},
+  {id: "pdPpsCurrentMa", param: "pps_current_ma", label: "PPS current", get: item => item.pd_pps_default_ma || 1000},
+];
+
+function pdConfigFields() {
+  return [...pdContractFields, ...pdSinkFields, ...pdPpsFields];
+}
+
+function selectedPdStatuses(targetSelectId) {
+  const target = document.getElementById(targetSelectId)?.value || "all";
+  const items = state.statuses.filter(pdStatusPresent);
+  if (target === "all") return items;
+  const moduleId = Number(target);
+  return items.filter(item => Number(item.module_id) === moduleId);
+}
+
+function commonPdValue(items, field) {
+  if (!items.length) return {mixed: false, value: undefined};
+  const values = items.map(item => field.get(item));
+  if (values.some(value => value === undefined || value === null)) {
+    return {mixed: true, value: undefined};
+  }
+  const first = controlValueToken(values[0]);
+  const mixed = values.some(value => controlValueToken(value) !== first);
+  return {mixed, value: mixed ? undefined : values[0]};
+}
+
+function setPdControlFromStatus(field, value, mixed) {
+  const el = document.getElementById(field.id);
+  if (!el || el.dataset.dirty === "1") return;
+  el.dataset.mixed = mixed ? "1" : "0";
+  el.dataset.loadedValue = mixed ? "" : controlValueToken(value);
+  el.classList.toggle("mixed-value", mixed);
+  if (el.type === "checkbox") {
+    el.indeterminate = mixed;
+    if (!mixed) el.checked = Boolean(value);
+    return;
+  }
+  if (mixed) {
+    el.value = "";
+    el.placeholder = "mixed";
+  } else {
+    el.value = value === undefined || value === null ? "" : String(value);
+    el.placeholder = "";
+  }
+}
+
+function hydratePdGroup(fields, targetSelectId, statusId) {
+  const items = selectedPdStatuses(targetSelectId);
+  const target = document.getElementById(targetSelectId)?.value || "all";
+  const status = document.getElementById(statusId);
+  const mixedLabels = [];
+  for (const field of fields) {
+    const common = commonPdValue(items, field);
+    if (common.mixed) mixedLabels.push(field.label);
+    setPdControlFromStatus(field, common.value, common.mixed);
+  }
+  if (!status) return;
+  if (!items.length) {
+    status.textContent = `no live MAX77958 status for ${target === "all" ? "selected modules" : `M${target}`}`;
+    status.className = "field-note warn";
+    return;
+  }
+  const modules = items.map(item => `M${item.module_id}`).join(", ");
+  if (mixedLabels.length) {
+    status.textContent = `loaded ${modules}; mixed: ${mixedLabels.join(", ")}`;
+    status.className = "field-note warn";
+  } else {
+    status.textContent = `loaded ${modules}`;
+    status.className = "field-note";
+  }
+}
+
+function hydratePdSettings() {
+  hydratePdGroup(pdContractFields, "pdContractTargets", "pdContractSelectionStatus");
+  hydratePdGroup(pdSinkFields, "pdSinkTargets", "pdSinkSelectionStatus");
+  hydratePdGroup(pdPpsFields, "pdPpsTargets", "pdPpsSelectionStatus");
+}
+
+function clearPdDirty(fields = pdConfigFields()) {
+  for (const field of fields) {
+    const el = document.getElementById(field.id);
+    if (!el) continue;
+    el.dataset.dirty = "0";
+  }
+}
+
+function markPdControlDirty(event) {
+  const el = event.currentTarget;
+  el.dataset.dirty = "1";
+  el.dataset.mixed = "0";
+  el.classList.remove("mixed-value");
+  if (el.type === "checkbox") el.indeterminate = false;
+}
+
+function wirePdDirtyTracking() {
+  for (const field of pdConfigFields()) {
+    const el = document.getElementById(field.id);
+    if (!el) continue;
+    el.dataset.dirty = "0";
+    el.addEventListener("input", markPdControlDirty);
+    el.addEventListener("change", markPdControlDirty);
+  }
+  const groups = [
+    {target: "pdContractTargets", fields: pdContractFields},
+    {target: "pdSinkTargets", fields: pdSinkFields},
+    {target: "pdPpsTargets", fields: pdPpsFields},
+  ];
+  for (const group of groups) {
+    const targets = document.getElementById(group.target);
+    if (!targets) continue;
+    targets.addEventListener("change", () => {
+      clearPdDirty(group.fields);
+      hydratePdSettings();
+    });
+  }
+}
+
+function pdParamFromControl(id) {
+  const el = document.getElementById(id);
+  if (!el) return "";
+  if (el.type === "checkbox") return el.checked ? "1" : "0";
+  return el.value.trim();
+}
+
+function pdPostPayload(targetSelectId, params) {
+  return {
+    target_modules: document.getElementById(targetSelectId).value,
+    params,
+  };
+}
+
+async function postPdConfig(targetSelectId, params, toastId, fieldsToClear = []) {
+  const data = await postMax77958Config(pdPostPayload(targetSelectId, params), toastId);
+  if (apiResponseOk(data)) {
+    clearPdDirty(fieldsToClear);
+    setTimeout(hydratePdSettings, 500);
+    setTimeout(fetchSnapshot, 600);
+  }
+  return data;
+}
+
 function calibrationParamsFromForm() {
   const method = document.getElementById("calMethod").value;
   const params = {
@@ -5687,6 +6186,11 @@ function persistedSettingIds() {
     "chargerAdcTargets", "chargerLimitTargets", "chargerTimerTargets",
     "chargerRawModule", "chargerShowRawTools", "chargerRawReg", "chargerRawValue",
     "chargerRawMask", "chargerRawBits",
+    "pdContractTargets", "pdSinkTargets", "pdPpsTargets", "pdRawModule",
+    "pdSourcePdoPos", "pdUsb2SwitchClosed", "pdSinkPdos", "pdSinkPdosMtp",
+    "pdPpsEnabled", "pdPpsVoltageMv", "pdPpsCurrentMa", "pdApdoPos",
+    "pdApdoVoltageMv", "pdApdoCurrentMa", "pdShowRawTools", "pdRawReg",
+    "pdRawValue",
     "calTargets", "calMethod", "calPair", "calKnownCm", "calThree",
     "calD01Cm", "calD02Cm", "calD12Cm", "calSamples",
     "calAutoApply", "calMinApplyDtu", "calReferenceGuardCm", "calTimeoutSec",
@@ -5767,6 +6271,13 @@ function updateChargerRawVisibility() {
   });
 }
 
+function updatePdRawVisibility() {
+  const show = document.getElementById("pdShowRawTools")?.checked;
+  document.querySelectorAll(".pd-raw-tool").forEach(el => {
+    el.classList.toggle("hidden", !show);
+  });
+}
+
 async function enablePositionRanging() {
   const settings = positionSettings();
   const tagId = settings.tagIds[0];
@@ -5804,10 +6315,16 @@ function wireSettings() {
   restoreSettings();
   wireSettingPersistence();
   wireChargerDirtyTracking();
+  wirePdDirtyTracking();
   updateChargerRawVisibility();
+  updatePdRawVisibility();
   const chargerShowRawTools = document.getElementById("chargerShowRawTools");
   if (chargerShowRawTools) {
     chargerShowRawTools.addEventListener("change", updateChargerRawVisibility);
+  }
+  const pdShowRawTools = document.getElementById("pdShowRawTools");
+  if (pdShowRawTools) {
+    pdShowRawTools.addEventListener("change", updatePdRawVisibility);
   }
   const accelTimebase = document.getElementById("accelTimebase");
   if (accelTimebase) {
@@ -5995,6 +6512,64 @@ function wireSettings() {
       params,
     }, "chargerRawToast");
   });
+  document.getElementById("pdRawModule").addEventListener("change", renderPdRegisters);
+  document.getElementById("refreshPd").addEventListener("click", () => {
+    postPdConfig("pdContractTargets", {refresh: "1"}, "pdContractToast");
+  });
+  document.getElementById("triggerPdBc").addEventListener("click", () => {
+    postPdConfig("pdContractTargets", {bc_trigger: "1"}, "pdContractToast");
+  });
+  document.getElementById("applyPdSource").addEventListener("click", () => {
+    const value = pdParamFromControl("pdSourcePdoPos");
+    if (!value) {
+      setToast("pdContractToast", "Source PDO position is required", "bad");
+      return;
+    }
+    postPdConfig("pdContractTargets", {source_pdo_pos: value}, "pdContractToast", pdContractFields);
+  });
+  document.getElementById("applyPdUsb2").addEventListener("click", () => {
+    postPdConfig("pdContractTargets", {
+      usb2_closed: pdParamFromControl("pdUsb2SwitchClosed"),
+    }, "pdContractToast", pdContractFields);
+  });
+  document.getElementById("applyPdSinkPdos").addEventListener("click", () => {
+    const value = pdParamFromControl("pdSinkPdos");
+    if (!value) {
+      setToast("pdSinkToast", "Sink PDO list is required", "bad");
+      return;
+    }
+    postPdConfig("pdSinkTargets", {
+      sink_pdos: value,
+      sink_pdos_mtp: pdParamFromControl("pdSinkPdosMtp"),
+    }, "pdSinkToast", pdSinkFields);
+  });
+  document.getElementById("readPdSinkRam").addEventListener("click", () => {
+    postPdConfig("pdSinkTargets", {read_sink_mtp: "0"}, "pdSinkToast");
+  });
+  document.getElementById("readPdSinkMtp").addEventListener("click", () => {
+    postPdConfig("pdSinkTargets", {read_sink_mtp: "1"}, "pdSinkToast");
+  });
+  document.getElementById("applyPdPpsDefault").addEventListener("click", () => {
+    postPdConfig("pdPpsTargets", {
+      pps_enabled: pdParamFromControl("pdPpsEnabled"),
+      pps_voltage_mv: pdParamFromControl("pdPpsVoltageMv"),
+      pps_current_ma: pdParamFromControl("pdPpsCurrentMa"),
+    }, "pdPpsToast", pdPpsFields);
+  });
+  document.getElementById("requestPdApdo").addEventListener("click", () => {
+    postPdConfig("pdPpsTargets", {
+      apdo_pos: pdParamFromControl("pdApdoPos"),
+      apdo_voltage_mv: pdParamFromControl("pdApdoVoltageMv"),
+      apdo_current_ma: pdParamFromControl("pdApdoCurrentMa"),
+    }, "pdPpsToast");
+  });
+  document.getElementById("applyPdRaw").addEventListener("click", () => {
+    postPdConfig("pdRawModule", {
+      reg: pdParamFromControl("pdRawReg"),
+      value: pdParamFromControl("pdRawValue"),
+      confirm: pdParamFromControl("pdRawConfirm"),
+    }, "pdRawToast");
+  });
   document.getElementById("autoCalibration").addEventListener("click", () => {
     postCalibrationAuto({
       target_modules: document.getElementById("calTargets").value,
@@ -6083,6 +6658,9 @@ class HttpHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/charger-config":
             self.handle_charger_config()
             return
+        if parsed.path == "/api/max77958-config":
+            self.handle_max77958_config()
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "not found")
 
     def read_json_body(self) -> dict[str, Any]:
@@ -6130,6 +6708,17 @@ class HttpHandler(BaseHTTPRequestHandler):
             payload = self.read_json_body()
             params = normalize_plain_params(payload.get("params") or {})
             results = self.server.apply_charger_config(
+                params, payload.get("target_modules")
+            )
+            self.send_json({"ok": all(item["ok"] for item in results), "results": results})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def handle_max77958_config(self) -> None:
+        try:
+            payload = self.read_json_body()
+            params = normalize_plain_params(payload.get("params") or {})
+            results = self.server.apply_max77958_config(
                 params, payload.get("target_modules")
             )
             self.send_json({"ok": all(item["ok"] for item in results), "results": results})
@@ -7067,6 +7656,16 @@ class DashboardHttpServer(ThreadingHTTPServer):
         targets = self.resolve_targets(target_modules)
         return [self.send_charger_config(target, params) for target in targets]
 
+    def apply_max77958_config(
+        self, params: dict[str, str], target_modules: Any = None
+    ) -> list[dict[str, Any]]:
+        if not self.token:
+            raise RuntimeError("APP_OTA_PASSWORD missing in secrets.h")
+        if not params:
+            raise RuntimeError("No MAX77958 config parameters provided")
+        targets = self.resolve_targets(target_modules)
+        return [self.send_max77958_config(target, params) for target in targets]
+
     def resolve_targets(self, target_modules: Any) -> list[str]:
         if target_modules in (None, "", "all"):
             return self.targets
@@ -7160,6 +7759,31 @@ class DashboardHttpServer(ThreadingHTTPServer):
         query = urllib.parse.urlencode(params, safe=",")
         request = urllib.request.Request(
             f"{charger_url(target)}?{query}",
+            data=b"",
+            method="POST",
+            headers={"Content-Length": "0", "X-OTA-Token": self.token},
+        )
+        started = time.monotonic()
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_sec) as response:
+                body = response.read().decode("utf-8", errors="replace").strip()
+                return {
+                    "target": target,
+                    "ok": 200 <= response.status < 300,
+                    "status": response.status,
+                    "elapsed_sec": round(time.monotonic() - started, 3),
+                    "body": body,
+                }
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace").strip()
+            return {"target": target, "ok": False, "status": exc.code, "body": body or exc.reason}
+        except (urllib.error.URLError, TimeoutError) as exc:
+            return {"target": target, "ok": False, "error": str(exc)}
+
+    def send_max77958_config(self, target: str, params: dict[str, str]) -> dict[str, Any]:
+        query = urllib.parse.urlencode(params, safe=",:")
+        request = urllib.request.Request(
+            f"{max77958_url(target)}?{query}",
             data=b"",
             method="POST",
             headers={"Content-Length": "0", "X-OTA-Token": self.token},

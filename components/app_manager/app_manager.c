@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gps_service.h"
+#include "max77958_service.h"
 #include "ota_service.h"
 #include "sdkconfig.h"
 #include "uwb_anchor_survey_service.h"
@@ -250,6 +251,12 @@ void app_manager_start(void)
     if (charger_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start BQ25792 service: %s",
                  esp_err_to_name(charger_err));
+    }
+
+    const esp_err_t max77958_err = max77958_service_start();
+    if (max77958_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start MAX77958 service: %s",
+                 esp_err_to_name(max77958_err));
     }
 
     const esp_err_t bno085_err = bno085_service_start();

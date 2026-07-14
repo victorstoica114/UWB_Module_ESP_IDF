@@ -1316,6 +1316,53 @@ the selected modules. Per the BQ25792 datasheet, stopping and restarting the
 charge cycle resets the active fast/pre-charge/trickle safety timers and also
 resets top-off timing.
 
+## MAX77958 USB-C PD Controller
+
+The MAX77958 USB-C/PD controller is monitored on the shared I2C bus
+(`GPIO9/GPIO10`, address `0x25`) at 400 kHz. Firmware treats it like a
+low-priority background device, the same way the charger monitor is treated:
+MAX77958 reads and AP-command writes use the shared I2C background lock, so the
+BNO085 realtime accelerometer path can win bus arbitration when it is active.
+The monitor runs every `APP_MAX77958_READ_INTERVAL_MS` (`10s` by default), plus
+on explicit dashboard refresh or after configuration operations.
+
+`/status` exposes both decoded fields and a raw register map:
+`pd_raw_hex`, device/FW IDs, interrupt/status/mask registers, VBUS ADC range,
+BC1.2 charger type, CC pin/orientation/status, PD role/status flags, CTRL1 USB2
+switch state, source PDOs advertised by the connected supply, sink PDOs
+configured in the MAX77958, PPS defaults, and the last AP-command result. Raw
+AP command response bytes are also exposed as `pd_last_response_hex` for
+datasheet-level debugging.
+
+The authenticated live endpoint is `/config/max77958`. Useful operations are:
+
+| Operation | Example | Effect |
+| --- | --- | --- |
+| Refresh | `/config/max77958?refresh=1` | Requests an immediate status/AP discovery refresh. |
+| BC detect | `/config/max77958?bc_trigger=1` | Triggers BC1.2 charger detection. |
+| USB2 switch | `/config/max77958?usb2_closed=1` | Opens/closes the D+/D- pass-through switches through CTRL1. |
+| Source PDO request | `/config/max77958?source_pdo_pos=2` | Requests one fixed supply profile from the source by advertised PDO position. |
+| Sink PDO set | `/config/max77958?sink_pdos=5000:3000,9000:3000` | Writes fixed sink capabilities in `mV:mA` form to RAM by default. Add `sink_pdos_mtp=1` only when intentionally changing the non-volatile MAX77958 profile. |
+| Sink PDO read | `/config/max77958?read_sink=1` or `read_sink_mtp=1` | Reads sink PDOs from RAM or MTP. |
+| PPS default | `/config/max77958?pps_enabled=1&pps_voltage_mv=9000&pps_current_ma=2000` | Stores the default PPS policy in ESP32 NVS and applies it at MAX77958 startup. |
+| APDO request | `/config/max77958?apdo_pos=1&apdo_voltage_mv=9000&apdo_current_ma=2000` | Requests a programmable PPS/APDO contract at runtime, if the source advertises one. |
+
+Changing the module supply voltage is therefore done through USB-C PD
+negotiation, not by directly forcing a rail voltage. For fixed adapters, first
+read the advertised source PDOs, then request the desired PDO position. For PPS
+adapters, use the APDO request with voltage/current in human units; internally
+the MAX77958 opcode uses 20 mV voltage units and 50 mA current units.
+
+The dashboard has a `USB-C PD` tab with a live table for all modules, human
+controls for Source PDO, Sink PDOs, PPS/APDO, BC detect, USB2 switch, and a
+hidden raw-register section. High-level policy settings are stored in ESP32 NVS
+and applied once at MAX77958 startup; raw register writes are guarded with
+`confirm=1` and are not persisted as policy.
+
+The protocol reference used for the AP-command opcodes is stored locally as
+`datasheets/max77958-customization-script-and-opcode-command-guide.pdf`, with
+extracted text in `datasheets/extracted_text/max77958-customization-script-and-opcode-command-guide.txt`.
+
 ## Local Workflow and VS Code Tasks
 
 Recommended workflow from this folder, in the ESP-IDF v6.0.2 terminal:
@@ -1442,8 +1489,8 @@ python3 tools/uwb_dashboard.py --log-port 6055 --http-port 8780 --open
 
 Open `http://127.0.0.1:8780/`. The dashboard has separate log tabs for module
 pairs, a combined log view, accelerometer graphs, a status page, runtime and UWB
-configuration controls, and a Battery Charger tab for BQ25792 ADC/watchdog,
-charge/input limit, and raw register experiments. Log filters and settings are
+configuration controls, a Battery Charger tab for BQ25792 ADC/watchdog,
+charge/input limit, and a USB-C PD tab for MAX77958 PDO/PPS experiments. Log filters and settings are
 persisted in the browser. Calibration distances are entered in centimeters and
 rounded to the nearest millimeter before being sent to `/config/runtime`.
 Only one program can listen on TCP port 6055 at a time, so stop
