@@ -128,6 +128,7 @@ static void bno085_stop_interrupt(void)
 
 static void bno085_task_finish(bool hold_reset)
 {
+    i2c_bus_service_set_realtime_period_us(0);
     bno085_stop_interrupt();
     bno085_release_i2c_device();
     if (hold_reset) {
@@ -190,6 +191,20 @@ static uint32_t bno085_accel_interval_ms(void)
         return config->bno085_accel_interval_ms;
     }
     return APP_BNO085_ACCEL_INTERVAL_MS;
+}
+
+static uint32_t bno085_accel_period_us(void)
+{
+    const uint32_t interval_ms = bno085_accel_interval_ms();
+    if (interval_ms > UINT32_MAX / 1000U) {
+        return UINT32_MAX;
+    }
+    return interval_ms * 1000U;
+}
+
+static void bno085_update_i2c_realtime_period(void)
+{
+    i2c_bus_service_set_realtime_period_us(bno085_accel_period_us());
 }
 
 static uint32_t bno085_log_interval_ms(void)
@@ -512,6 +527,7 @@ static esp_err_t bno085_enable_accelerometer(void)
         bno085_send_packet(BNO085_CHANNEL_CONTROL, payload, sizeof(payload));
     if (err == ESP_OK) {
         s_configured_accel_interval_ms = interval_ms;
+        bno085_update_i2c_realtime_period();
     }
     return err;
 }
@@ -820,13 +836,18 @@ static bool bno085_wait_for_interrupt_or_timeout(uint32_t *notify_bits)
 
     if (bno085_int_active()) {
         s_wait_immediate_count++;
+        i2c_bus_service_note_realtime_activity();
         return true;
     }
 
     const uint32_t timeout_ms = bno085_int_wait_timeout_ms();
     if (!s_int_irq_enabled) {
         *notify_bits = bno085_wait_notify_bits(timeout_ms);
-        return bno085_int_active();
+        const bool active = bno085_int_active();
+        if (active) {
+            i2c_bus_service_note_realtime_activity();
+        }
+        return active;
     }
 
     bno085_arm_interrupt_if_needed();
@@ -835,11 +856,13 @@ static bool bno085_wait_for_interrupt_or_timeout(uint32_t *notify_bits)
     if (*notify_bits != 0) {
         if ((*notify_bits & BNO085_NOTIFY_INT) != 0) {
             s_wait_notify_count++;
+            i2c_bus_service_note_realtime_activity();
         }
         return bno085_int_active();
     }
     if (bno085_int_active()) {
         s_wait_late_active_count++;
+        i2c_bus_service_note_realtime_activity();
         return true;
     }
 

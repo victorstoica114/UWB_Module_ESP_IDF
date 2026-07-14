@@ -24,7 +24,8 @@ static const char *TAG = "charger_service";
 enum {
     CHARGER_TASK_STACK_WORDS = 3072,
     CHARGER_TASK_PRIORITY = 4,
-    CHARGER_I2C_TIMEOUT_MS = 200,
+    CHARGER_I2C_TIMEOUT_MS = APP_BQ25792_I2C_TRANSACTION_TIMEOUT_MS,
+    CHARGER_I2C_PROBE_TIMEOUT_MS = APP_BQ25792_I2C_PROBE_TIMEOUT_MS,
     CHARGER_I2C_LOCK_TIMEOUT_MS = 1000,
     CHARGER_LOG_INTERVAL_MS = 5000,
     CHARGER_GPIO_INVALID_LEVEL = -1,
@@ -751,7 +752,7 @@ static esp_err_t charger_i2c_init(void)
         return ESP_ERR_TIMEOUT;
     }
     err = i2c_master_probe(s_i2c_bus, APP_BQ25792_I2C_ADDRESS,
-                           CHARGER_I2C_TIMEOUT_MS);
+                           CHARGER_I2C_PROBE_TIMEOUT_MS);
     i2c_bus_service_unlock();
     return err;
 }
@@ -763,13 +764,23 @@ static esp_err_t charger_read_bytes(uint8_t start_reg, uint8_t *data,
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!i2c_bus_service_lock_background(pdMS_TO_TICKS(CHARGER_I2C_LOCK_TIMEOUT_MS))) {
-        return ESP_ERR_TIMEOUT;
+    esp_err_t err = ESP_ERR_TIMEOUT;
+    for (uint32_t attempt = 0; attempt <= APP_BQ25792_I2C_READ_RETRIES;
+         ++attempt) {
+        if (!i2c_bus_service_lock_background(
+                pdMS_TO_TICKS(CHARGER_I2C_LOCK_TIMEOUT_MS))) {
+            err = ESP_ERR_TIMEOUT;
+        } else {
+            err = i2c_master_transmit_receive(
+                s_i2c_dev, &start_reg, sizeof(start_reg), data, data_len,
+                CHARGER_I2C_TIMEOUT_MS);
+            i2c_bus_service_unlock();
+        }
+        if (err == ESP_OK || attempt == APP_BQ25792_I2C_READ_RETRIES) {
+            return err;
+        }
+        taskYIELD();
     }
-    const esp_err_t err = i2c_master_transmit_receive(
-        s_i2c_dev, &start_reg, sizeof(start_reg), data, data_len,
-        CHARGER_I2C_TIMEOUT_MS);
-    i2c_bus_service_unlock();
     return err;
 }
 
@@ -833,20 +844,8 @@ static esp_err_t charger_read_quick_registers(
     const uint8_t start_reg = REG1B_CHARGER_STATUS_0;
     const uint8_t end_reg = REG45_DM_ADC;
     const size_t read_len = (size_t)(end_reg - start_reg + 1U);
-    const size_t first_len = (read_len + 1U) / 2U;
-    const size_t second_len = read_len - first_len;
-
-    esp_err_t err = charger_read_bytes(start_reg, &raw[start_reg], first_len);
-    if (err != ESP_OK || second_len == 0) {
-        return err;
-    }
-
-    if (APP_BQ25792_REGISTER_READ_CHUNK_GAP_MS > 0) {
-        vTaskDelay(pdMS_TO_TICKS(APP_BQ25792_REGISTER_READ_CHUNK_GAP_MS));
-    }
-
-    return charger_read_bytes((uint8_t)(start_reg + first_len),
-                              &raw[start_reg + first_len], second_len);
+    return charger_read_register_range_chunked(start_reg, &raw[start_reg],
+                                               read_len);
 }
 
 static void update_snapshot_gpio_fields(charger_service_snapshot_t *snapshot,

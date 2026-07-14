@@ -21,6 +21,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gps_service.h"
+#include "i2c_bus_service.h"
 #include "max77958_service.h"
 #include "uwb_config.h"
 #include "uwb_dw3000.h"
@@ -485,6 +486,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     const uint16_t configured_antenna_delay =
         app_identity_get_uwb_antenna_delay();
     const app_runtime_config_t *runtime_config = app_runtime_config_get();
+    i2c_bus_service_stats_t i2c_stats = {0};
+    i2c_bus_service_get_stats(&i2c_stats);
     gps_service_snapshot_t gps_snapshot = {0};
     gps_service_get_snapshot(&gps_snapshot);
     charger_service_snapshot_t charger_snapshot = {0};
@@ -602,6 +605,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_bno085_accel_enabled\":%s,"
         "\"runtime_bno085_accel_interval_ms\":%lu,"
         "\"runtime_bno085_log_interval_ms\":%lu,"
+        "\"i2c_realtime_period_us\":%lu,"
+        "\"i2c_realtime_time_to_next_us\":%ld,"
+        "\"i2c_realtime_waiters\":%lu,"
+        "\"i2c_realtime_lock_count\":%lu,"
+        "\"i2c_background_lock_count\":%lu,"
+        "\"i2c_background_deferred_count\":%lu,"
         "\"runtime_gps_enabled\":%s,"
         "\"gps_powered\":%s,"
         "\"gps_task_running\":%s,"
@@ -972,6 +981,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         runtime_config->bno085_accel_enabled ? "true" : "false",
         (unsigned long)runtime_config->bno085_accel_interval_ms,
         (unsigned long)runtime_config->bno085_log_interval_ms,
+        (unsigned long)i2c_stats.realtime_period_us,
+        (long)i2c_stats.realtime_time_to_next_us,
+        (unsigned long)i2c_stats.realtime_waiters,
+        (unsigned long)i2c_stats.realtime_lock_count,
+        (unsigned long)i2c_stats.background_lock_count,
+        (unsigned long)i2c_stats.background_deferred_count,
         runtime_config->gps_enabled ? "true" : "false",
         gps_snapshot.powered ? "true" : "false",
         gps_snapshot.task_running ? "true" : "false",

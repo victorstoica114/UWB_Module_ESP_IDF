@@ -4,7 +4,8 @@ idf_component_register(SRCS "ota_service.c"
                        PRIV_REQUIRES app_update bno085_service boot_guard
                                      charger_service config
                                      esp_app_format esp_http_server
-                                     esp_partition esp_system freertos gps_service log
+                                     esp_partition esp_system freertos gps_service
+                                     i2c_bus_service log
                                      max77958_service
                                      uwb_dw3000 wifi_service wireless_log_service
                                      wireless_telemetry_service)

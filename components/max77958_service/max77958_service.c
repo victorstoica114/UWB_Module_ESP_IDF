@@ -22,7 +22,8 @@ static const char *TAG = "max77958_service";
 enum {
     MAX77958_TASK_STACK_WORDS = 4096,
     MAX77958_TASK_PRIORITY = 4,
-    MAX77958_I2C_TIMEOUT_MS = 200,
+    MAX77958_I2C_TIMEOUT_MS = APP_MAX77958_I2C_TRANSACTION_TIMEOUT_MS,
+    MAX77958_I2C_PROBE_TIMEOUT_MS = APP_MAX77958_I2C_PROBE_TIMEOUT_MS,
     MAX77958_I2C_LOCK_TIMEOUT_MS = 1000,
     MAX77958_START_DELAY_MS = 2000,
     MAX77958_AP_POLL_MS = 2,
@@ -508,7 +509,7 @@ static esp_err_t max77958_i2c_init(void)
     }
 
     err = i2c_master_probe(s_i2c_bus, APP_MAX77958_I2C_ADDRESS,
-                           MAX77958_I2C_TIMEOUT_MS);
+                           MAX77958_I2C_PROBE_TIMEOUT_MS);
     if (err != ESP_OK) {
         (void)i2c_master_bus_rm_device(s_i2c_dev);
         s_i2c_dev = NULL;
@@ -526,13 +527,23 @@ static esp_err_t read_bytes(uint8_t start_reg, uint8_t *data, size_t data_len)
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (!i2c_bus_service_lock_background(pdMS_TO_TICKS(MAX77958_I2C_LOCK_TIMEOUT_MS))) {
-        return ESP_ERR_TIMEOUT;
+    esp_err_t err = ESP_ERR_TIMEOUT;
+    for (uint32_t attempt = 0; attempt <= APP_MAX77958_I2C_READ_RETRIES;
+         ++attempt) {
+        if (!i2c_bus_service_lock_background(
+                pdMS_TO_TICKS(MAX77958_I2C_LOCK_TIMEOUT_MS))) {
+            err = ESP_ERR_TIMEOUT;
+        } else {
+            err = i2c_master_transmit_receive(
+                s_i2c_dev, &start_reg, sizeof(start_reg), data, data_len,
+                MAX77958_I2C_TIMEOUT_MS);
+            i2c_bus_service_unlock();
+        }
+        if (err == ESP_OK || attempt == APP_MAX77958_I2C_READ_RETRIES) {
+            return err;
+        }
+        taskYIELD();
     }
-    const esp_err_t err = i2c_master_transmit_receive(
-        s_i2c_dev, &start_reg, sizeof(start_reg), data, data_len,
-        MAX77958_I2C_TIMEOUT_MS);
-    i2c_bus_service_unlock();
     return err;
 }
 
@@ -563,6 +574,38 @@ static esp_err_t write_bytes(uint8_t start_reg, const uint8_t *data,
     return err;
 }
 
+static size_t register_read_chunk_len(void)
+{
+    size_t chunk_len = APP_MAX77958_REGISTER_READ_CHUNK_BYTES;
+    if (chunk_len == 0 || chunk_len > MAX77958_SERVICE_AP_DATA_BYTES) {
+        chunk_len = 8U;
+    }
+    return chunk_len;
+}
+
+static esp_err_t read_register_range_chunked(uint8_t start_reg, uint8_t *data,
+                                             size_t data_len)
+{
+    size_t offset = 0;
+    while (offset < data_len) {
+        size_t chunk_len = register_read_chunk_len();
+        const size_t remaining = data_len - offset;
+        if (chunk_len > remaining) {
+            chunk_len = remaining;
+        }
+
+        const esp_err_t err =
+            read_bytes((uint8_t)(start_reg + offset), &data[offset], chunk_len);
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        offset += chunk_len;
+        taskYIELD();
+    }
+    return ESP_OK;
+}
+
 static esp_err_t read_register_map(
     uint8_t raw[MAX77958_SERVICE_REGISTER_MAP_SIZE])
 {
@@ -576,12 +619,12 @@ static esp_err_t read_register_map(
     memset(raw, 0, MAX77958_SERVICE_REGISTER_MAP_SIZE);
     for (size_t i = 0; i < sizeof(ranges) / sizeof(ranges[0]); ++i) {
         const esp_err_t err =
-            read_bytes(ranges[i].start_reg, &raw[ranges[i].start_reg],
-                       ranges[i].length);
+            read_register_range_chunked(ranges[i].start_reg,
+                                        &raw[ranges[i].start_reg],
+                                        ranges[i].length);
         if (err != ESP_OK) {
             return err;
         }
-        taskYIELD();
     }
     return ESP_OK;
 }

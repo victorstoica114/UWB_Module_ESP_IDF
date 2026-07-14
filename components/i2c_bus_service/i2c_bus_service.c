@@ -1,10 +1,12 @@
 #include "i2c_bus_service.h"
 
+#include "app_config.h"
 #include "board_config.h"
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -18,32 +20,104 @@ enum {
 static bool s_initialized;
 static i2c_master_bus_handle_t s_bus;
 static SemaphoreHandle_t s_mutex;
-static portMUX_TYPE s_waiter_mux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE s_state_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_realtime_waiters;
+static uint32_t s_realtime_period_us;
+static int64_t s_last_realtime_activity_us;
+static uint32_t s_realtime_lock_count;
+static uint32_t s_background_lock_count;
+static uint32_t s_background_deferred_count;
 
 static void realtime_waiter_add(void)
 {
-    taskENTER_CRITICAL(&s_waiter_mux);
+    taskENTER_CRITICAL(&s_state_mux);
     s_realtime_waiters++;
-    taskEXIT_CRITICAL(&s_waiter_mux);
+    taskEXIT_CRITICAL(&s_state_mux);
 }
 
 static void realtime_waiter_remove(void)
 {
-    taskENTER_CRITICAL(&s_waiter_mux);
+    taskENTER_CRITICAL(&s_state_mux);
     if (s_realtime_waiters > 0) {
         s_realtime_waiters--;
     }
-    taskEXIT_CRITICAL(&s_waiter_mux);
+    taskEXIT_CRITICAL(&s_state_mux);
+}
+
+static void counter_increment(uint32_t *counter)
+{
+    taskENTER_CRITICAL(&s_state_mux);
+    (*counter)++;
+    taskEXIT_CRITICAL(&s_state_mux);
+}
+
+static void realtime_state_snapshot(uint32_t *waiters, uint32_t *period_us,
+                                    int64_t *last_activity_us)
+{
+    taskENTER_CRITICAL(&s_state_mux);
+    if (waiters != NULL) {
+        *waiters = s_realtime_waiters;
+    }
+    if (period_us != NULL) {
+        *period_us = s_realtime_period_us;
+    }
+    if (last_activity_us != NULL) {
+        *last_activity_us = s_last_realtime_activity_us;
+    }
+    taskEXIT_CRITICAL(&s_state_mux);
 }
 
 static uint32_t realtime_waiter_count(void)
 {
     uint32_t count = 0;
-    taskENTER_CRITICAL(&s_waiter_mux);
-    count = s_realtime_waiters;
-    taskEXIT_CRITICAL(&s_waiter_mux);
+    realtime_state_snapshot(&count, NULL, NULL);
     return count;
+}
+
+static int32_t realtime_time_to_next_us_from(int64_t now_us, uint32_t period_us,
+                                             int64_t last_activity_us)
+{
+    if (period_us == 0 || last_activity_us == 0) {
+        return -1;
+    }
+
+    const int64_t elapsed_us = now_us - last_activity_us;
+    if (elapsed_us < 0) {
+        return (int32_t)period_us;
+    }
+    if (elapsed_us >= (int64_t)period_us) {
+        return 0;
+    }
+    return (int32_t)((int64_t)period_us - elapsed_us);
+}
+
+static bool realtime_background_window_open(void)
+{
+    uint32_t period_us = 0;
+    int64_t last_activity_us = 0;
+    realtime_state_snapshot(NULL, &period_us, &last_activity_us);
+    if (period_us == 0 || last_activity_us == 0) {
+        return true;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+    const int64_t elapsed_us = now_us - last_activity_us;
+    if (elapsed_us < 0) {
+        return false;
+    }
+
+    const int64_t stale_us =
+        (int64_t)period_us * (int64_t)APP_I2C_REALTIME_STALE_PERIODS;
+    if (stale_us > 0 && elapsed_us >= stale_us) {
+        return true;
+    }
+
+    if (elapsed_us >= (int64_t)period_us) {
+        return false;
+    }
+
+    const int64_t time_to_next_us = (int64_t)period_us - elapsed_us;
+    return time_to_next_us > (int64_t)APP_I2C_BACKGROUND_GUARD_US;
 }
 
 static bool timeout_elapsed(TickType_t start_tick, TickType_t timeout)
@@ -112,6 +186,9 @@ bool i2c_bus_service_lock_realtime(TickType_t timeout)
     realtime_waiter_add();
     const bool locked = xSemaphoreTake(s_mutex, timeout) == pdTRUE;
     realtime_waiter_remove();
+    if (locked) {
+        counter_increment(&s_realtime_lock_count);
+    }
     return locked;
 }
 
@@ -123,12 +200,17 @@ bool i2c_bus_service_lock_background(TickType_t timeout)
 
     const TickType_t start_tick = xTaskGetTickCount();
     while (true) {
-        if (realtime_waiter_count() == 0 &&
+        if (realtime_waiter_count() == 0 && realtime_background_window_open() &&
             xSemaphoreTake(s_mutex, BACKGROUND_LOCK_WAIT_TICKS) == pdTRUE) {
-            if (realtime_waiter_count() == 0) {
+            if (realtime_waiter_count() == 0 &&
+                realtime_background_window_open()) {
+                counter_increment(&s_background_lock_count);
                 return true;
             }
             xSemaphoreGive(s_mutex);
+            counter_increment(&s_background_deferred_count);
+        } else {
+            counter_increment(&s_background_deferred_count);
         }
 
         if (timeout == 0 || timeout_elapsed(start_tick, timeout)) {
@@ -144,4 +226,44 @@ void i2c_bus_service_unlock(void)
     if (s_mutex != NULL) {
         xSemaphoreGive(s_mutex);
     }
+}
+
+void i2c_bus_service_set_realtime_period_us(uint32_t period_us)
+{
+    const int64_t now_us = period_us > 0 ? esp_timer_get_time() : 0;
+    taskENTER_CRITICAL(&s_state_mux);
+    s_realtime_period_us = period_us;
+    s_last_realtime_activity_us = now_us;
+    taskEXIT_CRITICAL(&s_state_mux);
+}
+
+void i2c_bus_service_note_realtime_activity(void)
+{
+    const int64_t now_us = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_state_mux);
+    if (s_realtime_period_us > 0) {
+        s_last_realtime_activity_us = now_us;
+    }
+    taskEXIT_CRITICAL(&s_state_mux);
+}
+
+void i2c_bus_service_get_stats(i2c_bus_service_stats_t *stats)
+{
+    if (stats == NULL) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_state_mux);
+    stats->realtime_waiters = s_realtime_waiters;
+    stats->realtime_period_us = s_realtime_period_us;
+    stats->realtime_lock_count = s_realtime_lock_count;
+    stats->background_lock_count = s_background_lock_count;
+    stats->background_deferred_count = s_background_deferred_count;
+    const int64_t last_activity_us = s_last_realtime_activity_us;
+    taskEXIT_CRITICAL(&s_state_mux);
+
+    stats->realtime_time_to_next_us =
+        realtime_time_to_next_us_from(esp_timer_get_time(),
+                                      stats->realtime_period_us,
+                                      last_activity_us);
 }

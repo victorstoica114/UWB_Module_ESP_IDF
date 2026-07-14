@@ -110,8 +110,9 @@ most Wi-Fi and TCP work:
 | `boot_guard` | unpinned | Confirms stable boots after Wi-Fi/OTA are online and holds recovery state across resets. |
 | `wifi_service` | 0 | Owns Wi-Fi STA connect/reconnect management. |
 | `ota_service` / `httpd` | 0 | Starts authenticated OTA, `/status`, and runtime-config HTTP handling. |
-| `bno085` | 0 | Optional BNO085 accelerometer test when enabled. |
+| `bno085` | 0 | Optional BNO085 accelerometer test when enabled; owns realtime priority on the shared I2C bus. |
 | `bq25792` | 0 | Low-rate charger monitor; uses background I2C access so BNO085 can win bus arbitration. |
+| `max77958` | 0 | Low-rate USB-C PD monitor/config service; also uses background I2C access. |
 | `wireless_log` | unpinned | Drains the log queue and mirrors logs over TCP; FreeRTOS may run it on either core. |
 | `wireless_tel` | 1 | Drains high-rate telemetry into batched TCP writes. |
 | short-lived reboot tasks | unpinned | Temporary restart helpers after OTA or runtime-config changes. |
@@ -1198,6 +1199,32 @@ so no reboot is needed. The BNO08X datasheet lists
 `Accelerometer` at a maximum configurable rate of 500 Hz, although I2C bandwidth
 and wireless throughput still need to be considered in practice.
 
+When BNO085 is enabled, the shared I2C service treats its configured sample
+period as a realtime reservation. BNO085 packet reads and `Set Feature` writes
+take the realtime lock. BQ25792 and MAX77958 use the background lock, which will
+not start a new transaction when BNO085 is waiting or when the next expected BNO
+sample is within `APP_I2C_BACKGROUND_GUARD_US` (`1000 us` by default). If BNO stops
+producing interrupts for several sample periods, the reservation is considered
+stale so charger/PD status can still be read and recovery logic can run.
+Background clients may wait for a free window, but each low-level BQ/MAX I2C
+transaction has a short timeout (`10 ms`) so a stuck background transfer cannot
+hold the bus for dozens or hundreds of milliseconds.
+The one-time startup probe keeps a longer timeout (`200 ms`) because some
+devices need more slack before they acknowledge reliably; it is not used for the
+regular status-transfer path. Normal BQ/MAX reads retry twice before reporting an
+error; writes are still single-shot so configuration changes fail visibly instead
+of being repeated blindly.
+
+At the maximum BNO085 accelerometer rate, the sample period is `2 ms`. A normal
+accelerometer input report is small: the firmware reads the 4-byte SHTP header
+and then the 14-byte SHTP accelerometer packet, so the I2C wire time is on the
+order of `0.5-0.8 ms` at 400 kHz after protocol overhead. With the default
+`1000 us` background guard, BQ/MAX usually get only a few hundred microseconds
+of safe bus time per BNO period. Long status maps are therefore read in small
+8-byte chunks over many BNO periods instead of as one monolithic transaction.
+`/status` exposes `i2c_realtime_period_us`,
+`i2c_realtime_time_to_next_us`, and the realtime/background lock counters.
+
 High-rate accelerometer telemetry is intentionally handled like a small sensor
 stream, not like human log text. The BNO085 task does not enqueue accelerometer
 samples until the telemetry TCP connection is established, so startup transients
@@ -1239,9 +1266,9 @@ intentionally split into small register chunks
 chunks so the charger monitor stays lower priority than the BNO085
 accelerometer. The shared I2C service has explicit realtime/background locks:
 BNO085 reads and configuration writes use the realtime lock, while BQ25792 reads
-and writes use the background lock and do not start a transaction if a realtime
-waiter is present. BQ25792 `INT` wakes the task for a shorter status/ADC refresh
-split into two I2C transactions instead of a full raw-map dump, so charger
+and writes use the background lock and are deferred during the BNO085 realtime
+guard window. BQ25792 `INT` wakes the task for a shorter status/ADC refresh
+split into the same small I2C chunks instead of a full raw-map dump, so charger
 events can be handled while the BNO085 is running at high sample rates without a
 long charger transfer sitting on the bus. `/status` exposes the raw register bytes
 as `charger_raw_hex` plus decoded summary fields for part information,
@@ -1362,6 +1389,10 @@ The MAX77958 USB-C/PD controller is monitored on the shared I2C bus
 low-priority background device, the same way the charger monitor is treated:
 MAX77958 reads and AP-command writes use the shared I2C background lock, so the
 BNO085 realtime accelerometer path can win bus arbitration when it is active.
+The regular raw-map refresh is split into
+`APP_MAX77958_REGISTER_READ_CHUNK_BYTES` chunks (`8` bytes by default), so PD
+status reads do not occupy the bus for one long 32-byte transfer while the
+accelerometer is sampling at high rate.
 The monitor runs every `APP_MAX77958_READ_INTERVAL_MS` (`10s` by default), plus
 on explicit dashboard refresh or after configuration operations.
 
