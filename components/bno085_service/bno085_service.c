@@ -406,6 +406,7 @@ static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
     if (!i2c_bus_service_lock_realtime(pdMS_TO_TICKS(BNO085_READ_TIMEOUT_MS))) {
         return ESP_ERR_TIMEOUT;
     }
+    i2c_bus_service_note_realtime_activity();
 
     esp_err_t err = i2c_master_receive(s_i2c_dev, header, sizeof(header),
                                        BNO085_READ_TIMEOUT_MS);

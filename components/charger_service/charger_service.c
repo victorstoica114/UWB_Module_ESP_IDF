@@ -757,6 +757,59 @@ static esp_err_t charger_i2c_init(void)
     return err;
 }
 
+static uint32_t charger_i2c_estimate_us(uint64_t bits)
+{
+    if (APP_BQ25792_I2C_CLOCK_HZ == 0) {
+        return UINT32_MAX;
+    }
+    const uint64_t us =
+        (bits * 1000000ULL + APP_BQ25792_I2C_CLOCK_HZ - 1ULL) /
+            APP_BQ25792_I2C_CLOCK_HZ +
+        APP_I2C_BACKGROUND_TRANSFER_MARGIN_US;
+    return us > UINT32_MAX ? UINT32_MAX : (uint32_t)us;
+}
+
+static uint32_t charger_i2c_read_estimate_us(size_t data_len)
+{
+    return charger_i2c_estimate_us(27ULL + (uint64_t)data_len * 9ULL);
+}
+
+static uint32_t charger_i2c_write_estimate_us(size_t write_len)
+{
+    return charger_i2c_estimate_us(9ULL + (uint64_t)write_len * 9ULL);
+}
+
+static size_t charger_configured_read_chunk_len(void)
+{
+    size_t chunk_len = APP_BQ25792_REGISTER_READ_CHUNK_BYTES;
+    if (chunk_len == 0 || chunk_len > 16U) {
+        chunk_len = 16U;
+    }
+    return chunk_len;
+}
+
+static size_t charger_adaptive_read_chunk_len(size_t remaining)
+{
+    size_t chunk_len = charger_configured_read_chunk_len();
+    if (chunk_len > remaining) {
+        chunk_len = remaining;
+    }
+
+    const int32_t window_us = i2c_bus_service_background_window_us();
+    if (window_us == INT32_MAX) {
+        return chunk_len;
+    }
+    if (window_us <= 0) {
+        return 1U;
+    }
+
+    while (chunk_len > 1U &&
+           charger_i2c_read_estimate_us(chunk_len) > (uint32_t)window_us) {
+        chunk_len--;
+    }
+    return chunk_len;
+}
+
 static esp_err_t charger_read_bytes(uint8_t start_reg, uint8_t *data,
                                     size_t data_len)
 {
@@ -767,8 +820,9 @@ static esp_err_t charger_read_bytes(uint8_t start_reg, uint8_t *data,
     esp_err_t err = ESP_ERR_TIMEOUT;
     for (uint32_t attempt = 0; attempt <= APP_BQ25792_I2C_READ_RETRIES;
          ++attempt) {
-        if (!i2c_bus_service_lock_background(
-                pdMS_TO_TICKS(CHARGER_I2C_LOCK_TIMEOUT_MS))) {
+        if (!i2c_bus_service_lock_background_for(
+                pdMS_TO_TICKS(CHARGER_I2C_LOCK_TIMEOUT_MS),
+                charger_i2c_read_estimate_us(data_len))) {
             err = ESP_ERR_TIMEOUT;
         } else {
             err = i2c_master_transmit_receive(
@@ -791,13 +845,23 @@ static esp_err_t charger_write_byte(uint8_t reg, uint8_t value)
     }
 
     uint8_t data[2] = {reg, value};
-    if (!i2c_bus_service_lock_background(pdMS_TO_TICKS(CHARGER_I2C_LOCK_TIMEOUT_MS))) {
-        return ESP_ERR_TIMEOUT;
+    esp_err_t err = ESP_ERR_TIMEOUT;
+    for (uint32_t attempt = 0; attempt <= APP_BQ25792_I2C_WRITE_RETRIES;
+         ++attempt) {
+        if (!i2c_bus_service_lock_background_for(
+                pdMS_TO_TICKS(CHARGER_I2C_LOCK_TIMEOUT_MS),
+                charger_i2c_write_estimate_us(sizeof(data)))) {
+            err = ESP_ERR_TIMEOUT;
+        } else {
+            err = i2c_master_transmit(s_i2c_dev, data, sizeof(data),
+                                      CHARGER_I2C_TIMEOUT_MS);
+            i2c_bus_service_unlock();
+        }
+        if (err == ESP_OK || attempt == APP_BQ25792_I2C_WRITE_RETRIES) {
+            return err;
+        }
+        taskYIELD();
     }
-    const esp_err_t err =
-        i2c_master_transmit(s_i2c_dev, data, sizeof(data),
-                            CHARGER_I2C_TIMEOUT_MS);
-    i2c_bus_service_unlock();
     return err;
 }
 
@@ -806,14 +870,8 @@ static esp_err_t charger_read_register_range_chunked(
 {
     size_t offset = 0;
     while (offset < data_len) {
-        size_t chunk_len = APP_BQ25792_REGISTER_READ_CHUNK_BYTES;
-        if (chunk_len == 0 || chunk_len > 16U) {
-            chunk_len = 8U;
-        }
         const size_t remaining = data_len - offset;
-        if (chunk_len > remaining) {
-            chunk_len = remaining;
-        }
+        const size_t chunk_len = charger_adaptive_read_chunk_len(remaining);
 
         const esp_err_t err =
             charger_read_bytes((uint8_t)(start_reg + offset), &data[offset],

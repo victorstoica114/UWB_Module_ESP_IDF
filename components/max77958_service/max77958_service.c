@@ -518,6 +518,59 @@ static esp_err_t max77958_i2c_init(void)
     return err;
 }
 
+static uint32_t max77958_i2c_estimate_us(uint64_t bits)
+{
+    if (APP_MAX77958_I2C_CLOCK_HZ == 0) {
+        return UINT32_MAX;
+    }
+    const uint64_t us =
+        (bits * 1000000ULL + APP_MAX77958_I2C_CLOCK_HZ - 1ULL) /
+            APP_MAX77958_I2C_CLOCK_HZ +
+        APP_I2C_BACKGROUND_TRANSFER_MARGIN_US;
+    return us > UINT32_MAX ? UINT32_MAX : (uint32_t)us;
+}
+
+static uint32_t max77958_i2c_read_estimate_us(size_t data_len)
+{
+    return max77958_i2c_estimate_us(27ULL + (uint64_t)data_len * 9ULL);
+}
+
+static uint32_t max77958_i2c_write_estimate_us(size_t write_len)
+{
+    return max77958_i2c_estimate_us(9ULL + (uint64_t)write_len * 9ULL);
+}
+
+static size_t max77958_configured_read_chunk_len(void)
+{
+    size_t chunk_len = APP_MAX77958_REGISTER_READ_CHUNK_BYTES;
+    if (chunk_len == 0 || chunk_len > MAX77958_SERVICE_AP_DATA_BYTES) {
+        chunk_len = MAX77958_SERVICE_AP_DATA_BYTES;
+    }
+    return chunk_len;
+}
+
+static size_t max77958_adaptive_read_chunk_len(size_t remaining)
+{
+    size_t chunk_len = max77958_configured_read_chunk_len();
+    if (chunk_len > remaining) {
+        chunk_len = remaining;
+    }
+
+    const int32_t window_us = i2c_bus_service_background_window_us();
+    if (window_us == INT32_MAX) {
+        return chunk_len;
+    }
+    if (window_us <= 0) {
+        return 1U;
+    }
+
+    while (chunk_len > 1U &&
+           max77958_i2c_read_estimate_us(chunk_len) > (uint32_t)window_us) {
+        chunk_len--;
+    }
+    return chunk_len;
+}
+
 static esp_err_t read_bytes(uint8_t start_reg, uint8_t *data, size_t data_len)
 {
     if (data == NULL || data_len == 0) {
@@ -530,8 +583,9 @@ static esp_err_t read_bytes(uint8_t start_reg, uint8_t *data, size_t data_len)
     esp_err_t err = ESP_ERR_TIMEOUT;
     for (uint32_t attempt = 0; attempt <= APP_MAX77958_I2C_READ_RETRIES;
          ++attempt) {
-        if (!i2c_bus_service_lock_background(
-                pdMS_TO_TICKS(MAX77958_I2C_LOCK_TIMEOUT_MS))) {
+        if (!i2c_bus_service_lock_background_for(
+                pdMS_TO_TICKS(MAX77958_I2C_LOCK_TIMEOUT_MS),
+                max77958_i2c_read_estimate_us(data_len))) {
             err = ESP_ERR_TIMEOUT;
         } else {
             err = i2c_master_transmit_receive(
@@ -564,23 +618,25 @@ static esp_err_t write_bytes(uint8_t start_reg, const uint8_t *data,
     buffer[0] = start_reg;
     memcpy(&buffer[1], data, data_len);
 
-    if (!i2c_bus_service_lock_background(pdMS_TO_TICKS(MAX77958_I2C_LOCK_TIMEOUT_MS))) {
-        return ESP_ERR_TIMEOUT;
+    const uint32_t retries =
+        data_len == 1U ? APP_MAX77958_I2C_WRITE_RETRIES : 0U;
+    esp_err_t err = ESP_ERR_TIMEOUT;
+    for (uint32_t attempt = 0; attempt <= retries; ++attempt) {
+        if (!i2c_bus_service_lock_background_for(
+                pdMS_TO_TICKS(MAX77958_I2C_LOCK_TIMEOUT_MS),
+                max77958_i2c_write_estimate_us(data_len + 1U))) {
+            err = ESP_ERR_TIMEOUT;
+        } else {
+            err = i2c_master_transmit(s_i2c_dev, buffer, data_len + 1U,
+                                      MAX77958_I2C_TIMEOUT_MS);
+            i2c_bus_service_unlock();
+        }
+        if (err == ESP_OK || attempt == retries) {
+            return err;
+        }
+        taskYIELD();
     }
-    const esp_err_t err =
-        i2c_master_transmit(s_i2c_dev, buffer, data_len + 1U,
-                            MAX77958_I2C_TIMEOUT_MS);
-    i2c_bus_service_unlock();
     return err;
-}
-
-static size_t register_read_chunk_len(void)
-{
-    size_t chunk_len = APP_MAX77958_REGISTER_READ_CHUNK_BYTES;
-    if (chunk_len == 0 || chunk_len > MAX77958_SERVICE_AP_DATA_BYTES) {
-        chunk_len = 8U;
-    }
-    return chunk_len;
 }
 
 static esp_err_t read_register_range_chunked(uint8_t start_reg, uint8_t *data,
@@ -588,11 +644,8 @@ static esp_err_t read_register_range_chunked(uint8_t start_reg, uint8_t *data,
 {
     size_t offset = 0;
     while (offset < data_len) {
-        size_t chunk_len = register_read_chunk_len();
         const size_t remaining = data_len - offset;
-        if (chunk_len > remaining) {
-            chunk_len = remaining;
-        }
+        const size_t chunk_len = max77958_adaptive_read_chunk_len(remaining);
 
         const esp_err_t err =
             read_bytes((uint8_t)(start_reg + offset), &data[offset], chunk_len);

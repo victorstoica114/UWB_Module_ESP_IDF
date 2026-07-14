@@ -91,33 +91,58 @@ static int32_t realtime_time_to_next_us_from(int64_t now_us, uint32_t period_us,
     return (int32_t)((int64_t)period_us - elapsed_us);
 }
 
-static bool realtime_background_window_open(void)
+static int32_t realtime_background_window_us_from(int64_t now_us,
+                                                  uint32_t period_us,
+                                                  int64_t last_activity_us)
 {
-    uint32_t period_us = 0;
-    int64_t last_activity_us = 0;
-    realtime_state_snapshot(NULL, &period_us, &last_activity_us);
     if (period_us == 0 || last_activity_us == 0) {
-        return true;
+        return INT32_MAX;
     }
 
-    const int64_t now_us = esp_timer_get_time();
     const int64_t elapsed_us = now_us - last_activity_us;
     if (elapsed_us < 0) {
-        return false;
+        return 0;
     }
 
     const int64_t stale_us =
         (int64_t)period_us * (int64_t)APP_I2C_REALTIME_STALE_PERIODS;
     if (stale_us > 0 && elapsed_us >= stale_us) {
-        return true;
+        return INT32_MAX;
     }
 
     if (elapsed_us >= (int64_t)period_us) {
-        return false;
+        return 0;
     }
 
     const int64_t time_to_next_us = (int64_t)period_us - elapsed_us;
-    return time_to_next_us > (int64_t)APP_I2C_BACKGROUND_GUARD_US;
+    const int64_t window_us =
+        time_to_next_us - (int64_t)APP_I2C_BACKGROUND_GUARD_US;
+    if (window_us <= 0) {
+        return 0;
+    }
+    if (window_us > INT32_MAX) {
+        return INT32_MAX;
+    }
+    return (int32_t)window_us;
+}
+
+static int32_t realtime_background_window_us(void)
+{
+    uint32_t period_us = 0;
+    int64_t last_activity_us = 0;
+    realtime_state_snapshot(NULL, &period_us, &last_activity_us);
+    return realtime_background_window_us_from(esp_timer_get_time(), period_us,
+                                             last_activity_us);
+}
+
+static bool realtime_background_window_open_for(uint32_t estimated_transfer_us)
+{
+    const int32_t window_us = realtime_background_window_us();
+    if (window_us == INT32_MAX) {
+        return true;
+    }
+    return window_us > 0 && (estimated_transfer_us == 0 ||
+                             (uint32_t)window_us >= estimated_transfer_us);
 }
 
 static bool timeout_elapsed(TickType_t start_tick, TickType_t timeout)
@@ -194,16 +219,23 @@ bool i2c_bus_service_lock_realtime(TickType_t timeout)
 
 bool i2c_bus_service_lock_background(TickType_t timeout)
 {
+    return i2c_bus_service_lock_background_for(timeout, 0);
+}
+
+bool i2c_bus_service_lock_background_for(TickType_t timeout,
+                                         uint32_t estimated_transfer_us)
+{
     if (s_mutex == NULL) {
         return false;
     }
 
     const TickType_t start_tick = xTaskGetTickCount();
     while (true) {
-        if (realtime_waiter_count() == 0 && realtime_background_window_open() &&
+        if (realtime_waiter_count() == 0 &&
+            realtime_background_window_open_for(estimated_transfer_us) &&
             xSemaphoreTake(s_mutex, BACKGROUND_LOCK_WAIT_TICKS) == pdTRUE) {
             if (realtime_waiter_count() == 0 &&
-                realtime_background_window_open()) {
+                realtime_background_window_open_for(estimated_transfer_us)) {
                 counter_increment(&s_background_lock_count);
                 return true;
             }
@@ -247,6 +279,11 @@ void i2c_bus_service_note_realtime_activity(void)
     taskEXIT_CRITICAL(&s_state_mux);
 }
 
+int32_t i2c_bus_service_background_window_us(void)
+{
+    return realtime_background_window_us();
+}
+
 void i2c_bus_service_get_stats(i2c_bus_service_stats_t *stats)
 {
     if (stats == NULL) {
@@ -266,4 +303,8 @@ void i2c_bus_service_get_stats(i2c_bus_service_stats_t *stats)
         realtime_time_to_next_us_from(esp_timer_get_time(),
                                       stats->realtime_period_us,
                                       last_activity_us);
+    stats->background_window_us =
+        realtime_background_window_us_from(esp_timer_get_time(),
+                                           stats->realtime_period_us,
+                                           last_activity_us);
 }

@@ -1212,18 +1212,23 @@ hold the bus for dozens or hundreds of milliseconds.
 The one-time startup probe keeps a longer timeout (`200 ms`) because some
 devices need more slack before they acknowledge reliably; it is not used for the
 regular status-transfer path. Normal BQ/MAX reads retry twice before reporting an
-error; writes are still single-shot so configuration changes fail visibly instead
-of being repeated blindly.
+error. BQ register writes are retried because they are single-register,
+idempotent updates. MAX77958 single-register writes are retried too, but longer
+AP command writes are intentionally single-shot: if the I2C transaction does not
+fit while BNO is running at a high rate, the operation fails visibly instead of
+being repeated blindly.
 
 At the maximum BNO085 accelerometer rate, the sample period is `2 ms`. A normal
 accelerometer input report is small: the firmware reads the 4-byte SHTP header
 and then the 14-byte SHTP accelerometer packet, so the I2C wire time is on the
 order of `0.5-0.8 ms` at 400 kHz after protocol overhead. With the default
 `1000 us` background guard, BQ/MAX usually get only a few hundred microseconds
-of safe bus time per BNO period. Long status maps are therefore read in small
-8-byte chunks over many BNO periods instead of as one monolithic transaction.
+of safe bus time per BNO period. Long status maps are therefore read in adaptive
+chunks: at 500 Hz the chunk size shrinks to fit the tight window, while at lower
+BNO sample rates the same code uses larger chunks and refreshes BQ/MAX faster.
 `/status` exposes `i2c_realtime_period_us`,
-`i2c_realtime_time_to_next_us`, and the realtime/background lock counters.
+`i2c_realtime_time_to_next_us`, `i2c_background_window_us`, and the
+realtime/background lock counters.
 
 High-rate accelerometer telemetry is intentionally handled like a small sensor
 stream, not like human log text. The BNO085 task does not enqueue accelerometer
@@ -1261,10 +1266,13 @@ The BQ25792 Li-Po charger monitor runs on the shared I2C bus
 (`GPIO9/GPIO10`, address `0x6B`) at 400 kHz. A complete register-window dump
 `0x00..0x48` runs at startup, on explicit refresh/configuration changes, and
 then every `APP_BQ25792_READ_INTERVAL_MS` (`10s` by default). The full dump is
-intentionally split into small register chunks
-(`APP_BQ25792_REGISTER_READ_CHUNK_BYTES`, default `8`) with a short gap between
+intentionally split into adaptive register chunks capped by
+`APP_BQ25792_REGISTER_READ_CHUNK_BYTES` (`16` by default) with a short gap between
 chunks so the charger monitor stays lower priority than the BNO085
-accelerometer. The shared I2C service has explicit realtime/background locks:
+accelerometer. At high BNO085 sample rates the chunk size is reduced to fit the
+available background I2C window; at lower sample rates the monitor can use larger
+chunks and finish refreshes faster. The shared I2C service has explicit
+realtime/background locks:
 BNO085 reads and configuration writes use the realtime lock, while BQ25792 reads
 and writes use the background lock and are deferred during the BNO085 realtime
 guard window. BQ25792 `INT` wakes the task for a shorter status/ADC refresh
@@ -1389,10 +1397,13 @@ The MAX77958 USB-C/PD controller is monitored on the shared I2C bus
 low-priority background device, the same way the charger monitor is treated:
 MAX77958 reads and AP-command writes use the shared I2C background lock, so the
 BNO085 realtime accelerometer path can win bus arbitration when it is active.
-The regular raw-map refresh is split into
-`APP_MAX77958_REGISTER_READ_CHUNK_BYTES` chunks (`8` bytes by default), so PD
-status reads do not occupy the bus for one long 32-byte transfer while the
-accelerometer is sampling at high rate.
+The AP-command handling follows `UG-7139: MAX77958 Customization Script and
+OPCode Command Guide`, Rev. 5 / 7-2024: commands are written as one
+`AP_DATAOUT0..32` packet, then confirmed via `APCmdRes` and `AP_DATAIN0..32`.
+The regular raw-map refresh is split into adaptive
+`APP_MAX77958_REGISTER_READ_CHUNK_BYTES` chunks (`33` bytes by default), so PD
+status reads can use large transfers when the accelerometer rate is low, but
+shrink to smaller transfers when the BNO085 realtime window is tight.
 The monitor runs every `APP_MAX77958_READ_INTERVAL_MS` (`10s` by default), plus
 on explicit dashboard refresh or after configuration operations.
 

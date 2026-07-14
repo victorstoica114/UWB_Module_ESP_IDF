@@ -607,6 +607,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_bno085_log_interval_ms\":%lu,"
         "\"i2c_realtime_period_us\":%lu,"
         "\"i2c_realtime_time_to_next_us\":%ld,"
+        "\"i2c_background_window_us\":%ld,"
         "\"i2c_realtime_waiters\":%lu,"
         "\"i2c_realtime_lock_count\":%lu,"
         "\"i2c_background_lock_count\":%lu,"
@@ -983,6 +984,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)runtime_config->bno085_log_interval_ms,
         (unsigned long)i2c_stats.realtime_period_us,
         (long)i2c_stats.realtime_time_to_next_us,
+        (long)i2c_stats.background_window_us,
         (unsigned long)i2c_stats.realtime_waiters,
         (unsigned long)i2c_stats.realtime_lock_count,
         (unsigned long)i2c_stats.background_lock_count,
