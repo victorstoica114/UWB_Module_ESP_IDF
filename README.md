@@ -1203,7 +1203,7 @@ When BNO085 is enabled, the shared I2C service treats its configured sample
 period as a realtime reservation. BNO085 packet reads and `Set Feature` writes
 take the realtime lock. BQ25792 and MAX77958 use the background lock, which will
 not start a new transaction when BNO085 is waiting or when the next expected BNO
-sample is within `APP_I2C_BACKGROUND_GUARD_US` (`1000 us` by default). If BNO stops
+sample is within `APP_I2C_BACKGROUND_GUARD_US` (`500 us` by default). If BNO stops
 producing interrupts for several sample periods, the reservation is considered
 stale so charger/PD status can still be read and recovery logic can run.
 Background clients may wait for a free window, but each low-level BQ/MAX I2C
@@ -1218,14 +1218,43 @@ AP command writes are intentionally single-shot: if the I2C transaction does not
 fit while BNO is running at a high rate, the operation fails visibly instead of
 being repeated blindly.
 
+The current board uses mixed I2C speeds on the same physical bus. BNO085 stays
+at `400 kHz`, because the BNO08X datasheet only specifies standard/fast mode up
+to 400 kHz. BQ25792 and MAX77958 are configured at `1 MHz`. ESP-IDF keeps
+`scl_speed_hz` in each `i2c_device_config_t`, so the firmware does not
+reinitialize the bus between devices; each transaction uses the timing for the
+addressed device handle. MAX77958 explicitly supports 1 MHz Fast-Mode Plus
+without the special high-speed-mode sequence. BQ25792 has one descriptive I2C
+section that mentions fast mode, but its electrical table specifies
+`fSCL = 1000 kHz`; the 1 MHz setting was therefore validated empirically on the
+module.
+
 At the maximum BNO085 accelerometer rate, the sample period is `2 ms`. A normal
 accelerometer input report is small: the firmware reads the 4-byte SHTP header
 and then the 14-byte SHTP accelerometer packet, so the I2C wire time is on the
-order of `0.5-0.8 ms` at 400 kHz after protocol overhead. With the default
-`1000 us` background guard, BQ/MAX usually get only a few hundred microseconds
-of safe bus time per BNO period. Long status maps are therefore read in adaptive
-chunks: at 500 Hz the chunk size shrinks to fit the tight window, while at lower
-BNO sample rates the same code uses larger chunks and refreshes BQ/MAX faster.
+order of `0.5-0.8 ms` at 400 kHz after protocol overhead. Long status maps are
+read in adaptive chunks: at 500 Hz the chunk size shrinks to fit the tight
+window, while at lower BNO sample rates the same code uses larger chunks and
+refreshes BQ/MAX faster.
+
+Worst-case planning at BNO085 500 Hz:
+
+| Transfer | Wire estimate |
+| --- | ---: |
+| BNO header + normal accel packet at 400 kHz | about `0.8 ms` |
+| BQ25792 16-byte read chunk at 1 MHz | about `0.27 ms` |
+| BQ25792 single-register write at 1 MHz | about `0.13 ms` |
+| MAX77958 33-byte read chunk at 1 MHz | about `0.42 ms` |
+| MAX77958 34-byte AP-command write at 1 MHz | about `0.42 ms` |
+
+With a `2 ms` BNO period and `500 us` guard, a normal BNO packet leaves roughly
+`700 us` for background work. That fits one MAX77958 full AP-data chunk or one
+BQ25792 chunk. If BNO coalesces a larger input packet, the adaptive chunk logic
+shrinks BQ/MAX transfers rather than delaying the next BNO read. The schematic
+currently shows `10k` I2C pull-ups, but the live module tested cleanly at 1 MHz;
+if a board revision is unstable, verify the actual pull-up values and reduce
+them for Fast-Mode Plus before blaming firmware scheduling.
+
 `/status` exposes `i2c_realtime_period_us`,
 `i2c_realtime_time_to_next_us`, `i2c_background_window_us`, and the
 realtime/background lock counters.
