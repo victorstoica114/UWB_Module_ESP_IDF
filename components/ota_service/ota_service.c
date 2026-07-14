@@ -768,6 +768,14 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"pd_error_count\":%lu,"
         "\"pd_last_read_duration_ms\":%lu,"
         "\"pd_last_update_age_ms\":%lu,"
+        "\"pd_i2c_clock_hz\":%lu,"
+        "\"pd_i2c_hs_direct_clock_hz\":%lu,"
+        "\"pd_i2c_hs_ext_requested\":%s,"
+        "\"pd_i2c_hs_ext_active\":%s,"
+        "\"pd_i2c_hs_direct_reads_enabled\":%s,"
+        "\"pd_i2c_hs_direct_read_count\":%lu,"
+        "\"pd_i2c_hs_direct_error_count\":%lu,"
+        "\"pd_i2c_hs_direct_last_elapsed_us\":%lu,"
         "\"pd_device_id\":\"0x%02x\","
         "\"pd_device_rev\":\"0x%02x\","
         "\"pd_fw_rev\":%u,"
@@ -1155,6 +1163,14 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)pd_snapshot.error_count,
         (unsigned long)pd_snapshot.last_read_duration_ms,
         (unsigned long)pd_snapshot.last_update_age_ms,
+        (unsigned long)pd_snapshot.i2c_clock_hz,
+        (unsigned long)pd_snapshot.i2c_hs_direct_clock_hz,
+        pd_snapshot.i2c_hs_ext_requested ? "true" : "false",
+        pd_snapshot.i2c_hs_ext_active ? "true" : "false",
+        pd_snapshot.i2c_hs_direct_reads_enabled ? "true" : "false",
+        (unsigned long)pd_snapshot.i2c_hs_direct_read_count,
+        (unsigned long)pd_snapshot.i2c_hs_direct_error_count,
+        (unsigned long)pd_snapshot.i2c_hs_direct_last_elapsed_us,
         (unsigned)pd_snapshot.device_id,
         (unsigned)pd_snapshot.device_rev,
         (unsigned)pd_snapshot.fw_rev,

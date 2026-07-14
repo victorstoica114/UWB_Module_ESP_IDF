@@ -1244,6 +1244,7 @@ Worst-case planning at BNO085 500 Hz:
 | BNO header + normal accel packet at 400 kHz | about `0.8 ms` |
 | BQ25792 16-byte read chunk at 1 MHz | about `0.27 ms` |
 | BQ25792 single-register write at 1 MHz | about `0.13 ms` |
+| MAX77958 single-byte direct HS read at about 2 MHz | about `0.04-0.05 ms` measured on M1 |
 | MAX77958 33-byte read chunk at 1 MHz | about `0.42 ms` |
 | MAX77958 34-byte AP-command write at 1 MHz | about `0.42 ms` |
 
@@ -1422,7 +1423,7 @@ resets top-off timing.
 ## MAX77958 USB-C PD Controller
 
 The MAX77958 USB-C/PD controller is monitored on the shared I2C bus
-(`GPIO9/GPIO10`, address `0x25`) at 400 kHz. Firmware treats it like a
+(`GPIO9/GPIO10`, address `0x25`). Firmware treats it like a
 low-priority background device, the same way the charger monitor is treated:
 MAX77958 reads and AP-command writes use the shared I2C background lock, so the
 BNO085 realtime accelerometer path can win bus arbitration when it is active.
@@ -1436,6 +1437,16 @@ shrink to smaller transfers when the BNO085 realtime window is tight.
 The monitor runs every `APP_MAX77958_READ_INTERVAL_MS` (`10s` by default), plus
 on explicit dashboard refresh or after configuration operations.
 
+MAX77958 has an optional high-speed read path for boards with strong enough I2C
+pull-ups. The clean implementation does not fork ESP-IDF: it keeps normal MAX
+writes/AP commands on the standard ESP-IDF device handle at 1 MHz, sets
+`HS_EXT_EN` in `I2C_CNFG`, and uses a small local direct-read helper for MAX
+register reads. On M1, after changing the I2C pull-ups to `1k`, the validated
+direct profile is `low/high/wait = 10/0/0`, with HS master code `0x08` plus
+STOP before each read and about `2 MHz` observed on SCL. Burst reads are left
+disabled for now; the production path uses single-byte direct reads because
+that is the stable waveform/transaction we validated on hardware.
+
 `/status` exposes both decoded fields and a raw register map:
 `pd_raw_hex`, device/FW IDs, interrupt/status/mask registers, VBUS ADC range,
 BC1.2 charger type, CC pin/orientation/status, PD role/status flags, CTRL1 USB2
@@ -1443,6 +1454,10 @@ switch state, source PDOs advertised by the connected supply, sink PDOs
 configured in the MAX77958, PPS defaults, and the last AP-command result. Raw
 AP command response bytes are also exposed as `pd_last_response_hex` for
 datasheet-level debugging.
+It also exposes HS diagnostics:
+`pd_i2c_hs_ext_active`, `pd_i2c_hs_direct_read_count`,
+`pd_i2c_hs_direct_error_count`, and
+`pd_i2c_hs_direct_last_elapsed_us`.
 
 The authenticated live endpoint is `/config/max77958`. Useful operations are:
 
