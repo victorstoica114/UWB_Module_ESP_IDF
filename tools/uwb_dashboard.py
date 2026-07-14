@@ -413,6 +413,7 @@ class DashboardState:
     def __init__(self, *, max_logs: int) -> None:
         self.lock = threading.Lock()
         self.max_logs = max_logs
+        self.status_online_max_age_sec = 6.0
         self.logs: deque[dict[str, Any]] = deque(maxlen=max_logs)
         self.accel_history: dict[int, deque[dict[str, Any]]] = {}
         self.max_accel_samples = 30000
@@ -1071,7 +1072,24 @@ class DashboardState:
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             now = time.time()
-            statuses = list(self.status_by_module.values())
+            statuses = []
+            for status in self.status_by_module.values():
+                item = dict(status)
+                updated_at = float(item.get("status_updated_at") or 0.0)
+                age_sec = now - updated_at if updated_at > 0.0 else None
+                target = str(item.get("target") or "")
+                error = self.status_errors.get(target)
+                online = (
+                    age_sec is not None
+                    and age_sec <= self.status_online_max_age_sec
+                    and bool(item.get("wifi_connected"))
+                    and not error
+                )
+                item["http_status_age_sec"] = age_sec
+                item["http_status_online"] = online
+                if error:
+                    item["http_status_error"] = error
+                statuses.append(item)
             errors = dict(self.status_errors)
             client_count = self.client_count
             telemetry_client_count = self.telemetry_client_count
@@ -1093,6 +1111,7 @@ class DashboardState:
             "next_log_id": next_log_id,
             "statuses": statuses,
             "status_errors": errors,
+            "status_online_max_age_sec": self.status_online_max_age_sec,
             "accel_history": {},
             "ranging": ranging,
             "tdoa": tdoa,
@@ -3388,8 +3407,12 @@ function statusForModule(moduleId) {
   return state.statuses.find(item => Number(item.module_id) === Number(moduleId));
 }
 
+function moduleHttpOnline(item) {
+  return Boolean(item?.http_status_online);
+}
+
 function moduleInPositionRuntime(item, solver) {
-  if (!item) return false;
+  if (!item || !moduleHttpOnline(item)) return false;
   const mode = String(item.runtime_mode_name || item.runtime_mode || "").toLowerCase();
   const wanted = solver === "tdoa" ? "ds_twr_tdoa" : "ranging";
   return Boolean(item.runtime_uwb_enabled) && mode.includes(wanted);
@@ -3916,6 +3939,8 @@ function updatePositionAnchorTrail(anchors, now) {
 
 function computePositionModel() {
   const settings = positionSettings();
+  const selectedIds = selectedPositionModuleIds(settings);
+  const offlineModuleIds = selectedIds.filter(id => !moduleHttpOnline(statusForModule(id)));
   const active = positionRangingActive(settings);
   const geometry = measuredAnchorGeometry(settings.anchorIds, settings.maxAge);
   const anchors = {...(geometry?.anchors || {})};
@@ -3967,7 +3992,7 @@ function computePositionModel() {
   }
 
   state.positionResults = tags;
-  return {settings, active, anchors, tags, geometry};
+  return {settings, active, anchors, tags, geometry, offlineModuleIds};
 }
 
 function positionBounds(model) {
@@ -4222,8 +4247,13 @@ function renderPositionReadout(model) {
 
   if (!model.active) {
     overlay.classList.add("active");
-    overlay.querySelector("h2").textContent = `${solverName} is not active`;
-    overlay.querySelector("p").textContent = "Enable the selected position runtime to clear old measurements and compute a new live position.";
+    if ((model.offlineModuleIds || []).length) {
+      overlay.querySelector("h2").textContent = "Waiting for HTTP status";
+      overlay.querySelector("p").textContent = `No live position is shown until these modules answer /status again: ${model.offlineModuleIds.join(", ")}.`;
+    } else {
+      overlay.querySelector("h2").textContent = `${solverName} is not active`;
+      overlay.querySelector("p").textContent = "Enable the selected position runtime to clear old measurements and compute a new live position.";
+    }
     readout.innerHTML = `<div class="position-tag-card"><b>${esc(solverName)} inactive</b><span>No stored position is shown while the selected modules are not in the selected runtime.</span></div>`;
     accuracyRows.innerHTML = "";
     title.textContent = model.settings.solver === "tdoa" ? "TDOA Observations" : "Distances";
@@ -5045,9 +5075,9 @@ function renderInfo(snapshot) {
   if (telemetryPill) {
     telemetryPill.textContent = `${snapshot.telemetry_client_count || 0} telemetry client${snapshot.telemetry_client_count === 1 ? "" : "s"}`;
   }
-  const online = state.statuses.filter(item => item.wifi_connected).length;
+  const online = state.statuses.filter(item => item.http_status_online).length;
   const statusPill = document.getElementById("statusPill");
-  statusPill.textContent = `${online} modules online`;
+  statusPill.textContent = `${online}/${state.statuses.length || 5} HTTP online`;
   statusPill.className = `pill ${online >= 5 ? "good" : "warn"}`;
   const telemetryPorts = snapshot.telemetry_ports || [];
   const portOptions = document.getElementById("telemetryPortOptions");
@@ -7667,27 +7697,37 @@ class DashboardHttpServer(ThreadingHTTPServer):
         return [self.send_max77958_config(target, params) for target in targets]
 
     def resolve_targets(self, target_modules: Any) -> list[str]:
-        if target_modules in (None, "", "all"):
-            return self.targets
-
         if isinstance(target_modules, str):
             raw_items = [target_modules]
         else:
-            raw_items = list(target_modules)
+            raw_items = list(target_modules) if target_modules is not None else ["all"]
 
         module_ids: list[int] = []
         for raw in raw_items:
             text = str(raw).strip()
             if not text or text == "all":
-                return self.targets
+                module_ids = []
+                break
             module_ids.append(int(text))
 
         with self.state.lock:
+            now = time.time()
+            max_age_sec = self.state.status_online_max_age_sec
             by_module = {
                 int(status["module_id"]): str(status["target"])
                 for status in self.state.status_by_module.values()
-                if status.get("module_id") is not None and status.get("target")
+                if status.get("module_id") is not None
+                and status.get("target")
+                and bool(status.get("wifi_connected"))
+                and now - float(status.get("status_updated_at") or 0.0) <= max_age_sec
+                and str(status.get("target") or "") not in self.state.status_errors
             }
+
+        if not module_ids:
+            targets = list(dict.fromkeys(by_module.values()))
+            if not targets:
+                raise RuntimeError("No HTTP-live targets known")
+            return targets
 
         targets: list[str] = []
         missing: list[int] = []
@@ -7700,7 +7740,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
 
         if missing:
             raise RuntimeError(
-                "No live target known for module(s): " +
+                "No HTTP-live target known for module(s): " +
                 ",".join(str(item) for item in missing)
             )
         return targets
@@ -7834,6 +7874,11 @@ def main() -> int:
     targets = read_targets(resolve_project_path(args.target_list))
     token = read_ota_token(resolve_project_path(args.secrets))
     state = DashboardState(max_logs=args.max_logs)
+    state.status_online_max_age_sec = max(
+        12.0,
+        args.status_interval * 3.0,
+        len(targets) * 2.5 + args.status_interval,
+    )
 
     log_server = LogServer((args.log_host, args.log_port), state)
     log_thread = threading.Thread(target=log_server.serve_forever, daemon=True)
