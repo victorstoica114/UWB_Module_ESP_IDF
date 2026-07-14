@@ -1963,6 +1963,10 @@ th { color: var(--muted); font-weight: 700; }
             <h2>Live Position</h2>
             <div class="position-legend"><span style="color:#d7352a">tag</span><span style="color:#2b64d8">trail</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
             <div id="positionReadout" class="position-readout"></div>
+            <table>
+              <thead><tr><th>Tag</th><th>est. 1σ</th><th>RMS</th><th>max</th></tr></thead>
+              <tbody id="positionAccuracyRows"></tbody>
+            </table>
           </div>
           <div class="section">
             <h2 id="positionMeasurementTitle">Measurements</h2>
@@ -2960,6 +2964,17 @@ function solve2x2(a00, a01, a10, a11, b0, b1) {
   };
 }
 
+function inverse2x2(a00, a01, a10, a11) {
+  const det = a00 * a11 - a01 * a10;
+  if (Math.abs(det) < 1e-9) return null;
+  return {
+    a00: a11 / det,
+    a01: -a01 / det,
+    a10: -a10 / det,
+    a11: a00 / det,
+  };
+}
+
 function solveLinearSystem(matrix, rhs) {
   const n = rhs.length;
   const a = matrix.map((row, index) => [...row, rhs[index]]);
@@ -3350,6 +3365,95 @@ function tdoaResiduals(position, anchors, observations) {
   return residuals;
 }
 
+function positionAccuracyFromRows(rows) {
+  const usable = rows.filter(row =>
+    Number.isFinite(row.residual) &&
+    Number.isFinite(row.gx) &&
+    Number.isFinite(row.gy));
+  if (!usable.length) return null;
+
+  let sse = 0;
+  let maxAbs = 0;
+  let hxx = 0;
+  let hxy = 0;
+  let hyy = 0;
+  for (const row of usable) {
+    const residual = Number(row.residual);
+    sse += residual * residual;
+    maxAbs = Math.max(maxAbs, Math.abs(residual));
+    hxx += row.gx * row.gx;
+    hxy += row.gx * row.gy;
+    hyy += row.gy * row.gy;
+  }
+
+  const count = usable.length;
+  const dof = Math.max(1, count - 2);
+  const rms = Math.sqrt(sse / count);
+  const variance = sse / dof;
+  const inv = inverse2x2(hxx, hxy, hxy, hyy);
+  let sigmaX = NaN;
+  let sigmaY = NaN;
+  let sigmaMajor = NaN;
+  let gdop = NaN;
+  if (inv && Number.isFinite(variance)) {
+    const covXX = Math.max(0, variance * inv.a00);
+    const covXY = variance * inv.a01;
+    const covYY = Math.max(0, variance * inv.a11);
+    const eigTerm = Math.sqrt(Math.max(0, (covXX - covYY) * (covXX - covYY) + 4 * covXY * covXY));
+    sigmaX = Math.sqrt(covXX);
+    sigmaY = Math.sqrt(covYY);
+    sigmaMajor = Math.sqrt(Math.max(0, (covXX + covYY + eigTerm) / 2));
+    gdop = Math.sqrt(Math.max(0, inv.a00 + inv.a11));
+  }
+
+  return {
+    count,
+    dof,
+    rms_m: rms,
+    max_abs_m: maxAbs,
+    sigma_x_m: sigmaX,
+    sigma_y_m: sigmaY,
+    sigma_major_m: sigmaMajor,
+    gdop,
+  };
+}
+
+function tdoaPositionAccuracy(position, anchors, observations, residuals) {
+  if (!position) return null;
+  const rows = [];
+  for (const item of observations || []) {
+    const initiator = anchors[Number(item.initiator_id)];
+    const responder = anchors[Number(item.responder_id)];
+    if (!initiator || !responder) continue;
+    const di = Math.max(1e-6, Math.hypot(position.x - initiator.x, position.y - initiator.y));
+    const dr = Math.max(1e-6, Math.hypot(position.x - responder.x, position.y - responder.y));
+    const key = `${item.initiator_id}-${item.responder_id}`;
+    const residual = Number(residuals?.[key]);
+    rows.push({
+      residual,
+      gx: (position.x - responder.x) / dr - (position.x - initiator.x) / di,
+      gy: (position.y - responder.y) / dr - (position.y - initiator.y) / di,
+    });
+  }
+  return positionAccuracyFromRows(rows);
+}
+
+function rangingPositionAccuracy(position, anchors, distances, residuals) {
+  if (!position) return null;
+  const rows = [];
+  for (const [anchorId, distance] of Object.entries(distances || {})) {
+    const anchor = anchors[Number(anchorId)];
+    if (!anchor || !Number.isFinite(Number(distance))) continue;
+    const d = Math.max(1e-6, Math.hypot(position.x - anchor.x, position.y - anchor.y));
+    rows.push({
+      residual: Number(residuals?.[anchorId]),
+      gx: (position.x - anchor.x) / d,
+      gy: (position.y - anchor.y) / d,
+    });
+  }
+  return positionAccuracyFromRows(rows);
+}
+
 function updatePositionAnchorTrail(anchors, now) {
   const activeIds = new Set(Object.keys(anchors).map(String));
   for (const key of Object.keys(state.positionAnchorTrail)) {
@@ -3387,11 +3491,13 @@ function computePositionModel() {
       let observations = [];
       let position = null;
       let residuals = {};
+      let accuracy = null;
       if (settings.solver === "tdoa") {
         observations = pairedTdoaObservations(tagId, settings.anchorIds, settings.maxAge)
           .filter(item => anchors[Number(item.initiator_id)] && anchors[Number(item.responder_id)]);
         position = solveTdoa(anchors, observations);
         residuals = tdoaResiduals(position, anchors, observations);
+        accuracy = tdoaPositionAccuracy(position, anchors, observations, residuals);
       } else {
         for (const anchorId of settings.anchorIds) {
           const item = freshDistanceFor(tagId, anchorId, settings.maxAge);
@@ -3402,8 +3508,9 @@ function computePositionModel() {
         }
         position = trilaterate(anchors, distances);
         residuals = positionResiduals(position, anchors, distances);
+        accuracy = rangingPositionAccuracy(position, anchors, distances, residuals);
       }
-      tags[tagId] = {tagId, distances, distanceItems, observations, position, residuals};
+      tags[tagId] = {tagId, distances, distanceItems, observations, position, residuals, accuracy};
       if (position) {
         const key = String(tagId);
         const trail = state.positionTrail[key] || [];
@@ -3645,13 +3752,22 @@ function renderPositionGeometryPanel(model) {
   rows.innerHTML = pairRows.join("");
 }
 
+function fmtPositionCm(value, digits = 1) {
+  return Number.isFinite(Number(value)) ? `${fmtCmFromM(value, digits)} cm` : "-";
+}
+
+function fmtPositionSigma(value, digits = 1) {
+  return Number.isFinite(Number(value)) ? `±${fmtCmFromM(value, digits)} cm` : "-";
+}
+
 function renderPositionReadout(model) {
   const readout = document.getElementById("positionReadout");
+  const accuracyRows = document.getElementById("positionAccuracyRows");
   const rows = document.getElementById("positionDistanceRows");
   const head = document.getElementById("positionMeasurementHead");
   const title = document.getElementById("positionMeasurementTitle");
   const overlay = document.getElementById("positionOverlay");
-  if (!readout || !rows || !head || !title || !overlay) return;
+  if (!readout || !accuracyRows || !rows || !head || !title || !overlay) return;
   const solverName = model.settings.solver === "tdoa" ? "DS-TWR-TDOA" : "ranging";
   const enableText = model.settings.solver === "tdoa" ? "Enable DS-TWR-TDOA" : "Enable Ranging";
   document.querySelectorAll("#positionEnableRanging, #positionEnableRangingSide")
@@ -3663,6 +3779,7 @@ function renderPositionReadout(model) {
     overlay.querySelector("h2").textContent = `${solverName} is not active`;
     overlay.querySelector("p").textContent = "Enable the selected position runtime to clear old measurements and compute a new live position.";
     readout.innerHTML = `<div class="position-tag-card"><b>${esc(solverName)} inactive</b><span>No stored position is shown while the selected modules are not in the selected runtime.</span></div>`;
+    accuracyRows.innerHTML = "";
     title.textContent = model.settings.solver === "tdoa" ? "TDOA Observations" : "Distances";
     rows.innerHTML = "";
     return;
@@ -3689,9 +3806,24 @@ function renderPositionReadout(model) {
     if (!tag.position) {
       return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}</b><span>${count}/${total} fresh ${model.settings.solver === "tdoa" ? "TDOA observations" : "distances"}</span></div>`;
     }
-    return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span>${count}/${total} fresh ${model.settings.solver === "tdoa" ? "TDOA observations" : "distances"}</span></div>`;
+    const sigma = tag.accuracy?.sigma_major_m;
+    const accuracyText = Number.isFinite(Number(sigma)) ? ` · est. ${fmtPositionSigma(sigma, 1)}` : "";
+    return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span>${count}/${total} fresh ${model.settings.solver === "tdoa" ? "TDOA observations" : "distances"}${accuracyText}</span></div>`;
   });
   readout.innerHTML = tagCards.join("") || `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
+  const accuracyTableRows = Object.values(model.tags).map(tag => {
+    const accuracy = tag.accuracy;
+    if (!tag.position || !accuracy) {
+      return `<tr><td>T${esc(tag.tagId)}</td><td colspan="3"><span class="muted">waiting</span></td></tr>`;
+    }
+    return `<tr>
+      <td>T${esc(tag.tagId)}<br><span class="muted">${esc(accuracy.count)} obs · GDOP ${esc(fmtFixed(accuracy.gdop, 2))}</span></td>
+      <td>${fmtPositionSigma(accuracy.sigma_major_m, 1)}</td>
+      <td>${fmtPositionCm(accuracy.rms_m, 1)}</td>
+      <td>${fmtPositionCm(accuracy.max_abs_m, 1)}</td>
+    </tr>`;
+  });
+  accuracyRows.innerHTML = accuracyTableRows.join("") || `<tr><td colspan="4"><span class="muted">waiting</span></td></tr>`;
 
   if (model.settings.solver === "tdoa") {
     title.textContent = "TDOA Observations";
