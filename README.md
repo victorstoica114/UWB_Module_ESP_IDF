@@ -283,6 +283,76 @@ round 1:
 5 -> 4
 ```
 
+During the short-slot lab tests, the active runtime config was:
+
+| Parameter | Value | Meaning |
+| --- | ---: | --- |
+| `anchor_survey_slot_ms` | `100 ms` | Time budget for one directed anchor-anchor DS-TWR exchange. |
+| `anchor_survey_round_gap_ms` | `10 ms` | Quiet gap after all anchor pairs in one round. |
+| `anchor_survey_command_delay_ms` | `10 ms` | Delay after a coordinator command before a follower initiates DS-TWR. |
+| `anchor_survey_rx_slice_ms` | `100 ms` | Listen window used by followers/tag while waiting for UWB frames. |
+| `distance_test_rx_timeout_ms` | `90 ms` | Maximum wait for expected DS-TWR frames inside the slot. |
+| `distance_test_resp_delay_ms` | `20 ms` | Delayed TX turnaround from `POLL RX` to `RESP TX`. |
+| `distance_test_final_delay_ms` | `20 ms` | Delayed TX turnaround from `RESP RX` to `FINAL TX`. |
+| `distance_test_report_delay_ms` | `10 ms` | Delay before `REPORT` and before `REPORT2`. |
+| `distance_test_auto_rx_delay_uus` | `500 UUS` | DW3000 automatic TX-to-RX delay, about `513 us`. |
+
+With four anchors this gives:
+
+```text
+one round = 6 slots * 100 ms + 10 ms round gap ~= 610 ms
+```
+
+For a slot where the coordinator is not the initiator, for example `A3 -> A4`
+with `A2` as coordinator, the slot looks like this:
+
+```text
+slot A3 -> A4, total budget 100 ms
+
+A2 coordinator        A3 initiator              A4 responder              Tag M1
+     |                     |                         |                       |
+t=0  |-- DS_TWR_TDOA_CMD ->|                         |                       |
+     |                     |                         |                       |
+     |                     | wait command_delay_ms   |                       |
+     |                     | currently 10 ms         |                       |
+     |                     |                         |                       |
+t~10 |                     |-- POLL ---------------->|                       |
+     |                     | \                       |                       |
+     |                     |  \----------------------|---------------------> RX POLL
+     |                     |                         |                       |
+     |                     |                         | schedule RESP +20 ms |
+     |                     |                         |                       |
+t~30 |                     |<---------------- RESP --|                       |
+     |                     |<------------------------|--------------------- RX RESP
+     |                     |                         |                       |
+     |                     | schedule FINAL +20 ms   |                       |
+     |                     |                         |                       |
+t~50 |                     |-- FINAL --------------->|                       |
+     |                     |                         |                       |
+     |                     | wait report_delay_ms    |                       |
+     |                     | currently 10 ms         |                       |
+     |                     |                         |                       |
+t~60 |                     |-- REPORT -------------->|                       |
+     |                     |                         | calculate distance   |
+     |                     |                         | wait report_delay_ms |
+     |                     |                         |                       |
+t~70 |                     |<--------------- REPORT2-|                       |
+     |                     |<------------------------|--------------------- RX REPORT2
+     |                     |                         |                       |
+t=100| slot end            | slot end                | slot end             | keeps listening
+```
+
+If the coordinator is also the initiator for the current pair, there is no
+`DS_TWR_TDOA_CMD`: the coordinator starts the `POLL` directly at the beginning
+of the slot. The passive tag never transmits in this runtime; it only records
+its local RX timestamps for `POLL`, `RESP`, and `REPORT2`.
+
+Unlike antenna-delay calibration, this runtime does not currently use
+`CAL_SYNC` plus a 500 us guard at the start of each slot. The slots are paced by
+the coordinator and by the received UWB commands/frames. If more timing margin
+or determinism is needed, the calibration slot-sync mechanism is the natural
+next upgrade path for `DS-TWR-TDOA`.
+
 This is inspired by the FlexTDOA idea of rotating radio roles. It does not
 remove multipath, but it avoids always using the same antenna orientation and
 same anchor role on a given edge. The dashboard stores the measured
