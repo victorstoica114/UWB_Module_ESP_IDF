@@ -1544,7 +1544,7 @@ th { color: var(--muted); font-weight: 700; }
 .profile-note { max-width: 960px; line-height: 1.45; }
 .profile-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 12px;
   margin-top: 12px;
 }
@@ -2280,6 +2280,35 @@ th { color: var(--muted); font-weight: 700; }
           </div>
           <p class="muted profile-note">Apply writes every timing parameter in the selected profile to ESP32 NVS through runtime config. The same profile updates DS-TWR-TDOA anchor slots and classic ranging slots.</p>
           <div class="profile-grid">
+            <div class="profile-card" data-profile="baseline">
+              <h3>Stable Baseline</h3>
+              <p class="muted">Known-good reference profile using the currently validated timing values.</p>
+              <div class="form-grid compact">
+                <label for="profileBaselineSlotMs">Slot ms</label>
+                <input id="profileBaselineSlotMs" value="100" type="number" min="1" step="1">
+                <label for="profileBaselineRoundGapMs">Round gap ms</label>
+                <input id="profileBaselineRoundGapMs" value="10" type="number" min="1" step="1">
+                <label for="profileBaselineRxSliceMs">RX slice ms</label>
+                <input id="profileBaselineRxSliceMs" value="100" type="number" min="1" step="1">
+                <label for="profileBaselineCommandDelayMs">Command delay ms</label>
+                <input id="profileBaselineCommandDelayMs" value="10" type="number" min="1" step="1">
+                <label for="profileBaselineTimeoutMs">DS-TWR timeout ms</label>
+                <input id="profileBaselineTimeoutMs" value="90" type="number" min="1" step="1">
+                <label for="profileBaselineRespDelayMs">RESP delay ms</label>
+                <input id="profileBaselineRespDelayMs" value="20" type="number" min="1" step="1">
+                <label for="profileBaselineFinalDelayMs">FINAL delay ms</label>
+                <input id="profileBaselineFinalDelayMs" value="20" type="number" min="1" step="1">
+                <label for="profileBaselineReportDelayMs">REPORT delay ms</label>
+                <input id="profileBaselineReportDelayMs" value="10" type="number" min="1" step="1">
+                <label for="profileBaselineAutoRxDelayUus">Auto RX delay UUS</label>
+                <input id="profileBaselineAutoRxDelayUus" value="500" type="number" min="1" step="1">
+              </div>
+              <div class="profile-summary" id="profileBaselineSummary"></div>
+              <div class="form-actions">
+                <button class="primary apply-ranging-profile" data-profile="baseline">Apply Stable Baseline</button>
+                <button class="reset-ranging-profile" data-profile="baseline">Reset Defaults</button>
+              </div>
+            </div>
             <div class="profile-card" data-profile="safe">
               <h3>Safe Fast</h3>
               <p class="muted">First fast profile to try when stability matters more than minimum latency.</p>
@@ -2653,6 +2682,19 @@ const rangingProfileFields = [
   {key: "autoRxDelayUus", suffix: "AutoRxDelayUus"},
 ];
 const rangingProfileDefaults = {
+  baseline: {
+    prefix: "profileBaseline",
+    label: "Stable Baseline",
+    slotMs: 100,
+    roundGapMs: 10,
+    rxSliceMs: 100,
+    commandDelayMs: 10,
+    timeoutMs: 90,
+    respDelayMs: 20,
+    finalDelayMs: 20,
+    reportDelayMs: 10,
+    autoRxDelayUus: 500,
+  },
   safe: {
     prefix: "profileSafe",
     label: "Safe Fast",
