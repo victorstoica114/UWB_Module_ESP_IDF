@@ -353,6 +353,34 @@ the coordinator and by the received UWB commands/frames. If more timing margin
 or determinism is needed, the calibration slot-sync mechanism is the natural
 next upgrade path for `DS-TWR-TDOA`.
 
+Short-slot profile testing on the live five-module setup gave these 25 s
+snapshots:
+
+| Profile | Slot | Timeout/error logs | Anchor distance std | TDOA diff std | Verdict |
+| --- | ---: | ---: | --- | --- | --- |
+| `Stable Baseline` | `100 ms` | `44` | typically `1.3-2.3 cm` | typically `3.9-5.9 cm` | Best current stable reference. |
+| `Safe Fast` | `60 ms` | `148` | typically `1.0-2.6 cm` on successful pairs | typically `3.7-5.2 cm` | Too many missing slots in current geometry. |
+| `Balanced` | `50 ms` | `144` | typically `1.5-2.3 cm` on successful pairs | typically `3.2-6.9 cm` | Faster, but still loses too many pair exchanges. |
+| `Aggressive` | `40 ms` | `138` | typically `1.5-2.3 cm` on successful pairs | typically `3.0-5.5 cm` | Not catastrophic, but not reliable enough. |
+
+The important observation is that the short profiles still produce good-looking
+measurements when a pair succeeds; the problem is missing exchanges, especially
+on weaker/currently awkward pairs involving module 5 and module 3. For now,
+`Stable Baseline` should remain the fallback/default. The next useful candidate
+is an intermediate profile rather than jumping straight to 50 ms:
+
+```text
+slot            = 80 ms
+round gap       = 10 ms
+RX slice        = 80 ms
+command delay   = 8 ms
+DS-TWR timeout  = 60 ms
+RESP delay      = 15 ms
+FINAL delay     = 15 ms
+REPORT delay    = 8 ms
+auto RX delay   = 500 UUS
+```
+
 This is inspired by the FlexTDOA idea of rotating radio roles. It does not
 remove multipath, but it avoids always using the same antenna orientation and
 same anchor role on a given edge. The dashboard stores the measured
