@@ -1538,8 +1538,38 @@ th { color: var(--muted); font-weight: 700; }
 .section h2 { margin: 0 0 11px; font-size: 15px; }
 .hidden { display: none !important; }
 .form-grid { display: grid; grid-template-columns: 160px minmax(160px, 1fr); gap: 8px 10px; align-items: center; }
+.form-grid.compact { grid-template-columns: 140px minmax(92px, 1fr); gap: 7px 8px; }
 .form-grid label { color: var(--muted); font-size: 13px; }
 .form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.profile-note { max-width: 960px; line-height: 1.45; }
+.profile-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.profile-card {
+  border: 1px solid var(--line);
+  background: #fbfcfe;
+  padding: 12px;
+}
+.profile-card h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+.profile-card p {
+  margin: 0 0 10px;
+  min-height: 34px;
+  line-height: 1.35;
+}
+.profile-summary {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
 .field-note {
   min-height: 31px;
   display: flex;
@@ -1868,6 +1898,7 @@ th { color: var(--muted); font-weight: 700; }
 }
 @media (max-width: 940px) {
   .terminal-grid, .settings-grid, .charger-grid, .graphs-layout, .position-layout { grid-template-columns: 1fr; }
+  .profile-grid { grid-template-columns: 1fr; }
   .page { height: auto; }
   .terminal { height: 520px; }
   .chart-stack { grid-template-rows: none; }
@@ -1897,6 +1928,7 @@ th { color: var(--muted); font-weight: 700; }
     <button class="tab" data-tab="graphs">Graphs</button>
     <button class="tab" data-tab="info">Info</button>
     <button class="tab" data-tab="batteryCharger">Battery Charger</button>
+    <button class="tab" data-tab="rangingSettings">Ranging Settings</button>
     <button class="tab" data-tab="uwbSettings">UWB Settings</button>
     <button class="tab" data-tab="settings">Settings</button>
   </nav>
@@ -2231,6 +2263,118 @@ th { color: var(--muted); font-weight: 700; }
         </div>
       </div>
     </section>
+    <section id="rangingSettings" class="page">
+      <div class="settings">
+        <div class="section">
+          <h2>Ranging Profiles</h2>
+          <div class="form-grid">
+            <label for="rangingProfileTargets">Targets</label>
+            <select id="rangingProfileTargets">
+              <option value="all">all modules</option>
+              <option value="1">module 1</option>
+              <option value="2">module 2</option>
+              <option value="3">module 3</option>
+              <option value="4">module 4</option>
+              <option value="5">module 5</option>
+            </select>
+          </div>
+          <p class="muted profile-note">Apply writes every timing parameter in the selected profile to ESP32 NVS through runtime config. The same profile updates DS-TWR-TDOA anchor slots and classic ranging slots.</p>
+          <div class="profile-grid">
+            <div class="profile-card" data-profile="safe">
+              <h3>Safe Fast</h3>
+              <p class="muted">First fast profile to try when stability matters more than minimum latency.</p>
+              <div class="form-grid compact">
+                <label for="profileSafeSlotMs">Slot ms</label>
+                <input id="profileSafeSlotMs" value="60" type="number" min="1" step="1">
+                <label for="profileSafeRoundGapMs">Round gap ms</label>
+                <input id="profileSafeRoundGapMs" value="10" type="number" min="1" step="1">
+                <label for="profileSafeRxSliceMs">RX slice ms</label>
+                <input id="profileSafeRxSliceMs" value="60" type="number" min="1" step="1">
+                <label for="profileSafeCommandDelayMs">Command delay ms</label>
+                <input id="profileSafeCommandDelayMs" value="5" type="number" min="1" step="1">
+                <label for="profileSafeTimeoutMs">DS-TWR timeout ms</label>
+                <input id="profileSafeTimeoutMs" value="35" type="number" min="1" step="1">
+                <label for="profileSafeRespDelayMs">RESP delay ms</label>
+                <input id="profileSafeRespDelayMs" value="15" type="number" min="1" step="1">
+                <label for="profileSafeFinalDelayMs">FINAL delay ms</label>
+                <input id="profileSafeFinalDelayMs" value="15" type="number" min="1" step="1">
+                <label for="profileSafeReportDelayMs">REPORT delay ms</label>
+                <input id="profileSafeReportDelayMs" value="5" type="number" min="1" step="1">
+                <label for="profileSafeAutoRxDelayUus">Auto RX delay UUS</label>
+                <input id="profileSafeAutoRxDelayUus" value="500" type="number" min="1" step="1">
+              </div>
+              <div class="profile-summary" id="profileSafeSummary"></div>
+              <div class="form-actions">
+                <button class="primary apply-ranging-profile" data-profile="safe">Apply Safe Fast</button>
+                <button class="reset-ranging-profile" data-profile="safe">Reset Defaults</button>
+              </div>
+            </div>
+            <div class="profile-card" data-profile="balanced">
+              <h3>Balanced</h3>
+              <p class="muted">Recommended next target: much faster than current settings, still with useful margin.</p>
+              <div class="form-grid compact">
+                <label for="profileBalancedSlotMs">Slot ms</label>
+                <input id="profileBalancedSlotMs" value="50" type="number" min="1" step="1">
+                <label for="profileBalancedRoundGapMs">Round gap ms</label>
+                <input id="profileBalancedRoundGapMs" value="10" type="number" min="1" step="1">
+                <label for="profileBalancedRxSliceMs">RX slice ms</label>
+                <input id="profileBalancedRxSliceMs" value="50" type="number" min="1" step="1">
+                <label for="profileBalancedCommandDelayMs">Command delay ms</label>
+                <input id="profileBalancedCommandDelayMs" value="5" type="number" min="1" step="1">
+                <label for="profileBalancedTimeoutMs">DS-TWR timeout ms</label>
+                <input id="profileBalancedTimeoutMs" value="25" type="number" min="1" step="1">
+                <label for="profileBalancedRespDelayMs">RESP delay ms</label>
+                <input id="profileBalancedRespDelayMs" value="10" type="number" min="1" step="1">
+                <label for="profileBalancedFinalDelayMs">FINAL delay ms</label>
+                <input id="profileBalancedFinalDelayMs" value="10" type="number" min="1" step="1">
+                <label for="profileBalancedReportDelayMs">REPORT delay ms</label>
+                <input id="profileBalancedReportDelayMs" value="5" type="number" min="1" step="1">
+                <label for="profileBalancedAutoRxDelayUus">Auto RX delay UUS</label>
+                <input id="profileBalancedAutoRxDelayUus" value="500" type="number" min="1" step="1">
+              </div>
+              <div class="profile-summary" id="profileBalancedSummary"></div>
+              <div class="form-actions">
+                <button class="primary apply-ranging-profile" data-profile="balanced">Apply Balanced</button>
+                <button class="reset-ranging-profile" data-profile="balanced">Reset Defaults</button>
+              </div>
+            </div>
+            <div class="profile-card" data-profile="aggressive">
+              <h3>Aggressive</h3>
+              <p class="muted">Lowest-latency candidate. Use after Safe Fast/Balanced look clean.</p>
+              <div class="form-grid compact">
+                <label for="profileAggressiveSlotMs">Slot ms</label>
+                <input id="profileAggressiveSlotMs" value="40" type="number" min="1" step="1">
+                <label for="profileAggressiveRoundGapMs">Round gap ms</label>
+                <input id="profileAggressiveRoundGapMs" value="10" type="number" min="1" step="1">
+                <label for="profileAggressiveRxSliceMs">RX slice ms</label>
+                <input id="profileAggressiveRxSliceMs" value="40" type="number" min="1" step="1">
+                <label for="profileAggressiveCommandDelayMs">Command delay ms</label>
+                <input id="profileAggressiveCommandDelayMs" value="3" type="number" min="1" step="1">
+                <label for="profileAggressiveTimeoutMs">DS-TWR timeout ms</label>
+                <input id="profileAggressiveTimeoutMs" value="18" type="number" min="1" step="1">
+                <label for="profileAggressiveRespDelayMs">RESP delay ms</label>
+                <input id="profileAggressiveRespDelayMs" value="7" type="number" min="1" step="1">
+                <label for="profileAggressiveFinalDelayMs">FINAL delay ms</label>
+                <input id="profileAggressiveFinalDelayMs" value="7" type="number" min="1" step="1">
+                <label for="profileAggressiveReportDelayMs">REPORT delay ms</label>
+                <input id="profileAggressiveReportDelayMs" value="3" type="number" min="1" step="1">
+                <label for="profileAggressiveAutoRxDelayUus">Auto RX delay UUS</label>
+                <input id="profileAggressiveAutoRxDelayUus" value="500" type="number" min="1" step="1">
+              </div>
+              <div class="profile-summary" id="profileAggressiveSummary"></div>
+              <div class="form-actions">
+                <button class="primary apply-ranging-profile" data-profile="aggressive">Apply Aggressive</button>
+                <button class="reset-ranging-profile" data-profile="aggressive">Reset Defaults</button>
+              </div>
+            </div>
+          </div>
+          <div class="form-actions">
+            <button id="resetAllRangingProfiles">Reset All Profile Defaults</button>
+          </div>
+          <div id="rangingProfileToast" class="toast"></div>
+        </div>
+      </div>
+    </section>
     <section id="uwbSettings" class="page">
       <div class="settings">
         <div class="settings-grid">
@@ -2497,6 +2641,58 @@ const plot = {left: 52, right: 704, top: 14, bottom: 166, width: 652, height: 15
 const toastTimers = new Map();
 let calibrationPollTimer = null;
 let calibrationJobId = null;
+const rangingProfileFields = [
+  {key: "slotMs", suffix: "SlotMs"},
+  {key: "roundGapMs", suffix: "RoundGapMs"},
+  {key: "rxSliceMs", suffix: "RxSliceMs"},
+  {key: "commandDelayMs", suffix: "CommandDelayMs"},
+  {key: "timeoutMs", suffix: "TimeoutMs"},
+  {key: "respDelayMs", suffix: "RespDelayMs"},
+  {key: "finalDelayMs", suffix: "FinalDelayMs"},
+  {key: "reportDelayMs", suffix: "ReportDelayMs"},
+  {key: "autoRxDelayUus", suffix: "AutoRxDelayUus"},
+];
+const rangingProfileDefaults = {
+  safe: {
+    prefix: "profileSafe",
+    label: "Safe Fast",
+    slotMs: 60,
+    roundGapMs: 10,
+    rxSliceMs: 60,
+    commandDelayMs: 5,
+    timeoutMs: 35,
+    respDelayMs: 15,
+    finalDelayMs: 15,
+    reportDelayMs: 5,
+    autoRxDelayUus: 500,
+  },
+  balanced: {
+    prefix: "profileBalanced",
+    label: "Balanced",
+    slotMs: 50,
+    roundGapMs: 10,
+    rxSliceMs: 50,
+    commandDelayMs: 5,
+    timeoutMs: 25,
+    respDelayMs: 10,
+    finalDelayMs: 10,
+    reportDelayMs: 5,
+    autoRxDelayUus: 500,
+  },
+  aggressive: {
+    prefix: "profileAggressive",
+    label: "Aggressive",
+    slotMs: 40,
+    roundGapMs: 10,
+    rxSliceMs: 40,
+    commandDelayMs: 3,
+    timeoutMs: 18,
+    respDelayMs: 7,
+    finalDelayMs: 7,
+    reportDelayMs: 3,
+    autoRxDelayUus: 500,
+  },
+};
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -5307,6 +5503,131 @@ function calibrationParamsFromForm() {
   return params;
 }
 
+function rangingProfileElementId(profileKey, suffix) {
+  const profile = rangingProfileDefaults[profileKey];
+  return profile ? `${profile.prefix}${suffix}` : "";
+}
+
+function rangingProfileIds() {
+  const ids = ["rangingProfileTargets"];
+  for (const profileKey of Object.keys(rangingProfileDefaults)) {
+    for (const field of rangingProfileFields) {
+      ids.push(rangingProfileElementId(profileKey, field.suffix));
+    }
+  }
+  return ids;
+}
+
+function readRangingProfile(profileKey) {
+  const result = {};
+  for (const field of rangingProfileFields) {
+    const id = rangingProfileElementId(profileKey, field.suffix);
+    result[field.key] = Number(document.getElementById(id)?.value);
+  }
+  return result;
+}
+
+function writeRangingProfile(profileKey, values, persist = true) {
+  for (const field of rangingProfileFields) {
+    const id = rangingProfileElementId(profileKey, field.suffix);
+    const el = document.getElementById(id);
+    if (!el || values[field.key] === undefined) continue;
+    el.value = String(values[field.key]);
+    if (persist) localStorage.setItem(settingKey(id), el.value);
+  }
+  updateRangingProfileSummary(profileKey);
+}
+
+function rangingProfileRuntimeParams(values) {
+  return {
+    survey_slot_ms: String(values.slotMs),
+    survey_gap_ms: String(values.roundGapMs),
+    survey_rx_ms: String(values.rxSliceMs),
+    survey_delay_ms: String(values.commandDelayMs),
+    ranging_slot_ms: String(values.slotMs),
+    ranging_gap_ms: String(values.roundGapMs),
+    ranging_rx_ms: String(values.rxSliceMs),
+    dt_rx_timeout_ms: String(values.timeoutMs),
+    dt_resp_delay_ms: String(values.respDelayMs),
+    dt_final_delay_ms: String(values.finalDelayMs),
+    dt_report_delay_ms: String(values.reportDelayMs),
+    dt_auto_rx_delay_uus: String(values.autoRxDelayUus),
+  };
+}
+
+function mirrorRangingProfileToUwbFields(values) {
+  const fields = {
+    uwbSurveySlotMs: values.slotMs,
+    uwbSurveyGapMs: values.roundGapMs,
+    uwbSurveyRxMs: values.rxSliceMs,
+    uwbSurveyDelayMs: values.commandDelayMs,
+    uwbRangingSlotMs: values.slotMs,
+    uwbRangingGapMs: values.roundGapMs,
+    uwbRangingRxMs: values.rxSliceMs,
+    uwbDtRxTimeoutMs: values.timeoutMs,
+    uwbDtRespDelayMs: values.respDelayMs,
+    uwbDtFinalDelayMs: values.finalDelayMs,
+    uwbDtReportDelayMs: values.reportDelayMs,
+    uwbDtAutoRxDelayUus: values.autoRxDelayUus,
+  };
+  for (const [id, value] of Object.entries(fields)) {
+    const el = document.getElementById(id);
+    if (!el || value === undefined || !Number.isFinite(Number(value))) continue;
+    el.value = String(value);
+    localStorage.setItem(settingKey(id), el.value);
+  }
+}
+
+function profileSummaryText(values) {
+  const programmedMs =
+    values.commandDelayMs +
+    values.respDelayMs +
+    values.finalDelayMs +
+    2 * values.reportDelayMs;
+  const marginMs = values.slotMs - programmedMs;
+  const roundMs = 6 * values.slotMs + values.roundGapMs;
+  const warnings = [];
+  if (values.timeoutMs >= values.slotMs) warnings.push("timeout >= slot");
+  if (values.rxSliceMs > values.slotMs) warnings.push("RX slice > slot");
+  if (marginMs < 5) warnings.push("low slot margin");
+  const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
+  return `4 anchors: ~${fmtFixed(roundMs, 0)} ms/round · chain ${fmtFixed(programmedMs, 0)} ms · margin ${fmtFixed(marginMs, 0)} ms${warnText}`;
+}
+
+function updateRangingProfileSummary(profileKey) {
+  const profile = rangingProfileDefaults[profileKey];
+  if (!profile) return;
+  const summary = document.getElementById(`${profile.prefix}Summary`);
+  if (!summary) return;
+  const values = readRangingProfile(profileKey);
+  const valid = Object.values(values).every(value => Number.isFinite(value));
+  summary.textContent = valid ? profileSummaryText(values) : "incomplete profile";
+  summary.className = `profile-summary ${valid && values.slotMs - (values.commandDelayMs + values.respDelayMs + values.finalDelayMs + 2 * values.reportDelayMs) < 5 ? "warn" : ""}`.trim();
+}
+
+function updateAllRangingProfileSummaries() {
+  Object.keys(rangingProfileDefaults).forEach(updateRangingProfileSummary);
+}
+
+async function applyRangingProfile(profileKey) {
+  const profile = rangingProfileDefaults[profileKey];
+  if (!profile) return;
+  const values = readRangingProfile(profileKey);
+  if (!Object.values(values).every(value => Number.isFinite(value) && value > 0)) {
+    setToast("rangingProfileToast", "Profile has invalid values", "bad");
+    return;
+  }
+  setToast("rangingProfileToast", `applying ${profile.label}...`, "", null, false);
+  const data = await postConfig({
+    target_modules: document.getElementById("rangingProfileTargets").value,
+    params: rangingProfileRuntimeParams(values),
+  }, "rangingProfileToast");
+  if (apiResponseOk(data)) {
+    mirrorRangingProfileToUwbFields(values);
+    setTimeout(fetchSnapshot, 500);
+  }
+}
+
 function persistedSettingIds() {
   return [
     "runtimeTargets", "runtimeMode", "runtimeTag", "runtimeAnchors", "runtimeReboot",
@@ -5327,6 +5648,7 @@ function persistedSettingIds() {
     "calTargets", "calMethod", "calPair", "calKnownCm", "calThree",
     "calD01Cm", "calD02Cm", "calD12Cm", "calSamples",
     "calAutoApply", "calMinApplyDtu", "calReferenceGuardCm", "calTimeoutSec",
+    ...rangingProfileIds(),
   ];
 }
 function restoreSettings() {
@@ -5498,6 +5820,33 @@ function wireSettings() {
       }
     }, "telemetryPortToast");
   });
+  document.querySelectorAll(".profile-card input").forEach(el => {
+    el.addEventListener("input", () => {
+      const profile = el.closest(".profile-card")?.dataset.profile;
+      if (profile) updateRangingProfileSummary(profile);
+    });
+    el.addEventListener("change", () => {
+      const profile = el.closest(".profile-card")?.dataset.profile;
+      if (profile) updateRangingProfileSummary(profile);
+    });
+  });
+  document.querySelectorAll(".apply-ranging-profile").forEach(button => {
+    button.addEventListener("click", () => applyRangingProfile(button.dataset.profile));
+  });
+  document.querySelectorAll(".reset-ranging-profile").forEach(button => {
+    button.addEventListener("click", () => {
+      const profile = button.dataset.profile;
+      writeRangingProfile(profile, rangingProfileDefaults[profile]);
+      setToast("rangingProfileToast", "profile defaults restored locally; press Apply to write ESP NVS", "");
+    });
+  });
+  document.getElementById("resetAllRangingProfiles").addEventListener("click", () => {
+    for (const profile of Object.keys(rangingProfileDefaults)) {
+      writeRangingProfile(profile, rangingProfileDefaults[profile]);
+    }
+    setToast("rangingProfileToast", "all profile defaults restored locally; press Apply to write ESP NVS", "");
+  });
+  updateAllRangingProfileSummaries();
   document.getElementById("applyCalibrationSettings").addEventListener("click", () => {
     postConfig({
       target_modules: document.getElementById("runtimeTargets").value,
