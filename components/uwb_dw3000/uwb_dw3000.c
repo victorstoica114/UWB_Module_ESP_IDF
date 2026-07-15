@@ -254,7 +254,7 @@ enum {
 #define UWB_FLEX_TDOA_CMD_ROUND_OFFSET 13U
 #define UWB_FLEX_TDOA_CMD_LEN (UWB_FLEX_TDOA_CMD_ROUND_OFFSET + sizeof(uint32_t))
 #define UWB_FLEX_TDOA_DUAL_DIFF_REJECT_M 0.75
-#define UWB_FLEX_TDOA_DUAL_DIFF_MAX_BLEND 0.50
+#define UWB_FLEX_TDOA_DUAL_DIFF_BLEND 0.50
 
 enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_POLL = 1,
@@ -3953,12 +3953,8 @@ static void uwb_flex_tdoa_log_ds_twr_observation(
         dual_valid = isfinite(alternate_diff_m);
         suspect = dual_valid && agreement_m > UWB_FLEX_TDOA_DUAL_DIFF_REJECT_M;
         if (dual_valid && !suspect) {
-            const double agreement_ratio =
-                fmin(fmax(agreement_m / UWB_FLEX_TDOA_DUAL_DIFF_REJECT_M, 0.0),
-                     1.0);
-            blend_weight =
-                UWB_FLEX_TDOA_DUAL_DIFF_MAX_BLEND * (1.0 - agreement_ratio);
-            fused = blend_weight > 0.0;
+            blend_weight = UWB_FLEX_TDOA_DUAL_DIFF_BLEND;
+            fused = true;
         }
     }
 
