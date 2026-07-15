@@ -816,6 +816,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"pd_i2c_hs_direct_read_count\":%lu,"
         "\"pd_i2c_hs_direct_write_count\":%lu,"
         "\"pd_i2c_hs_direct_error_count\":%lu,"
+        "\"pd_i2c_hs_direct_write_verify_count\":%lu,"
+        "\"pd_i2c_hs_direct_write_verify_error_count\":%lu,"
         "\"pd_i2c_hs_direct_last_elapsed_us\":%lu,"
         "\"pd_i2c_hs_direct_scl_measure_error\":%d,"
         "\"pd_i2c_hs_direct_scl_measure_error_name\":\"%s\","
@@ -1255,6 +1257,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)pd_snapshot.i2c_hs_direct_read_count,
         (unsigned long)pd_snapshot.i2c_hs_direct_write_count,
         (unsigned long)pd_snapshot.i2c_hs_direct_error_count,
+        (unsigned long)pd_snapshot.i2c_hs_direct_write_verify_count,
+        (unsigned long)pd_snapshot.i2c_hs_direct_write_verify_error_count,
         (unsigned long)pd_snapshot.i2c_hs_direct_last_elapsed_us,
         pd_snapshot.i2c_hs_direct_scl_measure_error,
         esp_err_to_name((esp_err_t)pd_snapshot.i2c_hs_direct_scl_measure_error),

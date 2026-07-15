@@ -5033,6 +5033,7 @@ function renderPdRows(statuses) {
         last op ${esc(item.pd_last_opcode || "-")} -> ${esc(item.pd_last_response_opcode || "-")}<br>
         result ${esc(item.pd_last_result_code ?? "-")} ${esc(item.pd_last_result_name || "")}<br>
         <span class="muted">HS r/w/err ${esc(item.pd_i2c_hs_direct_read_count ?? "-")}/${esc(item.pd_i2c_hs_direct_write_count ?? "-")}/${esc(item.pd_i2c_hs_direct_error_count ?? "-")}</span><br>
+        <span class="muted">HS verify ok/err ${esc(item.pd_i2c_hs_direct_write_verify_count ?? "-")}/${esc(item.pd_i2c_hs_direct_write_verify_error_count ?? "-")}</span><br>
         <span class="muted">err ${esc(item.pd_last_operation_error_name || item.pd_last_error_name || "-")}
         · reads ${esc(item.pd_read_count ?? "-")} · age ${fmtAgeMs(item.pd_last_update_age_ms)}</span></td>
     </tr>`;

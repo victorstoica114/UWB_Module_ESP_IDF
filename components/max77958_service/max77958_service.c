@@ -118,6 +118,8 @@ static bool s_hs_ext_active;
 static uint32_t s_hs_direct_read_count;
 static uint32_t s_hs_direct_write_count;
 static uint32_t s_hs_direct_error_count;
+static uint32_t s_hs_direct_write_verify_count;
+static uint32_t s_hs_direct_write_verify_error_count;
 static uint32_t s_hs_direct_last_elapsed_us;
 static int s_hs_direct_scl_measure_error = ESP_ERR_NOT_SUPPORTED;
 static uint32_t s_hs_direct_scl_edges;
@@ -834,6 +836,85 @@ static esp_err_t write_bytes_direct_hs_chunked(uint8_t start_reg,
     return ESP_OK;
 }
 
+static esp_err_t verify_bytes_single_reads(uint8_t start_reg,
+                                           const uint8_t *expected,
+                                           size_t data_len)
+{
+    if (expected == NULL || data_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (size_t offset = 0; offset < data_len; ++offset) {
+        uint8_t actual = 0;
+        const uint8_t reg = (uint8_t)(start_reg + offset);
+        const esp_err_t err = read_bytes(reg, &actual, sizeof(actual));
+        if (err != ESP_OK) {
+            s_hs_direct_write_verify_error_count++;
+            ESP_LOGW(TAG, "MAX77958 read-back verify failed reg=0x%02X: %s",
+                     reg, esp_err_to_name(err));
+            return err;
+        }
+        if (actual != expected[offset]) {
+            s_hs_direct_write_verify_error_count++;
+            ESP_LOGW(TAG,
+                     "MAX77958 read-back mismatch reg=0x%02X expected=0x%02X actual=0x%02X",
+                     reg, expected[offset], actual);
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+    }
+
+    s_hs_direct_write_verify_count++;
+    return ESP_OK;
+}
+
+static esp_err_t ap_write_command_direct_hs_verified(
+    const uint8_t command[MAX77958_SERVICE_AP_DATA_BYTES], bool *latched)
+{
+    if (latched != NULL) {
+        *latched = false;
+    }
+    if (!max77958_hs_direct_writes_active()) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    /*
+     * AP_DATAOUT32 (0x41) latches the whole AP command. Verify everything up
+     * to 0x40 first, then write the latch byte separately and verify it after
+     * the command has been handed to the USBC block.
+     */
+    esp_err_t err =
+        write_bytes_direct_hs_chunked(REG_AP_DATAOUT0, command, 30U);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = verify_bytes_single_reads(REG_AP_DATAOUT0, command, 30U);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = write_bytes_direct_hs_chunked((uint8_t)(REG_AP_DATAOUT0 + 30U),
+                                        &command[30], 2U);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = verify_bytes_single_reads((uint8_t)(REG_AP_DATAOUT0 + 30U),
+                                    &command[30], 2U);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = write_bytes_direct_hs((uint8_t)(REG_AP_DATAOUT0 + 32U),
+                                &command[32], 1U);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (latched != NULL) {
+        *latched = true;
+    }
+    return verify_bytes_single_reads((uint8_t)(REG_AP_DATAOUT0 + 32U),
+                                     &command[32], 1U);
+}
+
 static esp_err_t max77958_read_device_id(uint8_t *device_id)
 {
     if (device_id == NULL) {
@@ -1103,11 +1184,20 @@ static esp_err_t ap_send33(uint8_t opcode, const uint8_t payload32[32],
         memcpy(&command[1], payload32, 32);
     }
 
-    esp_err_t err =
-        write_bytes_direct_hs_chunked(REG_AP_DATAOUT0, command,
-                                      sizeof(command));
-    if (err != ESP_OK) {
+    bool command_latched = false;
+    esp_err_t err = ap_write_command_direct_hs_verified(command,
+                                                        &command_latched);
+    if (err != ESP_OK && !command_latched) {
+        if (err != ESP_ERR_NOT_SUPPORTED) {
+            ESP_LOGW(TAG,
+                     "MAX77958 direct-HS AP write/verify failed before latch, falling back: %s",
+                     esp_err_to_name(err));
+        }
         err = write_bytes(REG_AP_DATAOUT0, command, sizeof(command));
+    } else if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "MAX77958 direct-HS AP write verification failed after latch; not retrying: %s",
+                 esp_err_to_name(err));
     }
     if (err == ESP_OK) {
         uint8_t last_uic = 0;
@@ -1153,6 +1243,10 @@ static void update_snapshot_from_raw(
         s_snapshot.i2c_hs_direct_read_count = s_hs_direct_read_count;
         s_snapshot.i2c_hs_direct_write_count = s_hs_direct_write_count;
         s_snapshot.i2c_hs_direct_error_count = s_hs_direct_error_count;
+        s_snapshot.i2c_hs_direct_write_verify_count =
+            s_hs_direct_write_verify_count;
+        s_snapshot.i2c_hs_direct_write_verify_error_count =
+            s_hs_direct_write_verify_error_count;
         s_snapshot.i2c_hs_direct_last_elapsed_us =
             s_hs_direct_last_elapsed_us;
         s_snapshot.i2c_hs_direct_scl_measure_error =
