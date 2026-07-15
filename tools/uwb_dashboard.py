@@ -895,6 +895,7 @@ class DashboardState:
                 if now - float(sample.get("received_at") or 0.0) <= 10.0
             ]
             mean_m = sum(values) / len(values) if values else None
+            median_m = self.median_float(values)
             std_m = None
             if len(values) >= 2 and mean_m is not None:
                 variance = sum((value - mean_m) ** 2 for value in values) / (
@@ -913,6 +914,7 @@ class DashboardState:
                 "stats": {
                     "samples": len(values),
                     "mean_m": mean_m,
+                    "median_m": median_m,
                     "std_m": std_m,
                     "min_m": min(values) if values else None,
                     "max_m": max(values) if values else None,
@@ -939,6 +941,7 @@ class DashboardState:
                 if now - float(sample.get("received_at") or 0.0) <= 10.0
             ]
             mean_m = sum(values) / len(values) if values else None
+            median_m = self.median_float(values)
             std_m = None
             if len(values) >= 2 and mean_m is not None:
                 variance = sum((value - mean_m) ** 2 for value in values) / (
@@ -960,6 +963,7 @@ class DashboardState:
                 "stats": {
                     "samples": len(values),
                     "mean_m": mean_m,
+                    "median_m": median_m,
                     "std_m": std_m,
                     "min_m": min(values) if values else None,
                     "max_m": max(values) if values else None,
@@ -977,6 +981,7 @@ class DashboardState:
                 if now - float(sample.get("received_at") or 0.0) <= 10.0
             ]
             mean_m = sum(values) / len(values) if values else None
+            median_m = self.median_float(values)
             std_m = None
             if len(values) >= 2 and mean_m is not None:
                 variance = sum((value - mean_m) ** 2 for value in values) / (
@@ -999,6 +1004,7 @@ class DashboardState:
                 "stats": {
                     "samples": len(values),
                     "mean_m": mean_m,
+                    "median_m": median_m,
                     "std_m": std_m,
                     "min_m": min(values) if values else None,
                     "max_m": max(values) if values else None,
@@ -1932,6 +1938,10 @@ th { color: var(--muted); font-weight: 700; }
   border-radius: 999px;
   background: transparent;
 }
+.position-skip td {
+  color: #98a2b3;
+  background: #fbfcfe;
+}
 @media (max-width: 940px) {
   .terminal-grid, .settings-grid, .charger-grid, .pd-grid, .graphs-layout, .position-layout { grid-template-columns: 1fr; }
   .profile-grid { grid-template-columns: 1fr; }
@@ -2024,7 +2034,7 @@ th { color: var(--muted); font-weight: 700; }
             <h2>Measured Anchor Geometry</h2>
             <div class="muted" style="margin-bottom:8px;">Relative anchor coordinates are reconstructed from live anchor-anchor ranges.</div>
             <table>
-              <thead><tr><th>Pair</th><th>m / avg</th><th>std</th><th>age</th><th>fit</th></tr></thead>
+              <thead><tr><th>Pair</th><th>med / avg</th><th>std</th><th>age</th><th>fit</th></tr></thead>
               <tbody id="positionGeometryRows"></tbody>
             </table>
           </div>
@@ -2862,6 +2872,8 @@ const state = {
   positionResults: {},
   positionWasActive: false,
 };
+const tdoaReverseSumRejectM = 0.75;
+const tdoaResidualRejectM = 0.45;
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
 const maxSeriesPoints = 1600;
@@ -3519,6 +3531,10 @@ function anchorPairKey(a, b) {
 function freshAnchorPairDistance(a, b, maxAge) {
   const item = state.tdoa?.anchor_distances?.[anchorPairKey(a, b)];
   if (!item || Number(item.age_sec) > maxAge) return null;
+  const median = Number(item.stats?.median_m);
+  if (Number.isFinite(median) && median > 0) {
+    return {...item, latest_distance_m: Number(item.distance_m), distance_m: median};
+  }
   return item;
 }
 
@@ -3834,6 +3850,96 @@ function tdoaResiduals(position, anchors, observations) {
   return residuals;
 }
 
+function tdoaObservationKey(item) {
+  return `${Number(item.initiator_id)}-${Number(item.responder_id)}`;
+}
+
+function tdoaRmsForResiduals(residuals, observations) {
+  const values = (observations || [])
+    .map(item => Number(residuals?.[tdoaObservationKey(item)]))
+    .filter(value => Number.isFinite(value));
+  if (!values.length) return Infinity;
+  return Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length);
+}
+
+function minTdoaObservationCount(anchorIds) {
+  return Math.max(2, Math.min(3, Number(anchorIds?.length || 0) - 1));
+}
+
+function robustTdoaFit(anchorIds, anchors, observations) {
+  const all = (observations || []).filter(item =>
+    anchors[Number(item.initiator_id)] &&
+    anchors[Number(item.responder_id)] &&
+    Number.isFinite(Number(item.diff_m)));
+  const minCount = minTdoaObservationCount(anchorIds);
+  const notes = new Map();
+  if (all.length < minCount) {
+    return {
+      position: null,
+      used: [],
+      annotated: all.map(item => ({...item, used_in_fit: false, reject_reason: "need more"})),
+      notes,
+    };
+  }
+
+  let used = all.filter(item => {
+    const reverseSum = Number(item.reverse_sum_m);
+    const ok = !Number.isFinite(reverseSum) || Math.abs(reverseSum) <= tdoaReverseSumRejectM;
+    if (!ok) notes.set(tdoaObservationKey(item), "rev sum");
+    return ok;
+  });
+  if (used.length < minCount) {
+    used = all;
+    notes.clear();
+  }
+
+  let position = solveTdoa(anchors, used);
+  if (!position) {
+    return {
+      position: null,
+      used: [],
+      annotated: all.map(item => ({...item, used_in_fit: false, reject_reason: notes.get(tdoaObservationKey(item)) || "fit fail"})),
+      notes,
+    };
+  }
+  let residuals = tdoaResiduals(position, anchors, used);
+  let rms = tdoaRmsForResiduals(residuals, used);
+
+  for (let iter = 0; iter < 2 && used.length > minCount; iter++) {
+    let worst = null;
+    let worstAbs = 0;
+    for (const item of used) {
+      const residual = Number(residuals[tdoaObservationKey(item)]);
+      const absResidual = Math.abs(residual);
+      if (Number.isFinite(absResidual) && absResidual > worstAbs) {
+        worst = item;
+        worstAbs = absResidual;
+      }
+    }
+    if (!worst || worstAbs <= tdoaResidualRejectM) break;
+
+    const trialUsed = used.filter(item => item !== worst);
+    const trialPosition = solveTdoa(anchors, trialUsed);
+    if (!trialPosition) break;
+    const trialResiduals = tdoaResiduals(trialPosition, anchors, trialUsed);
+    const trialRms = tdoaRmsForResiduals(trialResiduals, trialUsed);
+    if (!(trialRms < rms * 0.85 || rms > tdoaResidualRejectM)) break;
+
+    notes.set(tdoaObservationKey(worst), "resid");
+    used = trialUsed;
+    position = trialPosition;
+    residuals = trialResiduals;
+    rms = trialRms;
+  }
+
+  const usedKeys = new Set(used.map(tdoaObservationKey));
+  const annotated = all.map(item => {
+    const key = tdoaObservationKey(item);
+    return {...item, used_in_fit: usedKeys.has(key), reject_reason: notes.get(key) || ""};
+  });
+  return {position, used, annotated, notes};
+}
+
 function positionAccuracyFromRows(rows) {
   const usable = rows.filter(row =>
     Number.isFinite(row.residual) &&
@@ -3960,15 +4066,24 @@ function computePositionModel() {
       const distances = {};
       const distanceItems = {};
       let observations = [];
+      let fitObservations = [];
       let position = null;
       let residuals = {};
       let accuracy = null;
       if (settings.solver === "tdoa") {
         observations = pairedTdoaObservations(tagId, settings.anchorIds, settings.maxAge)
           .filter(item => anchors[Number(item.initiator_id)] && anchors[Number(item.responder_id)]);
-        position = solveTdoa(anchors, observations);
+        const fit = robustTdoaFit(settings.anchorIds, anchors, observations);
+        position = fit.position;
+        fitObservations = fit.used || [];
+        observations = fit.annotated || observations.map(item => ({...item, used_in_fit: true, reject_reason: ""}));
         residuals = tdoaResiduals(position, anchors, observations);
-        accuracy = tdoaPositionAccuracy(position, anchors, observations, residuals);
+        accuracy = tdoaPositionAccuracy(
+          position,
+          anchors,
+          fitObservations.length ? fitObservations : observations,
+          tdoaResiduals(position, anchors, fitObservations.length ? fitObservations : observations)
+        );
       } else {
         for (const anchorId of settings.anchorIds) {
           const item = freshDistanceFor(tagId, anchorId, settings.maxAge);
@@ -3981,7 +4096,7 @@ function computePositionModel() {
         residuals = positionResiduals(position, anchors, distances);
         accuracy = rangingPositionAccuracy(position, anchors, distances, residuals);
       }
-      tags[tagId] = {tagId, distances, distanceItems, observations, position, residuals, accuracy};
+      tags[tagId] = {tagId, distances, distanceItems, observations, fitObservations, position, residuals, accuracy};
       if (position) {
         const key = String(tagId);
         const trail = state.positionTrail[key] || [];
@@ -4273,18 +4388,24 @@ function renderPositionReadout(model) {
   }
 
   const tagCards = Object.values(model.tags).map(tag => {
-    const count = model.settings.solver === "tdoa"
+    const fitCount = model.settings.solver === "tdoa"
+      ? (tag.fitObservations || []).length
+      : Object.keys(tag.distances || {}).length;
+    const freshCount = model.settings.solver === "tdoa"
       ? (tag.observations || []).length
       : Object.keys(tag.distances || {}).length;
     const total = model.settings.solver === "tdoa"
       ? Math.max(0, model.settings.anchorIds.length * (model.settings.anchorIds.length - 1) / 2)
       : model.settings.anchorIds.length;
     if (!tag.position) {
-      return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}</b><span>${count}/${total} fresh ${model.settings.solver === "tdoa" ? "TDOA observations" : "distances"}</span></div>`;
+      return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}</b><span>${freshCount}/${total} fresh ${model.settings.solver === "tdoa" ? "TDOA observations" : "distances"}</span></div>`;
     }
     const sigma = tag.accuracy?.sigma_major_m;
     const accuracyText = Number.isFinite(Number(sigma)) ? ` · est. ${fmtPositionSigma(sigma, 1)}` : "";
-    return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span>${count}/${total} fresh ${model.settings.solver === "tdoa" ? "TDOA observations" : "distances"}${accuracyText}</span></div>`;
+    const countText = model.settings.solver === "tdoa"
+      ? `${fitCount}/${total} fit · ${freshCount} fresh`
+      : `${fitCount}/${total} fresh distances`;
+    return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span>${countText}${accuracyText}</span></div>`;
   });
   readout.innerHTML = tagCards.join("") || `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
   const accuracyTableRows = Object.values(model.tags).map(tag => {
@@ -4310,9 +4431,11 @@ function renderPositionReadout(model) {
         const key = `${item.initiator_id}-${item.responder_id}`;
         const reverseSum = Number(item.reverse_sum_m);
         const residual = tag.residuals?.[key];
-        tdoaRows.push(`<tr>
+        const used = item.used_in_fit !== false;
+        const fitNote = used ? "fit" : `skip ${item.reject_reason || "outlier"}`;
+        tdoaRows.push(`<tr class="${used ? "" : "position-skip"}">
           <td>T${esc(tag.tagId)}</td>
-          <td>A${esc(item.initiator_id)}↔A${esc(item.responder_id)}<br><span class="muted">seq ${esc(item.seq)}/${esc(item.reverse_seq)} · n ${esc(item.samples || 1)}</span></td>
+          <td>A${esc(item.initiator_id)}↔A${esc(item.responder_id)}<br><span class="muted">seq ${esc(item.seq)}/${esc(item.reverse_seq)} · n ${esc(item.samples || 1)} · ${esc(fitNote)}</span></td>
           <td>${fmtFixed(item.diff_m, 3)}</td>
           <td>${Number.isFinite(reverseSum) ? fmtCmFromM(reverseSum, 1) + " cm" : "-"}</td>
           <td class="${Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${fmtFixed(item.age_sec, 1)}s</td>

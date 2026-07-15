@@ -469,12 +469,14 @@ The log still includes both `raw` and corrected `diff` so the correction can be
 audited later.
 
 The dashboard `Position` tab reconstructs the relative anchor geometry from live
-anchor-anchor DS-TWR measurements. The first selected anchor is placed at
-`(0,0)`, the second defines the X axis, the third/fourth are trilaterated from
-the measured edges, and a small least-squares refinement spreads any geometry
-error across all fresh edges. The geometry table reports residual error in
-centimeters, so the real setup can be a slightly skewed quadrilateral instead of
-a perfect square.
+anchor-anchor DS-TWR measurements. It uses the recent median for each anchor
+edge, not just the latest sample, so one noisy range is less likely to move the
+whole coordinate frame. The first selected anchor is placed at `(0,0)`, the
+second defines the X axis, the third/fourth are trilaterated from the measured
+edges, and a small least-squares refinement spreads any geometry error across
+all fresh edges. The geometry table reports residual error in centimeters, so
+the real setup can be a slightly skewed quadrilateral instead of a perfect
+square.
 
 With `DS-TWR-TDOA` selected, the dashboard takes fresh `diff` observations and
 solves the tag position on the PC with a local least-squares range-difference
@@ -482,9 +484,12 @@ fit. When both directions of a pair are fresh, the dashboard uses the
 antisymmetric median `(Ai->Aj - Aj->Ai) / 2` and reports the reverse sum as a
 health check. A reverse sum near zero means the two directed observations agree;
 a large reverse sum means the pair has common-mode bias even if each individual
-line looks stable. `DS-TWR ranges` can use the same measured anchor geometry for
-absolute tag-anchor ranges, but the blue distance circles only make sense for
-absolute ranges, not TDOA range differences.
+line looks stable. The live fit now ignores observations with very large reverse
+sum and can drop a single high-residual outlier when enough other pairs remain;
+the table keeps those rows visible as `skip ...` diagnostics. `DS-TWR ranges`
+can use the same measured anchor geometry for absolute tag-anchor ranges, but
+the blue distance circles only make sense for absolute ranges, not TDOA range
+differences.
 
 ### Time Units
 
