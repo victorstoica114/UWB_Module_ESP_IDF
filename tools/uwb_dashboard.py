@@ -2291,13 +2291,13 @@ tr.status-stale td { color: #4f3b1d; }
             <label for="positionMaxAgeSec">Fresh age s</label>
             <input id="positionMaxAgeSec" value="3" type="number" min="0.2" step="0.1">
             <label for="positionTdoaMode">TDOA filter</label>
-            <select id="positionTdoaMode"><option value="static" selected>Static median</option><option value="dynamic">Dynamic 1.5s median</option></select>
+            <select id="positionTdoaMode"><option value="static" selected>Static median</option><option value="dynamic">Dynamic 1.5s median</option><option value="auto">Auto Kalman</option></select>
           </div>
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
             <div><b>Geometry</b><span>FlexTDOA uses live anchor-anchor ranges, so the anchors do not need to form a perfect square.</span></div>
-            <div><b>TDOA filter</b><span>Static uses the median of recent paired observations. Dynamic uses a short 1.5 s median and gives fresher, tighter rows more weight.</span></div>
+            <div><b>TDOA filter</b><span>Static uses the median of recent paired observations. Dynamic uses a short 1.5 s median. Auto Kalman uses dynamic observations, gates outliers, and switches between static and moving behavior.</span></div>
           </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
@@ -3182,11 +3182,13 @@ const state = {
   tdoa: {observations: {}, anchor_distances: {}, max_age_sec: 3},
   positionTrail: {},
   positionAnchorTrail: {},
+  positionFilters: {},
   positionResults: {},
   positionWasActive: false,
 };
 const tdoaReverseSumRejectM = 0.75;
 const tdoaResidualRejectM = 0.45;
+const kalmanMaxPredictionAgeSec = 2.5;
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
 const maxSeriesPoints = 1600;
@@ -3744,8 +3746,9 @@ function positionSettings() {
   const anchorIds = parseIdList(document.getElementById("positionAnchors")?.value, anchorCount);
   const tagIds = parseIdList(document.getElementById("positionTags")?.value);
   const maxAge = Math.max(0.2, Number(document.getElementById("positionMaxAgeSec")?.value || 3));
-  const tdoaMode = document.getElementById("positionTdoaMode")?.value === "dynamic"
-    ? "dynamic"
+  const rawTdoaMode = document.getElementById("positionTdoaMode")?.value || "static";
+  const tdoaMode = ["static", "dynamic", "auto"].includes(rawTdoaMode)
+    ? rawTdoaMode
     : "static";
   return {anchorCount, solver, anchorIds, tagIds, maxAge, tdoaMode};
 }
@@ -4063,8 +4066,14 @@ function tdoaSequencesArePaired(left, right, pairCount) {
   return nearest > 0 && nearest <= pairCount;
 }
 
+function tdoaModeUsesDynamicObservations(mode) {
+  return mode === "dynamic" || mode === "auto";
+}
+
 function tdoaObservationForMode(item, mode) {
-  if (mode !== "dynamic") return {...item, tdoa_filter: "static"};
+  if (!tdoaModeUsesDynamicObservations(mode)) {
+    return {...item, tdoa_filter: "static"};
+  }
   const dynamicDiff = Number(item.dynamic_diff_m);
   const dynamicRawDiff = Number(item.dynamic_raw_diff_m);
   const dynamicReverseSum = Number(item.dynamic_reverse_sum_m);
@@ -4084,7 +4093,7 @@ function tdoaObservationForMode(item, mode) {
       : (Number.isFinite(latestReverseSum)
         ? latestReverseSum
         : item.reverse_sum_m),
-    tdoa_filter: "dynamic",
+    tdoa_filter: mode === "auto" ? "auto" : "dynamic",
   };
 }
 
@@ -4248,7 +4257,7 @@ function tdoaRmsForResiduals(residuals, observations) {
 }
 
 function tdoaSolveWeight(item, maxAge, mode) {
-  if (mode !== "dynamic") return 1;
+  if (!tdoaModeUsesDynamicObservations(mode)) return 1;
   const age = Math.max(0, Number(item.age_sec) || 0);
   const horizon = Math.max(0.25, Number(maxAge) || 1);
   const tau = Math.max(0.2, Math.min(0.7, horizon / 2));
@@ -4439,6 +4448,249 @@ function tdoaPositionAccuracy(position, anchors, observations, residuals) {
   return positionAccuracyFromRows(rows);
 }
 
+function clamp(value, low, high) {
+  return Math.max(low, Math.min(high, value));
+}
+
+function kalmanFilterKey(tagId, settings) {
+  return [
+    settings.solver,
+    settings.tdoaMode,
+    settings.anchorIds.join(","),
+    tagId,
+  ].join(":");
+}
+
+function resetPositionFilters() {
+  state.positionFilters = {};
+}
+
+function initPositionFilter(position, accuracy, now) {
+  const sigma = clamp(
+    Math.max(
+      0.08,
+      Number(accuracy?.sigma_major_m) || 0,
+      Number(accuracy?.rms_m) || 0
+    ),
+    0.08,
+    0.6
+  );
+  const posVar = sigma * sigma;
+  return {
+    x: Number(position.x),
+    y: Number(position.y),
+    vx: 0,
+    vy: 0,
+    p: [
+      posVar, 0, 0, 0,
+      0, posVar, 0, 0,
+      0, 0, 0.35, 0,
+      0, 0, 0, 0.35,
+    ],
+    t: now,
+    lastUpdate: now,
+    accepted: 0,
+    rejected: 0,
+    movingScore: 0,
+    mode: "static",
+    lastInnovationM: 0,
+    lastGate: "init",
+  };
+}
+
+function kalmanPredict(filter, now) {
+  const dt = clamp(now - Number(filter.t || now), 0.02, 1.5);
+  const moving = Number(filter.movingScore || 0) > 0.45;
+  const accelSigma = moving ? 1.15 : 0.22;
+  const q = accelSigma * accelSigma;
+  filter.x += filter.vx * dt;
+  filter.y += filter.vy * dt;
+
+  const p = filter.p.slice();
+  const dt2 = dt * dt;
+  const dt3 = dt2 * dt;
+  const dt4 = dt2 * dt2;
+  const qPos = q * dt4 / 4;
+  const qCross = q * dt3 / 2;
+  const qVel = q * dt2;
+
+  filter.p = [
+    p[0] + dt * (p[2] + p[8]) + dt2 * p[10] + qPos,
+    p[1] + dt * (p[3] + p[9]) + dt2 * p[11],
+    p[2] + dt * p[10] + qCross,
+    p[3] + dt * p[11],
+
+    p[4] + dt * (p[6] + p[12]) + dt2 * p[14],
+    p[5] + dt * (p[7] + p[13]) + dt2 * p[15] + qPos,
+    p[6] + dt * p[14],
+    p[7] + dt * p[15] + qCross,
+
+    p[8] + dt * p[10] + qCross,
+    p[9] + dt * p[11],
+    p[10] + qVel,
+    p[11],
+
+    p[12] + dt * p[14],
+    p[13] + dt * p[15] + qCross,
+    p[14],
+    p[15] + qVel,
+  ];
+  filter.t = now;
+  return dt;
+}
+
+function kalmanMeasurementSigma(accuracy, fitObservations) {
+  const rms = Number(accuracy?.rms_m);
+  const sigmaMajor = Number(accuracy?.sigma_major_m);
+  const maxAbs = Number(accuracy?.max_abs_m);
+  const fitCount = Number(fitObservations?.length || accuracy?.count || 0);
+  let sigma = Math.max(
+    0.05,
+    Number.isFinite(rms) ? rms * 1.7 : 0,
+    Number.isFinite(sigmaMajor) ? sigmaMajor : 0
+  );
+  if (fitCount <= 3) sigma *= 1.25;
+  if (Number.isFinite(maxAbs) && maxAbs > 0.25) sigma *= 1.35;
+  return clamp(sigma, 0.05, 0.9);
+}
+
+function kalmanUpdate2d(filter, measurement, accuracy, fitObservations, now) {
+  const sigma = kalmanMeasurementSigma(accuracy, fitObservations);
+  const r = sigma * sigma;
+  const p = filter.p;
+  const ix = Number(measurement.x) - filter.x;
+  const iy = Number(measurement.y) - filter.y;
+  const innovationM = Math.hypot(ix, iy);
+  const s00 = p[0] + r;
+  const s01 = p[1];
+  const s10 = p[4];
+  const s11 = p[5] + r;
+  const det = s00 * s11 - s01 * s10;
+  if (Math.abs(det) < 1e-12) {
+    filter.lastGate = "singular";
+    filter.rejected += 1;
+    return false;
+  }
+  const inv00 = s11 / det;
+  const inv01 = -s01 / det;
+  const inv10 = -s10 / det;
+  const inv11 = s00 / det;
+  const d2 = ix * (inv00 * ix + inv01 * iy) + iy * (inv10 * ix + inv11 * iy);
+  const rms = Number(accuracy?.rms_m);
+  const maxAbs = Number(accuracy?.max_abs_m);
+  const fitCount = Number(fitObservations?.length || accuracy?.count || 0);
+  const qualityBad =
+    fitCount < 3 ||
+    (Number.isFinite(rms) && rms > 0.35) ||
+    (Number.isFinite(maxAbs) && maxAbs > 0.75);
+  const jumpBad =
+    innovationM > 2.0 &&
+    now - Number(filter.lastUpdate || 0) < 1.5 &&
+    Math.hypot(filter.vx, filter.vy) < 1.0;
+  if (qualityBad || d2 > 18 || jumpBad) {
+    filter.lastGate = qualityBad ? "quality" : (jumpBad ? "jump" : "mahal");
+    filter.lastInnovationM = innovationM;
+    filter.rejected += 1;
+    filter.movingScore = clamp(Number(filter.movingScore || 0) * 0.92, 0, 1);
+    return false;
+  }
+
+  const k = [
+    p[0] * inv00 + p[1] * inv10,
+    p[0] * inv01 + p[1] * inv11,
+    p[4] * inv00 + p[5] * inv10,
+    p[4] * inv01 + p[5] * inv11,
+    p[8] * inv00 + p[9] * inv10,
+    p[8] * inv01 + p[9] * inv11,
+    p[12] * inv00 + p[13] * inv10,
+    p[12] * inv01 + p[13] * inv11,
+  ];
+  filter.x += k[0] * ix + k[1] * iy;
+  filter.y += k[2] * ix + k[3] * iy;
+  filter.vx += k[4] * ix + k[5] * iy;
+  filter.vy += k[6] * ix + k[7] * iy;
+
+  const hP0 = [p[0], p[1], p[2], p[3]];
+  const hP1 = [p[4], p[5], p[6], p[7]];
+  filter.p = p.map((value, index) => {
+    const row = Math.floor(index / 4);
+    const col = index % 4;
+    return value - k[row * 2] * hP0[col] - k[row * 2 + 1] * hP1[col];
+  });
+
+  const speed = Math.hypot(filter.vx, filter.vy);
+  const motionHit = speed > 0.18 || innovationM > 0.22;
+  filter.movingScore = clamp(
+    Number(filter.movingScore || 0) * 0.82 + (motionHit ? 0.28 : -0.08),
+    0,
+    1
+  );
+  filter.mode = filter.movingScore > 0.45 ? "dynamic" : "static";
+  filter.lastInnovationM = innovationM;
+  filter.lastGate = "accepted";
+  filter.accepted += 1;
+  filter.lastUpdate = now;
+  return true;
+}
+
+function applyAutoKalman(tagId, position, accuracy, fitObservations, settings, now) {
+  if (settings.solver !== "tdoa" || settings.tdoaMode !== "auto") {
+    return {position, accuracy, filterInfo: null};
+  }
+  const key = kalmanFilterKey(tagId, settings);
+  let filter = state.positionFilters[key];
+  const hasMeasurement =
+    position &&
+    Number.isFinite(Number(position.x)) &&
+    Number.isFinite(Number(position.y));
+  if (!filter) {
+    if (!hasMeasurement) return {position: null, accuracy, filterInfo: null};
+    filter = initPositionFilter(position, accuracy, now);
+    state.positionFilters[key] = filter;
+    return {
+      position: {x: filter.x, y: filter.y},
+      accuracy,
+      filterInfo: {...filter, status: "init"},
+      rawPosition: position,
+    };
+  }
+
+  kalmanPredict(filter, now);
+  let accepted = false;
+  if (hasMeasurement) {
+    accepted = kalmanUpdate2d(filter, position, accuracy, fitObservations, now);
+  } else {
+    filter.lastGate = "predict";
+    filter.movingScore = clamp(Number(filter.movingScore || 0) * 0.92, 0, 1);
+    filter.mode = filter.movingScore > 0.45 ? "dynamic" : "static";
+  }
+
+  const predictionAge = now - Number(filter.lastUpdate || 0);
+  if (!hasMeasurement && predictionAge > kalmanMaxPredictionAgeSec) {
+    delete state.positionFilters[key];
+    return {position: null, accuracy, filterInfo: null};
+  }
+  const sigma = Math.sqrt(Math.max(0, filter.p[0] + filter.p[5]) / 2);
+  const filteredAccuracy = accuracy
+    ? {...accuracy, sigma_major_m: Math.max(Number(accuracy.sigma_major_m) || 0, sigma)}
+    : {count: 0, dof: 0, rms_m: NaN, max_abs_m: NaN, sigma_major_m: sigma, gdop: NaN};
+  return {
+    position: {x: filter.x, y: filter.y},
+    accuracy: filteredAccuracy,
+    filterInfo: {
+      mode: filter.mode,
+      status: accepted ? "accepted" : filter.lastGate,
+      accepted: filter.accepted,
+      rejected: filter.rejected,
+      innovation_m: filter.lastInnovationM,
+      speed_mps: Math.hypot(filter.vx, filter.vy),
+      prediction_age_s: predictionAge,
+      sigma_m: sigma,
+    },
+    rawPosition: hasMeasurement ? position : null,
+  };
+}
+
 function rangingPositionAccuracy(position, anchors, distances, residuals) {
   if (!position) return null;
   const rows = [];
@@ -4481,6 +4733,7 @@ function computePositionModel() {
     state.positionTrail = {};
     state.positionAnchorTrail = {};
     state.positionResults = {};
+    resetPositionFilters();
   }
   state.positionWasActive = active;
 
@@ -4494,8 +4747,10 @@ function computePositionModel() {
       let observations = [];
       let fitObservations = [];
       let position = null;
+      let rawPosition = null;
       let residuals = {};
       let accuracy = null;
+      let filterInfo = null;
       if (settings.solver === "tdoa") {
         observations = pairedTdoaObservations(
           tagId,
@@ -4515,6 +4770,19 @@ function computePositionModel() {
           fitObservations.length ? fitObservations : observations,
           tdoaResiduals(position, anchors, fitObservations.length ? fitObservations : observations)
         );
+        rawPosition = position;
+        const kalmanResult = applyAutoKalman(
+          tagId,
+          position,
+          accuracy,
+          fitObservations,
+          settings,
+          now
+        );
+        position = kalmanResult.position;
+        accuracy = kalmanResult.accuracy;
+        filterInfo = kalmanResult.filterInfo;
+        rawPosition = kalmanResult.rawPosition || rawPosition;
       } else {
         for (const anchorId of settings.anchorIds) {
           const item = freshDistanceFor(tagId, anchorId, settings.maxAge);
@@ -4527,7 +4795,18 @@ function computePositionModel() {
         residuals = positionResiduals(position, anchors, distances);
         accuracy = rangingPositionAccuracy(position, anchors, distances, residuals);
       }
-      tags[tagId] = {tagId, distances, distanceItems, observations, fitObservations, position, residuals, accuracy};
+      tags[tagId] = {
+        tagId,
+        distances,
+        distanceItems,
+        observations,
+        fitObservations,
+        position,
+        rawPosition,
+        residuals,
+        accuracy,
+        filterInfo,
+      };
       if (position) {
         const key = String(tagId);
         const trail = state.positionTrail[key] || [];
@@ -4833,10 +5112,16 @@ function renderPositionReadout(model) {
     }
     const sigma = tag.accuracy?.sigma_major_m;
     const accuracyText = Number.isFinite(Number(sigma)) ? ` · est. ${fmtPositionSigma(sigma, 1)}` : "";
+    const filterText = tag.filterInfo
+      ? ` · Kalman ${esc(tag.filterInfo.mode || "static")} · ${esc(tag.filterInfo.status || "")}`
+      : "";
+    const rawText = tag.rawPosition && tag.filterInfo
+      ? ` · raw ${fmtFixed(tag.rawPosition.x, 2)},${fmtFixed(tag.rawPosition.y, 2)}`
+      : "";
     const countText = model.settings.solver === "tdoa"
       ? `${fitCount}/${total} fit · ${freshCount} fresh`
       : `${fitCount}/${total} fresh distances`;
-    return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span>${countText}${accuracyText}</span></div>`;
+    return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span>${countText}${accuracyText}${filterText}${rawText}</span></div>`;
   });
   readout.innerHTML = tagCards.join("") || `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
   const accuracyTableRows = Object.values(model.tags).map(tag => {
@@ -4844,8 +5129,12 @@ function renderPositionReadout(model) {
     if (!tag.position || !accuracy) {
       return `<tr><td>T${esc(tag.tagId)}</td><td colspan="3"><span class="muted">waiting</span></td></tr>`;
     }
+    const filter = tag.filterInfo;
+    const filterText = filter
+      ? `<br><span class="muted">${esc(filter.mode || "static")} · ${fmtFixed(Number(filter.speed_mps || 0), 2)} m/s · gate ${esc(filter.status || "")} · ok/drop ${esc(filter.accepted || 0)}/${esc(filter.rejected || 0)}</span>`
+      : "";
     return `<tr>
-      <td>T${esc(tag.tagId)}<br><span class="muted">${esc(accuracy.count)} obs · GDOP ${esc(fmtFixed(accuracy.gdop, 2))}</span></td>
+      <td>T${esc(tag.tagId)}<br><span class="muted">${esc(accuracy.count)} obs · GDOP ${esc(fmtFixed(accuracy.gdop, 2))}</span>${filterText}</td>
       <td>${fmtPositionSigma(accuracy.sigma_major_m, 1)}</td>
       <td>${fmtPositionCm(accuracy.rms_m, 1)}</td>
       <td>${fmtPositionCm(accuracy.max_abs_m, 1)}</td>
@@ -4869,10 +5158,10 @@ function renderPositionReadout(model) {
         const blend = Number(item.blend_weight);
         const blendText = Number.isFinite(blend) ? ` · blend ${(blend * 100).toFixed(0)}%` : "";
         const weight = Number(item.solve_weight);
-        const weightText = model.settings.tdoaMode === "dynamic" && Number.isFinite(weight)
+        const weightText = tdoaModeUsesDynamicObservations(model.settings.tdoaMode) && Number.isFinite(weight)
           ? ` · w ${(weight * 100).toFixed(0)}%`
           : "";
-        const filterText = item.tdoa_filter === "dynamic"
+        const filterText = tdoaModeUsesDynamicObservations(item.tdoa_filter)
           ? ` · short n ${esc(item.dynamic_samples || item.samples || 1)}`
           : "";
         const suspectText = item.suspect ? " · suspect" : "";
@@ -7139,6 +7428,7 @@ async function enablePositionRanging() {
   await postConfig({target_modules: "all", params}, "positionToast");
   state.positionTrail = {};
   state.positionAnchorTrail = {};
+  resetPositionFilters();
   setTimeout(fetchSnapshot, 1500);
 }
 
@@ -7169,12 +7459,19 @@ function wireSettings() {
   ["positionAnchorCount", "positionSolver", "positionAnchors", "positionTags", "positionMaxAgeSec", "positionTdoaMode"].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
-    el.addEventListener("input", renderPosition);
-    el.addEventListener("change", renderPosition);
+    el.addEventListener("input", () => {
+      resetPositionFilters();
+      renderPosition();
+    });
+    el.addEventListener("change", () => {
+      resetPositionFilters();
+      renderPosition();
+    });
   });
   document.getElementById("positionResetTrail").addEventListener("click", () => {
     state.positionTrail = {};
     state.positionAnchorTrail = {};
+    resetPositionFilters();
     renderPosition();
   });
   document.getElementById("positionEnableRanging").addEventListener("click", enablePositionRanging);

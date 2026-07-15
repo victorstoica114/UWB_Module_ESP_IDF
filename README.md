@@ -650,6 +650,28 @@ better for fixed-tag measurements and calibration sanity checks. Dynamic should
 be used for walking tests because it roughly halves observation age while keeping
 least-squares residuals in the same range.
 
+Kalman/gating note, 2026-07-16:
+
+The FlexTDOA paper also separates two solver roles. `AlgMin` is a raw
+least-squares solver used to compare parameters without smoothing. `AlgEKF` is
+used for motion/update-rate experiments because it can update the position with
+each incoming measurement instead of waiting for a full minimum equation set.
+Their motion experiments use a rail/actuator, then add idle time to simulate
+larger effective tag speeds. They report that very sparse updates degrade the
+estimate, while more TDOA measurements per update become preferable as the
+effective speed increases. In their office setup, FlexTDOA reaches about
+`13-17 cm` median 3D error in LOS and `15-22 cm` median 3D error in NLOS,
+with up to `38%` lower P95 error than classic fixed-initiator TDOA in NLOS.
+
+The dashboard therefore has an `Auto Kalman` TDOA filter mode. It uses the same
+short dynamic paired observations as `Dynamic 1.5s median`, then applies a
+constant-velocity Kalman filter per tag. The filter gates updates by
+least-squares quality, innovation size, and jump/Mahalanobis distance. If a row
+is rejected, the displayed point is predicted briefly instead of jumping to a
+bad measurement. The filter automatically raises process noise when the tag
+appears to move and settles back toward a static mode when speed and innovation
+drop.
+
 ### Time Units
 
 The DW3000 uses several time units:
