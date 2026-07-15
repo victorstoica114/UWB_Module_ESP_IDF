@@ -391,6 +391,51 @@ That distance is cached as an unordered anchor pair. The next `FLEX_TDOA_REQ`
 from that initiator carries the cached distance for every responder, so the first
 round after boot is a warm-up round and later rounds contain live geometry.
 
+Lab stability comparison, 2026-07-15:
+
+This test compares anchor-anchor range stability only, not absolute placement
+accuracy. The modules were left in the current room/charging layout, so the
+important number is short-term spread, not whether the measured edge length is a
+known physical value. The FlexTDOA run used the short `REQ/RESP` anchor
+measurement. `sample` is the unfiltered corrected single-shot value from the log,
+while `median9` is the firmware rolling median sent as the cached anchor
+distance. The DS-TWR run used `APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY`, which performs
+the full `POLL/RESP/FINAL/REPORT/REPORT2` exchange and had no extra filter in
+the comparison window.
+
+| Protocol/value | Pair | n | avg cm | median cm | min cm | max cm | std cm | span cm |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| FlexTDOA `sample` raw | 2-3 | 221 | 547.3 | 548.5 | 486.1 | 593.5 | 14.9 | 107.4 |
+| FlexTDOA `sample` raw | 2-4 | 236 | 563.9 | 563.9 | 503.4 | 668.7 | 17.1 | 165.3 |
+| FlexTDOA `sample` raw | 2-5 | 243 | 862.6 | 864.9 | 747.2 | 957.1 | 18.2 | 209.9 |
+| FlexTDOA `sample` raw | 3-4 | 257 | 827.9 | 829.2 | 763.0 | 881.0 | 14.5 | 118.0 |
+| FlexTDOA `sample` raw | 3-5 | 274 | 733.4 | 735.7 | 650.0 | 834.5 | 21.1 | 184.5 |
+| FlexTDOA `sample` raw | 4-5 | 275 | 552.1 | 552.5 | 477.0 | 664.6 | 21.1 | 187.6 |
+| FlexTDOA `median9` | 2-3 | 221 | 548.3 | 548.5 | 546.3 | 552.2 | 0.8 | 5.9 |
+| FlexTDOA `median9` | 2-4 | 236 | 566.0 | 566.0 | 562.2 | 568.3 | 0.4 | 6.1 |
+| FlexTDOA `median9` | 2-5 | 243 | 865.5 | 865.5 | 853.5 | 873.4 | 1.0 | 19.9 |
+| FlexTDOA `median9` | 3-4 | 257 | 829.4 | 829.4 | 827.8 | 832.5 | 0.3 | 4.7 |
+| FlexTDOA `median9` | 3-5 | 274 | 732.5 | 732.5 | 713.0 | 745.1 | 2.7 | 32.1 |
+| FlexTDOA `median9` | 4-5 | 275 | 551.2 | 551.1 | 528.5 | 559.5 | 2.2 | 31.0 |
+| DS-TWR survey raw | 2-3 | 98 | 549.4 | 549.4 | 548.2 | 551.7 | 0.6 | 3.5 |
+| DS-TWR survey raw | 2-4 | 98 | 564.3 | 564.3 | 560.0 | 568.6 | 1.6 | 8.6 |
+| DS-TWR survey raw | 2-5 | 98 | 867.4 | 867.1 | 861.5 | 874.3 | 2.3 | 12.8 |
+| DS-TWR survey raw | 3-4 | 98 | 830.8 | 830.8 | 828.4 | 832.7 | 0.8 | 4.3 |
+| DS-TWR survey raw | 3-5 | 98 | 737.0 | 737.2 | 732.9 | 740.4 | 1.4 | 7.5 |
+| DS-TWR survey raw | 4-5 | 80 | 551.2 | 551.1 | 547.4 | 555.1 | 1.8 | 7.7 |
+
+The conclusion is useful: the full DS-TWR anchor-anchor exchange is already
+stable raw, roughly `0.6-2.3 cm` standard deviation in this run. The short
+FlexTDOA anchor measurement is much noisier raw, roughly `14.5-21.1 cm`
+standard deviation, but a 9-sample rolling median brings the cached geometry
+back to roughly `0.3-2.7 cm`. That means the older hybrid looked more stable
+because its anchor geometry came from full DS-TWR. For passive-tag FlexTDOA, a
+good practical direction is to keep the radio-passive tag observations, but
+stabilize anchor geometry with a median filter or with periodic full DS-TWR
+geometry refreshes. The uncorrected FlexTDOA `raw` field was much wider than
+`sample` in this run, so the clock-ratio correction is still required even
+before any median/mean filtering is considered.
+
 For one directed observation `Ai -> Aj`, the tag hears:
 
 ```text
