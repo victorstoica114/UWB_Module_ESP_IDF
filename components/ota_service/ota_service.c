@@ -49,7 +49,7 @@ enum {
     OTA_SERVICE_REBOOT_DELAY_MS = 1200,
     OTA_SERVICE_MAX_TOKEN_LEN = 128,
     OTA_SERVICE_MAX_QUERY_LEN = 768,
-    OTA_SERVICE_STATUS_RESPONSE_SIZE = 24000,
+    OTA_SERVICE_STATUS_RESPONSE_SIZE = 30000,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -488,6 +488,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     const app_runtime_config_t *runtime_config = app_runtime_config_get();
     i2c_bus_service_stats_t i2c_stats = {0};
     i2c_bus_service_get_stats(&i2c_stats);
+    bno085_service_snapshot_t bno_snapshot = {0};
+    bno085_service_get_snapshot(&bno_snapshot);
     gps_service_snapshot_t gps_snapshot = {0};
     gps_service_get_snapshot(&gps_snapshot);
     charger_service_snapshot_t charger_snapshot = {0};
@@ -605,6 +607,37 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_bno085_accel_enabled\":%s,"
         "\"runtime_bno085_accel_interval_ms\":%lu,"
         "\"runtime_bno085_log_interval_ms\":%lu,"
+        "\"bno085_service_started\":%s,"
+        "\"bno085_int_irq_enabled\":%s,"
+        "\"bno085_i2c_clock_hz\":%lu,"
+        "\"bno085_i2c_scl_measure_error\":%d,"
+        "\"bno085_i2c_scl_measure_error_name\":\"%s\","
+        "\"bno085_i2c_scl_edges\":%lu,"
+        "\"bno085_i2c_scl_elapsed_us\":%lu,"
+        "\"bno085_i2c_scl_measured_hz\":%lu,"
+        "\"bno085_report_count\":%lu,"
+        "\"bno085_packet_count\":%lu,"
+        "\"bno085_input_packet_count\":%lu,"
+        "\"bno085_timebase_count\":%lu,"
+        "\"bno085_max_reports_per_packet\":%lu,"
+        "\"bno085_continuation_packet_count\":%lu,"
+        "\"bno085_continuation_transfer_count\":%lu,"
+        "\"bno085_continuation_header_error_count\":%lu,"
+        "\"bno085_high_rate_poll_count\":%lu,"
+        "\"bno085_wait_immediate_count\":%lu,"
+        "\"bno085_wait_notify_count\":%lu,"
+        "\"bno085_wait_late_active_count\":%lu,"
+        "\"bno085_null_header_count\":%lu,"
+        "\"bno085_read_error_count\":%lu,"
+        "\"bno085_parse_error_count\":%lu,"
+        "\"bno085_int_irq_count\":%lu,"
+        "\"bno085_int_wait_timeout_count\":%lu,"
+        "\"bno085_last_packet_len\":%lu,"
+        "\"bno085_last_input_payload_len\":%lu,"
+        "\"bno085_last_x_mps2\":%.3f,"
+        "\"bno085_last_y_mps2\":%.3f,"
+        "\"bno085_last_z_mps2\":%.3f,"
+        "\"bno085_last_accuracy\":%u,"
         "\"i2c_realtime_period_us\":%lu,"
         "\"i2c_realtime_time_to_next_us\":%ld,"
         "\"i2c_background_window_us\":%ld,"
@@ -663,6 +696,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_last_read_duration_ms\":%lu,"
         "\"charger_last_read_full\":%s,"
         "\"charger_last_update_age_ms\":%lu,"
+        "\"charger_i2c_clock_hz\":%lu,"
+        "\"charger_i2c_scl_measure_error\":%d,"
+        "\"charger_i2c_scl_measure_error_name\":\"%s\","
+        "\"charger_i2c_scl_edges\":%lu,"
+        "\"charger_i2c_scl_elapsed_us\":%lu,"
+        "\"charger_i2c_scl_measured_hz\":%lu,"
         "\"charger_int_gpio_level\":%d,"
         "\"charger_int_irq_count\":%lu,"
         "\"charger_int_last_irq_age_ms\":%lu,"
@@ -995,6 +1034,37 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         runtime_config->bno085_accel_enabled ? "true" : "false",
         (unsigned long)runtime_config->bno085_accel_interval_ms,
         (unsigned long)runtime_config->bno085_log_interval_ms,
+        bno_snapshot.service_started ? "true" : "false",
+        bno_snapshot.int_irq_enabled ? "true" : "false",
+        (unsigned long)bno_snapshot.i2c_clock_hz,
+        bno_snapshot.i2c_scl_measure_error,
+        esp_err_to_name((esp_err_t)bno_snapshot.i2c_scl_measure_error),
+        (unsigned long)bno_snapshot.i2c_scl_edges,
+        (unsigned long)bno_snapshot.i2c_scl_elapsed_us,
+        (unsigned long)bno_snapshot.i2c_scl_measured_hz,
+        (unsigned long)bno_snapshot.report_count,
+        (unsigned long)bno_snapshot.packet_count,
+        (unsigned long)bno_snapshot.input_packet_count,
+        (unsigned long)bno_snapshot.timebase_count,
+        (unsigned long)bno_snapshot.max_reports_per_packet,
+        (unsigned long)bno_snapshot.continuation_packet_count,
+        (unsigned long)bno_snapshot.continuation_transfer_count,
+        (unsigned long)bno_snapshot.continuation_header_error_count,
+        (unsigned long)bno_snapshot.high_rate_poll_count,
+        (unsigned long)bno_snapshot.wait_immediate_count,
+        (unsigned long)bno_snapshot.wait_notify_count,
+        (unsigned long)bno_snapshot.wait_late_active_count,
+        (unsigned long)bno_snapshot.null_header_count,
+        (unsigned long)bno_snapshot.read_error_count,
+        (unsigned long)bno_snapshot.parse_error_count,
+        (unsigned long)bno_snapshot.int_irq_count,
+        (unsigned long)bno_snapshot.int_wait_timeout_count,
+        (unsigned long)bno_snapshot.last_packet_len,
+        (unsigned long)bno_snapshot.last_input_payload_len,
+        (double)bno_snapshot.last_x_mps2,
+        (double)bno_snapshot.last_y_mps2,
+        (double)bno_snapshot.last_z_mps2,
+        (unsigned)bno_snapshot.last_accuracy,
         (unsigned long)i2c_stats.realtime_period_us,
         (long)i2c_stats.realtime_time_to_next_us,
         (long)i2c_stats.background_window_us,
@@ -1053,6 +1123,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)charger_snapshot.last_read_duration_ms,
         charger_snapshot.last_read_full ? "true" : "false",
         (unsigned long)charger_snapshot.last_update_age_ms,
+        (unsigned long)charger_snapshot.i2c_clock_hz,
+        charger_snapshot.i2c_scl_measure_error,
+        esp_err_to_name((esp_err_t)charger_snapshot.i2c_scl_measure_error),
+        (unsigned long)charger_snapshot.i2c_scl_edges,
+        (unsigned long)charger_snapshot.i2c_scl_elapsed_us,
+        (unsigned long)charger_snapshot.i2c_scl_measured_hz,
         charger_snapshot.int_gpio_level,
         (unsigned long)charger_snapshot.int_irq_count,
         (unsigned long)charger_snapshot.int_last_irq_age_ms,

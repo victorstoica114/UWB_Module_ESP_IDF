@@ -1260,6 +1260,38 @@ them for Fast-Mode Plus before blaming firmware scheduling.
 `i2c_realtime_time_to_next_us`, `i2c_background_window_us`, and the
 realtime/background lock counters.
 
+The firmware also has optional SCL pulse-count diagnostics for BNO085, BQ25792,
+and the MAX77958 direct-HS path. They are disabled by default:
+
+```c
+#define APP_BNO085_I2C_MEASURE_SCL_ENABLED 0
+#define APP_BQ25792_I2C_MEASURE_SCL_ENABLED 0
+#define APP_MAX77958_I2C_HS_DIRECT_MEASURE_SCL_ENABLED 0
+```
+
+When enabled, the code uses the ESP32-S3 PCNT peripheral to count SCL rising
+edges during selected transactions and exposes the result in `/status`. This is
+useful for automated sanity checks and for confirming that the expected device
+is actively clocked. It is not a replacement for an oscilloscope when measuring
+absolute SCL frequency: the measured interval includes some software/driver
+overhead around the I2C transaction, so very short transfers under-report the
+actual wire frequency. For precise rise/fall time and duty-cycle checks, use
+the oscilloscope; for continuous firmware health, use the PCNT counters.
+
+M1 coexistence check, after changing the I2C pull-ups to `1k`, with MAX77958
+direct HS reads at the validated `10/0/0` timing:
+
+| Scenario | Result |
+| --- | --- |
+| BNO085 enabled at `500 Hz`, normal BQ/MAX background refresh | BNO advanced at about `493` realtime locks/s, BQ and MAX completed their normal periodic reads with `0` BQ errors and `0` MAX errors. |
+| Forced `20` BQ refreshes and `20` MAX refreshes while BNO085 stayed at `500 Hz` | BQ completed `20/20` reads with `0` errors. MAX completed `18/20` refresh cycles visible in the sampled status, and direct-HS reads advanced by `1669` with `0` direct errors. BNO085 reported a few read timeouts during this intentionally aggressive refresh load. |
+
+The practical rule is: keep BNO085 as the realtime owner of the bus, keep BQ/MAX
+refresh rates human-scale, and use forced refreshes for diagnostics rather than
+as a high-rate polling mechanism. If a future UI wants very frequent charger/PD
+updates while BNO085 runs at `500 Hz`, it should schedule them through the same
+background-window model instead of firing repeated immediate refresh requests.
+
 High-rate accelerometer telemetry is intentionally handled like a small sensor
 stream, not like human log text. The BNO085 task does not enqueue accelerometer
 samples until the telemetry TCP connection is established, so startup transients

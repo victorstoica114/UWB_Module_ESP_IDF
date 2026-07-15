@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "driver/i2c_master.h"
+#include "driver/pulse_cnt.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 
@@ -50,6 +51,20 @@ typedef struct {
     uint32_t scl_measure_hz;
 } i2c_bus_service_direct_result_t;
 
+typedef struct {
+    pcnt_unit_handle_t unit;
+    pcnt_channel_handle_t channel;
+    bool enabled;
+    bool started;
+} i2c_bus_service_scl_measure_t;
+
+typedef struct {
+    int error;
+    uint32_t edges;
+    uint32_t elapsed_us;
+    uint32_t measured_hz;
+} i2c_bus_service_scl_measure_result_t;
+
 esp_err_t i2c_bus_service_get(i2c_master_bus_handle_t *bus);
 bool i2c_bus_service_lock(TickType_t timeout);
 bool i2c_bus_service_lock_realtime(TickType_t timeout);
@@ -61,6 +76,11 @@ void i2c_bus_service_set_realtime_period_us(uint32_t period_us);
 void i2c_bus_service_note_realtime_activity(void);
 int32_t i2c_bus_service_background_window_us(void);
 void i2c_bus_service_get_stats(i2c_bus_service_stats_t *stats);
+esp_err_t i2c_bus_service_scl_measure_start(
+    int gpio, i2c_bus_service_scl_measure_t *measure);
+esp_err_t i2c_bus_service_scl_measure_stop(
+    i2c_bus_service_scl_measure_t *measure, uint32_t elapsed_us,
+    i2c_bus_service_scl_measure_result_t *result);
 esp_err_t i2c_bus_service_direct_read_reg(
     uint8_t address, uint8_t start_reg, uint8_t *data, size_t data_len,
     const i2c_bus_service_direct_config_t *config,

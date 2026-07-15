@@ -38,6 +38,11 @@ typedef struct {
     uint32_t last_read_duration_ms;
     bool last_read_full;
     uint32_t last_update_age_ms;
+    uint32_t i2c_clock_hz;
+    int i2c_scl_measure_error;
+    uint32_t i2c_scl_edges;
+    uint32_t i2c_scl_elapsed_us;
+    uint32_t i2c_scl_measured_hz;
     int int_gpio_level;
     uint32_t int_irq_count;
     uint32_t int_last_irq_age_ms;
