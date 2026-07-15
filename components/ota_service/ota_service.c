@@ -755,6 +755,13 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"resource_psram_total_bytes\":%lu,"
         "\"resource_psram_min_free_bytes\":%lu,"
         "\"resource_psram_largest_free_block_bytes\":%lu,"
+        "\"resource_flash_valid\":%s,"
+        "\"resource_flash_total_bytes\":%lu,"
+        "\"resource_flash_reserved_bytes\":%lu,"
+        "\"resource_flash_free_bytes\":%lu,"
+        "\"resource_flash_partition_count\":%lu,"
+        "\"resource_flash_error\":%d,"
+        "\"resource_flash_error_name\":\"%s\","
         "\"resource_temperature_valid\":%s,"
         "\"resource_temperature_c\":%.1f,"
         "\"resource_temperature_error\":%d,"
@@ -1158,6 +1165,13 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)resource_snapshot.psram_total_bytes,
         (unsigned long)resource_snapshot.psram_min_free_bytes,
         (unsigned long)resource_snapshot.psram_largest_free_block_bytes,
+        resource_snapshot.flash_valid ? "true" : "false",
+        (unsigned long)resource_snapshot.flash_total_bytes,
+        (unsigned long)resource_snapshot.flash_reserved_bytes,
+        (unsigned long)resource_snapshot.flash_free_bytes,
+        (unsigned long)resource_snapshot.flash_partition_count,
+        resource_snapshot.flash_error,
+        esp_err_to_name(resource_snapshot.flash_error),
         resource_snapshot.temperature_valid ? "true" : "false",
         resource_snapshot.temperature_c,
         resource_snapshot.temperature_error,

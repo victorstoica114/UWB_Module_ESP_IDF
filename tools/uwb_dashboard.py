@@ -1643,6 +1643,9 @@ th { color: var(--muted); font-weight: 700; }
 .resource-meter.psram .resource-bar-fill {
   background: linear-gradient(90deg, #2f6fe4, #6aa0f5);
 }
+.resource-meter.flash .resource-bar-fill {
+  background: linear-gradient(90deg, #0f766e, #2bb3a3);
+}
 .resource-meter.cpu0 .resource-bar-fill {
   background: linear-gradient(90deg, #7a56d9, #9d7cf0);
 }
@@ -5171,6 +5174,37 @@ function renderResourceCell(item) {
         <div class="resource-meter-foot">${clamped.toFixed(0)}% load${esc(footText)}</div>
       </div>`;
   };
+  const flashMeter = () => {
+    const total = Number(item.resource_flash_total_bytes);
+    const reserved = Number(item.resource_flash_reserved_bytes);
+    const free = Number(item.resource_flash_free_bytes);
+    const count = Number(item.resource_flash_partition_count);
+    if (!item.resource_flash_valid || !Number.isFinite(total) || total <= 0 || !Number.isFinite(reserved)) {
+      return `
+        <div class="resource-meter flash">
+          <div class="resource-meter-head">
+            <span class="resource-meter-name">FLASH</span>
+            <span class="resource-meter-value">${esc(item.resource_flash_error_name || "not available")}</span>
+          </div>
+          <div class="resource-bar"><div class="resource-bar-fill" style="width:0%"></div></div>
+        </div>`;
+    }
+    const reservedPercent = clampPercent((reserved * 100) / total);
+    const freePercent = Number.isFinite(free) ? clampPercent((free * 100) / total) : NaN;
+    const freeText = Number.isFinite(freePercent) ? `${freePercent.toFixed(0)}% unreserved` : "unreserved -";
+    const countText = Number.isFinite(count) ? `${count} partitions` : "partitions -";
+    return `
+      <div class="resource-meter flash" title="Flash reserved by partition layout ${fmtBytes(reserved)} / total ${fmtBytes(total)}">
+        <div class="resource-meter-head">
+          <span class="resource-meter-name">FLASH</span>
+          <span class="resource-meter-value">${fmtBytes(reserved)} reserved / ${fmtBytes(total)}</span>
+        </div>
+        <div class="resource-bar" aria-label="Flash ${reservedPercent.toFixed(1)} percent reserved">
+          <div class="resource-bar-fill" style="width:${reservedPercent.toFixed(1)}%"></div>
+        </div>
+        <div class="resource-meter-foot">${reservedPercent.toFixed(0)}% reserved · ${freeText} · ${countText}</div>
+      </div>`;
+  };
   const tempMeter = () => {
     const temp = Number(item.resource_temperature_c);
     if (!item.resource_temperature_valid || !Number.isFinite(temp)) {
@@ -5232,6 +5266,7 @@ function renderResourceCell(item) {
     <div class="resource-cell">
       ${memoryMeter("internal", "RAM", item.resource_internal_free_bytes, item.resource_internal_total_bytes, item.resource_internal_min_free_bytes, item.resource_internal_largest_free_block_bytes)}
       ${memoryMeter("psram", "PSRAM", item.resource_psram_free_bytes, item.resource_psram_total_bytes, item.resource_psram_min_free_bytes, item.resource_psram_largest_free_block_bytes)}
+      ${flashMeter()}
       ${percentMeter("cpu0", "CORE0", item.resource_core0_load_percent, item.resource_cpu_load_valid)}
       ${percentMeter("cpu1", "CORE1", item.resource_core1_load_percent, item.resource_cpu_load_valid)}
       ${tempMeter()}

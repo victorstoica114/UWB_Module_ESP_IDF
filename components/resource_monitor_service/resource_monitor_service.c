@@ -4,8 +4,10 @@
 #include <string.h>
 
 #include "driver/temperature_sensor.h"
+#include "esp_flash.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_partition.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/freertos_debug.h"
@@ -34,6 +36,13 @@ static resource_monitor_snapshot_t s_snapshot;
 static int64_t s_last_update_us;
 static bool s_started;
 static temperature_sensor_handle_t s_temp_sensor;
+static bool s_flash_stats_cached;
+static bool s_flash_stats_valid;
+static size_t s_flash_total_bytes;
+static size_t s_flash_reserved_bytes;
+static size_t s_flash_free_bytes;
+static uint32_t s_flash_partition_count;
+static esp_err_t s_flash_error = ESP_ERR_INVALID_STATE;
 
 typedef struct {
     TaskHandle_t handle;
@@ -88,6 +97,51 @@ static void update_heap_stats(resource_monitor_snapshot_t *snapshot)
         heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     snapshot->psram_largest_free_block_bytes =
         heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+static void update_flash_stats(resource_monitor_snapshot_t *snapshot)
+{
+    if (!s_flash_stats_cached) {
+        uint32_t flash_size = 0;
+        s_flash_error = esp_flash_get_size(NULL, &flash_size);
+        if (s_flash_error == ESP_OK && flash_size > 0U) {
+            size_t reserved = 0;
+            uint32_t partition_count = 0;
+
+            for (esp_partition_iterator_t it =
+                     esp_partition_find(ESP_PARTITION_TYPE_ANY,
+                                        ESP_PARTITION_SUBTYPE_ANY, NULL);
+                 it != NULL; it = esp_partition_next(it)) {
+                const esp_partition_t *partition = esp_partition_get(it);
+                if (partition != NULL) {
+                    reserved += partition->size;
+                    ++partition_count;
+                }
+            }
+
+            s_flash_total_bytes = (size_t)flash_size;
+            s_flash_reserved_bytes = reserved;
+            s_flash_free_bytes =
+                reserved < s_flash_total_bytes ? s_flash_total_bytes - reserved
+                                               : 0;
+            s_flash_partition_count = partition_count;
+            s_flash_stats_valid = true;
+        } else {
+            s_flash_total_bytes = 0;
+            s_flash_reserved_bytes = 0;
+            s_flash_free_bytes = 0;
+            s_flash_partition_count = 0;
+            s_flash_stats_valid = false;
+        }
+        s_flash_stats_cached = true;
+    }
+
+    snapshot->flash_total_bytes = s_flash_total_bytes;
+    snapshot->flash_reserved_bytes = s_flash_reserved_bytes;
+    snapshot->flash_free_bytes = s_flash_free_bytes;
+    snapshot->flash_partition_count = s_flash_partition_count;
+    snapshot->flash_valid = s_flash_stats_valid;
+    snapshot->flash_error = s_flash_error;
 }
 
 static void update_temperature(resource_monitor_snapshot_t *snapshot)
@@ -411,6 +465,7 @@ static void resource_monitor_task(void *arg)
         local.running = true;
         local.update_count++;
         update_heap_stats(&local);
+        update_flash_stats(&local);
         update_cpu_load(&local);
         update_task_load(&local);
         update_temperature(&local);
