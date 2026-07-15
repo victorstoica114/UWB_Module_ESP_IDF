@@ -307,89 +307,99 @@ The tag does not call any UWB TX function in this mode. It only receives anchor
 frames, records its own RX timestamps, and sends compact range-difference logs to
 the dashboard.
 
-The coordinator is the first configured anchor ID. In every round, each anchor
-gets one initiator slot. With anchors `2,3,4,5`, the initiator order rotates:
+The coordinator is the first configured anchor ID. In every round, the anchors
+walk all unordered anchor pairs. The direction reverses on alternating rounds,
+so both `Ai -> Aj` and `Aj -> Ai` are observed over time. With anchors
+`2,3,4,5`, the pair order is:
 
 ```text
-round 0: A2, A3, A4, A5
-round 1: A3, A4, A5, A2
-round 2: A4, A5, A2, A3
+round 0: A2->A3, A2->A4, A2->A5, A3->A4, A3->A5, A4->A5
+round 1: A3->A2, A4->A2, A5->A2, A4->A3, A5->A3, A5->A4
 ...
 ```
 
-Inside one slot, the initiator broadcasts a `FLEX_TDOA_REQ`. All other anchors
-respond in deterministic delayed-TX subslots with `FLEX_TDOA_RESP`. The response
-order also rotates, so a given physical pair is not always seen with the same
-role and same subslot timing.
+Inside one slot, the assigned anchor pair performs the full DS-TWR exchange:
+`POLL`, `RESP`, `FINAL`, `REPORT`, and `REPORT2`. The responder computes the
+anchor-anchor distance from the complete DS-TWR timestamp set and logs it as the
+live FlexTDOA anchor geometry. The tag remains radio-passive: it does not
+transmit UWB, it only listens to the same DS-TWR frames and solves a
+range-difference observation when `REPORT2` arrives.
 
 The active FlexTDOA frame set is:
 
 | Frame | Direction | Purpose |
 | --- | --- | --- |
-| `FLEX_TDOA_CMD` | coordinator -> initiator | Used only when the coordinator is not the current slot initiator. |
-| `FLEX_TDOA_REQ` | initiator -> broadcast | Starts the slot and carries the responder list plus cached anchor-anchor distances. |
-| `FLEX_TDOA_RESP` | responder -> broadcast | Scheduled delayed response; carries responder reply time and repeats the anchor-anchor distance. |
+| `FLEX_TDOA_CMD` | coordinator -> initiator | Used only when the coordinator is not the current pair initiator; carries initiator, responder, slot, and round. |
+| `POLL` | initiator -> responder | Starts the DS-TWR measurement for the assigned anchor pair; the passive tag timestamps it too. |
+| `RESP` | responder -> initiator | Delayed-TX response; the passive tag timestamps it and records the responder clock ratio. |
+| `FINAL` | initiator -> responder | Completes the DS-TWR timing triangle. |
+| `REPORT` | initiator -> responder | Carries initiator timestamps to the responder. |
+| `REPORT2` | responder -> initiator | Carries responder-side distance/timestamps; the passive tag uses it to finish the TDOA observation. |
 
 During the short-slot lab tests, the active FlexTDOA timing config was:
 
 | Parameter | Value | Meaning |
 | --- | ---: | --- |
-| `anchor_survey_slot_ms` | `100 ms` | Time budget for one FlexTDOA initiator slot. |
-| `anchor_survey_round_gap_ms` | `10 ms` | Quiet gap after all anchor initiator slots in one round. |
-| `anchor_survey_command_delay_ms` | `10 ms` | Delay after a coordinator command before a follower sends `REQ`; also the responder subslot spacing. |
+| `anchor_survey_slot_ms` | `100 ms` | Time budget for one directed DS-TWR anchor-pair slot. |
+| `anchor_survey_round_gap_ms` | `10 ms` | Quiet gap after all anchor-pair slots in one round. |
+| `anchor_survey_command_delay_ms` | `10 ms` | Delay after a coordinator command before a follower starts DS-TWR. |
 | `anchor_survey_rx_slice_ms` | `100 ms` | Listen window used by followers/tag while waiting for UWB frames. |
 
 With four anchors this gives:
 
 ```text
-one round = 4 slots * 100 ms + 10 ms round gap ~= 410 ms
+one round = 6 pair slots * 100 ms + 10 ms round gap ~= 610 ms
 ```
 
-For a slot where the coordinator is not the initiator, for example `A3` as
-initiator with `A2` as coordinator, the slot looks like this:
+For a slot where the coordinator is not the pair initiator, for example
+`A3 -> A4` with `A2` as coordinator, the slot looks like this:
 
 ```text
-slot A3 initiator, total budget 100 ms
+slot A3 -> A4, total budget 100 ms
 
-A2 coordinator        A3 initiator        A4/A5/A2 responders          Tag M1
+A2 coordinator        A3 initiator        A4 responder              Tag M1
      |                     |                      |                       |
 t=0  |-- FLEX_TDOA_CMD --> |                      |                       |
      |                     | wait 10 ms           |                       |
      |                     |                      |                       |
-t~10 |                     |-- FLEX_TDOA_REQ ---->|---------------------> RX REQ
-     |                     |                      |                       |
-t~20 |                     |<-- RESP responder 0 -|---------------------> RX RESP
-t~30 |                     |<-- RESP responder 1 -|---------------------> RX RESP
-t~40 |                     |<-- RESP responder 2 -|---------------------> RX RESP
-     |                     |                      |                       |
+t~10 |                     |-- POLL ------------->|---------------------> RX POLL
+t~30 |                     |<-- RESP -------------|---------------------> RX RESP
+t~50 |                     |-- FINAL ------------>|                       |
+t~60 |                     |-- REPORT ----------->|                       |
+t~70 |                     |<-- REPORT2 ----------|---------------------> RX REPORT2, log diff
 t=100| slot end            | slot end             | slot end             | keeps listening
 ```
 
 If the coordinator is also the slot initiator, there is no `FLEX_TDOA_CMD`: the
-coordinator sends `FLEX_TDOA_REQ` directly at the beginning of the slot.
+coordinator starts the DS-TWR `POLL` directly at the beginning of the slot.
 
 #### FlexTDOA Robustness Improvements
 
 `FLEX_TDOA_CMD` carries the full 32-bit round counter, not only the low byte.
-The round counter is part of the deterministic slot/subslot ordering used by
+The round counter is part of the deterministic pair-slot ordering used by
 followers. If only `round & 0xff` were sent, the system would still run, but
-after 256 rounds a follower could rotate responder order differently than the
-coordinator expects. Sending all 32 bits is cheap and keeps coordinator and
-followers aligned for long calibration or positioning sessions.
+after 256 rounds a follower could infer the wrong directed pair ordering if the
+schedule changes. Sending all 32 bits is cheap and keeps coordinator and
+followers aligned for long positioning sessions.
 
-The initiator uses the same request/response pair to refresh live anchor
+The responder uses the full DS-TWR timestamp set to refresh live anchor
 geometry:
 
 ```text
-round_anchor = RESP_RX_initiator - REQ_TX_initiator
-reply_anchor = RESP_TX_responder - REQ_RX_responder
+round_a = RESP_RX_initiator - POLL_TX_initiator
+reply_a = FINAL_TX_initiator - RESP_RX_initiator
+reply_b = RESP_TX_responder - POLL_RX_responder
+round_b = FINAL_RX_responder - RESP_TX_responder
 
-anchor_distance = c * (round_anchor - reply_anchor_corrected) / 2
+tof = (round_a * round_b - reply_a * reply_b)
+      / (round_a + round_b + reply_a + reply_b)
+
+anchor_distance = c * tof
 ```
 
-That distance is cached as an unordered anchor pair. The next `FLEX_TDOA_REQ`
-from that initiator carries the cached distance for every responder, so the first
-round after boot is a warm-up round and later rounds contain live geometry.
+That distance is cached as an unordered anchor pair and passed through the
+9-sample rolling median before it is emitted to the dashboard as live anchor
+geometry.
 
 Lab stability comparison, 2026-07-15:
 
@@ -397,12 +407,15 @@ This test compares anchor-anchor range stability only, not absolute placement
 accuracy. The modules were left in the current room/charging layout, so the
 important number is short-term spread, not whether the measured edge length is a
 known physical value. The FlexTDOA run used the short `REQ/RESP` anchor
-measurement. `sample` is the unfiltered corrected single-shot value from the log,
-while `median9` is the firmware rolling median sent as the cached anchor
-distance. The DS-TWR run used `APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY`, which performs
-the full `POLL/RESP/FINAL/REPORT/REPORT2` exchange. The `DS-TWR median9` rows
-apply the same 9-sample rolling median offline to the raw DS-TWR stream, so the
-table compares both raw-to-raw and median-to-median behavior.
+measurement used by the earlier clean FlexTDOA prototype. `sample` is the
+unfiltered corrected single-shot value from that short-anchor prototype, while
+`median9` is the firmware rolling median sent as the cached anchor distance.
+The DS-TWR run used `APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY`, which performs the
+full `POLL/RESP/FINAL/REPORT/REPORT2` exchange. The `DS-TWR median9` rows apply
+the same 9-sample rolling median offline to the raw DS-TWR stream, so the table
+compares both raw-to-raw and median-to-median behavior. Current FlexTDOA keeps
+the passive tag behavior but uses the DS-TWR anchor geometry path because of
+this result.
 
 | Protocol/value | Pair | n | avg cm | median cm | min cm | max cm | std cm | span cm |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -438,28 +451,28 @@ FlexTDOA anchor measurement is much noisier raw, roughly `14.5-21.1 cm`
 standard deviation, but a 9-sample rolling median brings the cached geometry
 back to roughly `0.3-2.7 cm`. That means the older hybrid looked more stable
 because its anchor geometry came from full DS-TWR. For passive-tag FlexTDOA, a
-good practical direction is to keep the radio-passive tag observations, but
-stabilize anchor geometry with a median filter or with periodic full DS-TWR
-geometry refreshes. The uncorrected FlexTDOA `raw` field was much wider than
-`sample` in this run, so the clock-ratio correction is still required even
-before any median/mean filtering is considered.
+good practical direction is to keep the radio-passive tag observations, but use
+full DS-TWR plus a median filter for anchor geometry. The uncorrected FlexTDOA
+`raw` field was much wider than `sample` in this run, so the clock-ratio
+correction is still required even before any median/mean filtering is
+considered.
 
 For one directed observation `Ai -> Aj`, the tag hears:
 
 ```text
-Ai FLEX_TDOA_REQ   ---- broadcast ----> tag RX timestamp R_req
-Aj FLEX_TDOA_RESP  ---- broadcast ----> tag RX timestamp R_resp
+Ai POLL      ---- unicast/broadcast on air ----> tag RX timestamp R_poll
+Aj RESP      ---- unicast/broadcast on air ----> tag RX timestamp R_resp
+Aj REPORT2   ---- unicast/broadcast on air ----> tag receives anchor timestamps
 ```
 
-`FLEX_TDOA_REQ` carries the current measured anchor-anchor distance. The
-responder's delayed response carries how long the responder waited between
-receiving the request and transmitting the response. The tag combines those
-values with its local receive timestamps:
+`REPORT2` carries the responder-side timestamps and the current DS-TWR
+anchor-anchor distance. The tag combines those values with its own receive
+timestamps:
 
 ```text
-reply_aj     = RESP_TX_Aj - REQ_RX_Aj          // Aj clock
+reply_aj     = RESP_TX_Aj - POLL_RX_Aj         // Aj clock
 tof_ij       = distance(Ai, Aj) / c
-rx_delta_tag = R_resp - R_req                  // tag clock
+rx_delta_tag = R_resp - R_poll                 // tag clock
 
 range_diff_ij = c * (rx_delta_tag - reply_aj_corrected - tof_ij)
               = distance(tag, Aj) - distance(tag, Ai)
@@ -480,7 +493,7 @@ The log still includes both `raw` and corrected `diff` so the correction can be
 audited later.
 
 The dashboard `Position` tab reconstructs the relative anchor geometry from live
-anchor-anchor ranges emitted by the FlexTDOA initiators. It uses the recent
+anchor-anchor ranges emitted by the FlexTDOA DS-TWR anchor slots. It uses the recent
 median for each anchor edge, not just the latest sample, so one noisy range is
 less likely to move the whole coordinate frame. The first selected anchor is
 placed at `(0,0)`, the second defines the X axis, the third/fourth are

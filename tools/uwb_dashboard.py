@@ -2659,7 +2659,7 @@ tr.status-stale td { color: #4f3b1d; }
                 <input id="profileBaselineRoundGapMs" value="10" type="number" min="1" step="1">
                 <label for="profileBaselineRxSliceMs">RX slice ms</label>
                 <input id="profileBaselineRxSliceMs" value="100" type="number" min="1" step="1">
-                <label for="profileBaselineCommandDelayMs">Flex subslot ms</label>
+                <label for="profileBaselineCommandDelayMs">Command delay ms</label>
                 <input id="profileBaselineCommandDelayMs" value="10" type="number" min="1" step="1">
                 <label for="profileBaselineTimeoutMs">Classic DS-TWR timeout ms</label>
                 <input id="profileBaselineTimeoutMs" value="90" type="number" min="1" step="1">
@@ -2688,7 +2688,7 @@ tr.status-stale td { color: #4f3b1d; }
                 <input id="profileSafeRoundGapMs" value="10" type="number" min="1" step="1">
                 <label for="profileSafeRxSliceMs">RX slice ms</label>
                 <input id="profileSafeRxSliceMs" value="60" type="number" min="1" step="1">
-                <label for="profileSafeCommandDelayMs">Flex subslot ms</label>
+                <label for="profileSafeCommandDelayMs">Command delay ms</label>
                 <input id="profileSafeCommandDelayMs" value="5" type="number" min="1" step="1">
                 <label for="profileSafeTimeoutMs">Classic DS-TWR timeout ms</label>
                 <input id="profileSafeTimeoutMs" value="35" type="number" min="1" step="1">
@@ -2717,7 +2717,7 @@ tr.status-stale td { color: #4f3b1d; }
                 <input id="profileBalancedRoundGapMs" value="10" type="number" min="1" step="1">
                 <label for="profileBalancedRxSliceMs">RX slice ms</label>
                 <input id="profileBalancedRxSliceMs" value="50" type="number" min="1" step="1">
-                <label for="profileBalancedCommandDelayMs">Flex subslot ms</label>
+                <label for="profileBalancedCommandDelayMs">Command delay ms</label>
                 <input id="profileBalancedCommandDelayMs" value="5" type="number" min="1" step="1">
                 <label for="profileBalancedTimeoutMs">Classic DS-TWR timeout ms</label>
                 <input id="profileBalancedTimeoutMs" value="25" type="number" min="1" step="1">
@@ -2746,7 +2746,7 @@ tr.status-stale td { color: #4f3b1d; }
                 <input id="profileAggressiveRoundGapMs" value="10" type="number" min="1" step="1">
                 <label for="profileAggressiveRxSliceMs">RX slice ms</label>
                 <input id="profileAggressiveRxSliceMs" value="40" type="number" min="1" step="1">
-                <label for="profileAggressiveCommandDelayMs">Flex subslot ms</label>
+                <label for="profileAggressiveCommandDelayMs">Command delay ms</label>
                 <input id="profileAggressiveCommandDelayMs" value="3" type="number" min="1" step="1">
                 <label for="profileAggressiveTimeoutMs">Classic DS-TWR timeout ms</label>
                 <input id="profileAggressiveTimeoutMs" value="18" type="number" min="1" step="1">
