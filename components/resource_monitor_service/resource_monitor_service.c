@@ -429,17 +429,22 @@ esp_err_t resource_monitor_service_start(void)
     (void)init_temperature_sensor();
     (void)init_task_sampling_buffers();
 
-    const BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+    /*
+     * Keep this stack internal. The task iterator in xTaskGetNext() walks
+     * FreeRTOS list internals and validates pointers; with the iterator and
+     * call frames on PSRAM-backed stack, M1 reproduced a CPU0 task watchdog
+     * lockup inside collect_task_samples().
+     */
+    const BaseType_t created = xTaskCreatePinnedToCore(
         resource_monitor_task, "resource_mon",
         RESOURCE_MONITOR_TASK_STACK_WORDS, NULL,
-        RESOURCE_MONITOR_TASK_PRIORITY, NULL, RESOURCE_MONITOR_TASK_CORE,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        RESOURCE_MONITOR_TASK_PRIORITY, NULL, RESOURCE_MONITOR_TASK_CORE);
     if (created != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
 
     s_started = true;
-    ESP_LOGI(TAG, "Resource monitor started: interval=%ums core=%d stack=PSRAM",
+    ESP_LOGI(TAG, "Resource monitor started: interval=%ums core=%d stack=internal",
              (unsigned)RESOURCE_MONITOR_SAMPLE_MS, RESOURCE_MONITOR_TASK_CORE);
     return ESP_OK;
 }

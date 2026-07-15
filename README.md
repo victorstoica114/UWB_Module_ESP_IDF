@@ -137,11 +137,17 @@ make a module disappear from Wi-Fi permanently.
 | Layer | What it handles | Mechanism |
 | --- | --- | --- |
 | ESP-IDF OTA rollback | A new OTA image crashes or resets before it proves it can boot. | `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` marks a fresh OTA image as `pending_verify`. The app calls `esp_ota_mark_app_valid_cancel_rollback()` only after Wi-Fi and OTA HTTP are online for `APP_BOOT_GUARD_STABLE_DELAY_MS`. If a reset happens first, the bootloader rolls back to the previous valid OTA slot. |
-| Local recovery mode | A valid app, serial-flashed app, or bad runtime config keeps rebooting. | `components/boot_guard` stores a small state record in RTC no-init memory. After `APP_BOOT_GUARD_FAILURE_THRESHOLD` unstable resets, the next boot starts only identity/runtime config, Wi-Fi, wireless log, telemetry, and OTA. UWB, GPS, charger, USB-C PD, and BNO085 are skipped. |
+| Local recovery mode | A valid app, serial-flashed app, or bad runtime config keeps rebooting. | `components/boot_guard` stores a small state record in RTC no-init memory. After `APP_BOOT_GUARD_FAILURE_THRESHOLD` unstable resets, the next boot starts only identity/runtime config, Wi-Fi, wireless log, telemetry, and OTA. UWB, GPS, charger, USB-C PD, resource monitor, and BNO085 are skipped. |
 
 Normal boot order is intentionally conservative: Wi-Fi, wireless log, telemetry,
 and OTA start before UWB or I2C peripherals. Recovery mode uses the same path but
 stops before the risky services and holds the DW3000 in reset.
+
+Task watchdog panic is enabled on purpose. A task watchdog, interrupt watchdog,
+panic, generic watchdog, or CPU lockup reset is counted as a recovery failure
+even if the previous boot had already been marked stable. This catches runtime
+configuration lockups that happen minutes or hours after boot instead of only
+early boot loops.
 
 `/status` exposes the recovery state:
 

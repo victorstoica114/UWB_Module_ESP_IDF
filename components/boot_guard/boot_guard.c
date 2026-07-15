@@ -92,6 +92,20 @@ static bool reset_reason_counts_as_failure(esp_reset_reason_t reason)
     }
 }
 
+static bool reset_reason_counts_after_stable(esp_reset_reason_t reason)
+{
+    switch (reason) {
+    case ESP_RST_PANIC:
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+    case ESP_RST_CPU_LOCKUP:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void boot_guard_refresh_ota_state(void)
 {
     s_running_ota_state = ESP_OTA_IMG_UNDEFINED;
@@ -187,10 +201,20 @@ esp_err_t boot_guard_init(void)
         boot_guard_rtc_reset();
     }
 
-    if (!s_rtc_state.boot_completed &&
-        reset_reason_counts_as_failure(s_last_reset_reason)) {
+    const bool previous_boot_completed = s_rtc_state.boot_completed != 0U;
+
+    /*
+     * A late watchdog/panic means the app became unhealthy after startup,
+     * often because of a runtime configuration change. Count those resets
+     * even if the previous boot had already been marked stable, otherwise a
+     * repeatable runtime lockup would never reach recovery mode.
+     */
+    if (reset_reason_counts_after_stable(s_last_reset_reason)) {
         ++s_rtc_state.consecutive_failures;
-    } else if (s_rtc_state.boot_completed) {
+    } else if (!previous_boot_completed &&
+               reset_reason_counts_as_failure(s_last_reset_reason)) {
+        ++s_rtc_state.consecutive_failures;
+    } else if (previous_boot_completed) {
         s_rtc_state.consecutive_failures = 0;
     }
 
