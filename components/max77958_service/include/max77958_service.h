@@ -41,7 +41,9 @@ typedef struct {
     bool i2c_hs_ext_requested;
     bool i2c_hs_ext_active;
     bool i2c_hs_direct_reads_enabled;
+    bool i2c_hs_direct_writes_enabled;
     uint32_t i2c_hs_direct_read_count;
+    uint32_t i2c_hs_direct_write_count;
     uint32_t i2c_hs_direct_error_count;
     uint32_t i2c_hs_direct_last_elapsed_us;
     int i2c_hs_direct_scl_measure_error;

@@ -85,6 +85,10 @@ esp_err_t i2c_bus_service_direct_read_reg(
     uint8_t address, uint8_t start_reg, uint8_t *data, size_t data_len,
     const i2c_bus_service_direct_config_t *config,
     i2c_bus_service_direct_result_t *result);
+esp_err_t i2c_bus_service_direct_write_reg(
+    uint8_t address, uint8_t start_reg, const uint8_t *data, size_t data_len,
+    const i2c_bus_service_direct_config_t *config,
+    i2c_bus_service_direct_result_t *result);
 
 #ifdef __cplusplus
 }

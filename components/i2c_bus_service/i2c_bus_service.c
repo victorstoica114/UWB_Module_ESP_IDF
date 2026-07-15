@@ -18,7 +18,8 @@ static const char *TAG = "i2c_bus_service";
 enum {
     APP_I2C_PORT = 0,
     BACKGROUND_LOCK_WAIT_TICKS = 1,
-    DIRECT_READ_MAX_BYTES = 32,
+    DIRECT_READ_MAX_BYTES = I2C_LL_FIFO_LEN,
+    DIRECT_WRITE_MAX_DATA_BYTES = I2C_LL_FIFO_LEN - 2,
     DIRECT_SOURCE_HZ = 40000000,
     DIRECT_DEFAULT_TIMEOUT_US = 20000,
     DIRECT_HS_ENTRY_CLOCK_HZ = 1000000,
@@ -741,6 +742,141 @@ esp_err_t i2c_bus_service_direct_read_reg(
 
     if ((int_raw & I2C_LL_INTR_MST_COMPLETE) != 0U &&
         rx_count >= data_len) {
+        err = ESP_OK;
+    } else if ((int_raw & I2C_LL_INTR_TIMEOUT) != 0U ||
+               elapsed_us >= timeout_us) {
+        err = ESP_ERR_TIMEOUT;
+    } else if ((int_raw & I2C_LL_INTR_NACK) != 0U ||
+               (int_raw & I2C_LL_INTR_ARBITRATION) != 0U) {
+        err = ESP_ERR_INVALID_RESPONSE;
+    } else {
+        err = ESP_ERR_INVALID_STATE;
+    }
+
+cleanup:
+    if (result != NULL) {
+        result->elapsed_us = elapsed_us;
+        result->int_raw = int_raw;
+        result->command_done_mask = direct_command_done_mask(hw);
+        result->scl_measure_error = measure_err;
+    }
+    i2c_ll_clear_intr_mask(hw, I2C_LL_INTR_MASK);
+    hw->filter_cfg.val = saved_filter_cfg;
+    i2c_bus_service_unlock();
+    return err;
+}
+
+esp_err_t i2c_bus_service_direct_write_reg(
+    uint8_t address, uint8_t start_reg, const uint8_t *data, size_t data_len,
+    const i2c_bus_service_direct_config_t *config,
+    i2c_bus_service_direct_result_t *result)
+{
+    if (data == NULL || config == NULL || data_len == 0 ||
+        data_len > DIRECT_WRITE_MAX_DATA_BYTES || address > 0x7fU ||
+        config->clock_hz == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (config->manual_timing &&
+        (config->scl_low_period > 0x1ffU ||
+         config->scl_high_period > 0x1ffU ||
+         config->scl_wait_high_period > 0x7fU)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (result != NULL) {
+        *result = (i2c_bus_service_direct_result_t){0};
+    }
+
+    i2c_master_bus_handle_t bus = NULL;
+    esp_err_t err = i2c_bus_service_get(&bus);
+    if (err != ESP_OK) {
+        return err;
+    }
+    (void)bus;
+
+    if (!i2c_bus_service_lock_background_for(pdMS_TO_TICKS(1000),
+                                             config->estimated_transfer_us)) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    i2c_dev_t *hw = I2C_LL_GET_HW(APP_I2C_PORT);
+    const uint32_t saved_filter_cfg = hw->filter_cfg.val;
+    const uint32_t timeout_us =
+        config->timeout_us != 0 ? config->timeout_us : DIRECT_DEFAULT_TIMEOUT_US;
+
+    uint32_t int_raw = 0;
+    uint32_t elapsed_us = 0;
+    esp_err_t measure_err = ESP_ERR_NOT_SUPPORTED;
+    i2c_bus_service_scl_measure_t scl_measure = {0};
+    i2c_bus_service_scl_measure_result_t scl_measure_result = {0};
+    direct_prepare_controller(hw);
+
+    if (config->hs_master_code) {
+        err = direct_send_hs_master_code(hw, config, result, timeout_us);
+        if (err != ESP_OK) {
+            goto cleanup;
+        }
+    }
+
+    direct_set_timing(hw, config, config->clock_hz);
+
+    uint8_t tx_data[I2C_LL_FIFO_LEN] = {0};
+    const size_t tx_len = data_len + 2U;
+    tx_data[0] = (uint8_t)(address << 1U);
+    tx_data[1] = start_reg;
+    memcpy(&tx_data[2], data, data_len);
+
+    i2c_ll_txfifo_rst(hw);
+    i2c_ll_rxfifo_rst(hw);
+    i2c_ll_write_txfifo(hw, tx_data, tx_len);
+
+    const i2c_ll_hw_cmd_t restart_cmd = {
+        .op_code = I2C_LL_CMD_RESTART,
+    };
+    const i2c_ll_hw_cmd_t write_cmd = {
+        .byte_num = (uint32_t)tx_len,
+        .ack_en = 1,
+        .ack_exp = 0,
+        .op_code = I2C_LL_CMD_WRITE,
+    };
+    const i2c_ll_hw_cmd_t stop_cmd = {
+        .op_code = I2C_LL_CMD_STOP,
+    };
+    const i2c_ll_hw_cmd_t end_cmd = {
+        .op_code = I2C_LL_CMD_END,
+    };
+
+    for (int i = 0; i < I2C_LL_CMD_REG_NUM; ++i) {
+        i2c_ll_master_write_cmd_reg(hw, end_cmd, i);
+    }
+    i2c_ll_master_write_cmd_reg(hw, restart_cmd, 0);
+    i2c_ll_master_write_cmd_reg(hw, write_cmd, 1);
+    i2c_ll_master_write_cmd_reg(hw, stop_cmd, 2);
+
+    if (config->measure_scl_gpio >= 0) {
+        measure_err =
+            i2c_bus_service_scl_measure_start(config->measure_scl_gpio,
+                                              &scl_measure);
+    }
+
+    const int64_t start_us = esp_timer_get_time();
+    i2c_ll_update(hw);
+    i2c_ll_start_trans(hw);
+    int_raw = direct_wait_raw(hw, start_us, timeout_us);
+
+    const int64_t elapsed_raw = esp_timer_get_time() - start_us;
+    elapsed_us = elapsed_raw > 0 ? (uint32_t)elapsed_raw : 0U;
+
+    if (scl_measure.unit != NULL) {
+        measure_err = i2c_bus_service_scl_measure_stop(
+            &scl_measure, elapsed_us, &scl_measure_result);
+        if (result != NULL) {
+            result->scl_measure_elapsed_us = scl_measure_result.elapsed_us;
+            result->scl_measure_edges = scl_measure_result.edges;
+            result->scl_measure_hz = scl_measure_result.measured_hz;
+        }
+    }
+
+    if ((int_raw & I2C_LL_INTR_MST_COMPLETE) != 0U) {
         err = ESP_OK;
     } else if ((int_raw & I2C_LL_INTR_TIMEOUT) != 0U ||
                elapsed_us >= timeout_us) {

@@ -66,7 +66,8 @@ enum {
     OP_SNK_PDO_SET = 0x3F,
 
     MAX77958_DEVICE_ID_EXPECTED = 0x58,
-    MAX77958_DIRECT_READ_CHUNK_BYTES = 1,
+    MAX77958_DIRECT_READ_MAX_BYTES = 32,
+    MAX77958_DIRECT_WRITE_MAX_BYTES = 30,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -115,6 +116,7 @@ static uint32_t s_last_update_ms;
 static uint32_t s_last_operation_ms;
 static bool s_hs_ext_active;
 static uint32_t s_hs_direct_read_count;
+static uint32_t s_hs_direct_write_count;
 static uint32_t s_hs_direct_error_count;
 static uint32_t s_hs_direct_last_elapsed_us;
 static int s_hs_direct_scl_measure_error = ESP_ERR_NOT_SUPPORTED;
@@ -536,6 +538,11 @@ static bool max77958_hs_direct_reads_active(void)
     return APP_MAX77958_I2C_HS_DIRECT_READS_ENABLED != 0 && s_hs_ext_active;
 }
 
+static bool max77958_hs_direct_writes_active(void)
+{
+    return APP_MAX77958_I2C_HS_DIRECT_WRITES_ENABLED != 0 && s_hs_ext_active;
+}
+
 static uint32_t max77958_i2c_estimate_us_for(uint64_t bits, uint32_t clock_hz)
 {
     if (clock_hz == 0) {
@@ -547,11 +554,16 @@ static uint32_t max77958_i2c_estimate_us_for(uint64_t bits, uint32_t clock_hz)
     return us > UINT32_MAX ? UINT32_MAX : (uint32_t)us;
 }
 
+static uint32_t max77958_i2c_standard_read_estimate_us(size_t data_len)
+{
+    return max77958_i2c_estimate_us_for(
+        27ULL + (uint64_t)data_len * 9ULL, APP_MAX77958_I2C_CLOCK_HZ);
+}
+
 static uint32_t max77958_i2c_read_estimate_us(size_t data_len)
 {
     if (!max77958_hs_direct_reads_active()) {
-        return max77958_i2c_estimate_us_for(
-            27ULL + (uint64_t)data_len * 9ULL, APP_MAX77958_I2C_CLOCK_HZ);
+        return max77958_i2c_standard_read_estimate_us(data_len);
     }
 
     const uint32_t entry_us = max77958_i2c_estimate_us_for(
@@ -571,6 +583,19 @@ static uint32_t max77958_i2c_write_estimate_us(size_t write_len)
         9ULL + (uint64_t)write_len * 9ULL, APP_MAX77958_I2C_CLOCK_HZ);
 }
 
+static uint32_t max77958_i2c_direct_write_estimate_us(size_t data_len)
+{
+    const uint32_t entry_us = max77958_i2c_estimate_us_for(
+        18ULL, APP_MAX77958_I2C_HS_ENTRY_CLOCK_HZ);
+    const uint32_t write_us = max77958_i2c_estimate_us_for(
+        9ULL + ((uint64_t)data_len + 1ULL) * 9ULL,
+        APP_MAX77958_I2C_HS_DIRECT_CLOCK_HZ);
+    if (entry_us == UINT32_MAX || write_us == UINT32_MAX) {
+        return UINT32_MAX;
+    }
+    return entry_us > UINT32_MAX - write_us ? UINT32_MAX : entry_us + write_us;
+}
+
 static size_t max77958_configured_read_chunk_len(void)
 {
     size_t chunk_len = APP_MAX77958_REGISTER_READ_CHUNK_BYTES;
@@ -578,10 +603,25 @@ static size_t max77958_configured_read_chunk_len(void)
         chunk_len = MAX77958_SERVICE_AP_DATA_BYTES;
     }
     if (max77958_hs_direct_reads_active() &&
-        chunk_len > MAX77958_DIRECT_READ_CHUNK_BYTES) {
-        chunk_len = MAX77958_DIRECT_READ_CHUNK_BYTES;
+        chunk_len > APP_MAX77958_I2C_HS_DIRECT_READ_CHUNK_BYTES) {
+        chunk_len = APP_MAX77958_I2C_HS_DIRECT_READ_CHUNK_BYTES;
+    }
+    if (chunk_len > MAX77958_DIRECT_READ_MAX_BYTES) {
+        chunk_len = MAX77958_DIRECT_READ_MAX_BYTES;
+    }
+    if (chunk_len == 0) {
+        chunk_len = 1U;
     }
     return chunk_len;
+}
+
+static size_t max77958_configured_write_chunk_len(void)
+{
+    size_t chunk_len = APP_MAX77958_I2C_HS_DIRECT_WRITE_CHUNK_BYTES;
+    if (chunk_len == 0 || chunk_len > MAX77958_DIRECT_WRITE_MAX_BYTES) {
+        chunk_len = MAX77958_DIRECT_WRITE_MAX_BYTES;
+    }
+    return chunk_len == 0 ? 1U : chunk_len;
 }
 
 static esp_err_t read_bytes_direct_hs(uint8_t start_reg, uint8_t *data,
@@ -615,6 +655,43 @@ static esp_err_t read_bytes_direct_hs(uint8_t start_reg, uint8_t *data,
     s_hs_direct_scl_measured_hz = result.scl_measure_hz;
     if (err == ESP_OK) {
         s_hs_direct_read_count++;
+    } else {
+        s_hs_direct_error_count++;
+    }
+    return err;
+}
+
+static esp_err_t write_bytes_direct_hs(uint8_t start_reg, const uint8_t *data,
+                                       size_t data_len)
+{
+    const i2c_bus_service_direct_config_t direct_config = {
+        .clock_hz = APP_MAX77958_I2C_HS_DIRECT_CLOCK_HZ,
+        .timeout_us = (uint32_t)MAX77958_I2C_TIMEOUT_MS * 1000U,
+        .estimated_transfer_us = max77958_i2c_direct_write_estimate_us(data_len),
+        .manual_timing = true,
+        .scl_low_period = APP_MAX77958_I2C_HS_DIRECT_LOW_PERIOD,
+        .scl_high_period = APP_MAX77958_I2C_HS_DIRECT_HIGH_PERIOD,
+        .scl_wait_high_period = APP_MAX77958_I2C_HS_DIRECT_WAIT_HIGH_PERIOD,
+        .hs_master_code = true,
+        .hs_master_stop = true,
+        .hs_entry_clock_hz = APP_MAX77958_I2C_HS_ENTRY_CLOCK_HZ,
+        .measure_scl_gpio =
+            APP_MAX77958_I2C_HS_DIRECT_MEASURE_SCL_ENABLED
+                ? BOARD_CONFIG_MAX77958_SCL_GPIO
+                : -1,
+    };
+    i2c_bus_service_direct_result_t result = {0};
+    const esp_err_t err = i2c_bus_service_direct_write_reg(
+        APP_MAX77958_I2C_ADDRESS, start_reg, data, data_len, &direct_config,
+        &result);
+    s_hs_direct_last_elapsed_us =
+        result.hs_master_elapsed_us + result.elapsed_us;
+    s_hs_direct_scl_measure_error = result.scl_measure_error;
+    s_hs_direct_scl_edges = result.scl_measure_edges;
+    s_hs_direct_scl_elapsed_us = result.scl_measure_elapsed_us;
+    s_hs_direct_scl_measured_hz = result.scl_measure_hz;
+    if (err == ESP_OK) {
+        s_hs_direct_write_count++;
     } else {
         s_hs_direct_error_count++;
     }
@@ -656,12 +733,17 @@ static esp_err_t read_bytes(uint8_t start_reg, uint8_t *data, size_t data_len)
     for (uint32_t attempt = 0; attempt <= APP_MAX77958_I2C_READ_RETRIES;
          ++attempt) {
         if (max77958_hs_direct_reads_active() &&
-            data_len <= MAX77958_DIRECT_READ_CHUNK_BYTES) {
+            data_len <= MAX77958_DIRECT_READ_MAX_BYTES) {
             err = read_bytes_direct_hs(start_reg, data, data_len);
-        } else {
+            if (err == ESP_OK) {
+                return ESP_OK;
+            }
+        }
+
+        {
             if (!i2c_bus_service_lock_background_for(
                     pdMS_TO_TICKS(MAX77958_I2C_LOCK_TIMEOUT_MS),
-                    max77958_i2c_read_estimate_us(data_len))) {
+                    max77958_i2c_standard_read_estimate_us(data_len))) {
                 err = ESP_ERR_TIMEOUT;
             } else {
                 err = i2c_master_transmit_receive(
@@ -699,6 +781,14 @@ static esp_err_t write_bytes(uint8_t start_reg, const uint8_t *data,
         data_len == 1U ? APP_MAX77958_I2C_WRITE_RETRIES : 0U;
     esp_err_t err = ESP_ERR_TIMEOUT;
     for (uint32_t attempt = 0; attempt <= retries; ++attempt) {
+        if (max77958_hs_direct_writes_active() &&
+            data_len <= max77958_configured_write_chunk_len()) {
+            err = write_bytes_direct_hs(start_reg, data, data_len);
+            if (err == ESP_OK) {
+                return ESP_OK;
+            }
+        }
+
         if (!i2c_bus_service_lock_background_for(
                 pdMS_TO_TICKS(MAX77958_I2C_LOCK_TIMEOUT_MS),
                 max77958_i2c_write_estimate_us(data_len + 1U))) {
@@ -714,6 +804,34 @@ static esp_err_t write_bytes(uint8_t start_reg, const uint8_t *data,
         taskYIELD();
     }
     return err;
+}
+
+static esp_err_t write_bytes_direct_hs_chunked(uint8_t start_reg,
+                                               const uint8_t *data,
+                                               size_t data_len)
+{
+    if (!max77958_hs_direct_writes_active()) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (data == NULL || data_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const size_t max_chunk = max77958_configured_write_chunk_len();
+    size_t offset = 0;
+    while (offset < data_len) {
+        const size_t remaining = data_len - offset;
+        const size_t chunk_len = remaining > max_chunk ? max_chunk : remaining;
+        const esp_err_t err =
+            write_bytes_direct_hs((uint8_t)(start_reg + offset),
+                                  &data[offset], chunk_len);
+        if (err != ESP_OK) {
+            return err;
+        }
+        offset += chunk_len;
+        taskYIELD();
+    }
+    return ESP_OK;
 }
 
 static esp_err_t max77958_read_device_id(uint8_t *device_id)
@@ -779,7 +897,8 @@ static esp_err_t max77958_enter_hs_ext_if_enabled(void)
 {
     s_hs_ext_active = false;
     if (!APP_MAX77958_I2C_HS_EXT_ENABLED ||
-        !APP_MAX77958_I2C_HS_DIRECT_READS_ENABLED) {
+        (!APP_MAX77958_I2C_HS_DIRECT_READS_ENABLED &&
+         !APP_MAX77958_I2C_HS_DIRECT_WRITES_ENABLED)) {
         return ESP_OK;
     }
 
@@ -800,12 +919,14 @@ static esp_err_t max77958_enter_hs_ext_if_enabled(void)
     }
 
     ESP_LOGI(TAG,
-             "MAX77958 direct HS reads active: clock=%uHz timing=%u/%u/%u entry=%uHz",
+             "MAX77958 direct HS active: clock=%uHz timing=%u/%u/%u entry=%uHz reads=%s writes=%s",
              (unsigned)APP_MAX77958_I2C_HS_DIRECT_CLOCK_HZ,
              (unsigned)APP_MAX77958_I2C_HS_DIRECT_LOW_PERIOD,
              (unsigned)APP_MAX77958_I2C_HS_DIRECT_HIGH_PERIOD,
              (unsigned)APP_MAX77958_I2C_HS_DIRECT_WAIT_HIGH_PERIOD,
-             (unsigned)APP_MAX77958_I2C_HS_ENTRY_CLOCK_HZ);
+             (unsigned)APP_MAX77958_I2C_HS_ENTRY_CLOCK_HZ,
+             APP_MAX77958_I2C_HS_DIRECT_READS_ENABLED ? "on" : "off",
+             APP_MAX77958_I2C_HS_DIRECT_WRITES_ENABLED ? "on" : "off");
     return ESP_OK;
 }
 
@@ -982,14 +1103,19 @@ static esp_err_t ap_send33(uint8_t opcode, const uint8_t payload32[32],
         memcpy(&command[1], payload32, 32);
     }
 
-    esp_err_t err = write_bytes(REG_AP_DATAOUT0, command, sizeof(command));
+    esp_err_t err =
+        write_bytes_direct_hs_chunked(REG_AP_DATAOUT0, command,
+                                      sizeof(command));
+    if (err != ESP_OK) {
+        err = write_bytes(REG_AP_DATAOUT0, command, sizeof(command));
+    }
     if (err == ESP_OK) {
         uint8_t last_uic = 0;
         err = wait_uic_mask(0x80U, APP_MAX77958_AP_CMD_TIMEOUT_MS,
                             &last_uic);
         if (err == ESP_OK) {
-            err = read_bytes(REG_AP_DATAIN0, local.response,
-                             sizeof(local.response));
+            err = read_register_range_chunked(REG_AP_DATAIN0, local.response,
+                                              sizeof(local.response));
         }
     }
 
@@ -1022,7 +1148,10 @@ static void update_snapshot_from_raw(
         s_snapshot.i2c_hs_ext_active = s_hs_ext_active;
         s_snapshot.i2c_hs_direct_reads_enabled =
             APP_MAX77958_I2C_HS_DIRECT_READS_ENABLED != 0;
+        s_snapshot.i2c_hs_direct_writes_enabled =
+            APP_MAX77958_I2C_HS_DIRECT_WRITES_ENABLED != 0;
         s_snapshot.i2c_hs_direct_read_count = s_hs_direct_read_count;
+        s_snapshot.i2c_hs_direct_write_count = s_hs_direct_write_count;
         s_snapshot.i2c_hs_direct_error_count = s_hs_direct_error_count;
         s_snapshot.i2c_hs_direct_last_elapsed_us =
             s_hs_direct_last_elapsed_us;
@@ -1234,7 +1363,7 @@ static void log_summary_if_needed(void)
     }
 
     ESP_LOGI(TAG,
-             "MAX77958 id=0x%02X rev=0x%02X fw=%u.%u VBUS~%umV BC=%s CC=%s/%s PD=%s/%s src_pdos=%u selected=%u sink_pdos=%u reads=%lu hs=%s direct=%lu/%lu",
+             "MAX77958 id=0x%02X rev=0x%02X fw=%u.%u VBUS~%umV BC=%s CC=%s/%s PD=%s/%s src_pdos=%u selected=%u sink_pdos=%u reads=%lu hs=%s direct r/w/err=%lu/%lu/%lu",
              (unsigned)snapshot.device_id, (unsigned)snapshot.device_rev,
              (unsigned)snapshot.fw_rev, (unsigned)snapshot.fw_sub_ver,
              (unsigned)snapshot.vbus_mid_mv,
@@ -1249,6 +1378,7 @@ static void log_summary_if_needed(void)
              (unsigned long)snapshot.read_count,
              snapshot.i2c_hs_ext_active ? "on" : "off",
              (unsigned long)snapshot.i2c_hs_direct_read_count,
+             (unsigned long)snapshot.i2c_hs_direct_write_count,
              (unsigned long)snapshot.i2c_hs_direct_error_count);
 }
 
@@ -1338,6 +1468,8 @@ esp_err_t max77958_service_start(void)
             APP_MAX77958_I2C_HS_EXT_ENABLED != 0;
         s_snapshot.i2c_hs_direct_reads_enabled =
             APP_MAX77958_I2C_HS_DIRECT_READS_ENABLED != 0;
+        s_snapshot.i2c_hs_direct_writes_enabled =
+            APP_MAX77958_I2C_HS_DIRECT_WRITES_ENABLED != 0;
         state_unlock();
     }
 

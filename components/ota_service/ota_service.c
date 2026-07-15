@@ -812,7 +812,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"pd_i2c_hs_ext_requested\":%s,"
         "\"pd_i2c_hs_ext_active\":%s,"
         "\"pd_i2c_hs_direct_reads_enabled\":%s,"
+        "\"pd_i2c_hs_direct_writes_enabled\":%s,"
         "\"pd_i2c_hs_direct_read_count\":%lu,"
+        "\"pd_i2c_hs_direct_write_count\":%lu,"
         "\"pd_i2c_hs_direct_error_count\":%lu,"
         "\"pd_i2c_hs_direct_last_elapsed_us\":%lu,"
         "\"pd_i2c_hs_direct_scl_measure_error\":%d,"
@@ -1249,7 +1251,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         pd_snapshot.i2c_hs_ext_requested ? "true" : "false",
         pd_snapshot.i2c_hs_ext_active ? "true" : "false",
         pd_snapshot.i2c_hs_direct_reads_enabled ? "true" : "false",
+        pd_snapshot.i2c_hs_direct_writes_enabled ? "true" : "false",
         (unsigned long)pd_snapshot.i2c_hs_direct_read_count,
+        (unsigned long)pd_snapshot.i2c_hs_direct_write_count,
         (unsigned long)pd_snapshot.i2c_hs_direct_error_count,
         (unsigned long)pd_snapshot.i2c_hs_direct_last_elapsed_us,
         pd_snapshot.i2c_hs_direct_scl_measure_error,

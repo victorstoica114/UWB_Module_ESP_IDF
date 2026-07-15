@@ -1213,21 +1213,22 @@ The one-time startup probe keeps a longer timeout (`200 ms`) because some
 devices need more slack before they acknowledge reliably; it is not used for the
 regular status-transfer path. Normal BQ/MAX reads retry twice before reporting an
 error. BQ register writes are retried because they are single-register,
-idempotent updates. MAX77958 single-register writes are retried too, but longer
-AP command writes are intentionally single-shot: if the I2C transaction does not
-fit while BNO is running at a high rate, the operation fails visibly instead of
-being repeated blindly.
+idempotent updates. MAX77958 single-register writes are retried too. Longer
+MAX77958 AP command writes are attempted through the direct high-speed path in
+bounded chunks and then fall back to the standard 1 MHz transaction if the HS
+path fails, so a configuration command still has one clean recovery route.
 
 The current board uses mixed I2C speeds on the same physical bus. BNO085 stays
 at `400 kHz`, because the BNO08X datasheet only specifies standard/fast mode up
-to 400 kHz. BQ25792 and MAX77958 are configured at `1 MHz`. ESP-IDF keeps
-`scl_speed_hz` in each `i2c_device_config_t`, so the firmware does not
-reinitialize the bus between devices; each transaction uses the timing for the
-addressed device handle. MAX77958 explicitly supports 1 MHz Fast-Mode Plus
-without the special high-speed-mode sequence. BQ25792 has one descriptive I2C
-section that mentions fast mode, but its electrical table specifies
-`fSCL = 1000 kHz`; the 1 MHz setting was therefore validated empirically on the
-module.
+to 400 kHz. BQ25792 is configured at `1 MHz`. MAX77958 keeps a normal 1 MHz
+ESP-IDF device handle for fallback and startup, then enables `HS_EXT_EN` and
+uses a local direct-HS helper at about `2 MHz` for validated MAX register
+traffic. ESP-IDF keeps `scl_speed_hz` in each `i2c_device_config_t`, so the
+firmware does not reinitialize the bus between ordinary device transactions;
+the MAX direct-HS helper temporarily programs the I2C peripheral only while it
+holds the shared background lock. BQ25792 has one descriptive I2C section that
+mentions fast mode, but its electrical table specifies `fSCL = 1000 kHz`; the
+1 MHz setting was therefore validated empirically on the module.
 
 At the maximum BNO085 accelerometer rate, the sample period is `2 ms`. A normal
 accelerometer input report is small: the firmware reads the 4-byte SHTP header
@@ -1245,8 +1246,9 @@ Worst-case planning at BNO085 500 Hz:
 | BQ25792 16-byte read chunk at 1 MHz | about `0.27 ms` |
 | BQ25792 single-register write at 1 MHz | about `0.13 ms` |
 | MAX77958 single-byte direct HS read at about 2 MHz | about `0.04-0.05 ms` measured on M1 |
-| MAX77958 33-byte read chunk at 1 MHz | about `0.42 ms` |
-| MAX77958 34-byte AP-command write at 1 MHz | about `0.42 ms` |
+| MAX77958 AP response read, direct HS `32 + 1` bytes | about `0.31 ms` wire time plus two HS entries |
+| MAX77958 AP-command write, direct HS `30 + 3` bytes | about `0.20 ms` wire time plus two HS entries |
+| MAX77958 fallback 34-byte AP-command write at 1 MHz | about `0.42 ms` |
 
 With a `2 ms` BNO period and `500 us` guard, a normal BNO packet leaves roughly
 `700 us` for background work. That fits one MAX77958 full AP-data chunk or one
@@ -1469,15 +1471,18 @@ shrink to smaller transfers when the BNO085 realtime window is tight.
 The monitor runs every `APP_MAX77958_READ_INTERVAL_MS` (`10s` by default), plus
 on explicit dashboard refresh or after configuration operations.
 
-MAX77958 has an optional high-speed read path for boards with strong enough I2C
-pull-ups. The clean implementation does not fork ESP-IDF: it keeps normal MAX
-writes/AP commands on the standard ESP-IDF device handle at 1 MHz, sets
-`HS_EXT_EN` in `I2C_CNFG`, and uses a small local direct-read helper for MAX
-register reads. On M1, after changing the I2C pull-ups to `1k`, the validated
-direct profile is `low/high/wait = 10/0/0`, with HS master code `0x08` plus
-STOP before each read and about `2 MHz` observed on SCL. Burst reads are left
-disabled for now; the production path uses single-byte direct reads because
-that is the stable waveform/transaction we validated on hardware.
+MAX77958 has an optional high-speed path for boards with strong enough I2C
+pull-ups. The clean implementation does not fork ESP-IDF: it keeps the standard
+1 MHz MAX device handle as fallback, sets `HS_EXT_EN` in `I2C_CNFG`, and uses
+small local direct helpers for MAX register reads and writes. On M1, after
+changing the I2C pull-ups to `1k`, the validated direct profile is
+`low/high/wait = 10/0/0`, with HS master code `0x08` plus STOP before each
+direct transaction and about `2 MHz` observed on SCL. Direct writes are limited
+to `30` data bytes per transaction because the ESP32-S3 I2C FIFO is `32` bytes
+and must also hold the I2C address byte and starting register. AP commands are
+therefore written as `0x21..0x3E` followed by `0x3F..0x41`; MAX77958 latches the
+command when `AP_DATAOUT32` (`0x41`) is written. AP responses are read in direct
+HS chunks, normally `32 + 1` bytes.
 
 `/status` exposes both decoded fields and a raw register map:
 `pd_raw_hex`, device/FW IDs, interrupt/status/mask registers, VBUS ADC range,
