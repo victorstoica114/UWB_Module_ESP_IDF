@@ -1114,8 +1114,8 @@ static esp_err_t ap_send33(uint8_t opcode, const uint8_t payload32[32],
         err = wait_uic_mask(0x80U, APP_MAX77958_AP_CMD_TIMEOUT_MS,
                             &last_uic);
         if (err == ESP_OK) {
-            err = read_register_range_chunked(REG_AP_DATAIN0, local.response,
-                                              sizeof(local.response));
+            err = read_bytes(REG_AP_DATAIN0, local.response,
+                             sizeof(local.response));
         }
     }
 

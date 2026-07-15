@@ -1246,8 +1246,8 @@ Worst-case planning at BNO085 500 Hz:
 | BQ25792 16-byte read chunk at 1 MHz | about `0.27 ms` |
 | BQ25792 single-register write at 1 MHz | about `0.13 ms` |
 | MAX77958 single-byte direct HS read at about 2 MHz | about `0.04-0.05 ms` measured on M1 |
-| MAX77958 AP response read, direct HS `32 + 1` bytes | about `0.31 ms` wire time plus two HS entries |
 | MAX77958 AP-command write, direct HS `30 + 3` bytes | about `0.20 ms` wire time plus two HS entries |
+| MAX77958 33-byte AP response read at 1 MHz | about `0.42 ms` |
 | MAX77958 fallback 34-byte AP-command write at 1 MHz | about `0.42 ms` |
 
 With a `2 ms` BNO period and `500 us` guard, a normal BNO packet leaves roughly
@@ -1481,8 +1481,11 @@ direct transaction and about `2 MHz` observed on SCL. Direct writes are limited
 to `30` data bytes per transaction because the ESP32-S3 I2C FIFO is `32` bytes
 and must also hold the I2C address byte and starting register. AP commands are
 therefore written as `0x21..0x3E` followed by `0x3F..0x41`; MAX77958 latches the
-command when `AP_DATAOUT32` (`0x41`) is written. AP responses are read in direct
-HS chunks, normally `32 + 1` bytes.
+command when `AP_DATAOUT32` (`0x41`) is written. Direct-HS reads default to
+single-byte transactions because that is the read form validated on M1 with zero
+direct errors; longer read bursts remain configurable through
+`APP_MAX77958_I2C_HS_DIRECT_READ_CHUNK_BYTES` for future oscilloscope-guided
+testing.
 
 `/status` exposes both decoded fields and a raw register map:
 `pd_raw_hex`, device/FW IDs, interrupt/status/mask registers, VBUS ADC range,
