@@ -52,12 +52,18 @@ RANGING_RE = re.compile(
     r"\bUWB_RANGING result\s+tag=(?P<tag>\d+)\s+anchor=(?P<anchor>\d+)\s+"
     r"seq=(?P<seq>\d+)\s+distance=(?P<distance>[-+]?\d+(?:\.\d+)?)\s+m"
 )
+FLOAT_TEXT_RE = r"[-+]?(?:\d+(?:\.\d+)?|nan|inf)"
 FLEX_TDOA_RE = re.compile(
     r"\bUWB_FLEX_TDOA obs\s+tag=(?P<tag>\d+)\s+"
     r"initiator=(?P<initiator>\d+)\s+responder=(?P<responder>\d+)\s+"
     r"seq=(?P<seq>\d+)\s+diff=(?P<diff>[-+]?\d+(?:\.\d+)?)\s+m\s+"
     r"raw=(?P<raw>[-+]?\d+(?:\.\d+)?)\s+m\s+"
     r"anchor=(?P<anchor_distance>[-+]?\d+(?:\.\d+)?)\s+m"
+)
+FLEX_TDOA_EXTRA_RE = re.compile(
+    rf"\balt=(?P<alt>{FLOAT_TEXT_RE})\s+m\s+"
+    rf"agree=(?P<agree>{FLOAT_TEXT_RE})\s+m\s+"
+    r"fused=(?P<fused>[01])\s+suspect=(?P<suspect>[01])"
 )
 FLEX_TDOA_ANCHOR_RE = re.compile(
     r"\bFLEX_TDOA anchor result\s+pair=(?P<initiator>\d+)-(?P<responder>\d+)\s+"
@@ -616,7 +622,8 @@ class DashboardState:
         ).append(sample)
 
     def record_tdoa_locked(self, item: dict[str, Any]) -> None:
-        match = FLEX_TDOA_RE.search(str(item.get("message") or item.get("raw") or ""))
+        raw_message = str(item.get("message") or item.get("raw") or "")
+        match = FLEX_TDOA_RE.search(raw_message)
         if match is None:
             return
 
@@ -631,6 +638,17 @@ class DashboardState:
         except ValueError:
             return
 
+        extra_match = FLEX_TDOA_EXTRA_RE.search(raw_message)
+        alt_diff_m = None
+        agreement_m = None
+        fused = False
+        suspect = False
+        if extra_match is not None:
+            alt_diff_m = self.optional_float(extra_match.group("alt"))
+            agreement_m = self.optional_float(extra_match.group("agree"))
+            fused = extra_match.group("fused") == "1"
+            suspect = extra_match.group("suspect") == "1"
+
         now = float(item.get("received_at") or time.time())
         key = (tag_id, initiator_id, responder_id)
         sample = {
@@ -640,11 +658,15 @@ class DashboardState:
             "seq": seq,
             "diff_m": diff_m,
             "raw_diff_m": raw_diff_m,
+            "alt_diff_m": alt_diff_m,
+            "agreement_m": agreement_m,
+            "fused": fused,
+            "suspect": suspect,
             "anchor_distance_m": anchor_distance_m,
             "received_at": now,
             "log_id": item.get("id"),
             "source_module_id": item.get("module_id"),
-            "raw": item.get("raw") or item.get("message") or "",
+            "raw": raw_message,
         }
         self.tdoa_observations[key] = sample
         self.tdoa_history.setdefault(
@@ -743,6 +765,14 @@ class DashboardState:
         return (clean[middle - 1] + clean[middle]) / 2.0
 
     @staticmethod
+    def optional_float(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    @staticmethod
     def sequence_delta(start: int, end: int) -> int:
         return (int(end) - int(start)) % 65536
 
@@ -834,6 +864,9 @@ class DashboardState:
                     diffs: list[float] = []
                     raw_diffs: list[float] = []
                     reverse_sums: list[float] = []
+                    agreement_values: list[float] = []
+                    fused_count = 0
+                    suspect_count = 0
                     for left, right in matched:
                         left_diff = float(left["diff_m"])
                         right_diff = float(right["diff_m"])
@@ -843,12 +876,23 @@ class DashboardState:
                         right_raw = float(right.get("raw_diff_m") or math.nan)
                         if math.isfinite(left_raw) and math.isfinite(right_raw):
                             raw_diffs.append((left_raw - right_raw) / 2.0)
+                        for sample in (left, right):
+                            if sample.get("fused"):
+                                fused_count += 1
+                            if sample.get("suspect"):
+                                suspect_count += 1
+                            agreement_m = self.optional_float(
+                                sample.get("agreement_m")
+                            )
+                            if agreement_m is not None:
+                                agreement_values.append(agreement_m)
 
                     diff_m = self.median_float(diffs)
                     reverse_sum_m = self.median_float(reverse_sums)
                     if diff_m is None or reverse_sum_m is None:
                         continue
                     raw_diff_m = self.median_float(raw_diffs)
+                    agreement_m = self.median_float(agreement_values)
                     latest_left, latest_right = max(
                         matched,
                         key=lambda pair: max(
@@ -875,6 +919,10 @@ class DashboardState:
                         "reverse_sum_m": reverse_sum_m,
                         "latest_reverse_sum_m": float(latest_left["diff_m"])
                         + float(latest_right["diff_m"]),
+                        "agreement_m": agreement_m,
+                        "fused_count": fused_count,
+                        "suspect_count": suspect_count,
+                        "suspect": suspect_count > len(matched),
                         "anchor_distance_m": float(
                             latest_left["anchor_distance_m"]
                         ),
@@ -955,6 +1003,10 @@ class DashboardState:
                 "seq": int(item["seq"]),
                 "diff_m": float(item["diff_m"]),
                 "raw_diff_m": float(item["raw_diff_m"]),
+                "alt_diff_m": item.get("alt_diff_m"),
+                "agreement_m": item.get("agreement_m"),
+                "fused": bool(item.get("fused")),
+                "suspect": bool(item.get("suspect")),
                 "anchor_distance_m": float(item["anchor_distance_m"]),
                 "age_sec": now - float(item["received_at"]),
                 "log_id": item.get("log_id"),
@@ -4067,15 +4119,28 @@ function robustTdoaFit(anchorIds, anchors, observations) {
     };
   }
 
-  let used = all.filter(item => {
+  let candidates = all.filter(item => {
+    const ok = !item.suspect;
+    if (!ok) notes.set(tdoaObservationKey(item), "suspect");
+    return ok;
+  });
+  if (candidates.length < minCount) {
+    candidates = all;
+    notes.clear();
+  }
+
+  let used = candidates.filter(item => {
     const reverseSum = Number(item.reverse_sum_m);
     const ok = !Number.isFinite(reverseSum) || Math.abs(reverseSum) <= tdoaReverseSumRejectM;
     if (!ok) notes.set(tdoaObservationKey(item), "rev sum");
     return ok;
   });
   if (used.length < minCount) {
-    used = all;
-    notes.clear();
+    used = candidates;
+    for (const item of candidates) {
+      const key = tdoaObservationKey(item);
+      if (notes.get(key) === "rev sum") notes.delete(key);
+    }
   }
 
   let position = solveTdoa(anchors, used);
@@ -4618,9 +4683,13 @@ function renderPositionReadout(model) {
         const residual = tag.residuals?.[key];
         const used = item.used_in_fit !== false;
         const fitNote = used ? "fit" : `skip ${item.reject_reason || "outlier"}`;
+        const agreement = Number(item.agreement_m);
+        const agreementText = Number.isFinite(agreement) ? ` · agree ${fmtCmFromM(agreement, 1)} cm` : "";
+        const suspectText = item.suspect ? " · suspect" : "";
+        const fusedText = Number(item.fused_count || 0) > 0 ? ` · fused ${esc(item.fused_count)}` : "";
         tdoaRows.push(`<tr class="${used ? "" : "position-skip"}">
           <td>T${esc(tag.tagId)}</td>
-          <td>A${esc(item.initiator_id)}↔A${esc(item.responder_id)}<br><span class="muted">seq ${esc(item.seq)}/${esc(item.reverse_seq)} · n ${esc(item.samples || 1)} · ${esc(fitNote)}</span></td>
+          <td>A${esc(item.initiator_id)}↔A${esc(item.responder_id)}<br><span class="muted">seq ${esc(item.seq)}/${esc(item.reverse_seq)} · n ${esc(item.samples || 1)}${agreementText}${fusedText}${suspectText} · ${esc(fitNote)}</span></td>
           <td>${fmtFixed(item.diff_m, 3)}</td>
           <td>${Number.isFinite(reverseSum) ? fmtCmFromM(reverseSum, 1) + " cm" : "-"}</td>
           <td class="${Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${fmtFixed(item.age_sec, 1)}s</td>

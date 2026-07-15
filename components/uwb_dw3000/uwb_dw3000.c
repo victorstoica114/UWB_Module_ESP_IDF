@@ -253,6 +253,7 @@ enum {
 #define UWB_FLEX_TDOA_CMD_SLOT_OFFSET 12U
 #define UWB_FLEX_TDOA_CMD_ROUND_OFFSET 13U
 #define UWB_FLEX_TDOA_CMD_LEN (UWB_FLEX_TDOA_CMD_ROUND_OFFSET + sizeof(uint32_t))
+#define UWB_FLEX_TDOA_DUAL_DIFF_REJECT_M 0.75
 
 enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_POLL = 1,
@@ -364,12 +365,18 @@ struct uwb_flex_tdoa_observation {
     uint8_t responder_id;
     uint64_t poll_rx_tag_ts;
     uint64_t resp_rx_tag_ts;
+    uint64_t final_rx_tag_ts;
     bool have_poll;
     bool have_resp;
+    bool have_final;
     bool resp_clock_offset_valid;
     int32_t resp_clock_offset_raw;
     double resp_clock_offset_ratio;
     uint32_t resp_clock_filter_samples;
+    bool final_clock_offset_valid;
+    int32_t final_clock_offset_raw;
+    double final_clock_offset_ratio;
+    uint32_t final_clock_filter_samples;
     TickType_t updated_tick;
 };
 
@@ -3887,9 +3894,13 @@ static void uwb_flex_tdoa_log_ds_twr_observation(
         report2->payload, UWB_DISTANCE_FRAME_POLL_RX_TS_OFFSET);
     const uint64_t resp_tx_anchor_ts = uwb_distance_get_ts40(
         report2->payload, UWB_DISTANCE_FRAME_RESP_TX_TS_OFFSET);
+    const uint64_t resp_rx_initiator_ts = uwb_distance_get_ts40(
+        report2->payload, UWB_DISTANCE_FRAME_RESP_RX_TS_OFFSET);
+    const uint64_t final_tx_initiator_ts = uwb_distance_get_ts40(
+        report2->payload, UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET);
     const double reply_b_dtu =
         (double)uwb_distance_delta_ts(resp_tx_anchor_ts, poll_rx_anchor_ts);
-    const double rx_delta_tag_dtu = (double)uwb_distance_delta_ts(
+    const double rx_poll_resp_tag_dtu = (double)uwb_distance_delta_ts(
         observation->resp_rx_tag_ts, observation->poll_rx_tag_ts);
     const double anchor_distance_m =
         (double)uwb_distance_get_i32(report2->payload,
@@ -3899,7 +3910,7 @@ static void uwb_flex_tdoa_log_ds_twr_observation(
         anchor_distance_m /
         (UWB_DW3000_TIME_UNIT_SECONDS * UWB_DW3000_SPEED_OF_LIGHT_MPS);
     const double raw_diff_dtu =
-        rx_delta_tag_dtu - reply_b_dtu - anchor_tof_dtu;
+        rx_poll_resp_tag_dtu - reply_b_dtu - anchor_tof_dtu;
 
     double clock_offset_ratio = 0.0;
     double reply_b_corrected_dtu = reply_b_dtu;
@@ -3909,26 +3920,67 @@ static void uwb_flex_tdoa_log_ds_twr_observation(
     }
 
     const double diff_dtu =
-        rx_delta_tag_dtu - reply_b_corrected_dtu - anchor_tof_dtu;
-    const double diff_m = uwb_distance_tof_to_meters(diff_dtu);
-    const double raw_diff_m = uwb_distance_tof_to_meters(raw_diff_dtu);
+        rx_poll_resp_tag_dtu - reply_b_corrected_dtu - anchor_tof_dtu;
+    const double primary_diff_m = uwb_distance_tof_to_meters(diff_dtu);
+    const double primary_raw_diff_m = uwb_distance_tof_to_meters(raw_diff_dtu);
+    double final_clock_offset_ratio = 0.0;
+    double alternate_diff_m = NAN;
+    double alternate_raw_diff_m = NAN;
+    double agreement_m = NAN;
+    bool dual_valid = false;
+    bool fused = false;
+    bool suspect = false;
+
+    if (observation->have_final) {
+        const double reply_a_dtu = (double)uwb_distance_delta_ts(
+            final_tx_initiator_ts, resp_rx_initiator_ts);
+        const double rx_resp_final_tag_dtu = (double)uwb_distance_delta_ts(
+            observation->final_rx_tag_ts, observation->resp_rx_tag_ts);
+        const double alternate_raw_diff_dtu =
+            anchor_tof_dtu + reply_a_dtu - rx_resp_final_tag_dtu;
+        double reply_a_corrected_dtu = reply_a_dtu;
+        if (observation->final_clock_offset_valid) {
+            final_clock_offset_ratio = observation->final_clock_offset_ratio;
+            reply_a_corrected_dtu = reply_a_dtu * (1.0 + final_clock_offset_ratio);
+        }
+        const double alternate_diff_dtu =
+            anchor_tof_dtu + reply_a_corrected_dtu - rx_resp_final_tag_dtu;
+        alternate_diff_m = uwb_distance_tof_to_meters(alternate_diff_dtu);
+        alternate_raw_diff_m = uwb_distance_tof_to_meters(alternate_raw_diff_dtu);
+        agreement_m = fabs(primary_diff_m - alternate_diff_m);
+        dual_valid = isfinite(alternate_diff_m);
+        suspect = dual_valid && agreement_m > UWB_FLEX_TDOA_DUAL_DIFF_REJECT_M;
+        fused = dual_valid && !suspect;
+    }
+
+    const double diff_m =
+        fused ? (primary_diff_m + alternate_diff_m) * 0.5 : primary_diff_m;
+    const double raw_diff_m =
+        fused ? (primary_raw_diff_m + alternate_raw_diff_m) * 0.5
+              : primary_raw_diff_m;
 
     ESP_LOGI(TAG,
-             "UWB_FLEX_TDOA obs tag=%u initiator=%u responder=%u seq=%u diff=%.3f m raw=%.3f m anchor=%.3f m clk_valid=%u clk_ratio=%.3e clk_samples=%lu",
+             "UWB_FLEX_TDOA obs tag=%u initiator=%u responder=%u seq=%u diff=%.3f m raw=%.3f m anchor=%.3f m alt=%.3f m agree=%.3f m fused=%u suspect=%u clk_valid=%u clk_ratio=%.3e clk_samples=%lu final_clk_valid=%u final_clk_ratio=%.3e final_clk_samples=%lu",
              (unsigned)tag_id, (unsigned)observation->initiator_id,
              (unsigned)observation->responder_id,
              (unsigned)observation->sequence, diff_m, raw_diff_m,
-             anchor_distance_m,
+             anchor_distance_m, alternate_diff_m, agreement_m, fused ? 1U : 0U,
+             suspect ? 1U : 0U,
              observation->resp_clock_offset_valid ? 1U : 0U,
              clock_offset_ratio,
-             (unsigned long)observation->resp_clock_filter_samples);
+             (unsigned long)observation->resp_clock_filter_samples,
+             observation->final_clock_offset_valid ? 1U : 0U,
+             final_clock_offset_ratio,
+             (unsigned long)observation->final_clock_filter_samples);
     ESP_LOGD(TAG,
-             "FLEX_TDOA DS-TWR obs timing tag=%u pair=%u-%u seq=%u rx_delta=%.2f dtu reply=%.2f dtu reply_corr=%.2f dtu anchor_tof=%.2f dtu clk_raw=%ld",
+             "FLEX_TDOA DS-TWR obs timing tag=%u pair=%u-%u seq=%u poll_resp=%.2f dtu reply_b=%.2f dtu reply_b_corr=%.2f dtu anchor_tof=%.2f dtu primary=%.3f m alt=%.3f m agree=%.3f m clk_raw=%ld final_clk_raw=%ld",
              (unsigned)tag_id, (unsigned)observation->initiator_id,
              (unsigned)observation->responder_id,
-             (unsigned)observation->sequence, rx_delta_tag_dtu, reply_b_dtu,
-             reply_b_corrected_dtu, anchor_tof_dtu,
-             (long)observation->resp_clock_offset_raw);
+             (unsigned)observation->sequence, rx_poll_resp_tag_dtu, reply_b_dtu,
+             reply_b_corrected_dtu, anchor_tof_dtu, primary_diff_m,
+             alternate_diff_m, agreement_m,
+             (long)observation->resp_clock_offset_raw,
+             (long)observation->final_clock_offset_raw);
 
     memset(observation, 0, sizeof(*observation));
 }
@@ -3998,6 +4050,41 @@ static void uwb_flex_tdoa_tag_process_frame(
             } else {
                 observation->resp_clock_offset_ratio = 0.0;
                 observation->resp_clock_filter_samples = 0;
+            }
+            observation->updated_tick = xTaskGetTickCount();
+        }
+        break;
+
+    case UWB_DISTANCE_FRAME_FINAL:
+        initiator_id = frame->source_id;
+        responder_id = frame->destination_id;
+        if (!uwb_flex_tdoa_anchor_pair_valid(anchor_ids, anchor_count,
+                                             initiator_id, responder_id)) {
+            return;
+        }
+        {
+            struct uwb_flex_tdoa_observation *observation =
+                uwb_flex_tdoa_find_observation(
+                    observations, frame->sequence, initiator_id, responder_id,
+                    true);
+            if (observation == NULL) {
+                return;
+            }
+            observation->final_rx_tag_ts = frame->rx_timestamp;
+            observation->have_final = true;
+            observation->final_clock_offset_valid = frame->clock_offset_valid;
+            observation->final_clock_offset_raw = frame->clock_offset_raw;
+            if (frame->clock_offset_valid) {
+                const double sample_ratio =
+                    uwb_dw3000_clock_offset_ratio(frame->clock_offset_raw);
+                observation->final_clock_offset_ratio =
+                    uwb_flex_tdoa_update_clock_filter(
+                        clock_filters, clock_filter_count, initiator_id,
+                        sample_ratio,
+                        &observation->final_clock_filter_samples);
+            } else {
+                observation->final_clock_offset_ratio = 0.0;
+                observation->final_clock_filter_samples = 0;
             }
             observation->updated_tick = xTaskGetTickCount();
         }

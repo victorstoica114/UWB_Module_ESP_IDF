@@ -457,31 +457,56 @@ full DS-TWR plus a median filter for anchor geometry. The uncorrected FlexTDOA
 correction is still required even before any median/mean filtering is
 considered.
 
-For one directed observation `Ai -> Aj`, the tag hears:
+For one directed observation `Ai -> Aj`, the tag now derives two passive
+range-difference estimates from the same DS-TWR slot. This keeps the tag
+radio-passive while still using more of the DS-TWR timing triangle.
+
+The tag hears:
 
 ```text
 Ai POLL      ---- unicast/broadcast on air ----> tag RX timestamp R_poll
 Aj RESP      ---- unicast/broadcast on air ----> tag RX timestamp R_resp
+Ai FINAL     ---- unicast/broadcast on air ----> tag RX timestamp R_final
 Aj REPORT2   ---- unicast/broadcast on air ----> tag receives anchor timestamps
 ```
 
-`REPORT2` carries the responder-side timestamps and the current DS-TWR
-anchor-anchor distance. The tag combines those values with its own receive
-timestamps:
+`REPORT2` carries the responder-side timestamps, the initiator timestamps
+received earlier in `REPORT`, and the current DS-TWR anchor-anchor distance.
+The tag combines those values with its own receive timestamps.
+
+Primary estimate, from `POLL -> RESP`:
 
 ```text
 reply_aj     = RESP_TX_Aj - POLL_RX_Aj         // Aj clock
 tof_ij       = distance(Ai, Aj) / c
 rx_delta_tag = R_resp - R_poll                 // tag clock
 
-range_diff_ij = c * (rx_delta_tag - reply_aj_corrected - tof_ij)
-              = distance(tag, Aj) - distance(tag, Ai)
+range_diff_ij_primary = c * (rx_delta_tag - reply_aj_corrected - tof_ij)
+                      = distance(tag, Aj) - distance(tag, Ai)
 ```
 
-The firmware logs:
+Alternate estimate, from `RESP -> FINAL`:
 
 ```text
-UWB_FLEX_TDOA obs tag=<tag> initiator=<Ai> responder=<Aj> seq=<seq> diff=<m> m ...
+reply_ai      = FINAL_TX_Ai - RESP_RX_Ai        // Ai clock
+rx_delta_tag  = R_final - R_resp                // tag clock
+
+range_diff_ij_alt = c * (tof_ij + reply_ai_corrected - rx_delta_tag)
+                  = distance(tag, Aj) - distance(tag, Ai)
+```
+
+If both estimates are present and they agree within
+`UWB_FLEX_TDOA_DUAL_DIFF_REJECT_M` (`0.75 m` at the moment), the firmware logs
+their average as `diff` and marks the sample as `fused=1`. If they disagree,
+the primary estimate is still logged, but `suspect=1` lets the dashboard keep
+the row visible while excluding it from the live least-squares fit when enough
+other observations are available.
+
+The firmware log line includes both estimates:
+
+```text
+UWB_FLEX_TDOA obs tag=<tag> initiator=<Ai> responder=<Aj> seq=<seq>
+  diff=<m> m raw=<m> m anchor=<m> m alt=<m> m agree=<m> m fused=<0|1> suspect=<0|1> ...
 ```
 
 The passive tag keeps a small clock-offset filter per responder anchor. The raw
