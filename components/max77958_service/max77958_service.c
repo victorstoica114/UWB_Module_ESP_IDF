@@ -117,6 +117,10 @@ static bool s_hs_ext_active;
 static uint32_t s_hs_direct_read_count;
 static uint32_t s_hs_direct_error_count;
 static uint32_t s_hs_direct_last_elapsed_us;
+static int s_hs_direct_scl_measure_error = ESP_ERR_NOT_SUPPORTED;
+static uint32_t s_hs_direct_scl_edges;
+static uint32_t s_hs_direct_scl_elapsed_us;
+static uint32_t s_hs_direct_scl_measured_hz;
 
 static uint32_t ticks_to_ms(void)
 {
@@ -594,6 +598,10 @@ static esp_err_t read_bytes_direct_hs(uint8_t start_reg, uint8_t *data,
         .hs_master_code = true,
         .hs_master_stop = true,
         .hs_entry_clock_hz = APP_MAX77958_I2C_HS_ENTRY_CLOCK_HZ,
+        .measure_scl_gpio =
+            APP_MAX77958_I2C_HS_DIRECT_MEASURE_SCL_ENABLED
+                ? BOARD_CONFIG_MAX77958_SCL_GPIO
+                : -1,
     };
     i2c_bus_service_direct_result_t result = {0};
     const esp_err_t err = i2c_bus_service_direct_read_reg(
@@ -601,6 +609,10 @@ static esp_err_t read_bytes_direct_hs(uint8_t start_reg, uint8_t *data,
         &result);
     s_hs_direct_last_elapsed_us =
         result.hs_master_elapsed_us + result.elapsed_us;
+    s_hs_direct_scl_measure_error = result.scl_measure_error;
+    s_hs_direct_scl_edges = result.scl_measure_edges;
+    s_hs_direct_scl_elapsed_us = result.scl_measure_elapsed_us;
+    s_hs_direct_scl_measured_hz = result.scl_measure_hz;
     if (err == ESP_OK) {
         s_hs_direct_read_count++;
     } else {
@@ -1014,6 +1026,13 @@ static void update_snapshot_from_raw(
         s_snapshot.i2c_hs_direct_error_count = s_hs_direct_error_count;
         s_snapshot.i2c_hs_direct_last_elapsed_us =
             s_hs_direct_last_elapsed_us;
+        s_snapshot.i2c_hs_direct_scl_measure_error =
+            s_hs_direct_scl_measure_error;
+        s_snapshot.i2c_hs_direct_scl_edges = s_hs_direct_scl_edges;
+        s_snapshot.i2c_hs_direct_scl_elapsed_us =
+            s_hs_direct_scl_elapsed_us;
+        s_snapshot.i2c_hs_direct_scl_measured_hz =
+            s_hs_direct_scl_measured_hz;
         s_snapshot.last_operation_age_ms =
             elapsed_since(now_ms, s_last_operation_ms);
         if (read_err == ESP_OK) {

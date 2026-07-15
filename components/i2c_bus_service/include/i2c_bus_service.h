@@ -34,6 +34,7 @@ typedef struct {
     bool hs_master_code;
     bool hs_master_stop;
     uint32_t hs_entry_clock_hz;
+    int measure_scl_gpio;
 } i2c_bus_service_direct_config_t;
 
 typedef struct {
@@ -43,6 +44,10 @@ typedef struct {
     uint32_t hs_master_elapsed_us;
     uint32_t hs_master_int_raw;
     uint32_t hs_master_command_done_mask;
+    int scl_measure_error;
+    uint32_t scl_measure_edges;
+    uint32_t scl_measure_elapsed_us;
+    uint32_t scl_measure_hz;
 } i2c_bus_service_direct_result_t;
 
 esp_err_t i2c_bus_service_get(i2c_master_bus_handle_t *bus);

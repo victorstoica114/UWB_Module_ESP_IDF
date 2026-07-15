@@ -776,6 +776,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"pd_i2c_hs_direct_read_count\":%lu,"
         "\"pd_i2c_hs_direct_error_count\":%lu,"
         "\"pd_i2c_hs_direct_last_elapsed_us\":%lu,"
+        "\"pd_i2c_hs_direct_scl_measure_error\":%d,"
+        "\"pd_i2c_hs_direct_scl_measure_error_name\":\"%s\","
+        "\"pd_i2c_hs_direct_scl_edges\":%lu,"
+        "\"pd_i2c_hs_direct_scl_elapsed_us\":%lu,"
+        "\"pd_i2c_hs_direct_scl_measured_hz\":%lu,"
         "\"pd_device_id\":\"0x%02x\","
         "\"pd_device_rev\":\"0x%02x\","
         "\"pd_fw_rev\":%u,"
@@ -1171,6 +1176,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)pd_snapshot.i2c_hs_direct_read_count,
         (unsigned long)pd_snapshot.i2c_hs_direct_error_count,
         (unsigned long)pd_snapshot.i2c_hs_direct_last_elapsed_us,
+        pd_snapshot.i2c_hs_direct_scl_measure_error,
+        esp_err_to_name((esp_err_t)pd_snapshot.i2c_hs_direct_scl_measure_error),
+        (unsigned long)pd_snapshot.i2c_hs_direct_scl_edges,
+        (unsigned long)pd_snapshot.i2c_hs_direct_scl_elapsed_us,
+        (unsigned long)pd_snapshot.i2c_hs_direct_scl_measured_hz,
         (unsigned)pd_snapshot.device_id,
         (unsigned)pd_snapshot.device_rev,
         (unsigned)pd_snapshot.fw_rev,

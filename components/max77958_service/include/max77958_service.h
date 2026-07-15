@@ -44,6 +44,10 @@ typedef struct {
     uint32_t i2c_hs_direct_read_count;
     uint32_t i2c_hs_direct_error_count;
     uint32_t i2c_hs_direct_last_elapsed_us;
+    int i2c_hs_direct_scl_measure_error;
+    uint32_t i2c_hs_direct_scl_edges;
+    uint32_t i2c_hs_direct_scl_elapsed_us;
+    uint32_t i2c_hs_direct_scl_measured_hz;
 
     uint8_t device_id;
     uint8_t device_rev;

@@ -3,6 +3,7 @@
 #include "app_config.h"
 #include "board_config.h"
 #include "driver/i2c_master.h"
+#include "driver/pulse_cnt.h"
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -369,6 +370,140 @@ static uint32_t direct_wait_done_mask(i2c_dev_t *hw, int64_t start_us,
     return int_raw;
 }
 
+typedef struct {
+    pcnt_unit_handle_t unit;
+    pcnt_channel_handle_t channel;
+    bool enabled;
+    bool started;
+} direct_scl_measure_t;
+
+static esp_err_t direct_scl_measure_start(int gpio,
+                                          direct_scl_measure_t *measure)
+{
+    if (measure == NULL || gpio < 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *measure = (direct_scl_measure_t){0};
+
+    const pcnt_unit_config_t unit_config = {
+        .low_limit = -1,
+        .high_limit = 32767,
+        .intr_priority = 0,
+    };
+    esp_err_t err = pcnt_new_unit(&unit_config, &measure->unit);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    const pcnt_chan_config_t chan_config = {
+        .edge_gpio_num = gpio,
+        .level_gpio_num = -1,
+    };
+    err = pcnt_new_channel(measure->unit, &chan_config, &measure->channel);
+    if (err != ESP_OK) {
+        goto fail;
+    }
+
+    err = pcnt_channel_set_edge_action(
+        measure->channel, PCNT_CHANNEL_EDGE_ACTION_INCREASE,
+        PCNT_CHANNEL_EDGE_ACTION_HOLD);
+    if (err != ESP_OK) {
+        goto fail;
+    }
+    err = pcnt_channel_set_level_action(
+        measure->channel, PCNT_CHANNEL_LEVEL_ACTION_KEEP,
+        PCNT_CHANNEL_LEVEL_ACTION_KEEP);
+    if (err != ESP_OK) {
+        goto fail;
+    }
+    err = pcnt_unit_enable(measure->unit);
+    if (err != ESP_OK) {
+        goto fail;
+    }
+    measure->enabled = true;
+    err = pcnt_unit_clear_count(measure->unit);
+    if (err != ESP_OK) {
+        goto fail;
+    }
+    err = pcnt_unit_start(measure->unit);
+    if (err != ESP_OK) {
+        goto fail;
+    }
+    measure->started = true;
+    return ESP_OK;
+
+fail:
+    if (measure->started) {
+        (void)pcnt_unit_stop(measure->unit);
+    }
+    if (measure->enabled) {
+        (void)pcnt_unit_disable(measure->unit);
+    }
+    if (measure->channel != NULL) {
+        (void)pcnt_del_channel(measure->channel);
+    }
+    if (measure->unit != NULL) {
+        (void)pcnt_del_unit(measure->unit);
+    }
+    *measure = (direct_scl_measure_t){0};
+    return err;
+}
+
+static esp_err_t direct_scl_measure_stop(direct_scl_measure_t *measure,
+                                         uint32_t elapsed_us,
+                                         i2c_bus_service_direct_result_t *result)
+{
+    if (measure == NULL || measure->unit == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = ESP_OK;
+    if (measure->started) {
+        err = pcnt_unit_stop(measure->unit);
+        measure->started = false;
+    }
+
+    int count = 0;
+    const esp_err_t count_err = pcnt_unit_get_count(measure->unit, &count);
+    if (err == ESP_OK) {
+        err = count_err;
+    }
+
+    if (result != NULL) {
+        result->scl_measure_elapsed_us = elapsed_us;
+        result->scl_measure_edges = count > 0 ? (uint32_t)count : 0U;
+        if (elapsed_us > 0 && count > 0) {
+            result->scl_measure_hz =
+                (uint32_t)(((uint64_t)count * 1000000ULL +
+                            (elapsed_us / 2U)) /
+                           elapsed_us);
+        }
+    }
+
+    if (measure->enabled) {
+        const esp_err_t disable_err = pcnt_unit_disable(measure->unit);
+        if (err == ESP_OK) {
+            err = disable_err;
+        }
+        measure->enabled = false;
+    }
+    if (measure->channel != NULL) {
+        const esp_err_t channel_err = pcnt_del_channel(measure->channel);
+        if (err == ESP_OK) {
+            err = channel_err;
+        }
+        measure->channel = NULL;
+    }
+    if (measure->unit != NULL) {
+        const esp_err_t unit_err = pcnt_del_unit(measure->unit);
+        if (err == ESP_OK) {
+            err = unit_err;
+        }
+        measure->unit = NULL;
+    }
+    return err;
+}
+
 static void direct_set_timing(i2c_dev_t *hw,
                               const i2c_bus_service_direct_config_t *config,
                               uint32_t clock_hz)
@@ -510,6 +645,8 @@ esp_err_t i2c_bus_service_direct_read_reg(
 
     uint32_t int_raw = 0;
     uint32_t elapsed_us = 0;
+    esp_err_t measure_err = ESP_ERR_NOT_SUPPORTED;
+    direct_scl_measure_t scl_measure = {0};
     direct_prepare_controller(hw);
 
     if (config->hs_master_code) {
@@ -579,18 +716,28 @@ esp_err_t i2c_bus_service_direct_read_reg(
         i2c_ll_master_write_cmd_reg(hw, stop_cmd, 5);
     }
 
+    if (config->measure_scl_gpio >= 0) {
+        measure_err =
+            direct_scl_measure_start(config->measure_scl_gpio, &scl_measure);
+    }
+
     const int64_t start_us = esp_timer_get_time();
     i2c_ll_update(hw);
     i2c_ll_start_trans(hw);
     int_raw = direct_wait_raw(hw, start_us, timeout_us);
 
+    const int64_t elapsed_raw = esp_timer_get_time() - start_us;
+    elapsed_us = elapsed_raw > 0 ? (uint32_t)elapsed_raw : 0U;
+
+    if (scl_measure.unit != NULL) {
+        measure_err =
+            direct_scl_measure_stop(&scl_measure, elapsed_us, result);
+    }
+
     const uint32_t rx_count = hw->sr.rxfifo_cnt;
     if (rx_count >= data_len) {
         i2c_ll_read_rxfifo(hw, data, data_len);
     }
-
-    const int64_t elapsed_raw = esp_timer_get_time() - start_us;
-    elapsed_us = elapsed_raw > 0 ? (uint32_t)elapsed_raw : 0U;
 
     if ((int_raw & I2C_LL_INTR_MST_COMPLETE) != 0U &&
         rx_count >= data_len) {
@@ -610,6 +757,7 @@ cleanup:
         result->elapsed_us = elapsed_us;
         result->int_raw = int_raw;
         result->command_done_mask = direct_command_done_mask(hw);
+        result->scl_measure_error = measure_err;
     }
     i2c_ll_clear_intr_mask(hw, I2C_LL_INTR_MASK);
     hw->filter_cfg.val = saved_filter_cfg;
