@@ -81,6 +81,7 @@ TELEMETRY_STREAM_BNO085_ACCEL = 1
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
+DYNAMIC_TDOA_WINDOW_SEC = 1.5
 
 
 class CalibrationCancelled(RuntimeError):
@@ -919,10 +920,57 @@ class DashboardState:
                             float(pair[1].get("received_at") or 0.0),
                         ),
                     )
+                    latest_left_diff = float(latest_left["diff_m"])
+                    latest_right_diff = float(latest_right["diff_m"])
+                    latest_diff_m = (latest_left_diff - latest_right_diff) / 2.0
+                    latest_raw_diff_m = None
+                    latest_left_raw = float(latest_left.get("raw_diff_m") or math.nan)
+                    latest_right_raw = float(latest_right.get("raw_diff_m") or math.nan)
+                    if math.isfinite(latest_left_raw) and math.isfinite(latest_right_raw):
+                        latest_raw_diff_m = (
+                            latest_left_raw - latest_right_raw
+                        ) / 2.0
+                    matched_times = [
+                        float(sample.get("received_at") or 0.0)
+                        for pair in matched
+                        for sample in pair
+                    ]
                     received_at = max(
                         float(latest_left.get("received_at") or 0.0),
                         float(latest_right.get("received_at") or 0.0),
                     )
+                    dynamic_matched = [
+                        pair
+                        for pair in matched
+                        if now
+                        - max(
+                            float(pair[0].get("received_at") or 0.0),
+                            float(pair[1].get("received_at") or 0.0),
+                        )
+                        <= DYNAMIC_TDOA_WINDOW_SEC
+                    ]
+                    if not dynamic_matched:
+                        dynamic_matched = [(latest_left, latest_right)]
+                    dynamic_diffs: list[float] = []
+                    dynamic_raw_diffs: list[float] = []
+                    dynamic_reverse_sums: list[float] = []
+                    dynamic_times = [
+                        float(sample.get("received_at") or 0.0)
+                        for pair in dynamic_matched
+                        for sample in pair
+                    ]
+                    for left, right in dynamic_matched:
+                        left_diff = float(left["diff_m"])
+                        right_diff = float(right["diff_m"])
+                        dynamic_diffs.append((left_diff - right_diff) / 2.0)
+                        dynamic_reverse_sums.append(left_diff + right_diff)
+                        left_raw = float(left.get("raw_diff_m") or math.nan)
+                        right_raw = float(right.get("raw_diff_m") or math.nan)
+                        if math.isfinite(left_raw) and math.isfinite(right_raw):
+                            dynamic_raw_diffs.append((left_raw - right_raw) / 2.0)
+                    dynamic_diff_m = self.median_float(dynamic_diffs)
+                    dynamic_raw_diff_m = self.median_float(dynamic_raw_diffs)
+                    dynamic_reverse_sum_m = self.median_float(dynamic_reverse_sums)
                     paired_observations[
                         f"{tag_id}:{initiator_id}:{responder_id}"
                     ] = {
@@ -932,10 +980,27 @@ class DashboardState:
                         "seq": int(latest_left["seq"]),
                         "reverse_seq": int(latest_right["seq"]),
                         "diff_m": diff_m,
+                        "dynamic_diff_m": dynamic_diff_m
+                        if dynamic_diff_m is not None
+                        else latest_diff_m,
+                        "latest_diff_m": latest_diff_m,
                         "raw_diff_m": raw_diff_m
                         if raw_diff_m is not None
                         else float(latest_left["raw_diff_m"]),
+                        "dynamic_raw_diff_m": dynamic_raw_diff_m
+                        if dynamic_raw_diff_m is not None
+                        else (
+                            latest_raw_diff_m
+                            if latest_raw_diff_m is not None
+                            else float(latest_left["raw_diff_m"])
+                        ),
+                        "latest_raw_diff_m": latest_raw_diff_m
+                        if latest_raw_diff_m is not None
+                        else float(latest_left["raw_diff_m"]),
                         "reverse_sum_m": reverse_sum_m,
+                        "dynamic_reverse_sum_m": dynamic_reverse_sum_m
+                        if dynamic_reverse_sum_m is not None
+                        else float(latest_left["diff_m"]) + float(latest_right["diff_m"]),
                         "latest_reverse_sum_m": float(latest_left["diff_m"])
                         + float(latest_right["diff_m"]),
                         "agreement_m": agreement_m,
@@ -947,6 +1012,17 @@ class DashboardState:
                             latest_left["anchor_distance_m"]
                         ),
                         "age_sec": now - received_at,
+                        "history_span_sec": (
+                            max(matched_times) - min(matched_times)
+                            if matched_times
+                            else 0.0
+                        ),
+                        "dynamic_span_sec": (
+                            max(dynamic_times) - min(dynamic_times)
+                            if dynamic_times
+                            else 0.0
+                        ),
+                        "dynamic_samples": len(dynamic_matched),
                         "samples": len(matched),
                         "source_module_id": latest_left.get("source_module_id"),
                         "log_id": latest_left.get("log_id"),
@@ -2214,11 +2290,14 @@ tr.status-stale td { color: #4f3b1d; }
             <input id="positionTags" value="1">
             <label for="positionMaxAgeSec">Fresh age s</label>
             <input id="positionMaxAgeSec" value="3" type="number" min="0.2" step="0.1">
+            <label for="positionTdoaMode">TDOA filter</label>
+            <select id="positionTdoaMode"><option value="static" selected>Static median</option><option value="dynamic">Dynamic 1.5s median</option></select>
           </div>
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
             <div><b>Geometry</b><span>FlexTDOA uses live anchor-anchor ranges, so the anchors do not need to form a perfect square.</span></div>
+            <div><b>TDOA filter</b><span>Static uses the median of recent paired observations. Dynamic uses a short 1.5 s median and gives fresher, tighter rows more weight.</span></div>
           </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
@@ -3665,7 +3744,10 @@ function positionSettings() {
   const anchorIds = parseIdList(document.getElementById("positionAnchors")?.value, anchorCount);
   const tagIds = parseIdList(document.getElementById("positionTags")?.value);
   const maxAge = Math.max(0.2, Number(document.getElementById("positionMaxAgeSec")?.value || 3));
-  return {anchorCount, solver, anchorIds, tagIds, maxAge};
+  const tdoaMode = document.getElementById("positionTdoaMode")?.value === "dynamic"
+    ? "dynamic"
+    : "static";
+  return {anchorCount, solver, anchorIds, tagIds, maxAge, tdoaMode};
 }
 
 function selectedPositionModuleIds(settings = positionSettings()) {
@@ -3981,7 +4063,32 @@ function tdoaSequencesArePaired(left, right, pairCount) {
   return nearest > 0 && nearest <= pairCount;
 }
 
-function pairedTdoaObservations(tagId, anchorIds, maxAge) {
+function tdoaObservationForMode(item, mode) {
+  if (mode !== "dynamic") return {...item, tdoa_filter: "static"};
+  const dynamicDiff = Number(item.dynamic_diff_m);
+  const dynamicRawDiff = Number(item.dynamic_raw_diff_m);
+  const dynamicReverseSum = Number(item.dynamic_reverse_sum_m);
+  const latestDiff = Number(item.latest_diff_m);
+  const latestRawDiff = Number(item.latest_raw_diff_m);
+  const latestReverseSum = Number(item.latest_reverse_sum_m);
+  return {
+    ...item,
+    diff_m: Number.isFinite(dynamicDiff)
+      ? dynamicDiff
+      : (Number.isFinite(latestDiff) ? latestDiff : item.diff_m),
+    raw_diff_m: Number.isFinite(dynamicRawDiff)
+      ? dynamicRawDiff
+      : (Number.isFinite(latestRawDiff) ? latestRawDiff : item.raw_diff_m),
+    reverse_sum_m: Number.isFinite(dynamicReverseSum)
+      ? dynamicReverseSum
+      : (Number.isFinite(latestReverseSum)
+        ? latestReverseSum
+        : item.reverse_sum_m),
+    tdoa_filter: "dynamic",
+  };
+}
+
+function pairedTdoaObservations(tagId, anchorIds, maxAge, mode = "static") {
   const selected = new Set(anchorIds.map(Number));
   const serverPaired = Object.values(state.tdoa?.paired_observations || {})
     .filter(item =>
@@ -3993,7 +4100,9 @@ function pairedTdoaObservations(tagId, anchorIds, maxAge) {
     .sort((left, right) =>
       Number(left.initiator_id) - Number(right.initiator_id) ||
       Number(left.responder_id) - Number(right.responder_id));
-  if (serverPaired.length) return serverPaired;
+  if (serverPaired.length) {
+    return serverPaired.map(item => tdoaObservationForMode(item, mode));
+  }
 
   const fresh = freshTdoaObservations(tagId, anchorIds, maxAge);
   const byDirection = new Map(
@@ -4021,7 +4130,11 @@ function pairedTdoaObservations(tagId, anchorIds, maxAge) {
       initiator_id: a,
       responder_id: b,
       diff_m: (abDiff - baDiff) / 2,
+      latest_diff_m: (abDiff - baDiff) / 2,
       raw_diff_m: Number.isFinite(rawAbDiff) && Number.isFinite(rawBaDiff)
+        ? (rawAbDiff - rawBaDiff) / 2
+        : Number(ab.raw_diff_m),
+      latest_raw_diff_m: Number.isFinite(rawAbDiff) && Number.isFinite(rawBaDiff)
         ? (rawAbDiff - rawBaDiff) / 2
         : Number(ab.raw_diff_m),
       age_sec: age,
@@ -4030,6 +4143,7 @@ function pairedTdoaObservations(tagId, anchorIds, maxAge) {
       reverse_age_sec: ba.age_sec,
       reverse_diff_m: baDiff,
       reverse_sum_m: reverseSum,
+      latest_reverse_sum_m: reverseSum,
       seq_gap: Math.min(
         sequenceForwardDelta(ab.seq, ba.seq),
         sequenceForwardDelta(ba.seq, ab.seq)
@@ -4037,7 +4151,7 @@ function pairedTdoaObservations(tagId, anchorIds, maxAge) {
     });
   }
 
-  return paired.sort((left, right) =>
+  return paired.map(item => tdoaObservationForMode(item, mode)).sort((left, right) =>
     Number(left.initiator_id) - Number(right.initiator_id) ||
     Number(left.responder_id) - Number(right.responder_id));
 }
@@ -4049,6 +4163,9 @@ function solveTdoa(anchors, observations) {
       initiator: anchors[Number(item.initiator_id)],
       responder: anchors[Number(item.responder_id)],
       diff: Number(item.diff_m),
+      weight: Number.isFinite(Number(item.solve_weight))
+        ? Math.max(0.05, Number(item.solve_weight))
+        : 1,
     }))
     .filter(entry => entry.initiator && entry.responder && Number.isFinite(entry.diff));
   if (usable.length < 2) return null;
@@ -4072,11 +4189,12 @@ function solveTdoa(anchors, observations) {
       const residual = (dr - di) - entry.diff;
       const gx = (x - ar.x) / dr - (x - ai.x) / di;
       const gy = (y - ar.y) / dr - (y - ai.y) / di;
-      nxx += gx * gx;
-      nxy += gx * gy;
-      nyy += gy * gy;
-      rhsX += -gx * residual;
-      rhsY += -gy * residual;
+      const weight = entry.weight;
+      nxx += weight * gx * gx;
+      nxy += weight * gx * gy;
+      nyy += weight * gy * gy;
+      rhsX += -weight * gx * residual;
+      rhsY += -weight * gy * residual;
       used++;
     }
     if (used < 2) return null;
@@ -4114,22 +4232,52 @@ function tdoaObservationKey(item) {
 }
 
 function tdoaRmsForResiduals(residuals, observations) {
-  const values = (observations || [])
-    .map(item => Number(residuals?.[tdoaObservationKey(item)]))
-    .filter(value => Number.isFinite(value));
-  if (!values.length) return Infinity;
-  return Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length);
+  let weightedSum = 0;
+  let weightSum = 0;
+  for (const item of observations || []) {
+    const value = Number(residuals?.[tdoaObservationKey(item)]);
+    if (!Number.isFinite(value)) continue;
+    const weight = Number.isFinite(Number(item.solve_weight))
+      ? Math.max(0.05, Number(item.solve_weight))
+      : 1;
+    weightedSum += weight * value * value;
+    weightSum += weight;
+  }
+  if (weightSum <= 0) return Infinity;
+  return Math.sqrt(weightedSum / weightSum);
+}
+
+function tdoaSolveWeight(item, maxAge, mode) {
+  if (mode !== "dynamic") return 1;
+  const age = Math.max(0, Number(item.age_sec) || 0);
+  const horizon = Math.max(0.25, Number(maxAge) || 1);
+  const tau = Math.max(0.2, Math.min(0.7, horizon / 2));
+  const ageWeight = Math.exp(-age / tau);
+  const span = Math.max(
+    0,
+    Number(item.dynamic_span_sec ?? item.history_span_sec) || 0
+  );
+  const spanWeight = 1 / (1 + Math.max(0, span - 0.15) / 0.5);
+  return Math.max(0.1, Math.min(1, ageWeight * spanWeight));
 }
 
 function minTdoaObservationCount(anchorIds) {
   return Math.max(2, Math.min(3, Number(anchorIds?.length || 0) - 1));
 }
 
-function robustTdoaFit(anchorIds, anchors, observations) {
+function robustTdoaFit(anchorIds, anchors, observations, options = {}) {
   const all = (observations || []).filter(item =>
     anchors[Number(item.initiator_id)] &&
     anchors[Number(item.responder_id)] &&
-    Number.isFinite(Number(item.diff_m)));
+    Number.isFinite(Number(item.diff_m)))
+    .map(item => ({
+      ...item,
+      solve_weight: tdoaSolveWeight(
+        item,
+        options.maxAge,
+        options.tdoaMode || "static"
+      ),
+    }));
   const minCount = minTdoaObservationCount(anchorIds);
   const notes = new Map();
   if (all.length < minCount) {
@@ -4224,18 +4372,23 @@ function positionAccuracyFromRows(rows) {
   let hxx = 0;
   let hxy = 0;
   let hyy = 0;
+  let weightSum = 0;
   for (const row of usable) {
     const residual = Number(row.residual);
-    sse += residual * residual;
+    const weight = Number.isFinite(Number(row.weight))
+      ? Math.max(0.05, Number(row.weight))
+      : 1;
+    sse += weight * residual * residual;
+    weightSum += weight;
     maxAbs = Math.max(maxAbs, Math.abs(residual));
-    hxx += row.gx * row.gx;
-    hxy += row.gx * row.gy;
-    hyy += row.gy * row.gy;
+    hxx += weight * row.gx * row.gx;
+    hxy += weight * row.gx * row.gy;
+    hyy += weight * row.gy * row.gy;
   }
 
   const count = usable.length;
   const dof = Math.max(1, count - 2);
-  const rms = Math.sqrt(sse / count);
+  const rms = Math.sqrt(sse / Math.max(1e-6, weightSum));
   const variance = sse / dof;
   const inv = inverse2x2(hxx, hxy, hxy, hyy);
   let sigmaX = NaN;
@@ -4280,6 +4433,7 @@ function tdoaPositionAccuracy(position, anchors, observations, residuals) {
       residual,
       gx: (position.x - responder.x) / dr - (position.x - initiator.x) / di,
       gy: (position.y - responder.y) / dr - (position.y - initiator.y) / di,
+      weight: item.solve_weight,
     });
   }
   return positionAccuracyFromRows(rows);
@@ -4343,9 +4497,14 @@ function computePositionModel() {
       let residuals = {};
       let accuracy = null;
       if (settings.solver === "tdoa") {
-        observations = pairedTdoaObservations(tagId, settings.anchorIds, settings.maxAge)
+        observations = pairedTdoaObservations(
+          tagId,
+          settings.anchorIds,
+          settings.maxAge,
+          settings.tdoaMode
+        )
           .filter(item => anchors[Number(item.initiator_id)] && anchors[Number(item.responder_id)]);
-        const fit = robustTdoaFit(settings.anchorIds, anchors, observations);
+        const fit = robustTdoaFit(settings.anchorIds, anchors, observations, settings);
         position = fit.position;
         fitObservations = fit.used || [];
         observations = fit.annotated || observations.map(item => ({...item, used_in_fit: true, reject_reason: ""}));
@@ -4709,11 +4868,18 @@ function renderPositionReadout(model) {
         const agreementText = Number.isFinite(agreement) ? ` · agree ${fmtCmFromM(agreement, 1)} cm` : "";
         const blend = Number(item.blend_weight);
         const blendText = Number.isFinite(blend) ? ` · blend ${(blend * 100).toFixed(0)}%` : "";
+        const weight = Number(item.solve_weight);
+        const weightText = model.settings.tdoaMode === "dynamic" && Number.isFinite(weight)
+          ? ` · w ${(weight * 100).toFixed(0)}%`
+          : "";
+        const filterText = item.tdoa_filter === "dynamic"
+          ? ` · short n ${esc(item.dynamic_samples || item.samples || 1)}`
+          : "";
         const suspectText = item.suspect ? " · suspect" : "";
         const fusedText = Number(item.fused_count || 0) > 0 ? ` · fused ${esc(item.fused_count)}` : "";
         tdoaRows.push(`<tr class="${used ? "" : "position-skip"}">
           <td>T${esc(tag.tagId)}</td>
-          <td>A${esc(item.initiator_id)}↔A${esc(item.responder_id)}<br><span class="muted">seq ${esc(item.seq)}/${esc(item.reverse_seq)} · n ${esc(item.samples || 1)}${agreementText}${blendText}${fusedText}${suspectText} · ${esc(fitNote)}</span></td>
+          <td>A${esc(item.initiator_id)}↔A${esc(item.responder_id)}<br><span class="muted">seq ${esc(item.seq)}/${esc(item.reverse_seq)} · n ${esc(item.samples || 1)}${filterText}${agreementText}${blendText}${weightText}${fusedText}${suspectText} · ${esc(fitNote)}</span></td>
           <td>${fmtFixed(item.diff_m, 3)}</td>
           <td>${Number.isFinite(reverseSum) ? fmtCmFromM(reverseSum, 1) + " cm" : "-"}</td>
           <td class="${Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${fmtFixed(item.age_sec, 1)}s</td>
@@ -6784,18 +6950,20 @@ function mirrorRangingProfileToUwbFields(values) {
   }
 }
 
-function profileSummaryText(values) {
+function profileSummaryText(values, anchorCount = 4) {
   const flexResponseWindowMs = 3 * values.commandDelayMs;
   const classicProgrammedMs =
     values.respDelayMs + values.finalDelayMs + 2 * values.reportDelayMs;
   const marginMs = values.slotMs - flexResponseWindowMs;
-  const roundMs = 4 * values.slotMs + values.roundGapMs;
+  const pairCount = Math.max(1, anchorCount * (anchorCount - 1) / 2);
+  const roundMs = pairCount * values.slotMs + values.roundGapMs;
+  const bidirectionalMs = 2 * roundMs;
   const warnings = [];
   if (values.timeoutMs >= values.slotMs) warnings.push("timeout >= slot");
   if (values.rxSliceMs > values.slotMs) warnings.push("RX slice > slot");
   if (marginMs < 5) warnings.push("low slot margin");
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `4 anchors: ~${fmtFixed(roundMs, 0)} ms/round · Flex response window ${fmtFixed(flexResponseWindowMs, 0)} ms · classic DS-TWR ${fmtFixed(classicProgrammedMs, 0)} ms · margin ${fmtFixed(marginMs, 0)} ms${warnText}`;
+  return `${anchorCount} anchors: ${pairCount} pair slots · ~${fmtFixed(roundMs, 0)} ms/round · ~${fmtFixed(bidirectionalMs, 0)} ms bidir · Flex response window ${fmtFixed(flexResponseWindowMs, 0)} ms · classic DS-TWR ${fmtFixed(classicProgrammedMs, 0)} ms · margin ${fmtFixed(marginMs, 0)} ms${warnText}`;
 }
 
 function updateRangingProfileSummary(profileKey) {
@@ -6805,7 +6973,7 @@ function updateRangingProfileSummary(profileKey) {
   if (!summary) return;
   const values = readRangingProfile(profileKey);
   const valid = Object.values(values).every(value => Number.isFinite(value));
-  summary.textContent = valid ? profileSummaryText(values) : "incomplete profile";
+  summary.textContent = valid ? profileSummaryText(values, 4) : "incomplete profile";
   summary.className = `profile-summary ${valid && values.slotMs - (3 * values.commandDelayMs) < 5 ? "warn" : ""}`.trim();
 }
 
@@ -6838,7 +7006,7 @@ function persistedSettingIds() {
     "runtimeUwb", "runtimeBno085", "runtimeGps", "runtimeTelemetryPort",
     "accelTimebase", "accelSampleHz", "accelTargets",
     "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
-    "positionMaxAgeSec",
+    "positionMaxAgeSec", "positionTdoaMode",
     "uwbTargets", "uwbRadioChannel", "uwbSurveyRxMs", "uwbSurveyDelayMs", "uwbSurveySlotMs",
     "uwbSurveyGapMs", "uwbSurveyLogEvery", "uwbRangingSlotMs",
     "uwbRangingGapMs", "uwbRangingRxMs", "uwbDtInitiator", "uwbDtResponder",
@@ -6998,7 +7166,7 @@ function wireSettings() {
       renderAccelGraphs();
     });
   }
-  ["positionAnchorCount", "positionSolver", "positionAnchors", "positionTags", "positionMaxAgeSec"].forEach(id => {
+  ["positionAnchorCount", "positionSolver", "positionAnchors", "positionTags", "positionMaxAgeSec", "positionTdoaMode"].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("input", renderPosition);

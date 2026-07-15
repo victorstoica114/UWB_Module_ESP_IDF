@@ -629,6 +629,27 @@ can use the same measured anchor geometry for absolute tag-anchor ranges, but
 the blue distance circles only make sense for absolute ranges, not TDOA range
 differences.
 
+Dynamic solver replay, 2026-07-15:
+
+The position solver was replayed offline on a real dashboard capture with the
+tag moving and then held still. This isolates the PC-side solver/filtering from
+the radio protocol and firmware. Pure latest-sample solving was rejected because
+it follows motion sooner but produces visibly more jitter. The best current
+dynamic compromise is a short 1.5 s median window with per-observation weights
+for fresh, compact rows.
+
+| Solver filter | Median max observation age | Solutions | RMS median / p90 | Step p90 | Fixed-tail span / std | Read |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Static median, 3 s | `1.15 s` | `1062` | `4.93 / 6.87 cm` | `2.10 cm` | `7.65 / 1.37 cm` | Best stationary smoothing |
+| Dynamic median, 1.5 s | `0.62 s` | `1057` | `4.66 / 6.73 cm` | `1.64 cm` | `10.54 / 1.71 cm` | Current walking/default dynamic mode |
+| Dynamic median, 1.2 s | `0.51 s` | `1039` | `4.67 / 6.81 cm` | `2.17 cm` | `13.96 / 2.00 cm` | Fresher, but starts to jitter more |
+| Dynamic median, 1.0 s | `0.31 s` | `969` | `4.19 / 6.59 cm` | `4.51 cm` | `16.10 / 2.77 cm` | Too sparse for stable tracking |
+
+The dashboard exposes both `Static median` and `Dynamic 1.5s median`. Static is
+better for fixed-tag measurements and calibration sanity checks. Dynamic should
+be used for walking tests because it roughly halves observation age while keeping
+least-squares residuals in the same range.
+
 ### Time Units
 
 The DW3000 uses several time units:
