@@ -416,7 +416,7 @@ Slot-order scenarios for four anchors:
 | --- | --- | ---: | ---: | --- |
 | Previous round-reverse | `2->3, 2->4, 2->5, 3->4, 3->5, 4->5`, then all reversed next round | `6 * slot + gap` | `12 * slot + 2 * gap` | Good for sweeping all pairs, but each paired TDOA observation mixes directions separated by most of a round. |
 | Current adjacent pair round-trip | `2->3, 3->2, 2->4, 4->2, ...` | `1 * slot` | `12 * slot + gap` | Same number of directed DS-TWR slots, but each pair gets its reverse immediately. Better candidate for moving tags. |
-| Classic FlexTDOA-style multi-response | one request, `K` responders in subslots | one request slot | depends on `K` and subslot timing | Faster and closer to the paper, but would require a protocol change because our stable geometry currently comes from full DS-TWR per pair. |
+| Classic FlexTDOA-style multi-response | one request, `K` responders in subslots | one request slot | for `K=3`, about `5.05 ms` per initiator slot using the paper timing | Faster and closer to the paper, but would require a protocol change because our stable geometry currently comes from full DS-TWR per pair. |
 
 For the current profiles, the adjacent experiment changes the reverse
 separation like this compared with the previous order:
@@ -440,6 +440,23 @@ implementation uses shorter request/response subslots (`250 us` guard,
 request/response subslots on the order of microseconds to a few milliseconds).
 Our current protocol is deliberately heavier because each directed pair carries
 full DS-TWR plus `REPORT2`, but the scheduling idea is compatible.
+
+Using the paper's timing formula,
+
+```text
+t_slot = guard + request_subslot + process
+       + K * response_subslot + K * response_process
+       = 250 us + 2000 us + 250 us + K * 250 us + K * 600 us
+```
+
+a four-anchor passive-tag setup with one initiator and the other three anchors
+as responders would have `K = 3`, so one classic FlexTDOA slot would be roughly
+`5.05 ms`. A full four-initiator changing-initiator cycle would be roughly
+`20.2 ms` before extra idle time. That is the long-term speed target if we
+decide to move closer to the paper. The trade-off is that the anchor-anchor
+geometry would no longer come from the complete DS-TWR exchange we have already
+validated as stable, so this should be treated as a separate protocol step, not
+as a small optimization of the current DS-TWR-based FlexTDOA runtime.
 
 Likely next steps:
 
