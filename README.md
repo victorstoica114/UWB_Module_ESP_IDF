@@ -400,8 +400,9 @@ known physical value. The FlexTDOA run used the short `REQ/RESP` anchor
 measurement. `sample` is the unfiltered corrected single-shot value from the log,
 while `median9` is the firmware rolling median sent as the cached anchor
 distance. The DS-TWR run used `APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY`, which performs
-the full `POLL/RESP/FINAL/REPORT/REPORT2` exchange and had no extra filter in
-the comparison window.
+the full `POLL/RESP/FINAL/REPORT/REPORT2` exchange. The `DS-TWR median9` rows
+apply the same 9-sample rolling median offline to the raw DS-TWR stream, so the
+table compares both raw-to-raw and median-to-median behavior.
 
 | Protocol/value | Pair | n | avg cm | median cm | min cm | max cm | std cm | span cm |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -417,15 +418,22 @@ the comparison window.
 | FlexTDOA `median9` | 3-4 | 257 | 829.4 | 829.4 | 827.8 | 832.5 | 0.3 | 4.7 |
 | FlexTDOA `median9` | 3-5 | 274 | 732.5 | 732.5 | 713.0 | 745.1 | 2.7 | 32.1 |
 | FlexTDOA `median9` | 4-5 | 275 | 551.2 | 551.1 | 528.5 | 559.5 | 2.2 | 31.0 |
-| DS-TWR survey raw | 2-3 | 98 | 549.4 | 549.4 | 548.2 | 551.7 | 0.6 | 3.5 |
-| DS-TWR survey raw | 2-4 | 98 | 564.3 | 564.3 | 560.0 | 568.6 | 1.6 | 8.6 |
-| DS-TWR survey raw | 2-5 | 98 | 867.4 | 867.1 | 861.5 | 874.3 | 2.3 | 12.8 |
-| DS-TWR survey raw | 3-4 | 98 | 830.8 | 830.8 | 828.4 | 832.7 | 0.8 | 4.3 |
-| DS-TWR survey raw | 3-5 | 98 | 737.0 | 737.2 | 732.9 | 740.4 | 1.4 | 7.5 |
-| DS-TWR survey raw | 4-5 | 80 | 551.2 | 551.1 | 547.4 | 555.1 | 1.8 | 7.7 |
+| DS-TWR survey raw | 2-3 | 98 | 549.4 | 549.4 | 547.5 | 551.1 | 0.8 | 3.6 |
+| DS-TWR survey raw | 2-4 | 98 | 564.2 | 564.2 | 560.3 | 567.1 | 1.5 | 6.8 |
+| DS-TWR survey raw | 2-5 | 99 | 867.5 | 867.2 | 862.9 | 872.3 | 2.1 | 9.4 |
+| DS-TWR survey raw | 3-4 | 98 | 830.7 | 830.8 | 829.1 | 832.7 | 0.7 | 3.6 |
+| DS-TWR survey raw | 3-5 | 99 | 737.1 | 737.3 | 732.8 | 740.1 | 1.5 | 7.3 |
+| DS-TWR survey raw | 4-5 | 78 | 551.6 | 551.7 | 548.1 | 554.6 | 1.5 | 6.5 |
+| DS-TWR `median9` | 2-3 | 98 | 549.4 | 549.4 | 548.3 | 550.4 | 0.4 | 2.1 |
+| DS-TWR `median9` | 2-4 | 98 | 564.2 | 564.1 | 562.3 | 565.8 | 0.7 | 3.5 |
+| DS-TWR `median9` | 2-5 | 99 | 867.3 | 867.4 | 864.8 | 868.8 | 0.9 | 4.0 |
+| DS-TWR `median9` | 3-4 | 98 | 830.7 | 830.8 | 830.0 | 831.2 | 0.3 | 1.2 |
+| DS-TWR `median9` | 3-5 | 99 | 737.3 | 737.4 | 735.3 | 738.7 | 0.5 | 3.4 |
+| DS-TWR `median9` | 4-5 | 78 | 551.7 | 551.7 | 550.4 | 552.8 | 0.5 | 2.4 |
 
 The conclusion is useful: the full DS-TWR anchor-anchor exchange is already
-stable raw, roughly `0.6-2.3 cm` standard deviation in this run. The short
+stable raw, roughly `0.7-2.1 cm` standard deviation in this run, and the same
+9-sample median brings it to roughly `0.3-0.9 cm`. The short
 FlexTDOA anchor measurement is much noisier raw, roughly `14.5-21.1 cm`
 standard deviation, but a 9-sample rolling median brings the cached geometry
 back to roughly `0.3-2.7 cm`. That means the older hybrid looked more stable
