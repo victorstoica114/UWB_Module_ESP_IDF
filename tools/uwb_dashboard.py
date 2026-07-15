@@ -7356,14 +7356,14 @@ function profileSummaryText(values, anchorCount = 4) {
     values.respDelayMs + values.finalDelayMs + 2 * values.reportDelayMs;
   const marginMs = values.slotMs - programmedDsTwrMs;
   const pairCount = Math.max(1, anchorCount * (anchorCount - 1) / 2);
-  const roundMs = pairCount * values.slotMs + values.roundGapMs;
-  const bidirectionalMs = 2 * roundMs;
+  const directedSlotCount = pairCount * 2;
+  const cycleMs = directedSlotCount * values.slotMs + values.roundGapMs;
   const warnings = [];
   if (values.timeoutMs >= values.slotMs) warnings.push("timeout >= slot");
   if (values.rxSliceMs > values.slotMs) warnings.push("RX slice > slot");
   if (marginMs < 5) warnings.push("low slot margin");
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `${anchorCount} anchors: ${pairCount} pair slots · ~${fmtFixed(roundMs, 0)} ms/round · ~${fmtFixed(bidirectionalMs, 0)} ms bidir · programmed FlexTDOA ${fmtFixed(programmedDsTwrMs, 0)} ms · DS-TWR body ${fmtFixed(classicProgrammedMs, 0)} ms · margin ${fmtFixed(marginMs, 0)} ms${warnText}`;
+  return `${anchorCount} anchors: ${directedSlotCount} directed slots · reverse after ~${fmtFixed(values.slotMs, 0)} ms · ~${fmtFixed(cycleMs, 0)} ms/cycle · programmed FlexTDOA ${fmtFixed(programmedDsTwrMs, 0)} ms · DS-TWR body ${fmtFixed(classicProgrammedMs, 0)} ms · margin ${fmtFixed(marginMs, 0)} ms${warnText}`;
 }
 
 function profileProgrammedDsTwrMs(values) {

@@ -308,13 +308,14 @@ frames, records its own RX timestamps, and sends compact range-difference logs t
 the dashboard.
 
 The coordinator is the first configured anchor ID. In every round, the anchors
-walk all unordered anchor pairs. The direction reverses on alternating rounds,
-so both `Ai -> Aj` and `Aj -> Ai` are observed over time. With anchors
+walk all unordered anchor pairs as adjacent directed round-trips. With anchors
 `2,3,4,5`, the pair order is:
 
 ```text
-round 0: A2->A3, A2->A4, A2->A5, A3->A4, A3->A5, A4->A5
-round 1: A3->A2, A4->A2, A5->A2, A4->A3, A5->A3, A5->A4
+round 0: A2->A3, A3->A2, A2->A4, A4->A2, A2->A5, A5->A2,
+         A3->A4, A4->A3, A3->A5, A5->A3, A4->A5, A5->A4
+round 1: A3->A2, A2->A3, A4->A2, A2->A4, A5->A2, A2->A5,
+         A4->A3, A3->A4, A5->A3, A3->A5, A5->A4, A4->A5
 ...
 ```
 
@@ -341,14 +342,14 @@ During the short-slot lab tests, the active FlexTDOA timing config was:
 | Parameter | Value | Meaning |
 | --- | ---: | --- |
 | `anchor_survey_slot_ms` | `100 ms` | Time budget for one directed DS-TWR anchor-pair slot. |
-| `anchor_survey_round_gap_ms` | `10 ms` | Quiet gap after all anchor-pair slots in one round. |
+| `anchor_survey_round_gap_ms` | `10 ms` | Quiet gap after all directed anchor-pair slots in one cycle. |
 | `anchor_survey_command_delay_ms` | `10 ms` | Delay after a coordinator command before a follower starts DS-TWR. |
 | `anchor_survey_rx_slice_ms` | `100 ms` | Listen window used by followers/tag while waiting for UWB frames. |
 
-With four anchors this gives:
+With four anchors this gives one full directed cycle:
 
 ```text
-one round = 6 pair slots * 100 ms + 10 ms round gap ~= 610 ms
+one cycle = 12 directed slots * 100 ms + 10 ms round gap ~= 1210 ms
 ```
 
 For a slot where the coordinator is not the pair initiator, for example
@@ -395,31 +396,65 @@ The coordinator command path also uses `anchor_survey_command_delay_ms` as a
 software wait on the commanded initiator. These are the first places to optimize
 after reducing the configured delays.
 
-The dashboard timing profiles currently mean:
+The dashboard timing profiles currently mean, with adjacent pair round-trip
+scheduling:
 
-| Profile | slot | round gap | command | RESP | FINAL | REPORT/REPORT2 | programmed slot work | 4-anchor round | paired update |
+| Profile | slot | round gap | command | RESP | FINAL | REPORT/REPORT2 | programmed slot work | reverse separation | full directed cycle |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Stable Baseline | `100 ms` | `10 ms` | `10 ms` | `20 ms` | `20 ms` | `10 ms` | `70 ms` | `610 ms` | `1220 ms` |
-| Safe Fast | `60 ms` | `10 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `45 ms` | `370 ms` | `740 ms` |
-| Balanced | `50 ms` | `10 ms` | `5 ms` | `10 ms` | `10 ms` | `5 ms` | `35 ms` | `310 ms` | `620 ms` |
-| Aggressive | `40 ms` | `10 ms` | `3 ms` | `7 ms` | `7 ms` | `3 ms` | `23 ms` | `250 ms` | `500 ms` |
+| Stable Baseline | `100 ms` | `10 ms` | `10 ms` | `20 ms` | `20 ms` | `10 ms` | `70 ms` | `100 ms` | `1210 ms` |
+| Safe Fast | `60 ms` | `10 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `45 ms` | `60 ms` | `730 ms` |
+| Balanced | `50 ms` | `10 ms` | `5 ms` | `10 ms` | `10 ms` | `5 ms` | `35 ms` | `50 ms` | `610 ms` |
+| Aggressive | `40 ms` | `10 ms` | `3 ms` | `7 ms` | `7 ms` | `3 ms` | `23 ms` | `40 ms` | `490 ms` |
 
-`paired update` is two rounds because the direction reverses on alternating
-rounds. The dashboard can still solve from the latest paired observations, but
-motion tests should treat this as the effective bidirectional observation age.
+`reverse separation` is the time between `Ai->Aj` and `Aj->Ai` for one pair.
+`full directed cycle` is the time until all six anchor pairs have been measured
+in both directions once.
+
+Slot-order scenarios for four anchors:
+
+| Scenario | Directed slot order | Pair reverse separation | Full directed cycle | Read |
+| --- | --- | ---: | ---: | --- |
+| Previous round-reverse | `2->3, 2->4, 2->5, 3->4, 3->5, 4->5`, then all reversed next round | `6 * slot + gap` | `12 * slot + 2 * gap` | Good for sweeping all pairs, but each paired TDOA observation mixes directions separated by most of a round. |
+| Current adjacent pair round-trip | `2->3, 3->2, 2->4, 4->2, ...` | `1 * slot` | `12 * slot + gap` | Same number of directed DS-TWR slots, but each pair gets its reverse immediately. Better candidate for moving tags. |
+| Classic FlexTDOA-style multi-response | one request, `K` responders in subslots | one request slot | depends on `K` and subslot timing | Faster and closer to the paper, but would require a protocol change because our stable geometry currently comes from full DS-TWR per pair. |
+
+For the current profiles, the adjacent experiment changes the reverse
+separation like this compared with the previous order:
+
+| Profile | current reverse separation | adjacent reverse separation | full directed cycle, current | full directed cycle, adjacent |
+| --- | ---: | ---: | ---: | ---: |
+| Stable Baseline | `610 ms` | `100 ms` | `1220 ms` | `1210 ms` |
+| Safe Fast | `370 ms` | `60 ms` | `740 ms` | `730 ms` |
+| Balanced | `310 ms` | `50 ms` | `620 ms` | `610 ms` |
+| Aggressive | `250 ms` | `40 ms` | `500 ms` | `490 ms` |
+
+This is attractive because it does not increase channel usage. It only changes
+the slot order, so every pair sees `Ai->Aj` and `Aj->Ai` while the tag is in
+almost the same physical position. That should reduce dynamic error without
+giving up the full DS-TWR anchor-anchor geometry.
+
+The FlexTDOA paper also points in this direction at the scheduling level: its
+TDMA frame assigns slots to initiators, allows the initiator and responder order
+to change, and evaluates changing-initiator/changing-responder schedules. Their
+implementation uses shorter request/response subslots (`250 us` guard,
+request/response subslots on the order of microseconds to a few milliseconds).
+Our current protocol is deliberately heavier because each directed pair carries
+full DS-TWR plus `REPORT2`, but the scheduling idea is compatible.
 
 Likely next steps:
 
 1. Validate the existing `Safe Fast`, `Balanced`, and `Aggressive` profiles on
    hardware and log per-pair timeout/fail rates.
-2. Reduce `RESP` and `FINAL` delayed-TX delays first, because they dominate the
+2. Validate the adjacent pair round-trip ordering on hardware. It should reduce
+   paired-observation age for moving tags with minimal risk.
+3. Reduce `RESP` and `FINAL` delayed-TX delays first, because they dominate the
    DS-TWR body and are controlled by the DW3000 timestamp engine.
-3. Convert `REPORT`/`REPORT2` waits to delayed TX or a tighter state-machine
+4. Convert `REPORT`/`REPORT2` waits to delayed TX or a tighter state-machine
    path if software delay jitter becomes visible.
-4. Replace follower `command_delay_ms` with a scheduled `POLL` delayed-TX based
+5. Replace follower `command_delay_ms` with a scheduled `POLL` delayed-TX based
    on command RX time. That would make commanded slots deterministic like the
    calibration slots and remove one FreeRTOS delay from the hot path.
-5. Keep the full DS-TWR anchor-anchor measurement for geometry. The clean
+6. Keep the full DS-TWR anchor-anchor measurement for geometry. The clean
    FlexTDOA prototype was faster, but the raw anchor geometry was much noisier;
    full DS-TWR plus median filtering is the stable base for the passive tag.
 
@@ -721,6 +756,18 @@ is rejected, the displayed point is predicted briefly instead of jumping to a
 bad measurement. The filter automatically raises process noise when the tag
 appears to move and settles back toward a static mode when speed and innovation
 drop.
+
+Walking-test note, 2026-07-16:
+
+During a handheld walk with the tag, the fixed-point tail after the walk settled
+near `x ~= 3.43 m`, `y ~= 3.11 m`. The last stationary segment had all `6/6`
+paired observations fresh, `reverse_sum` usually below `11 cm`, residual RMS
+around `4-10 cm`, and a short-window position span around `6.5-7.6 cm`.
+During motion, the raw least-squares solution still produced large jumps when
+only `3/6` or `4/6` usable observations remained, or when `reverse_sum` climbed
+above roughly `1 m`. This supports two follow-up changes: stricter observation
+gating before the solver, and adjacent pair round-trip scheduling so paired
+directions are observed while the tag is closer to the same physical position.
 
 ### Time Units
 

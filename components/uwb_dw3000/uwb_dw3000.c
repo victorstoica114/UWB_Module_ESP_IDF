@@ -4388,50 +4388,52 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t coordinator_id,
     uint32_t round = 0;
 
     ESP_LOGI(TAG,
-             "FLEX_TDOA coordinator active: source_id=%u anchor_count=%u pairs=%u slot=%u ms round_gap=%u ms",
+             "FLEX_TDOA coordinator active: source_id=%u anchor_count=%u pairs=%u directed_slots=%u slot=%u ms round_gap=%u ms",
              (unsigned)s_source_id, (unsigned)anchor_count,
-             (unsigned)pair_count,
+             (unsigned)pair_count, (unsigned)(pair_count * 2U),
              (unsigned)config->anchor_survey_slot_ms,
              (unsigned)config->anchor_survey_round_gap_ms);
 
     while (true) {
         ESP_LOGI(TAG, "FLEX_TDOA round=%lu start", (unsigned long)round);
         for (size_t i = 0; i < pair_count; ++i) {
-            config = app_runtime_config_get();
-            const uint8_t slot_index = (uint8_t)i;
-            struct uwb_anchor_survey_pair pair = pairs[i];
-            if ((round & 1UL) != 0UL) {
-                const uint8_t tmp = pair.initiator_id;
-                pair.initiator_id = pair.responder_id;
-                pair.responder_id = tmp;
-            }
-            const TickType_t slot_end =
-                xTaskGetTickCount() +
-                pdMS_TO_TICKS(config->anchor_survey_slot_ms);
-            const uint16_t slot_sequence = sequence++;
-
-            if (pair.initiator_id == s_source_id) {
-                ESP_LOGI(TAG,
-                         "FLEX_TDOA local DS-TWR slot=%u seq=%u pair=%u-%u",
-                         (unsigned)slot_index, (unsigned)slot_sequence,
-                         (unsigned)pair.initiator_id,
-                         (unsigned)pair.responder_id);
-                const esp_err_t err = uwb_distance_initiate_once(
-                    pair.responder_id, slot_sequence, false);
-                if (err != ESP_OK) {
-                    ESP_LOGW(TAG,
-                             "FLEX_TDOA local DS-TWR pair=%u-%u seq=%u failed: %s",
-                             (unsigned)pair.initiator_id,
-                             (unsigned)pair.responder_id,
-                             (unsigned)slot_sequence, esp_err_to_name(err));
+            for (size_t direction = 0; direction < 2U; ++direction) {
+                config = app_runtime_config_get();
+                const uint8_t slot_index = (uint8_t)((i * 2U) + direction);
+                struct uwb_anchor_survey_pair pair = pairs[i];
+                if (((round + direction) & 1UL) != 0UL) {
+                    const uint8_t tmp = pair.initiator_id;
+                    pair.initiator_id = pair.responder_id;
+                    pair.responder_id = tmp;
                 }
-            } else {
-                (void)uwb_flex_tdoa_send_command(&pair, slot_index, round,
-                                                  slot_sequence);
-            }
+                const TickType_t slot_end =
+                    xTaskGetTickCount() +
+                    pdMS_TO_TICKS(config->anchor_survey_slot_ms);
+                const uint16_t slot_sequence = sequence++;
 
-            uwb_flex_tdoa_listen_until(slot_end, coordinator_id, anchor_ids,
-                                         anchor_count);
+                if (pair.initiator_id == s_source_id) {
+                    ESP_LOGI(TAG,
+                             "FLEX_TDOA local DS-TWR slot=%u seq=%u pair=%u-%u",
+                             (unsigned)slot_index, (unsigned)slot_sequence,
+                             (unsigned)pair.initiator_id,
+                             (unsigned)pair.responder_id);
+                    const esp_err_t err = uwb_distance_initiate_once(
+                        pair.responder_id, slot_sequence, false);
+                    if (err != ESP_OK) {
+                        ESP_LOGW(TAG,
+                                 "FLEX_TDOA local DS-TWR pair=%u-%u seq=%u failed: %s",
+                                 (unsigned)pair.initiator_id,
+                                 (unsigned)pair.responder_id,
+                                 (unsigned)slot_sequence, esp_err_to_name(err));
+                    }
+                } else {
+                    (void)uwb_flex_tdoa_send_command(&pair, slot_index, round,
+                                                      slot_sequence);
+                }
+
+                uwb_flex_tdoa_listen_until(slot_end, coordinator_id,
+                                           anchor_ids, anchor_count);
+            }
         }
 
         round++;
