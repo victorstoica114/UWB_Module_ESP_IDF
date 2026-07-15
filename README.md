@@ -574,6 +574,30 @@ least-squares residual. For now the dual-leg path is worth keeping because it
 exposes bad/multipath-like observations directly instead of letting a
 directional bias hide inside the solver.
 
+Guarded dual-leg validation, 2026-07-15:
+
+After the comparison above, the firmware was changed to use a guarded 50/50
+dual-leg average when `primary` and `alt` agree within `0.75 m`, and to fall
+back to the classic `primary` estimate when they do not. The table below uses
+the same `715fee2` log capture and recomputes both variants offline, so the
+numbers compare math only, not different room layouts.
+
+| Metric | `primary_classic` from same logs | `guarded_dual_50` `715fee2` | Read |
+| --- | ---: | ---: | --- |
+| Passive observations | `681` | `681` | Same capture |
+| Fused observations | n/a | `678 / 681` (`99.6%`) | Almost all slots had both legs |
+| Suspect observations | n/a | `3 / 681` (`0.4%`) | Hard disagreements are rare |
+| `primary` vs `alt` agreement, median | n/a | `21.8 cm` | Quality signal remains useful |
+| Paired reverse sum, median | `-23.0 cm` | `0.45 cm` | Dual-leg removes the directional bias |
+| Paired reverse sum, p90 abs | `35.9 cm` | `9.21 cm` | Worst normal rows are much tighter |
+| Solved tag X std / span | `1.72 cm` / `9.98 cm` | `1.60 cm` / `9.57 cm` | Slightly better |
+| Solved tag Y std / span | `1.21 cm` / `8.52 cm` | `1.04 cm` / `5.98 cm` | Better |
+| Solver residual RMS, median | `14.91 cm` | `7.77 cm` | Roughly half in this geometry |
+
+This is the current practical hybrid: full DS-TWR is kept for anchor-anchor
+geometry, while the radio-passive tag uses both DS-TWR legs as a consistency
+check and as a fused range-difference measurement.
+
 The passive tag keeps a small clock-offset filter per responder anchor. The raw
 DW3000 carrier-integrator clock ratio is useful but noisy enough that applying a
 single instantaneous value adds visible jitter to `diff`. The firmware therefore
