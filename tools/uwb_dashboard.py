@@ -1610,6 +1610,15 @@ th { color: var(--muted); font-weight: 700; }
 .resource-meter.psram .resource-bar-fill {
   background: linear-gradient(90deg, #2f6fe4, #6aa0f5);
 }
+.resource-meter.cpu0 .resource-bar-fill {
+  background: linear-gradient(90deg, #7a56d9, #9d7cf0);
+}
+.resource-meter.cpu1 .resource-bar-fill {
+  background: linear-gradient(90deg, #b35b00, #df8a28);
+}
+.resource-meter.temp .resource-bar-fill {
+  background: linear-gradient(90deg, #138a4b, #d08a00 62%, #c43a31);
+}
 .resource-meter-foot {
   margin-top: 2px;
   color: var(--muted);
@@ -5018,7 +5027,7 @@ function renderResourceCell(item) {
   if (!item || !item.resource_monitor_running) {
     return `<span class="muted">not available</span>`;
   }
-  const meter = (kind, label, freeValue, totalValue, minFreeValue, largestValue) => {
+  const memoryMeter = (kind, label, freeValue, totalValue, minFreeValue, largestValue) => {
     const free = Number(freeValue);
     const total = Number(totalValue);
     const minFree = Number(minFreeValue);
@@ -5052,17 +5061,67 @@ function renderResourceCell(item) {
         <div class="resource-meter-foot">${usedPercent.toFixed(0)}% used · ${freePercent.toFixed(0)}% free · ${minText} · ${largestText}</div>
       </div>`;
   };
-  const cpu = item.resource_cpu_load_valid
-    ? `C0 ${fmtPercent(item.resource_core0_load_percent)} / C1 ${fmtPercent(item.resource_core1_load_percent)}`
-    : "CPU warming up";
-  const temp = item.resource_temperature_valid
-    ? `${fmtMaybeNumber(item.resource_temperature_c, 1)} C`
-    : `temp ${item.resource_temperature_error_name || "-"}`;
+  const percentMeter = (kind, label, value, valid, foot = "") => {
+    const percent = Number(value);
+    if (!valid || !Number.isFinite(percent)) {
+      return `
+        <div class="resource-meter ${kind}">
+          <div class="resource-meter-head">
+            <span class="resource-meter-name">${esc(label)}</span>
+            <span class="resource-meter-value">warming up</span>
+          </div>
+          <div class="resource-bar"><div class="resource-bar-fill" style="width:0%"></div></div>
+        </div>`;
+    }
+    const clamped = clampPercent(percent);
+    const footText = foot ? ` · ${foot}` : "";
+    return `
+      <div class="resource-meter ${kind}" title="${esc(label)} load ${percent.toFixed(1)}%">
+        <div class="resource-meter-head">
+          <span class="resource-meter-name">${esc(label)}</span>
+          <span class="resource-meter-value">${percent.toFixed(1)}%</span>
+        </div>
+        <div class="resource-bar" aria-label="${esc(label)} ${percent.toFixed(1)} percent load">
+          <div class="resource-bar-fill" style="width:${clamped.toFixed(1)}%"></div>
+        </div>
+        <div class="resource-meter-foot">${clamped.toFixed(0)}% load${esc(footText)}</div>
+      </div>`;
+  };
+  const tempMeter = () => {
+    const temp = Number(item.resource_temperature_c);
+    if (!item.resource_temperature_valid || !Number.isFinite(temp)) {
+      return `
+        <div class="resource-meter temp">
+          <div class="resource-meter-head">
+            <span class="resource-meter-name">ESP temp</span>
+            <span class="resource-meter-value">${esc(item.resource_temperature_error_name || "not available")}</span>
+          </div>
+          <div class="resource-bar"><div class="resource-bar-fill" style="width:0%"></div></div>
+        </div>`;
+    }
+    const minTemp = 20;
+    const maxTemp = 80;
+    const tempPercent = clampPercent(((temp - minTemp) * 100) / (maxTemp - minTemp));
+    return `
+      <div class="resource-meter temp" title="ESP internal temperature ${temp.toFixed(1)} C">
+        <div class="resource-meter-head">
+          <span class="resource-meter-name">ESP temp</span>
+          <span class="resource-meter-value">${temp.toFixed(1)} C</span>
+        </div>
+        <div class="resource-bar" aria-label="ESP temperature ${temp.toFixed(1)} C">
+          <div class="resource-bar-fill" style="width:${tempPercent.toFixed(1)}%"></div>
+        </div>
+        <div class="resource-meter-foot">scale ${minTemp}-${maxTemp} C · ${tempPercent.toFixed(0)}%</div>
+      </div>`;
+  };
   return `
     <div class="resource-cell">
-      ${meter("internal", "RAM", item.resource_internal_free_bytes, item.resource_internal_total_bytes, item.resource_internal_min_free_bytes, item.resource_internal_largest_free_block_bytes)}
-      ${meter("psram", "PSRAM", item.resource_psram_free_bytes, item.resource_psram_total_bytes, item.resource_psram_min_free_bytes, item.resource_psram_largest_free_block_bytes)}
-      <div class="resource-meta">${esc(cpu)} · ESP ${esc(temp)} · age ${fmtAgeMs(item.resource_last_update_age_ms)}</div>
+      ${memoryMeter("internal", "RAM", item.resource_internal_free_bytes, item.resource_internal_total_bytes, item.resource_internal_min_free_bytes, item.resource_internal_largest_free_block_bytes)}
+      ${memoryMeter("psram", "PSRAM", item.resource_psram_free_bytes, item.resource_psram_total_bytes, item.resource_psram_min_free_bytes, item.resource_psram_largest_free_block_bytes)}
+      ${percentMeter("cpu0", "CORE0", item.resource_core0_load_percent, item.resource_cpu_load_valid)}
+      ${percentMeter("cpu1", "CORE1", item.resource_core1_load_percent, item.resource_cpu_load_valid)}
+      ${tempMeter()}
+      <div class="resource-meta">age ${fmtAgeMs(item.resource_last_update_age_ms)}</div>
     </div>`;
 }
 
