@@ -1480,14 +1480,14 @@ changing the I2C pull-ups to `1k`, the validated direct profile is
 direct transaction and about `2 MHz` observed on SCL. Direct writes are limited
 to `30` data bytes per transaction because the ESP32-S3 I2C FIFO is `32` bytes
 and must also hold the I2C address byte and starting register. AP commands are
-therefore written as `0x21..0x3E`, verified by read-back, then `0x3F..0x40`,
-verified by read-back, and finally `0x41` as the latch byte. MAX77958 latches
-the command when `AP_DATAOUT32` (`0x41`) is written, so that final byte can only
-be read back after the command is handed to the USBC block. Direct-HS reads
-default to single-byte transactions because that is the read form validated on
-M1 with zero direct errors; longer read bursts remain configurable through
-`APP_MAX77958_I2C_HS_DIRECT_READ_CHUNK_BYTES` for future oscilloscope-guided
-testing.
+therefore written as `0x21..0x3E` followed by `0x3F..0x41`; MAX77958 latches the
+command when `AP_DATAOUT32` (`0x41`) is written. Runtime AP writes do not do
+read-back verification, because that path was validated during M1 bring-up and
+the normal firmware should keep the shared I2C bus free for the BNO085.
+Direct-HS reads default to single-byte transactions because that is the read
+form validated on M1 with zero direct errors; longer read bursts remain
+configurable through `APP_MAX77958_I2C_HS_DIRECT_READ_CHUNK_BYTES` for future
+oscilloscope-guided testing.
 
 `/status` exposes both decoded fields and a raw register map:
 `pd_raw_hex`, device/FW IDs, interrupt/status/mask registers, VBUS ADC range,
