@@ -242,6 +242,17 @@ def print_summary(host: str, status: dict, raw: bytes) -> None:
         )
     )
     print(
+        "termination: EN_TERM={term} ITERM={iterm}mA "
+        "VRECHG_offset={vrechg}mV threshold={threshold}mV "
+        "TRECHG={trechg}ms".format(
+            term=status.get("charger_termination_enabled"),
+            iterm=status.get("charger_termination_current_ma"),
+            vrechg=status.get("charger_recharge_threshold_offset_mv"),
+            threshold=status.get("charger_recharge_threshold_mv"),
+            trechg=status.get("charger_recharge_deglitch_ms"),
+        )
+    )
+    print(
         "VBAT={vbat}mV SOC={soc} VSYS={vsys}mV VBUS={vbus}mV "
         "IBUS={ibus}mA IBAT={ibat}mA TS={ts}%REGN "
         "TS_STATUS cold/cool/warm/hot={ts_cold}/{ts_cool}/{ts_warm}/{ts_hot} "

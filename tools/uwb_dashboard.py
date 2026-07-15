@@ -2348,6 +2348,45 @@ tr.status-stale td { color: #4f3b1d; }
               <div id="chargerLimitsToast" class="toast"></div>
             </div>
             <div class="section">
+              <h2>Termination / Recharge</h2>
+              <div class="form-grid">
+                <label for="chargerTerminationTargets">Targets</label>
+                <select id="chargerTerminationTargets">
+                  <option value="all">all modules</option>
+                  <option value="1">module 1</option>
+                  <option value="2">module 2</option>
+                  <option value="3">module 3</option>
+                  <option value="4">module 4</option>
+                  <option value="5">module 5</option>
+                </select>
+                <label>Loaded</label>
+                <div id="chargerTerminationSelectionStatus" class="field-note">waiting for status</div>
+                <label for="chargerTerminationEnabled">Termination</label>
+                <div class="checkbox-row"><input id="chargerTerminationEnabled" type="checkbox"><span>enabled</span></div>
+                <label for="chargerTerminationCurrentMa">ITERM mA</label>
+                <input id="chargerTerminationCurrentMa" type="number" min="40" max="1000" step="40">
+                <label for="chargerRechargeOffsetMv">VRECHG offset mV</label>
+                <input id="chargerRechargeOffsetMv" type="number" min="50" max="800" step="50">
+                <label for="chargerRechargeDeglitchMs">TRECHG debounce</label>
+                <select id="chargerRechargeDeglitchMs">
+                  <option value="64">64 ms</option>
+                  <option value="256">256 ms</option>
+                  <option value="1024" selected>1024 ms</option>
+                  <option value="2048">2048 ms</option>
+                </select>
+              </div>
+              <div class="param-legend">
+                <div><b>Termination</b><span>Controls EN_TERM. When enabled, BQ25792 can stop charging after CV current falls below ITERM.</span></div>
+                <div><b>ITERM</b><span>Termination current threshold; step 40 mA. Low values may terminate above the requested value due to comparator offset.</span></div>
+                <div><b>VRECHG</b><span>Recharge threshold below VREG. Example: VREG 4200 mV and offset 200 mV restarts near 4000 mV.</span></div>
+                <div><b>TRECHG</b><span>Debounce time for VBAT staying below the recharge threshold before a new charge cycle starts.</span></div>
+              </div>
+              <div class="form-actions">
+                <button class="primary" id="applyChargerTermination">Apply Termination</button>
+              </div>
+              <div id="chargerTerminationToast" class="toast"></div>
+            </div>
+            <div class="section">
               <h2>Safety Timers</h2>
               <div class="form-grid">
                 <label for="chargerTimerTargets">Targets</label>
@@ -4946,6 +4985,44 @@ function chargerExternalIlimEnabled(item) {
   return Number.isFinite(reg14) ? (reg14 & 0x02) !== 0 : undefined;
 }
 
+function chargerTerminationConfig(item) {
+  const bytes = chargerRawBytes(item);
+  const reg09 = bytes[0x09];
+  const reg0a = bytes[0x0A];
+  const reg0f = bytes[0x0F];
+  const trechgByCode = [64, 256, 1024, 2048];
+  const rawIterm = Number.isFinite(reg09) ? (reg09 & 0x1f) : undefined;
+  const rawVrechg = Number.isFinite(reg0a) ? (reg0a & 0x0f) : undefined;
+  const rawTrechg = Number.isFinite(reg0a) ? ((reg0a >> 4) & 0x03) : undefined;
+  const offset = item.charger_recharge_threshold_offset_mv ??
+    (rawVrechg !== undefined ? (rawVrechg + 1) * 50 : undefined);
+  const vreg = Number(item?.charger_charge_voltage_limit_mv);
+  const threshold = item.charger_recharge_threshold_mv ??
+    (Number.isFinite(vreg) && Number.isFinite(Number(offset)) ? Math.max(0, vreg - Number(offset)) : undefined);
+  return {
+    terminationEnabled: item.charger_termination_enabled ??
+      (Number.isFinite(reg0f) ? (reg0f & 0x02) !== 0 : undefined),
+    terminationCurrentMa: item.charger_termination_current_ma ??
+      (rawIterm !== undefined ? Math.max(40, rawIterm * 40) : undefined),
+    rechargeOffsetMv: offset,
+    rechargeThresholdMv: threshold,
+    rechargeDeglitchMs: item.charger_recharge_deglitch_ms ??
+      (rawTrechg !== undefined ? trechgByCode[rawTrechg] : undefined),
+  };
+}
+
+function chargerTerminationSummary(item) {
+  const config = chargerTerminationConfig(item);
+  const term = config.terminationEnabled === undefined
+    ? "TERM ?"
+    : `TERM ${config.terminationEnabled ? "on" : "off"}`;
+  const threshold = config.rechargeThresholdMv === undefined
+    ? "-"
+    : fmtMv(config.rechargeThresholdMv);
+  return `${term} · ITERM ${fmtMa(config.terminationCurrentMa)}<br>` +
+    `VRECHG -${fmtMv(config.rechargeOffsetMv)} -> ${threshold} · TRECHG ${esc(config.rechargeDeglitchMs ?? "-")} ms`;
+}
+
 function chargerChargePhase(item) {
   const code = (chargerStatusByte(item, 1) >> 5) & 0x07;
   return {code, text: CHARGER_CHG_STAT_NAMES[code] || `chg ${code}`};
@@ -5096,6 +5173,7 @@ function renderBatteryCell(item) {
     <span class="${vsysClass}">VSYSMIN loop ${chargerVsysRegulating(item) ? "on" : "off"}</span>
     <span class="${extIlimClass}">ILIM_HIZ clamp ${extIlimText}</span>
     <span class="${ovpClass}">VBAT_OVP ${chargerVbatOvp(item) ? "on" : "off"}</span>${chargerLimitWarning(item)}<br>
+    ${chargerTerminationSummary(item)}<br>
     ${chargerTimerSummary(item)}<br>
     VBAT ${fmtMv(item.charger_vbat_mv)} · SOC ${fmtSoc(item)}<br>
     VSYS ${fmtMv(item.charger_vsys_mv)} · VBUS ${fmtMv(item.charger_vbus_mv)}<br>
@@ -5342,6 +5420,7 @@ function renderChargerRows(statuses) {
         VINDPM ${fmtMv(item.charger_input_voltage_limit_mv)}<br>
         IINDPM ${fmtMa(item.charger_input_current_limit_ma)}<br>
         <span class="${extIlimClass}">ILIM_HIZ clamp ${extIlimText}</span><br>
+        ${chargerTerminationSummary(item)}<br>
         ${chargerTimerSummary(item)}</td>
       <td>SOC ${fmtSoc(item)} · VBAT ${fmtMv(item.charger_vbat_mv)}<br>
         VBUS ${fmtMv(item.charger_vbus_mv)} · VSYS ${fmtMv(item.charger_vsys_mv)}<br>
@@ -6134,6 +6213,12 @@ const chargerLimitFields = [
   {id: "chargerInputCurrentMa", param: "input_current_ma", label: "IINDPM", get: item => item.charger_input_current_limit_ma},
   {id: "chargerExtIlimEnabled", param: "external_input_current_limit_enabled", label: "ILIM_HIZ clamp", get: chargerExternalIlimEnabled},
 ];
+const chargerTerminationFields = [
+  {id: "chargerTerminationEnabled", param: "termination_enabled", label: "Termination", get: item => chargerTerminationConfig(item).terminationEnabled},
+  {id: "chargerTerminationCurrentMa", param: "termination_current_ma", label: "ITERM", get: item => chargerTerminationConfig(item).terminationCurrentMa},
+  {id: "chargerRechargeOffsetMv", param: "recharge_threshold_offset_mv", label: "VRECHG offset", get: item => chargerTerminationConfig(item).rechargeOffsetMv},
+  {id: "chargerRechargeDeglitchMs", param: "recharge_deglitch_ms", label: "TRECHG", get: item => chargerTerminationConfig(item).rechargeDeglitchMs},
+];
 const chargerTimerFields = [
   {id: "chargerFastTimerEnabled", param: "fast_charge_timer_enabled", label: "Fast timer", get: item => chargerTimerConfig(item).fastEnabled},
   {id: "chargerFastTimerHours", param: "fast_charge_timer_hours", label: "Fast duration", get: item => chargerTimerConfig(item).fastHours},
@@ -6145,7 +6230,7 @@ const chargerTimerFields = [
 ];
 
 function chargerConfigFields() {
-  return [...chargerAdcFields, ...chargerLimitFields, ...chargerTimerFields];
+  return [...chargerAdcFields, ...chargerLimitFields, ...chargerTerminationFields, ...chargerTimerFields];
 }
 
 function legacyChargerConfigSettingIds() {
@@ -6239,6 +6324,7 @@ function hydrateChargerGroup(fields, targetSelectId, statusId) {
 function hydrateChargerSettings() {
   hydrateChargerGroup(chargerAdcFields, "chargerAdcTargets", "chargerAdcSelectionStatus");
   hydrateChargerGroup(chargerLimitFields, "chargerLimitTargets", "chargerLimitSelectionStatus");
+  hydrateChargerGroup(chargerTerminationFields, "chargerTerminationTargets", "chargerTerminationSelectionStatus");
   hydrateChargerGroup(chargerTimerFields, "chargerTimerTargets", "chargerTimerSelectionStatus");
 }
 
@@ -6269,6 +6355,7 @@ function wireChargerDirtyTracking() {
   const groups = [
     {target: "chargerAdcTargets", fields: chargerAdcFields},
     {target: "chargerLimitTargets", fields: chargerLimitFields},
+    {target: "chargerTerminationTargets", fields: chargerTerminationFields},
     {target: "chargerTimerTargets", fields: chargerTimerFields},
   ];
   for (const group of groups) {
@@ -6668,7 +6755,8 @@ function persistedSettingIds() {
     "uwbDtFinalDelayMs", "uwbDtReportDelayMs", "uwbDtAutoRxDelayUus",
     "uwbCalSummary", "uwbCalMinMs", "uwbCalGuardUs", "uwbCalMaxMs", "uwbCalRxMs",
     "uwbAntennaDelayHex", "uwbAdvancedReboot",
-    "chargerAdcTargets", "chargerLimitTargets", "chargerTimerTargets",
+    "chargerAdcTargets", "chargerLimitTargets", "chargerTerminationTargets",
+    "chargerTimerTargets",
     "chargerRawModule", "chargerShowRawTools", "chargerRawReg", "chargerRawValue",
     "chargerRawMask", "chargerRawBits",
     "pdContractTargets", "pdSinkTargets", "pdPpsTargets", "pdRawModule",
@@ -6975,6 +7063,9 @@ function wireSettings() {
   });
   document.getElementById("applyChargerLimits").addEventListener("click", () => {
     postDirtyChargerConfig(chargerLimitFields, "chargerLimitTargets", "chargerLimitsToast");
+  });
+  document.getElementById("applyChargerTermination").addEventListener("click", () => {
+    postDirtyChargerConfig(chargerTerminationFields, "chargerTerminationTargets", "chargerTerminationToast");
   });
   document.getElementById("applyChargerTimers").addEventListener("click", () => {
     postDirtyChargerConfig(chargerTimerFields, "chargerTimerTargets", "chargerTimersToast");

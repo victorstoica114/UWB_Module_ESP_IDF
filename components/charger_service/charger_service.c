@@ -34,6 +34,8 @@ enum {
     REG03_CHARGE_CURRENT_LIMIT = 0x03,
     REG05_INPUT_VOLTAGE_LIMIT = 0x05,
     REG06_INPUT_CURRENT_LIMIT = 0x06,
+    REG09_TERMINATION_CONTROL = 0x09,
+    REG0A_RECHARGE_CONTROL = 0x0A,
     REG0D_IOTG_REGULATION = 0x0D,
     REG0E_TIMER_CONTROL = 0x0E,
     REG0F_CHARGER_CONTROL_0 = 0x0F,
@@ -87,6 +89,10 @@ typedef enum {
 #define KEY_VINDPM_MV "vindpm"
 #define KEY_IINDPM_MA "iindpm"
 #define KEY_EXT_ILIM_EN "ext_ilim"
+#define KEY_TERM_EN "term_en"
+#define KEY_ITERM_MA "iterm"
+#define KEY_VRECHG_MV "vrechg"
+#define KEY_TRECHG_MS "trechg"
 #define KEY_TOPOFF_TIMER_MIN "top_min"
 #define KEY_TRICKLE_TIMER_EN "tri_tmr"
 #define KEY_PRECHG_TIMER_EN "pre_en"
@@ -117,6 +123,11 @@ typedef struct {
     uint16_t input_current_limit_ma;
     bool has_external_input_current_limit_enabled;
     bool external_input_current_limit_enabled;
+    bool has_termination_recharge;
+    bool termination_enabled;
+    uint16_t termination_current_ma;
+    uint16_t recharge_threshold_offset_mv;
+    uint16_t recharge_deglitch_ms;
     bool has_safety_timers;
     uint16_t topoff_timer_minutes;
     bool trickle_timer_enabled;
@@ -244,6 +255,46 @@ static uint16_t bq_vindpm_mv_from_raw(uint8_t raw)
 static uint16_t bq_iindpm_ma_from_raw(uint16_t raw)
 {
     return (uint16_t)((raw & 0x01FFU) * 10U);
+}
+
+static uint16_t bq_iterm_ma_from_raw(uint8_t raw)
+{
+    const uint16_t ma = (uint16_t)((raw & 0x1FU) * 40U);
+    return ma > 0U ? ma : 40U;
+}
+
+static uint16_t bq_vrechg_mv_from_raw(uint8_t raw)
+{
+    return (uint16_t)(((uint16_t)(raw & 0x0FU) + 1U) * 50U);
+}
+
+static uint16_t bq_trechg_ms_from_code(uint8_t code)
+{
+    static const uint16_t ms[] = {64U, 256U, 1024U, 2048U};
+    return ms[code & 0x03U];
+}
+
+static bool bq_trechg_code_from_ms(uint16_t ms, uint8_t *code)
+{
+    if (code == NULL) {
+        return false;
+    }
+    switch (ms) {
+    case 64:
+        *code = 0U;
+        return true;
+    case 256:
+        *code = 1U;
+        return true;
+    case 1024:
+        *code = 2U;
+        return true;
+    case 2048:
+        *code = 3U;
+        return true;
+    default:
+        return false;
+    }
 }
 
 static uint8_t bq_fast_charge_timer_hours_from_code(uint8_t code)
@@ -426,6 +477,10 @@ static esp_err_t charger_policy_load(charger_policy_t *policy)
     policy->fast_charge_timer_hours = 12U;
     policy->timer_2x_enabled = true;
     policy->precharge_timer_minutes = 120U;
+    policy->termination_enabled = true;
+    policy->termination_current_ma = 200U;
+    policy->recharge_threshold_offset_mv = 200U;
+    policy->recharge_deglitch_ms = 1024U;
 
     nvs_handle_t handle = 0;
     const esp_err_t open_err =
@@ -494,6 +549,23 @@ static esp_err_t charger_policy_load(charger_policy_t *policy)
         policy->external_input_current_limit_enabled = u8 != 0U;
         policy->field_count++;
     }
+    if (charger_policy_read_u8(handle, KEY_TERM_EN, &u8)) {
+        policy->has_termination_recharge = true;
+        policy->termination_enabled = u8 != 0U;
+        policy->field_count++;
+    }
+    if (charger_policy_read_u16(handle, KEY_ITERM_MA, &u16)) {
+        policy->has_termination_recharge = true;
+        policy->termination_current_ma = u16;
+    }
+    if (charger_policy_read_u16(handle, KEY_VRECHG_MV, &u16)) {
+        policy->has_termination_recharge = true;
+        policy->recharge_threshold_offset_mv = u16;
+    }
+    if (charger_policy_read_u16(handle, KEY_TRECHG_MS, &u16)) {
+        policy->has_termination_recharge = true;
+        policy->recharge_deglitch_ms = u16;
+    }
     if (charger_policy_read_u8(handle, KEY_TOPOFF_TIMER_MIN, &u8)) {
         policy->has_safety_timers = true;
         policy->topoff_timer_minutes = u8;
@@ -526,7 +598,8 @@ static esp_err_t charger_policy_load(charger_policy_t *policy)
 
     nvs_close(handle);
     return policy->field_count > 0U || policy->has_adc ||
-                   policy->has_safety_timers
+                   policy->has_safety_timers ||
+                   policy->has_termination_recharge
                ? ESP_OK
                : ESP_ERR_NOT_FOUND;
 }
@@ -579,6 +652,22 @@ static esp_err_t charger_policy_save_safety_timers(
         TAG, "persist timer 2x failed");
     return charger_policy_write_u8(KEY_PRECHG_TIMER_MIN,
                                    (uint8_t)precharge_timer_minutes);
+}
+
+static esp_err_t charger_policy_save_termination_recharge(
+    bool termination_enabled, uint16_t termination_current_ma,
+    uint16_t recharge_threshold_offset_mv, uint16_t recharge_deglitch_ms)
+{
+    ESP_RETURN_ON_ERROR(
+        charger_policy_write_u8(KEY_TERM_EN, termination_enabled ? 1U : 0U),
+        TAG, "persist termination enable failed");
+    ESP_RETURN_ON_ERROR(charger_policy_write_u16(KEY_ITERM_MA,
+                                                 termination_current_ma),
+                        TAG, "persist termination current failed");
+    ESP_RETURN_ON_ERROR(charger_policy_write_u16(KEY_VRECHG_MV,
+                                                 recharge_threshold_offset_mv),
+                        TAG, "persist recharge threshold failed");
+    return charger_policy_write_u16(KEY_TRECHG_MS, recharge_deglitch_ms);
 }
 
 static void charger_request_refresh_from_task_context(void)
@@ -971,6 +1060,9 @@ static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_
                    sizeof(s_snapshot.charger_flag));
             memcpy(s_snapshot.fault_flag, &raw[REG26_FAULT_FLAG_0],
                    sizeof(s_snapshot.fault_flag));
+            s_snapshot.reg09_termination_control =
+                raw[REG09_TERMINATION_CONTROL];
+            s_snapshot.reg0a_recharge_control = raw[REG0A_RECHARGE_CONTROL];
             s_snapshot.reg0d_iotg_regulation = raw[REG0D_IOTG_REGULATION];
             s_snapshot.reg0e_timer_control = raw[REG0E_TIMER_CONTROL];
             s_snapshot.reg16_temperature_control =
@@ -995,6 +1087,21 @@ static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_
                 bq_iindpm_ma_from_raw(read_be_u16(raw, REG06_INPUT_CURRENT_LIMIT));
             s_snapshot.charge_enabled =
                 (raw[REG0F_CHARGER_CONTROL_0] & 0x20U) != 0U;
+            s_snapshot.termination_enabled =
+                (raw[REG0F_CHARGER_CONTROL_0] & 0x02U) != 0U;
+            s_snapshot.termination_current_ma =
+                bq_iterm_ma_from_raw(raw[REG09_TERMINATION_CONTROL]);
+            s_snapshot.recharge_threshold_offset_mv =
+                bq_vrechg_mv_from_raw(raw[REG0A_RECHARGE_CONTROL]);
+            s_snapshot.recharge_threshold_mv =
+                s_snapshot.charge_voltage_limit_mv >
+                        s_snapshot.recharge_threshold_offset_mv
+                    ? (uint16_t)(s_snapshot.charge_voltage_limit_mv -
+                                 s_snapshot.recharge_threshold_offset_mv)
+                    : 0U;
+            s_snapshot.recharge_deglitch_ms =
+                bq_trechg_ms_from_code(
+                    (uint8_t)((raw[REG0A_RECHARGE_CONTROL] >> 4U) & 0x03U));
             s_snapshot.iindpm_active =
                 (raw[REG1B_CHARGER_STATUS_0] & 0x80U) != 0U;
             s_snapshot.vindpm_active =
@@ -1219,6 +1326,17 @@ static esp_err_t charger_apply_saved_policy(void)
             "IINDPM",
             charger_service_set_input_current_limit_ma(
                 policy.input_current_limit_ma, results, 4, &written_count),
+            &first_err, &applied_count);
+    }
+    if (policy.has_termination_recharge) {
+        charger_service_write_result_t results[4] = {0};
+        size_t written_count = 0;
+        charger_note_policy_result(
+            "termination/recharge",
+            charger_service_set_termination_recharge(
+                policy.termination_enabled, policy.termination_current_ma,
+                policy.recharge_threshold_offset_mv,
+                policy.recharge_deglitch_ms, results, 4, &written_count),
             &first_err, &applied_count);
     }
     if (policy.has_safety_timers) {
@@ -1781,6 +1899,68 @@ esp_err_t charger_service_set_external_input_current_limit_enabled(
         return err;
     }
     return charger_policy_write_u8(KEY_EXT_ILIM_EN, enabled ? 1U : 0U);
+}
+
+esp_err_t charger_service_set_termination_recharge(
+    bool termination_enabled, uint16_t termination_current_ma,
+    uint16_t recharge_threshold_offset_mv, uint16_t recharge_deglitch_ms,
+    charger_service_write_result_t *results, size_t result_count,
+    size_t *written_count)
+{
+    if (written_count == NULL ||
+        !ma_in_range(termination_current_ma, 40U, 1000U) ||
+        !mv_in_range(recharge_threshold_offset_mv, 50U, 800U)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *written_count = 0;
+
+    uint8_t trechg_code = 0;
+    if (!bq_trechg_code_from_ms(recharge_deglitch_ms, &trechg_code)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    charger_service_write_result_t item = {0};
+    esp_err_t err = charger_service_set_watchdog_disabled(&item);
+    append_result(results, result_count, written_count, &item);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = charger_service_update_register_bits(
+        REG0F_CHARGER_CONTROL_0, 0x02U,
+        termination_enabled ? 0x02U : 0x00U, &item);
+    append_result(results, result_count, written_count, &item);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    uint8_t iterm_raw = (uint8_t)((termination_current_ma + 20U) / 40U);
+    if (iterm_raw == 0U) {
+        iterm_raw = 1U;
+    } else if (iterm_raw > 25U) {
+        iterm_raw = 25U;
+    }
+    err = charger_service_update_register_bits(REG09_TERMINATION_CONTROL,
+                                               0x1FU, iterm_raw, &item);
+    append_result(results, result_count, written_count, &item);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    const uint8_t vrechg_raw =
+        (uint8_t)(((recharge_threshold_offset_mv + 25U) / 50U) - 1U);
+    const uint8_t recharge_bits =
+        (uint8_t)(((trechg_code & 0x03U) << 4U) | (vrechg_raw & 0x0FU));
+    err = charger_service_update_register_bits(REG0A_RECHARGE_CONTROL, 0x3FU,
+                                               recharge_bits, &item);
+    append_result(results, result_count, written_count, &item);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    return charger_policy_save_termination_recharge(
+        termination_enabled, termination_current_ma,
+        recharge_threshold_offset_mv, recharge_deglitch_ms);
 }
 
 esp_err_t charger_service_set_safety_timers(

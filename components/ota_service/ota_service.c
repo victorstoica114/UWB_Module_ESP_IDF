@@ -829,6 +829,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_part_number\":%u,"
         "\"charger_device_revision\":%u,"
         "\"charger_adc_enabled\":%s,"
+        "\"charger_reg09_termination_control\":\"0x%02x\","
+        "\"charger_reg0a_recharge_control\":\"0x%02x\","
         "\"charger_reg0d_iotg_regulation\":\"0x%02x\","
         "\"charger_reg0e_timer_control\":\"0x%02x\","
         "\"charger_reg16_temperature_control\":\"0x%02x\","
@@ -847,6 +849,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"charger_input_current_limit_ma\":%u,"
         "\"charger_external_input_current_limit_enabled\":%s,"
         "\"charger_charge_enabled\":%s,"
+        "\"charger_termination_enabled\":%s,"
+        "\"charger_termination_current_ma\":%u,"
+        "\"charger_recharge_threshold_offset_mv\":%u,"
+        "\"charger_recharge_threshold_mv\":%u,"
+        "\"charger_recharge_deglitch_ms\":%u,"
         "\"charger_charge_status_code\":%u,"
         "\"charger_vbus_status_code\":%u,"
         "\"charger_iindpm_active\":%s,"
@@ -1239,6 +1246,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned)charger_snapshot.part_number,
         (unsigned)charger_snapshot.device_revision,
         charger_snapshot.adc_enabled ? "true" : "false",
+        (unsigned)charger_snapshot.reg09_termination_control,
+        (unsigned)charger_snapshot.reg0a_recharge_control,
         (unsigned)charger_snapshot.reg0d_iotg_regulation,
         (unsigned)charger_snapshot.reg0e_timer_control,
         (unsigned)charger_snapshot.reg16_temperature_control,
@@ -1258,6 +1267,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         charger_snapshot.external_input_current_limit_enabled ? "true"
                                                               : "false",
         charger_snapshot.charge_enabled ? "true" : "false",
+        charger_snapshot.termination_enabled ? "true" : "false",
+        (unsigned)charger_snapshot.termination_current_ma,
+        (unsigned)charger_snapshot.recharge_threshold_offset_mv,
+        (unsigned)charger_snapshot.recharge_threshold_mv,
+        (unsigned)charger_snapshot.recharge_deglitch_ms,
         (unsigned)charger_snapshot.charge_status_code,
         (unsigned)charger_snapshot.vbus_status_code,
         charger_snapshot.iindpm_active ? "true" : "false",
@@ -1889,6 +1903,94 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
                                    "Invalid iindpm_ma");
     }
 
+    const bool termination_requested =
+        ota_query_has_key(query, "termination_enabled") ||
+        ota_query_has_key(query, "termination_current_ma") ||
+        ota_query_has_key(query, "recharge_threshold_offset_mv") ||
+        ota_query_has_key(query, "recharge_deglitch_ms");
+    if (termination_requested) {
+        charger_service_snapshot_t current = {0};
+        charger_service_get_snapshot(&current);
+
+        bool termination_enabled =
+            current.raw_valid ? current.termination_enabled : true;
+        uint16_t termination_current_ma =
+            current.termination_current_ma != 0U
+                ? current.termination_current_ma
+                : 200U;
+        uint16_t recharge_threshold_offset_mv =
+            current.recharge_threshold_offset_mv != 0U
+                ? current.recharge_threshold_offset_mv
+                : 200U;
+        uint16_t recharge_deglitch_ms =
+            current.recharge_deglitch_ms != 0U ? current.recharge_deglitch_ms
+                                               : 1024U;
+
+        char text[32] = {0};
+        query_err = httpd_query_key_value(query, "termination_enabled", text,
+                                          sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_bool_text(text, &termination_enabled)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid termination_enabled");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid termination_enabled");
+        }
+
+        query_err = httpd_query_key_value(query, "termination_current_ma",
+                                          text, sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_u16(text, &termination_current_ma)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid termination_current_ma");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid termination_current_ma");
+        }
+
+        query_err =
+            httpd_query_key_value(query, "recharge_threshold_offset_mv", text,
+                                  sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_u16(text, &recharge_threshold_offset_mv)) {
+                return httpd_resp_send_err(
+                    req, HTTPD_400_BAD_REQUEST,
+                    "Invalid recharge_threshold_offset_mv");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(
+                req, HTTPD_400_BAD_REQUEST,
+                "Invalid recharge_threshold_offset_mv");
+        }
+
+        query_err = httpd_query_key_value(query, "recharge_deglitch_ms", text,
+                                          sizeof(text));
+        if (query_err == ESP_OK) {
+            if (!ota_parse_u16(text, &recharge_deglitch_ms)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid recharge_deglitch_ms");
+            }
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid recharge_deglitch_ms");
+        }
+
+        charger_service_write_result_t results[4] = {0};
+        size_t written_count = 0;
+        const esp_err_t err = charger_service_set_termination_recharge(
+            termination_enabled, termination_current_ma,
+            recharge_threshold_offset_mv, recharge_deglitch_ms, results, 4,
+            &written_count);
+        operation_count += (uint32_t)written_count;
+        handled = true;
+        if (err != ESP_OK && first_error == ESP_OK) {
+            first_error = err;
+        }
+    }
+
     const bool timer_requested =
         ota_query_has_key(query, "topoff_timer_minutes") ||
         ota_query_has_key(query, "trickle_timer_enabled") ||
@@ -2097,10 +2199,14 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
     charger_service_get_snapshot(&snapshot);
 
     ESP_LOGW(TAG,
-             "Charger config: ops=%lu err=%s ADC=%s CHG=%s REG0F=0x%02X VREG=%umV ICHG=%umA VINDPM=%umV IINDPM=%umA EXTILIM=%s fast_tmr=%s/%uh pre_tmr=%s/%umin WD=%u",
+             "Charger config: ops=%lu err=%s ADC=%s CHG=%s TERM=%s ITERM=%umA VRECHG=%umV TRECHG=%ums REG0F=0x%02X VREG=%umV ICHG=%umA VINDPM=%umV IINDPM=%umA EXTILIM=%s fast_tmr=%s/%uh pre_tmr=%s/%umin WD=%u",
              (unsigned long)operation_count, esp_err_to_name(first_error),
              snapshot.adc_enabled ? "on" : "off",
              snapshot.charge_enabled ? "on" : "off",
+             snapshot.termination_enabled ? "on" : "off",
+             (unsigned)snapshot.termination_current_ma,
+             (unsigned)snapshot.recharge_threshold_offset_mv,
+             (unsigned)snapshot.recharge_deglitch_ms,
              (unsigned)snapshot.reg0f_charger_control_0,
              (unsigned)snapshot.charge_voltage_limit_mv,
              (unsigned)snapshot.charge_current_limit_ma,
@@ -2113,7 +2219,7 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
              (unsigned)snapshot.precharge_timer_minutes,
              (unsigned)snapshot.watchdog_setting);
 
-    char response[2600];
+    char response[3000];
     const int len = snprintf(
         response, sizeof(response),
         "{"
@@ -2127,7 +2233,14 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
         "\"charger_adc_continuous\":%s,"
         "\"charger_adc_running_average\":%s,"
         "\"charger_charge_enabled\":%s,"
+        "\"charger_termination_enabled\":%s,"
+        "\"charger_termination_current_ma\":%u,"
+        "\"charger_recharge_threshold_offset_mv\":%u,"
+        "\"charger_recharge_threshold_mv\":%u,"
+        "\"charger_recharge_deglitch_ms\":%u,"
         "\"charger_reg0f_charger_control_0\":\"0x%02x\","
+        "\"charger_reg09_termination_control\":\"0x%02x\","
+        "\"charger_reg0a_recharge_control\":\"0x%02x\","
         "\"charger_reg0d_iotg_regulation\":\"0x%02x\","
         "\"charger_reg0e_timer_control\":\"0x%02x\","
         "\"charger_reg16_temperature_control\":\"0x%02x\","
@@ -2183,7 +2296,14 @@ static esp_err_t charger_config_post_handler(httpd_req_t *req)
         snapshot.adc_continuous ? "true" : "false",
         snapshot.adc_running_average ? "true" : "false",
         snapshot.charge_enabled ? "true" : "false",
+        snapshot.termination_enabled ? "true" : "false",
+        (unsigned)snapshot.termination_current_ma,
+        (unsigned)snapshot.recharge_threshold_offset_mv,
+        (unsigned)snapshot.recharge_threshold_mv,
+        (unsigned)snapshot.recharge_deglitch_ms,
         (unsigned)snapshot.reg0f_charger_control_0,
+        (unsigned)snapshot.reg09_termination_control,
+        (unsigned)snapshot.reg0a_recharge_control,
         (unsigned)snapshot.reg0d_iotg_regulation,
         (unsigned)snapshot.reg0e_timer_control,
         (unsigned)snapshot.reg16_temperature_control,

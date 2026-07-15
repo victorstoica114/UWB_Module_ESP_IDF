@@ -1320,14 +1320,16 @@ split into the same small I2C chunks instead of a full raw-map dump, so charger
 events can be handled while the BNO085 is running at high sample rates without a
 long charger transfer sitting on the bus. `/status` exposes the raw register bytes
 as `charger_raw_hex` plus decoded summary fields for part information,
-status/fault bytes, ADC control, watchdog state, charge/input limits, `VBAT`,
-`VSYS`, `VBUS`, `VAC1`, `VAC2`, `IBUS`, `IBAT`, `TS`, `TDIE`, `D+`, and `D-`.
+status/fault bytes, ADC control, watchdog state, charge/input limits,
+termination/recharge settings, `VBAT`, `VSYS`, `VBUS`, `VAC1`, `VAC2`,
+`IBUS`, `IBAT`, `TS`, `TDIE`, `D+`, and `D-`.
 Firmware also publishes a simple 1S Li-Po state-of-charge estimate derived from
 `VBAT`; this is a
 voltage-based dashboard aid, not a coulomb-counting fuel gauge. The dashboard
 Info tab shows the decoded charger values in the Battery column, the Battery
 Charger tab shows a full live table plus human controls for ADC, charge limits,
-and safety timers. Raw registers are still available from a service checkbox, and
+hardware termination/recharge behavior, and safety timers. Raw registers are
+still available from a service checkbox, and
 `tools/bq25792_dump.py --target-list tools/ota_targets.local.txt` prints every
 register byte with names.
 
@@ -1369,8 +1371,9 @@ The firmware exposes an authenticated live endpoint at `/config/charger` for
 controlled writes. The endpoint disables the watchdog before charger
 configuration changes, can enable/disable the ADC, can choose continuous or
 one-shot ADC conversion and ADC sample speed, and can set `VSYSMIN`, charging
-enable state, charge voltage/current, input voltage/current DPM, and charge
-safety timers using human units (`mV`/`mA`/minutes/hours). It also has a guarded
+enable state, charge voltage/current, input voltage/current DPM, termination
+current, recharge threshold/debounce, and charge safety timers using human units
+(`mV`/`mA`/milliseconds/minutes/hours). It also has a guarded
 raw register write path (`reg`, `value`, optional
 `mask`/`bits`, and `confirm=1`) for datasheet-level experiments.
 
@@ -1412,6 +1415,21 @@ and `tools/bq25792_dump.py` warn when `VSYSMIN >= VREG` or when `VSYSMIN` looks
 too high for a 1S pack.
 All high-level charger policy values are stored in ESP32 NVS and reapplied once
 at charger startup.
+
+Dashboard charger termination/recharge controls use the BQ25792 hardware charge
+state machine rather than a firmware polling policy. A charge cycle terminates
+when the charger is in battery CV regulation, `VBAT` is above the recharge
+threshold, actual charge current falls below `ITERM`, and the device is not in
+input-current, input-voltage, or thermal regulation. After termination, BQ25792
+automatically starts a new charge cycle when `VBAT` stays below `VREG - VRECHG`
+for `TRECHG`.
+
+| Control | BQ25792 field | Step | Effect |
+| --- | --- | --- | --- |
+| `Termination` | `EN_TERM` in `REG0F` | boolean | Enables hardware charge termination. If disabled before termination, BQ25792 keeps charging and the top-off timer cannot start. |
+| `ITERM mA` | `ITERM[4:0]` in `REG09` | `40 mA` | Charge termination current threshold. At low values, the datasheet notes comparator offset can make actual termination occur above the requested threshold. |
+| `VRECHG offset mV` | `VRECHG[3:0]` in `REG0A` | `50 mV` | Recharge threshold below `VREG`. For example, `VREG=4200 mV` and `VRECHG=200 mV` restarts near `4000 mV`. |
+| `TRECHG debounce` | `TRECHG[1:0]` in `REG0A` | `64/256/1024/2048 ms` | How long `VBAT` must remain below the recharge threshold before BQ25792 starts a new charge cycle. |
 
 Dashboard charger safety-timer controls affect charge-cycle timeout behavior:
 

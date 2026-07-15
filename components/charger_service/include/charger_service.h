@@ -55,6 +55,8 @@ typedef struct {
     uint8_t fault_flag[2];
     uint8_t reg0d_iotg_regulation;
     uint8_t reg0e_timer_control;
+    uint8_t reg09_termination_control;
+    uint8_t reg0a_recharge_control;
     uint8_t reg16_temperature_control;
     uint8_t reg17_ntc_control_0;
     uint8_t reg18_ntc_control_1;
@@ -70,6 +72,11 @@ typedef struct {
     uint16_t input_voltage_limit_mv;
     uint16_t input_current_limit_ma;
     bool charge_enabled;
+    bool termination_enabled;
+    uint16_t termination_current_ma;
+    uint16_t recharge_threshold_offset_mv;
+    uint16_t recharge_threshold_mv;
+    uint16_t recharge_deglitch_ms;
     uint8_t charge_status_code;
     uint8_t vbus_status_code;
     bool iindpm_active;
@@ -167,6 +174,11 @@ esp_err_t charger_service_set_input_current_limit_ma(
     size_t *written_count);
 esp_err_t charger_service_set_external_input_current_limit_enabled(
     bool enabled, charger_service_write_result_t *result);
+esp_err_t charger_service_set_termination_recharge(
+    bool termination_enabled, uint16_t termination_current_ma,
+    uint16_t recharge_threshold_offset_mv, uint16_t recharge_deglitch_ms,
+    charger_service_write_result_t *results, size_t result_count,
+    size_t *written_count);
 esp_err_t charger_service_set_safety_timers(
     uint16_t topoff_timer_minutes, bool trickle_timer_enabled,
     bool precharge_timer_enabled, bool fast_charge_timer_enabled,
