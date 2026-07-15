@@ -128,7 +128,7 @@ bool app_runtime_config_runtime_mode_valid(uint8_t mode)
            mode == APP_RUNTIME_MODE_UWB_ANTENNA_DELAY_CALIBRATION ||
            mode == APP_RUNTIME_MODE_UWB_RANGING ||
            mode == APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY ||
-           mode == APP_RUNTIME_MODE_UWB_DS_TWR_TDOA;
+           mode == APP_RUNTIME_MODE_UWB_FLEX_TDOA;
 }
 
 const char *app_runtime_config_runtime_mode_to_string(uint8_t mode)
@@ -144,8 +144,8 @@ const char *app_runtime_config_runtime_mode_to_string(uint8_t mode)
         return "uwb_ranging";
     case APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY:
         return "uwb_anchor_survey";
-    case APP_RUNTIME_MODE_UWB_DS_TWR_TDOA:
-        return "uwb_ds_twr_tdoa";
+    case APP_RUNTIME_MODE_UWB_FLEX_TDOA:
+        return "uwb_flex_tdoa";
     default:
         return "unknown";
     }
@@ -204,11 +204,11 @@ uint8_t app_runtime_config_runtime_mode_from_string(const char *text, bool *ok)
                string_equal(text, "uwb_anchor_survey")) {
         parsed = APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY;
         parsed_ok = true;
-    } else if (string_equal(text, "ds_twr_tdoa") ||
-               string_equal(text, "dstwr_tdoa") ||
-               string_equal(text, "ds-twr-tdoa") ||
-               string_equal(text, "uwb_ds_twr_tdoa")) {
-        parsed = APP_RUNTIME_MODE_UWB_DS_TWR_TDOA;
+    } else if (string_equal(text, "flex_tdoa") ||
+               string_equal(text, "flextdoa") ||
+               string_equal(text, "flex-tdoa") ||
+               string_equal(text, "uwb_flex_tdoa")) {
+        parsed = APP_RUNTIME_MODE_UWB_FLEX_TDOA;
         parsed_ok = true;
     }
 

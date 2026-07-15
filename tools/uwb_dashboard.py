@@ -52,15 +52,15 @@ RANGING_RE = re.compile(
     r"\bUWB_RANGING result\s+tag=(?P<tag>\d+)\s+anchor=(?P<anchor>\d+)\s+"
     r"seq=(?P<seq>\d+)\s+distance=(?P<distance>[-+]?\d+(?:\.\d+)?)\s+m"
 )
-DS_TWR_TDOA_RE = re.compile(
-    r"\bUWB_DS_TWR_TDOA obs\s+tag=(?P<tag>\d+)\s+"
+FLEX_TDOA_RE = re.compile(
+    r"\bUWB_FLEX_TDOA obs\s+tag=(?P<tag>\d+)\s+"
     r"initiator=(?P<initiator>\d+)\s+responder=(?P<responder>\d+)\s+"
     r"seq=(?P<seq>\d+)\s+diff=(?P<diff>[-+]?\d+(?:\.\d+)?)\s+m\s+"
     r"raw=(?P<raw>[-+]?\d+(?:\.\d+)?)\s+m\s+"
     r"anchor=(?P<anchor_distance>[-+]?\d+(?:\.\d+)?)\s+m"
 )
-DS_TWR_TDOA_ANCHOR_RE = re.compile(
-    r"\bDS_TWR_TDOA anchor result\s+pair=(?P<initiator>\d+)-(?P<responder>\d+)\s+"
+FLEX_TDOA_ANCHOR_RE = re.compile(
+    r"\bFLEX_TDOA anchor result\s+pair=(?P<initiator>\d+)-(?P<responder>\d+)\s+"
     r"seq=(?P<seq>\d+)\s+distance=(?P<distance>[-+]?\d+(?:\.\d+)?)\s+m\s+"
     r"[-+]?\d+(?:\.\d+)?\s+cm\s+raw=(?P<raw>[-+]?\d+(?:\.\d+)?)\s+m"
 )
@@ -616,7 +616,7 @@ class DashboardState:
         ).append(sample)
 
     def record_tdoa_locked(self, item: dict[str, Any]) -> None:
-        match = DS_TWR_TDOA_RE.search(str(item.get("message") or item.get("raw") or ""))
+        match = FLEX_TDOA_RE.search(str(item.get("message") or item.get("raw") or ""))
         if match is None:
             return
 
@@ -661,7 +661,7 @@ class DashboardState:
         )
 
     def record_tdoa_anchor_locked(self, item: dict[str, Any]) -> None:
-        match = DS_TWR_TDOA_ANCHOR_RE.search(
+        match = FLEX_TDOA_ANCHOR_RE.search(
             str(item.get("message") or item.get("raw") or "")
         )
         if match is None:
@@ -757,10 +757,9 @@ class DashboardState:
             right_seq = int(right["seq"])
         except (KeyError, TypeError, ValueError):
             return False
-        return (
-            cls.sequence_delta(left_seq, right_seq) == pair_count
-            or cls.sequence_delta(right_seq, left_seq) == pair_count
-        )
+        forward = cls.sequence_delta(left_seq, right_seq)
+        reverse = cls.sequence_delta(right_seq, left_seq)
+        return 0 < min(forward, reverse) <= pair_count
 
     def tdoa_runtime_anchor_ids_locked(self) -> list[int]:
         for item in self.status_by_module.values():
@@ -783,8 +782,8 @@ class DashboardState:
         self, now: float, max_age_sec: float
     ) -> dict[str, Any]:
         anchor_ids = self.tdoa_runtime_anchor_ids_locked()
-        pair_count = len(anchor_ids) * (len(anchor_ids) - 1) // 2
-        if pair_count <= 0:
+        slot_count = len(anchor_ids)
+        if slot_count <= 0:
             return {}
 
         tag_ids = sorted({key[0] for key in self.tdoa_history})
@@ -817,7 +816,7 @@ class DashboardState:
                             right
                             for right in right_history
                             if self.tdoa_sequences_are_paired(
-                                left, right, pair_count
+                                left, right, slot_count
                             )
                         ]
                         if not compatible:
@@ -2134,7 +2133,7 @@ tr.status-stale td { color: #4f3b1d; }
             <label for="positionAnchorCount">Anchors used</label>
             <select id="positionAnchorCount"><option value="4">4 anchors</option><option value="3">3 anchors</option></select>
             <label for="positionSolver">Solver</label>
-            <select id="positionSolver"><option value="tdoa" selected>DS-TWR-TDOA</option><option value="ranging">DS-TWR ranges</option></select>
+            <select id="positionSolver"><option value="tdoa" selected>FlexTDOA</option><option value="ranging">DS-TWR ranges</option></select>
             <label for="positionAnchors">Anchor IDs</label>
             <input id="positionAnchors" value="2,3,4,5">
             <label for="positionTags">Tag IDs</label>
@@ -2144,8 +2143,8 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
-            <div><b>Tags</b><span>Comma separated tag IDs. In DS-TWR-TDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
-            <div><b>Geometry</b><span>DS-TWR-TDOA uses live anchor-anchor ranges, so the anchors do not need to form a perfect square.</span></div>
+            <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
+            <div><b>Geometry</b><span>FlexTDOA uses live anchor-anchor ranges, so the anchors do not need to form a perfect square.</span></div>
           </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
@@ -2648,7 +2647,7 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p class="muted profile-note">Apply writes every timing parameter in the selected profile to ESP32 NVS through runtime config. The same profile updates DS-TWR-TDOA anchor slots and classic ranging slots.</p>
+          <p class="muted profile-note">Apply writes every timing parameter in the selected profile to ESP32 NVS through runtime config. The same profile updates FlexTDOA anchor slots and classic ranging slots.</p>
           <div class="profile-grid">
             <div class="profile-card" data-profile="baseline">
               <h3>Stable Baseline</h3>
@@ -2660,9 +2659,9 @@ tr.status-stale td { color: #4f3b1d; }
                 <input id="profileBaselineRoundGapMs" value="10" type="number" min="1" step="1">
                 <label for="profileBaselineRxSliceMs">RX slice ms</label>
                 <input id="profileBaselineRxSliceMs" value="100" type="number" min="1" step="1">
-                <label for="profileBaselineCommandDelayMs">Command delay ms</label>
+                <label for="profileBaselineCommandDelayMs">Flex subslot ms</label>
                 <input id="profileBaselineCommandDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileBaselineTimeoutMs">DS-TWR timeout ms</label>
+                <label for="profileBaselineTimeoutMs">Classic DS-TWR timeout ms</label>
                 <input id="profileBaselineTimeoutMs" value="90" type="number" min="1" step="1">
                 <label for="profileBaselineRespDelayMs">RESP delay ms</label>
                 <input id="profileBaselineRespDelayMs" value="20" type="number" min="1" step="1">
@@ -2689,9 +2688,9 @@ tr.status-stale td { color: #4f3b1d; }
                 <input id="profileSafeRoundGapMs" value="10" type="number" min="1" step="1">
                 <label for="profileSafeRxSliceMs">RX slice ms</label>
                 <input id="profileSafeRxSliceMs" value="60" type="number" min="1" step="1">
-                <label for="profileSafeCommandDelayMs">Command delay ms</label>
+                <label for="profileSafeCommandDelayMs">Flex subslot ms</label>
                 <input id="profileSafeCommandDelayMs" value="5" type="number" min="1" step="1">
-                <label for="profileSafeTimeoutMs">DS-TWR timeout ms</label>
+                <label for="profileSafeTimeoutMs">Classic DS-TWR timeout ms</label>
                 <input id="profileSafeTimeoutMs" value="35" type="number" min="1" step="1">
                 <label for="profileSafeRespDelayMs">RESP delay ms</label>
                 <input id="profileSafeRespDelayMs" value="15" type="number" min="1" step="1">
@@ -2718,9 +2717,9 @@ tr.status-stale td { color: #4f3b1d; }
                 <input id="profileBalancedRoundGapMs" value="10" type="number" min="1" step="1">
                 <label for="profileBalancedRxSliceMs">RX slice ms</label>
                 <input id="profileBalancedRxSliceMs" value="50" type="number" min="1" step="1">
-                <label for="profileBalancedCommandDelayMs">Command delay ms</label>
+                <label for="profileBalancedCommandDelayMs">Flex subslot ms</label>
                 <input id="profileBalancedCommandDelayMs" value="5" type="number" min="1" step="1">
-                <label for="profileBalancedTimeoutMs">DS-TWR timeout ms</label>
+                <label for="profileBalancedTimeoutMs">Classic DS-TWR timeout ms</label>
                 <input id="profileBalancedTimeoutMs" value="25" type="number" min="1" step="1">
                 <label for="profileBalancedRespDelayMs">RESP delay ms</label>
                 <input id="profileBalancedRespDelayMs" value="10" type="number" min="1" step="1">
@@ -2747,9 +2746,9 @@ tr.status-stale td { color: #4f3b1d; }
                 <input id="profileAggressiveRoundGapMs" value="10" type="number" min="1" step="1">
                 <label for="profileAggressiveRxSliceMs">RX slice ms</label>
                 <input id="profileAggressiveRxSliceMs" value="40" type="number" min="1" step="1">
-                <label for="profileAggressiveCommandDelayMs">Command delay ms</label>
+                <label for="profileAggressiveCommandDelayMs">Flex subslot ms</label>
                 <input id="profileAggressiveCommandDelayMs" value="3" type="number" min="1" step="1">
-                <label for="profileAggressiveTimeoutMs">DS-TWR timeout ms</label>
+                <label for="profileAggressiveTimeoutMs">Classic DS-TWR timeout ms</label>
                 <input id="profileAggressiveTimeoutMs" value="18" type="number" min="1" step="1">
                 <label for="profileAggressiveRespDelayMs">RESP delay ms</label>
                 <input id="profileAggressiveRespDelayMs" value="7" type="number" min="1" step="1">
@@ -2883,7 +2882,7 @@ tr.status-stale td { color: #4f3b1d; }
                 <label for="runtimeMode">Mode</label>
                 <select id="runtimeMode">
                   <option value="ranging">ranging</option>
-                  <option value="ds_twr_tdoa">DS-TWR-TDOA</option>
+                  <option value="flex_tdoa">FlexTDOA</option>
                   <option value="survey">survey</option>
                   <option value="distance">distance</option>
                   <option value="beacon">beacon</option>
@@ -3611,7 +3610,7 @@ function moduleHttpOnline(item) {
 function moduleInPositionRuntime(item, solver) {
   if (!item || !moduleHttpOnline(item)) return false;
   const mode = String(item.runtime_mode_name || item.runtime_mode || "").toLowerCase();
-  const wanted = solver === "tdoa" ? "ds_twr_tdoa" : "ranging";
+  const wanted = solver === "tdoa" ? "flex_tdoa" : "ranging";
   return Boolean(item.runtime_uwb_enabled) && mode.includes(wanted);
 }
 
@@ -3904,7 +3903,8 @@ function sequenceForwardDelta(from, to) {
 function tdoaSequencesArePaired(left, right, pairCount) {
   const forward = sequenceForwardDelta(left?.seq, right?.seq);
   const reverse = sequenceForwardDelta(right?.seq, left?.seq);
-  return forward === pairCount || reverse === pairCount;
+  const nearest = Math.min(forward, reverse);
+  return nearest > 0 && nearest <= pairCount;
 }
 
 function pairedTdoaObservations(tagId, anchorIds, maxAge) {
@@ -3926,7 +3926,7 @@ function pairedTdoaObservations(tagId, anchorIds, maxAge) {
     fresh.map(item => [`${item.initiator_id}-${item.responder_id}`, item])
   );
   const pairs = selectedAnchorPairs(anchorIds);
-  const pairCount = pairs.length;
+  const pairCount = anchorIds.length;
   const paired = [];
 
   for (const [a, b] of pairs) {
@@ -4539,8 +4539,8 @@ function renderPositionReadout(model) {
   const title = document.getElementById("positionMeasurementTitle");
   const overlay = document.getElementById("positionOverlay");
   if (!readout || !accuracyRows || !rows || !head || !title || !overlay) return;
-  const solverName = model.settings.solver === "tdoa" ? "DS-TWR-TDOA" : "ranging";
-  const enableText = model.settings.solver === "tdoa" ? "Enable DS-TWR-TDOA" : "Enable Ranging";
+  const solverName = model.settings.solver === "tdoa" ? "FlexTDOA" : "ranging";
+  const enableText = model.settings.solver === "tdoa" ? "Enable FlexTDOA" : "Enable Ranging";
   document.querySelectorAll("#positionEnableRanging, #positionEnableRangingSide")
     .forEach(button => { button.textContent = enableText; });
   renderPositionGeometryPanel(model);
@@ -6692,19 +6692,17 @@ function mirrorRangingProfileToUwbFields(values) {
 }
 
 function profileSummaryText(values) {
-  const programmedMs =
-    values.commandDelayMs +
-    values.respDelayMs +
-    values.finalDelayMs +
-    2 * values.reportDelayMs;
-  const marginMs = values.slotMs - programmedMs;
-  const roundMs = 6 * values.slotMs + values.roundGapMs;
+  const flexResponseWindowMs = 3 * values.commandDelayMs;
+  const classicProgrammedMs =
+    values.respDelayMs + values.finalDelayMs + 2 * values.reportDelayMs;
+  const marginMs = values.slotMs - flexResponseWindowMs;
+  const roundMs = 4 * values.slotMs + values.roundGapMs;
   const warnings = [];
   if (values.timeoutMs >= values.slotMs) warnings.push("timeout >= slot");
   if (values.rxSliceMs > values.slotMs) warnings.push("RX slice > slot");
   if (marginMs < 5) warnings.push("low slot margin");
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `4 anchors: ~${fmtFixed(roundMs, 0)} ms/round · chain ${fmtFixed(programmedMs, 0)} ms · margin ${fmtFixed(marginMs, 0)} ms${warnText}`;
+  return `4 anchors: ~${fmtFixed(roundMs, 0)} ms/round · Flex response window ${fmtFixed(flexResponseWindowMs, 0)} ms · classic DS-TWR ${fmtFixed(classicProgrammedMs, 0)} ms · margin ${fmtFixed(marginMs, 0)} ms${warnText}`;
 }
 
 function updateRangingProfileSummary(profileKey) {
@@ -6715,7 +6713,7 @@ function updateRangingProfileSummary(profileKey) {
   const values = readRangingProfile(profileKey);
   const valid = Object.values(values).every(value => Number.isFinite(value));
   summary.textContent = valid ? profileSummaryText(values) : "incomplete profile";
-  summary.className = `profile-summary ${valid && values.slotMs - (values.commandDelayMs + values.respDelayMs + values.finalDelayMs + 2 * values.reportDelayMs) < 5 ? "warn" : ""}`.trim();
+  summary.className = `profile-summary ${valid && values.slotMs - (3 * values.commandDelayMs) < 5 ? "warn" : ""}`.trim();
 }
 
 function updateAllRangingProfileSummaries() {
@@ -6859,7 +6857,7 @@ async function enablePositionRanging() {
     return;
   }
   const anchors = settings.anchorIds.join(",");
-  const mode = settings.solver === "tdoa" ? "ds_twr_tdoa" : "ranging";
+  const mode = settings.solver === "tdoa" ? "flex_tdoa" : "ranging";
   const params = {
     mode,
     tag: String(tagId),
