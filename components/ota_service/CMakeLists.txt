@@ -7,5 +7,6 @@ idf_component_register(SRCS "ota_service.c"
                                      esp_partition esp_system freertos gps_service
                                      i2c_bus_service log
                                      max77958_service
+                                     resource_monitor_service
                                      uwb_dw3000 wifi_service wireless_log_service
                                      wireless_telemetry_service)

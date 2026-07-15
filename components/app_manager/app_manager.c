@@ -19,6 +19,7 @@
 #include "gps_service.h"
 #include "max77958_service.h"
 #include "ota_service.h"
+#include "resource_monitor_service.h"
 #include "sdkconfig.h"
 #include "uwb_anchor_survey_service.h"
 #include "uwb_calibration_service.h"
@@ -287,6 +288,12 @@ void app_manager_start(void)
     if (ota_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start OTA service: %s",
                  esp_err_to_name(ota_err));
+    }
+
+    const esp_err_t resource_err = resource_monitor_service_start();
+    if (resource_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start resource monitor: %s",
+                 esp_err_to_name(resource_err));
     }
 
     boot_guard_start_stability_task();

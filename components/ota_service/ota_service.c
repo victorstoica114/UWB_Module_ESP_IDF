@@ -23,6 +23,7 @@
 #include "gps_service.h"
 #include "i2c_bus_service.h"
 #include "max77958_service.h"
+#include "resource_monitor_service.h"
 #include "uwb_config.h"
 #include "uwb_dw3000.h"
 #include "wifi_service.h"
@@ -497,6 +498,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                                    sizeof(charger_raw_hex));
     max77958_service_snapshot_t pd_snapshot = {0};
     max77958_service_get_snapshot(&pd_snapshot);
+    resource_monitor_snapshot_t resource_snapshot = {0};
+    resource_monitor_service_get_snapshot(&resource_snapshot);
     char pd_raw_hex[(MAX77958_SERVICE_REGISTER_MAP_SIZE * 2U) + 1U] = {0};
     max77958_service_format_raw_hex(&pd_snapshot, pd_raw_hex,
                                     sizeof(pd_raw_hex));
@@ -612,6 +615,25 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"i2c_realtime_lock_count\":%lu,"
         "\"i2c_background_lock_count\":%lu,"
         "\"i2c_background_deferred_count\":%lu,"
+        "\"resource_monitor_running\":%s,"
+        "\"resource_update_count\":%lu,"
+        "\"resource_last_update_age_ms\":%lu,"
+        "\"resource_cpu_load_valid\":%s,"
+        "\"resource_core0_load_percent\":%.1f,"
+        "\"resource_core1_load_percent\":%.1f,"
+        "\"resource_heap_free_bytes\":%lu,"
+        "\"resource_heap_min_free_bytes\":%lu,"
+        "\"resource_heap_largest_free_block_bytes\":%lu,"
+        "\"resource_internal_free_bytes\":%lu,"
+        "\"resource_internal_min_free_bytes\":%lu,"
+        "\"resource_internal_largest_free_block_bytes\":%lu,"
+        "\"resource_psram_free_bytes\":%lu,"
+        "\"resource_psram_min_free_bytes\":%lu,"
+        "\"resource_psram_largest_free_block_bytes\":%lu,"
+        "\"resource_temperature_valid\":%s,"
+        "\"resource_temperature_c\":%.1f,"
+        "\"resource_temperature_error\":%d,"
+        "\"resource_temperature_error_name\":\"%s\","
         "\"runtime_gps_enabled\":%s,"
         "\"gps_powered\":%s,"
         "\"gps_task_running\":%s,"
@@ -989,6 +1011,25 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)i2c_stats.realtime_lock_count,
         (unsigned long)i2c_stats.background_lock_count,
         (unsigned long)i2c_stats.background_deferred_count,
+        resource_snapshot.running ? "true" : "false",
+        (unsigned long)resource_snapshot.update_count,
+        (unsigned long)resource_snapshot.last_update_age_ms,
+        resource_snapshot.cpu_load_valid ? "true" : "false",
+        resource_snapshot.core0_load_percent,
+        resource_snapshot.core1_load_percent,
+        (unsigned long)resource_snapshot.heap_free_bytes,
+        (unsigned long)resource_snapshot.heap_min_free_bytes,
+        (unsigned long)resource_snapshot.heap_largest_free_block_bytes,
+        (unsigned long)resource_snapshot.internal_free_bytes,
+        (unsigned long)resource_snapshot.internal_min_free_bytes,
+        (unsigned long)resource_snapshot.internal_largest_free_block_bytes,
+        (unsigned long)resource_snapshot.psram_free_bytes,
+        (unsigned long)resource_snapshot.psram_min_free_bytes,
+        (unsigned long)resource_snapshot.psram_largest_free_block_bytes,
+        resource_snapshot.temperature_valid ? "true" : "false",
+        resource_snapshot.temperature_c,
+        resource_snapshot.temperature_error,
+        esp_err_to_name(resource_snapshot.temperature_error),
         runtime_config->gps_enabled ? "true" : "false",
         gps_snapshot.powered ? "true" : "false",
         gps_snapshot.task_running ? "true" : "false",

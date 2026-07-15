@@ -2097,7 +2097,7 @@ th { color: var(--muted); font-weight: 700; }
     <section id="info" class="page">
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Module</th><th>Wi-Fi</th><th>Runtime</th><th>Components</th><th>GPS</th><th>UWB</th><th>Antenna</th><th>Logs</th><th>Battery</th></tr></thead>
+          <thead><tr><th>Module</th><th>Wi-Fi</th><th>Runtime</th><th>Components</th><th>GPS</th><th>UWB</th><th>Antenna</th><th>Logs</th><th>Resources</th><th>Battery</th></tr></thead>
           <tbody id="infoRows"></tbody>
         </table>
       </div>
@@ -4667,6 +4667,18 @@ function fmtAgeMs(ageMs) {
   return `${(number / 1000).toFixed(1)}s`;
 }
 
+function fmtBytes(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return "-";
+  if (number >= 1024 * 1024) return `${(number / (1024 * 1024)).toFixed(2)} MiB`;
+  return `${(number / 1024).toFixed(0)} KiB`;
+}
+
+function fmtPercent(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(1)}%` : "-";
+}
+
 function fmtMv(value) {
   const number = Number(value);
   return Number.isFinite(number) ? `${(number / 1000).toFixed(3)} V` : "-";
@@ -4944,6 +4956,23 @@ function renderBatteryCell(item) {
       (${esc(item.charger_full_read_count ?? "-")}/${esc(item.charger_quick_read_count ?? "-")} full/quick)
       · ${esc(item.charger_last_read_duration_ms ?? "-")} ms
       · age ${fmtAgeMs(item.charger_last_update_age_ms)}</span>`;
+}
+
+function renderResourceCell(item) {
+  if (!item || !item.resource_monitor_running) {
+    return `<span class="muted">not available</span>`;
+  }
+  const cpu = item.resource_cpu_load_valid
+    ? `C0 ${fmtPercent(item.resource_core0_load_percent)} / C1 ${fmtPercent(item.resource_core1_load_percent)}`
+    : "CPU warming up";
+  const temp = item.resource_temperature_valid
+    ? `${fmtMaybeNumber(item.resource_temperature_c, 1)} C`
+    : `temp ${item.resource_temperature_error_name || "-"}`;
+  return `
+    RAM ${fmtBytes(item.resource_internal_free_bytes)}<br>
+    <span class="muted">min ${fmtBytes(item.resource_internal_min_free_bytes)} · blk ${fmtBytes(item.resource_internal_largest_free_block_bytes)}</span><br>
+    PSRAM ${fmtBytes(item.resource_psram_free_bytes)}<br>
+    <span class="muted">${esc(cpu)} · ESP ${esc(temp)} · age ${fmtAgeMs(item.resource_last_update_age_ms)}</span>`;
 }
 
 function hexByte(value) {
@@ -5239,6 +5268,7 @@ function renderInfo(snapshot) {
       <td>${esc(item.uwb_status)}<br>tx ${esc(item.uwb_tx_count)} / rx ${esc(item.uwb_rx_count)}<br>err ${esc(item.uwb_tx_error_count)}/${esc(item.uwb_rx_error_count)}</td>
       <td>${esc(item.uwb_active_antenna_delay_hex)}<br><span class="muted">NVS ${item.uwb_antenna_delay_from_nvs ? "yes" : "no"}</span></td>
       <td>log ${esc(item.wireless_log_status)}<br>dropped ${esc(item.wireless_log_dropped)}<br>tel ${esc(item.wireless_telemetry_status || "-")}<br>port ${esc(item.wireless_telemetry_port ?? item.runtime_wireless_telemetry_port ?? "-")}<br>tel drop ${esc(item.wireless_telemetry_dropped ?? "-")}<br><span class="muted">full ${esc(item.wireless_telemetry_drop_full ?? "-")} · mutex ${esc(item.wireless_telemetry_drop_mutex ?? "-")} · fmt ${esc(item.wireless_telemetry_drop_format ?? "-")}<br>qmax ${esc(item.wireless_telemetry_queue_high_water ?? "-")}<br>bin ${esc(item.wireless_telemetry_binary_frames ?? "-")}f / ${esc(item.wireless_telemetry_binary_samples ?? "-")}s · text ${esc(item.wireless_telemetry_text_frames ?? "-")}</span><br>tel err ${esc(item.wireless_telemetry_last_error ?? "-")}<br>age ${fmtAge(item.status_updated_at)}</td>
+      <td>${renderResourceCell(item)}</td>
       <td>${renderBatteryCell(item)}</td>
     </tr>`).join("");
   renderUwbRadio(state.statuses[0] || {});
