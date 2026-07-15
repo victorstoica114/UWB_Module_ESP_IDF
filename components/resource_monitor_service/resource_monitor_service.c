@@ -1,5 +1,6 @@
 #include "resource_monitor_service.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "driver/temperature_sensor.h"
@@ -18,6 +19,7 @@ enum {
     RESOURCE_MONITOR_TASK_STACK_WORDS = 3072,
     RESOURCE_MONITOR_TASK_PRIORITY = 1,
     RESOURCE_MONITOR_SAMPLE_MS = 1000,
+    RESOURCE_MONITOR_MAX_TRACKED_TASKS = 128,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -31,6 +33,18 @@ static resource_monitor_snapshot_t s_snapshot;
 static int64_t s_last_update_us;
 static bool s_started;
 static temperature_sensor_handle_t s_temp_sensor;
+static TaskStatus_t *s_task_status_array;
+static UBaseType_t s_task_status_capacity;
+
+typedef struct {
+    UBaseType_t task_number;
+    uint64_t runtime_counter;
+} task_runtime_record_t;
+
+static task_runtime_record_t s_previous_tasks[RESOURCE_MONITOR_MAX_TRACKED_TASKS];
+static UBaseType_t s_previous_task_count;
+static int64_t s_previous_task_time_us;
+static bool s_previous_tasks_valid;
 
 static uint32_t age_ms_from_time_us(int64_t timestamp_us)
 {
@@ -147,6 +161,162 @@ static void update_cpu_load(resource_monitor_snapshot_t *snapshot)
 #endif
 }
 
+static bool ensure_task_status_capacity(UBaseType_t required)
+{
+    if (required <= s_task_status_capacity) {
+        return true;
+    }
+
+    TaskStatus_t *new_array = heap_caps_calloc(
+        required, sizeof(TaskStatus_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (new_array == NULL) {
+        new_array = heap_caps_calloc(required, sizeof(TaskStatus_t),
+                                     MALLOC_CAP_8BIT);
+    }
+    if (new_array == NULL) {
+        return false;
+    }
+
+    if (s_task_status_array != NULL) {
+        heap_caps_free(s_task_status_array);
+    }
+    s_task_status_array = new_array;
+    s_task_status_capacity = required;
+    return true;
+}
+
+static const task_runtime_record_t *find_previous_task(UBaseType_t task_number)
+{
+    for (UBaseType_t i = 0; i < s_previous_task_count; ++i) {
+        if (s_previous_tasks[i].task_number == task_number) {
+            return &s_previous_tasks[i];
+        }
+    }
+    return NULL;
+}
+
+static void store_previous_tasks(const TaskStatus_t *tasks, UBaseType_t count,
+                                 int64_t timestamp_us)
+{
+    const UBaseType_t limit =
+        count > RESOURCE_MONITOR_MAX_TRACKED_TASKS
+            ? RESOURCE_MONITOR_MAX_TRACKED_TASKS
+            : count;
+    for (UBaseType_t i = 0; i < limit; ++i) {
+        s_previous_tasks[i].task_number = tasks[i].xTaskNumber;
+        s_previous_tasks[i].runtime_counter =
+            (uint64_t)tasks[i].ulRunTimeCounter;
+    }
+    s_previous_task_count = limit;
+    s_previous_task_time_us = timestamp_us;
+    s_previous_tasks_valid = true;
+}
+
+static bool is_idle_task_name(const char *name)
+{
+    return name != NULL &&
+           (strncmp(name, "IDLE", 4) == 0 || strncmp(name, "idle", 4) == 0);
+}
+
+static void insert_top_task(resource_monitor_snapshot_t *snapshot,
+                            const TaskStatus_t *task, uint64_t delta_us,
+                            float load_percent)
+{
+    if (delta_us == 0 || is_idle_task_name(task->pcTaskName)) {
+        return;
+    }
+
+    size_t insert_at = 0;
+    while (insert_at < snapshot->top_task_count &&
+           delta_us <= snapshot->top_tasks[insert_at].runtime_delta_us) {
+        ++insert_at;
+    }
+    if (insert_at >= RESOURCE_MONITOR_TOP_TASK_COUNT) {
+        return;
+    }
+
+    if (snapshot->top_task_count < RESOURCE_MONITOR_TOP_TASK_COUNT) {
+        ++snapshot->top_task_count;
+    }
+    for (size_t i = snapshot->top_task_count - 1; i > insert_at; --i) {
+        snapshot->top_tasks[i] = snapshot->top_tasks[i - 1];
+    }
+
+    resource_monitor_task_load_t *entry = &snapshot->top_tasks[insert_at];
+    (void)snprintf(entry->name, sizeof(entry->name), "%s",
+                   task->pcTaskName != NULL ? task->pcTaskName : "?");
+    entry->runtime_delta_us = delta_us;
+    entry->load_percent =
+        load_percent < 0.0f ? 0.0f
+                            : (load_percent > 100.0f ? 100.0f : load_percent);
+#if configTASKLIST_INCLUDE_COREID == 1
+    entry->core_id = task->xCoreID;
+#else
+    entry->core_id = -1;
+#endif
+}
+
+static void update_task_load(resource_monitor_snapshot_t *snapshot)
+{
+    snapshot->task_load_valid = false;
+    snapshot->task_list_overflow = false;
+    snapshot->top_task_count = 0;
+    memset(snapshot->top_tasks, 0, sizeof(snapshot->top_tasks));
+
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS && CONFIG_FREERTOS_USE_TRACE_FACILITY
+    UBaseType_t required = uxTaskGetNumberOfTasks();
+    if (required == 0) {
+        return;
+    }
+    if (required > RESOURCE_MONITOR_MAX_TRACKED_TASKS) {
+        snapshot->task_list_overflow = true;
+        return;
+    }
+    required += 4;
+    if (!ensure_task_status_capacity(required)) {
+        snapshot->task_list_overflow = true;
+        return;
+    }
+
+    configRUN_TIME_COUNTER_TYPE total_runtime = 0;
+    const UBaseType_t count = uxTaskGetSystemState(
+        s_task_status_array, s_task_status_capacity, &total_runtime);
+    (void)total_runtime;
+    const int64_t now_us = esp_timer_get_time();
+    if (count == 0) {
+        snapshot->task_list_overflow = true;
+        return;
+    }
+
+    if (s_previous_tasks_valid && now_us > s_previous_task_time_us) {
+        const uint64_t elapsed_us =
+            (uint64_t)(now_us - s_previous_task_time_us);
+        for (UBaseType_t i = 0; i < count; ++i) {
+            const task_runtime_record_t *previous =
+                find_previous_task(s_task_status_array[i].xTaskNumber);
+            if (previous == NULL) {
+                continue;
+            }
+            const uint64_t current =
+                (uint64_t)s_task_status_array[i].ulRunTimeCounter;
+            if (current < previous->runtime_counter) {
+                continue;
+            }
+            const uint64_t delta_us = current - previous->runtime_counter;
+            const float load_percent =
+                elapsed_us > 0
+                    ? (100.0f * (float)delta_us) / (float)elapsed_us
+                    : 0.0f;
+            insert_top_task(snapshot, &s_task_status_array[i], delta_us,
+                            load_percent);
+        }
+        snapshot->task_load_valid = true;
+    }
+
+    store_previous_tasks(s_task_status_array, count, now_us);
+#endif
+}
+
 static esp_err_t init_temperature_sensor(void)
 {
 #if SOC_TEMP_SENSOR_SUPPORTED
@@ -191,6 +361,7 @@ static void resource_monitor_task(void *arg)
         local.update_count++;
         update_heap_stats(&local);
         update_cpu_load(&local);
+        update_task_load(&local);
         update_temperature(&local);
         local.last_update_age_ms = 0;
         publish_snapshot(&local);

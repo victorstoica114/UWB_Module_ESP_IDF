@@ -50,7 +50,7 @@ enum {
     OTA_SERVICE_REBOOT_DELAY_MS = 1200,
     OTA_SERVICE_MAX_TOKEN_LEN = 128,
     OTA_SERVICE_MAX_QUERY_LEN = 768,
-    OTA_SERVICE_STATUS_RESPONSE_SIZE = 24000,
+    OTA_SERVICE_STATUS_RESPONSE_SIZE = 28000,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -112,6 +112,86 @@ static void format_u32_array_json(const uint32_t *values, size_t count,
         written = snprintf(&buffer[offset], buffer_size - offset,
                            "%s%lu", i == 0 ? "" : ",",
                            (unsigned long)values[i]);
+        if (written < 0 || (size_t)written >= buffer_size - offset) {
+            buffer[0] = '\0';
+            return;
+        }
+        offset += (size_t)written;
+    }
+    if (offset + 2U <= buffer_size) {
+        (void)snprintf(&buffer[offset], buffer_size - offset, "]");
+    }
+}
+
+static void format_json_string(const char *value, char *buffer,
+                               size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return;
+    }
+    size_t offset = 0;
+    buffer[offset++] = '"';
+    if (value != NULL) {
+        for (const char *cursor = value;
+             *cursor != '\0' && offset + 2U < buffer_size; ++cursor) {
+            const char ch = *cursor;
+            if (ch == '"' || ch == '\\') {
+                if (offset + 3U >= buffer_size) {
+                    break;
+                }
+                buffer[offset++] = '\\';
+                buffer[offset++] = ch;
+            } else if ((unsigned char)ch < 0x20U) {
+                buffer[offset++] = '?';
+            } else {
+                buffer[offset++] = ch;
+            }
+        }
+    }
+    if (offset < buffer_size) {
+        buffer[offset++] = '"';
+    }
+    if (offset < buffer_size) {
+        buffer[offset] = '\0';
+    } else {
+        buffer[buffer_size - 1U] = '\0';
+    }
+}
+
+static void format_resource_top_tasks_json(
+    const resource_monitor_snapshot_t *snapshot, char *buffer,
+    size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return;
+    }
+    size_t offset = 0;
+    int written = snprintf(buffer, buffer_size, "[");
+    if (written < 0 || (size_t)written >= buffer_size) {
+        buffer[0] = '\0';
+        return;
+    }
+    offset = (size_t)written;
+    if (snapshot == NULL) {
+        (void)snprintf(&buffer[offset], buffer_size - offset, "]");
+        return;
+    }
+
+    const uint32_t count =
+        snapshot->top_task_count > RESOURCE_MONITOR_TOP_TASK_COUNT
+            ? RESOURCE_MONITOR_TOP_TASK_COUNT
+            : snapshot->top_task_count;
+    for (uint32_t i = 0; i < count; ++i) {
+        const resource_monitor_task_load_t *task = &snapshot->top_tasks[i];
+        char name_json[(RESOURCE_MONITOR_TASK_NAME_LEN * 2U) + 3U] = {0};
+        format_json_string(task->name, name_json, sizeof(name_json));
+        written = snprintf(&buffer[offset], buffer_size - offset,
+                           "%s{\"name\":%s,\"core\":%ld,"
+                           "\"load_percent\":%.1f,"
+                           "\"runtime_delta_us\":%llu}",
+                           i == 0 ? "" : ",", name_json,
+                           (long)task->core_id, task->load_percent,
+                           (unsigned long long)task->runtime_delta_us);
         if (written < 0 || (size_t)written >= buffer_size - offset) {
             buffer[0] = '\0';
             return;
@@ -500,6 +580,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     max77958_service_get_snapshot(&pd_snapshot);
     resource_monitor_snapshot_t resource_snapshot = {0};
     resource_monitor_service_get_snapshot(&resource_snapshot);
+    char resource_top_tasks_json[1024] = {0};
+    format_resource_top_tasks_json(&resource_snapshot, resource_top_tasks_json,
+                                   sizeof(resource_top_tasks_json));
     char pd_raw_hex[(MAX77958_SERVICE_REGISTER_MAP_SIZE * 2U) + 1U] = {0};
     max77958_service_format_raw_hex(&pd_snapshot, pd_raw_hex,
                                     sizeof(pd_raw_hex));
@@ -619,6 +702,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"resource_update_count\":%lu,"
         "\"resource_last_update_age_ms\":%lu,"
         "\"resource_cpu_load_valid\":%s,"
+        "\"resource_task_load_valid\":%s,"
+        "\"resource_task_list_overflow\":%s,"
+        "\"resource_top_task_count\":%lu,"
+        "\"resource_top_tasks\":%s,"
         "\"resource_core0_load_percent\":%.1f,"
         "\"resource_core1_load_percent\":%.1f,"
         "\"resource_heap_free_bytes\":%lu,"
@@ -1018,6 +1105,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)resource_snapshot.update_count,
         (unsigned long)resource_snapshot.last_update_age_ms,
         resource_snapshot.cpu_load_valid ? "true" : "false",
+        resource_snapshot.task_load_valid ? "true" : "false",
+        resource_snapshot.task_list_overflow ? "true" : "false",
+        (unsigned long)resource_snapshot.top_task_count,
+        resource_top_tasks_json[0] != '\0' ? resource_top_tasks_json : "[]",
         resource_snapshot.core0_load_percent,
         resource_snapshot.core1_load_percent,
         (unsigned long)resource_snapshot.heap_free_bytes,

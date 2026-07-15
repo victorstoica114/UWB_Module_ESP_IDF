@@ -1619,9 +1619,34 @@ th { color: var(--muted); font-weight: 700; }
 .resource-meter.temp .resource-bar-fill {
   background: linear-gradient(90deg, #138a4b, #d08a00 62%, #c43a31);
 }
+.resource-meter.task {
+  margin-bottom: 5px;
+}
+.resource-meter.task .resource-bar {
+  height: 6px;
+}
+.resource-meter.task .resource-bar-fill {
+  background: linear-gradient(90deg, #516070, #8996a8);
+}
 .resource-meter-foot {
   margin-top: 2px;
   color: var(--muted);
+}
+.resource-task-list {
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+.resource-task-title {
+  color: var(--muted);
+  font-weight: 700;
+  margin-bottom: 5px;
+}
+.resource-task-name {
+  max-width: 136px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .resource-meta {
   margin-top: 5px;
@@ -5114,6 +5139,36 @@ function renderResourceCell(item) {
         <div class="resource-meter-foot">scale ${minTemp}-${maxTemp} C · ${tempPercent.toFixed(0)}%</div>
       </div>`;
   };
+  const taskMeters = () => {
+    const tasks = Array.isArray(item.resource_top_tasks) ? item.resource_top_tasks : [];
+    if (item.resource_task_list_overflow) {
+      return `<div class="resource-task-list"><span class="warn">task list overflow</span></div>`;
+    }
+    if (!item.resource_task_load_valid) {
+      return `<div class="resource-task-list"><span class="muted">task CPU warming up</span></div>`;
+    }
+    if (!tasks.length) {
+      return `<div class="resource-task-list"><span class="muted">no active tasks</span></div>`;
+    }
+    const rows = tasks.map(task => {
+      const load = Number(task.load_percent);
+      const loadPercent = Number.isFinite(load) ? clampPercent(load) : 0;
+      const core = Number(task.core);
+      const coreText = Number.isFinite(core) && core >= 0 ? `C${core}` : "core -";
+      const name = String(task.name || "?");
+      return `
+        <div class="resource-meter task" title="${esc(name)} ${Number.isFinite(load) ? load.toFixed(1) : "-"}% · ${esc(coreText)}">
+          <div class="resource-meter-head">
+            <span class="resource-meter-name resource-task-name">${esc(name)}</span>
+            <span class="resource-meter-value">${esc(coreText)} · ${Number.isFinite(load) ? load.toFixed(1) : "-"}%</span>
+          </div>
+          <div class="resource-bar" aria-label="${esc(name)} task load">
+            <div class="resource-bar-fill" style="width:${loadPercent.toFixed(1)}%"></div>
+          </div>
+        </div>`;
+    }).join("");
+    return `<div class="resource-task-list"><div class="resource-task-title">Top tasks</div>${rows}</div>`;
+  };
   return `
     <div class="resource-cell">
       ${memoryMeter("internal", "RAM", item.resource_internal_free_bytes, item.resource_internal_total_bytes, item.resource_internal_min_free_bytes, item.resource_internal_largest_free_block_bytes)}
@@ -5121,6 +5176,7 @@ function renderResourceCell(item) {
       ${percentMeter("cpu0", "CORE0", item.resource_core0_load_percent, item.resource_cpu_load_valid)}
       ${percentMeter("cpu1", "CORE1", item.resource_core1_load_percent, item.resource_cpu_load_valid)}
       ${tempMeter()}
+      ${taskMeters()}
       <div class="resource-meta">age ${fmtAgeMs(item.resource_last_update_age_ms)}</div>
     </div>`;
 }
