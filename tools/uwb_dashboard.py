@@ -433,6 +433,7 @@ class DashboardState:
         self.client_counts: dict[str, int] = {}
         self.telemetry_client_counts: dict[str, int] = {}
         self.listener_telemetry_ports: list[int] = []
+        self.status_targets: list[str] = []
         self.status_by_module: dict[int, dict[str, Any]] = {}
         self.status_errors: dict[str, str] = {}
 
@@ -1038,6 +1039,10 @@ class DashboardState:
         with self.lock:
             self.listener_telemetry_ports = list(dict.fromkeys(ports))
 
+    def set_status_targets(self, targets: list[str]) -> None:
+        with self.lock:
+            self.status_targets = list(dict.fromkeys(targets))
+
     def set_status(self, module_id: int, status: dict[str, Any]) -> None:
         status["status_updated_at"] = time.time()
         with self.lock:
@@ -1079,11 +1084,14 @@ class DashboardState:
         with self.lock:
             now = time.time()
             statuses = []
+            seen_targets: set[str] = set()
             for status in self.status_by_module.values():
                 item = dict(status)
                 updated_at = float(item.get("status_updated_at") or 0.0)
                 age_sec = now - updated_at if updated_at > 0.0 else None
                 target = str(item.get("target") or "")
+                if target:
+                    seen_targets.add(target)
                 error = self.status_errors.get(target)
                 online = (
                     age_sec is not None
@@ -1096,17 +1104,41 @@ class DashboardState:
                 if error:
                     item["http_status_error"] = error
                 statuses.append(item)
+            for target in self.status_targets:
+                if target in seen_targets:
+                    continue
+                item = {
+                    "module_id": None,
+                    "hostname": target,
+                    "target": target,
+                    "ip": target,
+                    "wifi_connected": False,
+                    "wifi_connected_rssi": "-",
+                    "wifi_disconnect_count": "-",
+                    "runtime_anchor_ids": [],
+                    "status_updated_at": None,
+                    "http_status_age_sec": None,
+                    "http_status_online": False,
+                    "http_status_error": self.status_errors.get(target, "no status yet"),
+                }
+                statuses.append(item)
             errors = dict(self.status_errors)
             client_count = self.client_count
             telemetry_client_count = self.telemetry_client_count
             client_counts = dict(self.client_counts)
             telemetry_client_counts = dict(self.telemetry_client_counts)
             listener_telemetry_ports = list(self.listener_telemetry_ports)
+            status_target_count = len(self.status_targets)
             log_count = len(self.logs)
             next_log_id = self.next_log_id
             ranging = self.ranging_snapshot_locked(now)
             tdoa = self.tdoa_snapshot_locked(now)
-        statuses.sort(key=lambda item: int(item.get("module_id") or 0))
+        statuses.sort(
+            key=lambda item: (
+                int(item.get("module_id") or 9999),
+                str(item.get("target") or item.get("ip") or ""),
+            )
+        )
         return {
             "client_count": client_count,
             "telemetry_client_count": telemetry_client_count,
@@ -1117,6 +1149,7 @@ class DashboardState:
             "next_log_id": next_log_id,
             "statuses": statuses,
             "status_errors": errors,
+            "status_target_count": status_target_count,
             "status_online_max_age_sec": self.status_online_max_age_sec,
             "accel_history": {},
             "ranging": ranging,
@@ -1657,6 +1690,8 @@ th { color: var(--muted); font-weight: 700; }
 .ok { color: var(--green); font-weight: 700; }
 .warn { color: var(--orange); font-weight: 700; }
 .bad { color: var(--red); font-weight: 700; }
+tr.status-stale { background: #fffaf2; }
+tr.status-stale td { color: #4f3b1d; }
 .settings-grid { display: grid; grid-template-columns: minmax(340px, 520px) minmax(420px, 1fr); gap: 14px; align-items: start; }
 .charger-grid { grid-template-columns: minmax(620px, 1.25fr) minmax(360px, 0.75fr); }
 .pd-grid { grid-template-columns: minmax(680px, 1.2fr) minmax(380px, 0.8fr); }
@@ -3142,6 +3177,30 @@ function fmtAge(ts) {
   if (!ts) return "-";
   const age = Math.max(0, Date.now() / 1000 - ts);
   return `${age.toFixed(1)}s`;
+}
+function statusIsFresh(item) {
+  return Boolean(item?.http_status_online);
+}
+function statusAgeText(item) {
+  const age = Number(item?.http_status_age_sec);
+  return Number.isFinite(age) && age >= 0 ? `${age.toFixed(1)}s` : fmtAge(item?.status_updated_at);
+}
+function renderModuleCell(item) {
+  const fresh = statusIsFresh(item);
+  const statusLine = fresh
+    ? `<span class="ok">HTTP live</span>`
+    : `<span class="warn">HTTP stale ${esc(statusAgeText(item))}</span>`;
+  const error = !fresh && item.http_status_error
+    ? `<br><span class="muted">${esc(item.http_status_error)}</span>`
+    : "";
+  return `<b>${esc(item.hostname)}</b><br><span class="muted">${esc(item.ip || item.target || "")}</span><br>${statusLine}${error}`;
+}
+function renderWifiCell(item) {
+  const fresh = statusIsFresh(item);
+  const stateClass = item.wifi_connected ? "ok" : "bad";
+  const stateText = item.wifi_connected ? "connected" : "offline";
+  const prefix = fresh ? "" : "last: ";
+  return `<span class="${fresh ? stateClass : "warn"}">${prefix}${stateText}</span><br>RSSI ${esc(item.wifi_connected_rssi)} dBm<br>disc ${esc(item.wifi_disconnect_count)}`;
 }
 function terminalMatchesModule(term, log) {
   return term.modules === "all" || term.modules.includes(Number(log.module_id));
@@ -5435,8 +5494,9 @@ function renderInfo(snapshot) {
   }
   const online = state.statuses.filter(item => item.http_status_online).length;
   const statusPill = document.getElementById("statusPill");
-  statusPill.textContent = `${online}/${state.statuses.length || 5} HTTP online`;
-  statusPill.className = `pill ${online >= 5 ? "good" : "warn"}`;
+  const expectedStatuses = Number(snapshot.status_target_count || state.statuses.length || 5);
+  statusPill.textContent = `${online}/${expectedStatuses} HTTP online`;
+  statusPill.className = `pill ${online >= expectedStatuses ? "good" : "warn"}`;
   const telemetryPorts = snapshot.telemetry_ports || [];
   const portOptions = document.getElementById("telemetryPortOptions");
   if (portOptions && telemetryPorts.length) {
@@ -5465,9 +5525,9 @@ function renderInfo(snapshot) {
   }
   const rows = document.getElementById("infoRows");
   rows.innerHTML = state.statuses.map(item => `
-    <tr>
-      <td><b>${esc(item.hostname)}</b><br><span class="muted">${esc(item.ip || item.target || "")}</span></td>
-      <td><span class="${item.wifi_connected ? "ok" : "bad"}">${item.wifi_connected ? "connected" : "offline"}</span><br>RSSI ${esc(item.wifi_connected_rssi)} dBm<br>disc ${esc(item.wifi_disconnect_count)}</td>
+    <tr class="${statusIsFresh(item) ? "" : "status-stale"}">
+      <td>${renderModuleCell(item)}</td>
+      <td>${renderWifiCell(item)}</td>
       <td>${esc(item.runtime_mode_name)}<br>tag ${esc(item.runtime_tag_id)} anchors ${(item.runtime_anchor_ids || []).join(",")}</td>
       <td>UWB <span class="${item.runtime_uwb_enabled ? "ok" : "muted"}">${item.runtime_uwb_enabled ? "on" : "off"}</span><br>BNO085 <span class="${item.runtime_bno085_accel_enabled ? "ok" : "muted"}">${item.runtime_bno085_accel_enabled ? "on" : "off"}</span><br><span class="muted">${esc(item.runtime_bno085_accel_interval_ms || "-")}/${esc(item.runtime_bno085_log_interval_ms || "-")} ms</span><br>GPS <span class="${item.runtime_gps_enabled ? "ok" : "muted"}">${item.runtime_gps_enabled ? "on" : "off"}</span></td>
       <td>${renderGpsCell(item)}</td>
@@ -5477,12 +5537,13 @@ function renderInfo(snapshot) {
       <td>${renderResourceCell(item)}</td>
       <td>${renderBatteryCell(item)}</td>
     </tr>`).join("");
-  renderUwbRadio(state.statuses[0] || {});
+  const freshStatus = state.statuses.find(statusIsFresh) || {};
+  renderUwbRadio(freshStatus);
   renderCharger(state.statuses);
   renderPd(state.statuses);
   renderPosition();
   scheduleAccelRender();
-  hydrateSettingsFromStatus(state.statuses[0] || {});
+  hydrateSettingsFromStatus(freshStatus);
   hydrateChargerSettings();
   hydratePdSettings();
 }
@@ -8238,6 +8299,7 @@ def main() -> int:
         args.status_interval * 3.0,
         len(targets) * 2.5 + args.status_interval,
     )
+    state.set_status_targets(targets)
 
     log_server = LogServer((args.log_host, args.log_port), state)
     log_thread = threading.Thread(target=log_server.serve_forever, daemon=True)
