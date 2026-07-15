@@ -782,7 +782,7 @@ class DashboardState:
         self, now: float, max_age_sec: float
     ) -> dict[str, Any]:
         anchor_ids = self.tdoa_runtime_anchor_ids_locked()
-        slot_count = len(anchor_ids)
+        slot_count = len(anchor_ids) * (len(anchor_ids) - 1) // 2
         if slot_count <= 0:
             return {}
 
@@ -3926,7 +3926,7 @@ function pairedTdoaObservations(tagId, anchorIds, maxAge) {
     fresh.map(item => [`${item.initiator_id}-${item.responder_id}`, item])
   );
   const pairs = selectedAnchorPairs(anchorIds);
-  const pairCount = anchorIds.length;
+  const pairCount = pairs.length;
   const paired = [];
 
   for (const [a, b] of pairs) {
