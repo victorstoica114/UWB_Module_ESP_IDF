@@ -509,7 +509,7 @@ UWB_FLEX_TDOA obs tag=<tag> initiator=<Ai> responder=<Aj> seq=<seq>
   diff=<m> m raw=<m> m anchor=<m> m alt=<m> m agree=<m> m fused=<0|1> suspect=<0|1> ...
 ```
 
-Dual-leg passive test, 2026-07-15:
+Initial dual-leg passive sanity test, 2026-07-15:
 
 The test below used the same room setup that was active during development. It
 does not claim absolute tag accuracy, because the tag position was not measured
@@ -537,6 +537,33 @@ multipath/consistency check without making the tag transmit. One outlier class
 still exists: individual `primary` vs `alt` agreement can spike hard, so the
 dashboard keeps `suspect` rows visible and excludes them from the live fit when
 there are enough healthy pairs.
+
+Back-to-back classic vs dual-leg comparison, 2026-07-15:
+
+This run was made to compare the old passive FlexTDOA observation against the
+dual-leg version as fairly as possible. The same anchor/tag layout was kept, the
+same dashboard parser/solver was used, and each firmware ran for `75 s`:
+
+| Metric | Classic FlexTDOA `78967ac` | Dual-leg FlexTDOA `56d0033` | Read |
+| --- | ---: | ---: | --- |
+| Passive observations | `617` | `670` | Similar throughput |
+| Fused observations | n/a | `665 / 670` (`99.3%`) | Dual leg usually has both estimates |
+| Suspect observations | n/a | `5 / 670` (`0.7%`) | Few hard disagreements |
+| `primary` vs `alt` agreement, median | n/a | `31.2 cm` | Useful as a quality signal |
+| Paired reverse sum, median | `-30.75 cm` | `0.8 cm` | Dual-leg removes a strong directional bias |
+| Paired reverse sum, std | `11.63 cm` | `3.68 cm` | Dual-leg is much more antisymmetric |
+| Anchor edge std, median | `1.03 cm` | `1.18 cm` | Same DS-TWR geometry path; effectively similar |
+| Solved tag X std / span | `1.36 cm` / `6.16 cm` | `1.25 cm` / `7.10 cm` | Similar |
+| Solved tag Y std / span | `1.03 cm` / `5.31 cm` | `0.99 cm` / `4.94 cm` | Similar |
+| Solver residual RMS, median | `5.35 cm` | `6.64 cm` | Classic was lower in this run |
+
+The practical verdict is not "dual-leg is better at every metric". It is more
+specific: dual-leg greatly improves pair symmetry (`reverse_sum`) and gives a
+new internal consistency check (`agree`, `suspect`) while preserving roughly the
+same fixed-tag position stability. The cost in this run was a slightly higher
+least-squares residual. For now the dual-leg path is worth keeping because it
+exposes bad/multipath-like observations directly instead of letting a
+directional bias hide inside the solver.
 
 The passive tag keeps a small clock-offset filter per responder anchor. The raw
 DW3000 carrier-integrator clock ratio is useful but noisy enough that applying a
