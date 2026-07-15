@@ -1230,6 +1230,15 @@ holds the shared background lock. BQ25792 has one descriptive I2C section that
 mentions fast mode, but its electrical table specifies `fSCL = 1000 kHz`; the
 1 MHz setting was therefore validated empirically on the module.
 
+The MAX77958 high-speed path is a measured ESP32-S3 board result, not a claim
+that ESP-IDF exposes a turnkey high-speed switch for this target. The firmware
+enters an HS-master-style transfer by sending the I2C HS master code (`0x08`) at
+the entry clock, then reprogramming the peripheral timing for the direct
+transaction. On M1 with 1k pull-ups, the validated timing profile is
+`low/high/wait = 10/0/0`, which produced clean MAX77958 direct-HS traffic at
+about `2 MHz`. That gives us a practical HS master mode for this board while
+keeping the normal ESP-IDF 1 MHz handle as a safe fallback path.
+
 At the maximum BNO085 accelerometer rate, the sample period is `2 ms`. A normal
 accelerometer input report is small: the firmware reads the 4-byte SHTP header
 and then the 14-byte SHTP accelerometer packet, so the I2C wire time is on the
@@ -1258,6 +1267,25 @@ currently shows `10k` I2C pull-ups, but the live module tested cleanly at 1 MHz;
 if a board revision is unstable, verify the actual pull-up values and reduce
 them for Fast-Mode Plus before blaming firmware scheduling.
 
+Validated M1 coexistence test:
+
+| Condition | Result |
+| --- | --- |
+| Firmware / board | `3646a76` on ESP32-S3 M1, 1k I2C pull-ups |
+| Duration | `180.96 s` |
+| BNO085 accelerometer | `500 Hz` requested, `91,614` reports, `506.3 samples/s` observed |
+| BNO085 errors | `0` read errors, `0` parse errors |
+| BQ25792 load | `180` full refreshes, about `1 Hz`, `0` errors |
+| MAX77958 load | `180` refreshes, about `1 Hz`, `0` public read errors, `0` operation errors |
+| MAX77958 direct-HS recovery | `2` direct-HS attempts fell back cleanly; the higher-level MAX operation still completed |
+| Control-path errors | `0` HTTP refresh errors, `0` `/status` errors |
+
+That run proves the shared bus can carry the BNO085 at its maximum accelerometer
+rate while still fitting charger and USB-C/PD refreshes at about 1 Hz. The
+internal BQ25792 and MAX77958 monitor defaults are therefore set to
+`APP_BQ25792_READ_INTERVAL_MS = 1000` and
+`APP_MAX77958_READ_INTERVAL_MS = 1000`.
+
 `/status` exposes `i2c_realtime_period_us`,
 `i2c_realtime_time_to_next_us`, `i2c_background_window_us`, and the
 realtime/background lock counters.
@@ -1280,19 +1308,10 @@ overhead around the I2C transaction, so very short transfers under-report the
 actual wire frequency. For precise rise/fall time and duty-cycle checks, use
 the oscilloscope; for continuous firmware health, use the PCNT counters.
 
-M1 coexistence check, after changing the I2C pull-ups to `1k`, with MAX77958
-direct HS reads at the validated `10/0/0` timing:
-
-| Scenario | Result |
-| --- | --- |
-| BNO085 enabled at `500 Hz`, normal BQ/MAX background refresh | BNO advanced at about `493` realtime locks/s, BQ and MAX completed their normal periodic reads with `0` BQ errors and `0` MAX errors. |
-| Forced `20` BQ refreshes and `20` MAX refreshes while BNO085 stayed at `500 Hz` | BQ completed `20/20` reads with `0` errors. MAX completed `18/20` refresh cycles visible in the sampled status, and direct-HS reads advanced by `1669` with `0` direct errors. BNO085 reported a few read timeouts during this intentionally aggressive refresh load. |
-
 The practical rule is: keep BNO085 as the realtime owner of the bus, keep BQ/MAX
-refresh rates human-scale, and use forced refreshes for diagnostics rather than
-as a high-rate polling mechanism. If a future UI wants very frequent charger/PD
-updates while BNO085 runs at `500 Hz`, it should schedule them through the same
-background-window model instead of firing repeated immediate refresh requests.
+refresh rates human-scale, and route charger/PD reads through the background
+window model. The current validated human-scale refresh target is 1 Hz for both
+BQ25792 and MAX77958 while BNO085 runs at 500 Hz.
 
 High-rate accelerometer telemetry is intentionally handled like a small sensor
 stream, not like human log text. The BNO085 task does not enqueue accelerometer
@@ -1327,9 +1346,9 @@ current implementation is a passive GNSS diagnostic suitable for testing
 modules with antennas, currently modules 3 and 5 near the window.
 
 The BQ25792 Li-Po charger monitor runs on the shared I2C bus
-(`GPIO9/GPIO10`, address `0x6B`) at 400 kHz. A complete register-window dump
+(`GPIO9/GPIO10`, address `0x6B`) at 1 MHz. A complete register-window dump
 `0x00..0x48` runs at startup, on explicit refresh/configuration changes, and
-then every `APP_BQ25792_READ_INTERVAL_MS` (`10s` by default). The full dump is
+then every `APP_BQ25792_READ_INTERVAL_MS` (`1s` by default). The full dump is
 intentionally split into adaptive register chunks capped by
 `APP_BQ25792_REGISTER_READ_CHUNK_BYTES` (`16` by default) with a short gap between
 chunks so the charger monitor stays lower priority than the BNO085
@@ -1468,7 +1487,7 @@ The regular raw-map refresh is split into adaptive
 `APP_MAX77958_REGISTER_READ_CHUNK_BYTES` chunks (`33` bytes by default), so PD
 status reads can use large transfers when the accelerometer rate is low, but
 shrink to smaller transfers when the BNO085 realtime window is tight.
-The monitor runs every `APP_MAX77958_READ_INTERVAL_MS` (`10s` by default), plus
+The monitor runs every `APP_MAX77958_READ_INTERVAL_MS` (`1s` by default), plus
 on explicit dashboard refresh or after configuration operations.
 
 MAX77958 has an optional high-speed path for boards with strong enough I2C
