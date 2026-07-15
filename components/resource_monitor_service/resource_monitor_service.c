@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/freertos_debug.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
@@ -33,15 +34,17 @@ static resource_monitor_snapshot_t s_snapshot;
 static int64_t s_last_update_us;
 static bool s_started;
 static temperature_sensor_handle_t s_temp_sensor;
-static TaskStatus_t *s_task_status_array;
-static UBaseType_t s_task_status_capacity;
 
 typedef struct {
-    UBaseType_t task_number;
+    TaskHandle_t handle;
+    char name[RESOURCE_MONITOR_TASK_NAME_LEN];
+    int32_t core_id;
     uint64_t runtime_counter;
 } task_runtime_record_t;
 
-static task_runtime_record_t s_previous_tasks[RESOURCE_MONITOR_MAX_TRACKED_TASKS];
+static task_runtime_record_t *s_current_tasks;
+static task_runtime_record_t *s_previous_tasks;
+static UBaseType_t s_task_sample_capacity;
 static UBaseType_t s_previous_task_count;
 static int64_t s_previous_task_time_us;
 static bool s_previous_tasks_valid;
@@ -161,41 +164,67 @@ static void update_cpu_load(resource_monitor_snapshot_t *snapshot)
 #endif
 }
 
-static bool ensure_task_status_capacity(UBaseType_t required)
+static void copy_task_name(char *dest, size_t dest_size, const char *src)
 {
-    if (required <= s_task_status_capacity) {
-        return true;
+    if (dest == NULL || dest_size == 0) {
+        return;
     }
-
-    TaskStatus_t *new_array = heap_caps_calloc(
-        required, sizeof(TaskStatus_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (new_array == NULL) {
-        new_array = heap_caps_calloc(required, sizeof(TaskStatus_t),
-                                     MALLOC_CAP_8BIT);
+    if (src == NULL) {
+        src = "?";
     }
-    if (new_array == NULL) {
-        return false;
+    size_t i = 0;
+    for (; i + 1 < dest_size && src[i] != '\0'; ++i) {
+        dest[i] = src[i];
     }
-
-    if (s_task_status_array != NULL) {
-        heap_caps_free(s_task_status_array);
-    }
-    s_task_status_array = new_array;
-    s_task_status_capacity = required;
-    return true;
+    dest[i] = '\0';
 }
 
-static const task_runtime_record_t *find_previous_task(UBaseType_t task_number)
+static esp_err_t init_task_sampling_buffers(void)
+{
+    if (s_current_tasks != NULL && s_previous_tasks != NULL) {
+        return ESP_OK;
+    }
+
+    const size_t bytes =
+        RESOURCE_MONITOR_MAX_TRACKED_TASKS * sizeof(task_runtime_record_t);
+    s_current_tasks = heap_caps_calloc(
+        RESOURCE_MONITOR_MAX_TRACKED_TASKS, sizeof(task_runtime_record_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_previous_tasks = heap_caps_calloc(
+        RESOURCE_MONITOR_MAX_TRACKED_TASKS, sizeof(task_runtime_record_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_current_tasks == NULL || s_previous_tasks == NULL) {
+        if (s_current_tasks != NULL) {
+            heap_caps_free(s_current_tasks);
+            s_current_tasks = NULL;
+        }
+        if (s_previous_tasks != NULL) {
+            heap_caps_free(s_previous_tasks);
+            s_previous_tasks = NULL;
+        }
+        s_task_sample_capacity = 0;
+        ESP_LOGW(TAG, "Task load buffers unavailable in PSRAM (%u bytes)",
+                 (unsigned)(bytes * 2U));
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_task_sample_capacity = RESOURCE_MONITOR_MAX_TRACKED_TASKS;
+    ESP_LOGI(TAG, "Task load buffers allocated in PSRAM: %u bytes",
+             (unsigned)(bytes * 2U));
+    return ESP_OK;
+}
+
+static const task_runtime_record_t *find_previous_task(TaskHandle_t handle)
 {
     for (UBaseType_t i = 0; i < s_previous_task_count; ++i) {
-        if (s_previous_tasks[i].task_number == task_number) {
+        if (s_previous_tasks[i].handle == handle) {
             return &s_previous_tasks[i];
         }
     }
     return NULL;
 }
 
-static void store_previous_tasks(const TaskStatus_t *tasks, UBaseType_t count,
+static void store_previous_tasks(const task_runtime_record_t *tasks, UBaseType_t count,
                                  int64_t timestamp_us)
 {
     const UBaseType_t limit =
@@ -203,9 +232,7 @@ static void store_previous_tasks(const TaskStatus_t *tasks, UBaseType_t count,
             ? RESOURCE_MONITOR_MAX_TRACKED_TASKS
             : count;
     for (UBaseType_t i = 0; i < limit; ++i) {
-        s_previous_tasks[i].task_number = tasks[i].xTaskNumber;
-        s_previous_tasks[i].runtime_counter =
-            (uint64_t)tasks[i].ulRunTimeCounter;
+        s_previous_tasks[i] = tasks[i];
     }
     s_previous_task_count = limit;
     s_previous_task_time_us = timestamp_us;
@@ -219,10 +246,11 @@ static bool is_idle_task_name(const char *name)
 }
 
 static void insert_top_task(resource_monitor_snapshot_t *snapshot,
-                            const TaskStatus_t *task, uint64_t delta_us,
+                            const task_runtime_record_t *task,
+                            uint64_t delta_us,
                             float load_percent)
 {
-    if (delta_us == 0 || is_idle_task_name(task->pcTaskName)) {
+    if (delta_us == 0 || is_idle_task_name(task->name)) {
         return;
     }
 
@@ -243,17 +271,57 @@ static void insert_top_task(resource_monitor_snapshot_t *snapshot,
     }
 
     resource_monitor_task_load_t *entry = &snapshot->top_tasks[insert_at];
-    (void)snprintf(entry->name, sizeof(entry->name), "%s",
-                   task->pcTaskName != NULL ? task->pcTaskName : "?");
+    copy_task_name(entry->name, sizeof(entry->name), task->name);
     entry->runtime_delta_us = delta_us;
     entry->load_percent =
         load_percent < 0.0f ? 0.0f
                             : (load_percent > 100.0f ? 100.0f : load_percent);
+    entry->core_id = task->core_id;
+}
+
+static UBaseType_t collect_task_samples(task_runtime_record_t *tasks,
+                                        UBaseType_t capacity, bool *overflow)
+{
+    UBaseType_t count = 0;
+    if (overflow != NULL) {
+        *overflow = false;
+    }
+
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS && CONFIG_FREERTOS_USE_TRACE_FACILITY
+    TaskIterator_t iterator = {0};
+
+    vTaskSuspendAll();
+    while (xTaskGetNext(&iterator) != -1) {
+        const TaskHandle_t handle = iterator.pxTaskHandle;
+        if (handle == NULL) {
+            continue;
+        }
+        if (count >= capacity) {
+            if (overflow != NULL) {
+                *overflow = true;
+            }
+            break;
+        }
+
+        task_runtime_record_t *sample = &tasks[count++];
+        TaskStatus_t status = {0};
+        vTaskGetInfo(handle, &status, pdFALSE, eReady);
+        sample->handle = handle;
+        sample->runtime_counter = (uint64_t)status.ulRunTimeCounter;
 #if configTASKLIST_INCLUDE_COREID == 1
-    entry->core_id = task->xCoreID;
+        sample->core_id = status.xCoreID;
 #else
-    entry->core_id = -1;
+        sample->core_id = -1;
 #endif
+        copy_task_name(sample->name, sizeof(sample->name), status.pcTaskName);
+    }
+    (void)xTaskResumeAll();
+#else
+    (void)tasks;
+    (void)capacity;
+#endif
+
+    return count;
 }
 
 static void update_task_load(resource_monitor_snapshot_t *snapshot)
@@ -264,26 +332,17 @@ static void update_task_load(resource_monitor_snapshot_t *snapshot)
     memset(snapshot->top_tasks, 0, sizeof(snapshot->top_tasks));
 
 #if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS && CONFIG_FREERTOS_USE_TRACE_FACILITY
-    UBaseType_t required = uxTaskGetNumberOfTasks();
-    if (required == 0) {
-        return;
-    }
-    if (required > RESOURCE_MONITOR_MAX_TRACKED_TASKS) {
-        snapshot->task_list_overflow = true;
-        return;
-    }
-    required += 4;
-    if (!ensure_task_status_capacity(required)) {
+    if (s_current_tasks == NULL || s_previous_tasks == NULL ||
+        s_task_sample_capacity == 0) {
         snapshot->task_list_overflow = true;
         return;
     }
 
-    configRUN_TIME_COUNTER_TYPE total_runtime = 0;
-    const UBaseType_t count = uxTaskGetSystemState(
-        s_task_status_array, s_task_status_capacity, &total_runtime);
-    (void)total_runtime;
+    bool overflow = false;
+    const UBaseType_t count = collect_task_samples(
+        s_current_tasks, s_task_sample_capacity, &overflow);
     const int64_t now_us = esp_timer_get_time();
-    if (count == 0) {
+    if (overflow || count == 0) {
         snapshot->task_list_overflow = true;
         return;
     }
@@ -293,12 +352,12 @@ static void update_task_load(resource_monitor_snapshot_t *snapshot)
             (uint64_t)(now_us - s_previous_task_time_us);
         for (UBaseType_t i = 0; i < count; ++i) {
             const task_runtime_record_t *previous =
-                find_previous_task(s_task_status_array[i].xTaskNumber);
+                find_previous_task(s_current_tasks[i].handle);
             if (previous == NULL) {
                 continue;
             }
             const uint64_t current =
-                (uint64_t)s_task_status_array[i].ulRunTimeCounter;
+                s_current_tasks[i].runtime_counter;
             if (current < previous->runtime_counter) {
                 continue;
             }
@@ -307,13 +366,13 @@ static void update_task_load(resource_monitor_snapshot_t *snapshot)
                 elapsed_us > 0
                     ? (100.0f * (float)delta_us) / (float)elapsed_us
                     : 0.0f;
-            insert_top_task(snapshot, &s_task_status_array[i], delta_us,
+            insert_top_task(snapshot, &s_current_tasks[i], delta_us,
                             load_percent);
         }
         snapshot->task_load_valid = true;
     }
 
-    store_previous_tasks(s_task_status_array, count, now_us);
+    store_previous_tasks(s_current_tasks, count, now_us);
 #endif
 }
 
@@ -376,6 +435,7 @@ esp_err_t resource_monitor_service_start(void)
     }
 
     (void)init_temperature_sensor();
+    (void)init_task_sampling_buffers();
 
     const BaseType_t created = xTaskCreatePinnedToCore(
         resource_monitor_task, "resource_mon",
