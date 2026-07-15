@@ -280,12 +280,9 @@ static void insert_top_task(resource_monitor_snapshot_t *snapshot,
 }
 
 static UBaseType_t collect_task_samples(task_runtime_record_t *tasks,
-                                        UBaseType_t capacity, bool *overflow)
+                                        UBaseType_t capacity)
 {
     UBaseType_t count = 0;
-    if (overflow != NULL) {
-        *overflow = false;
-    }
 
 #if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS && CONFIG_FREERTOS_USE_TRACE_FACILITY
     TaskIterator_t iterator = {0};
@@ -297,9 +294,6 @@ static UBaseType_t collect_task_samples(task_runtime_record_t *tasks,
             continue;
         }
         if (count >= capacity) {
-            if (overflow != NULL) {
-                *overflow = true;
-            }
             break;
         }
 
@@ -338,12 +332,10 @@ static void update_task_load(resource_monitor_snapshot_t *snapshot)
         return;
     }
 
-    bool overflow = false;
     const UBaseType_t count = collect_task_samples(
-        s_current_tasks, s_task_sample_capacity, &overflow);
+        s_current_tasks, s_task_sample_capacity);
     const int64_t now_us = esp_timer_get_time();
-    if (overflow || count == 0) {
-        snapshot->task_list_overflow = true;
+    if (count == 0) {
         return;
     }
 
