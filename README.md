@@ -496,17 +496,27 @@ range_diff_ij_alt = c * (tof_ij + reply_ai_corrected - rx_delta_tag)
 ```
 
 If both estimates are present and they agree within
-`UWB_FLEX_TDOA_DUAL_DIFF_REJECT_M` (`0.75 m` at the moment), the firmware logs
-their average as `diff` and marks the sample as `fused=1`. If they disagree,
-the primary estimate is still logged, but `suspect=1` lets the dashboard keep
-the row visible while excluding it from the live least-squares fit when enough
-other observations are available.
+`UWB_FLEX_TDOA_DUAL_DIFF_REJECT_M` (`0.75 m` at the moment), the firmware uses
+an adaptive hybrid:
+
+```text
+blend = 0.5 * (1 - agree / reject_limit)
+diff  = primary + blend * (alt - primary)
+```
+
+So when the two estimates are very close, the result can approach a 50/50
+average. As they diverge, the solver moves back toward the classic
+`POLL -> RESP` estimate. If they disagree beyond the reject limit, the primary
+estimate is still logged, but `suspect=1` lets the dashboard keep the row
+visible while excluding it from the live least-squares fit when enough other
+observations are available.
 
 The firmware log line includes both estimates:
 
 ```text
 UWB_FLEX_TDOA obs tag=<tag> initiator=<Ai> responder=<Aj> seq=<seq>
-  diff=<m> m raw=<m> m anchor=<m> m alt=<m> m agree=<m> m fused=<0|1> suspect=<0|1> ...
+  diff=<m> m raw=<m> m anchor=<m> m primary=<m> m alt=<m> m
+  agree=<m> m blend=<0..0.5> fused=<0|1> suspect=<0|1> ...
 ```
 
 Initial dual-leg passive sanity test, 2026-07-15:

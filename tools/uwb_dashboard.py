@@ -63,7 +63,11 @@ FLEX_TDOA_RE = re.compile(
 FLEX_TDOA_EXTRA_RE = re.compile(
     rf"\balt=(?P<alt>{FLOAT_TEXT_RE})\s+m\s+"
     rf"agree=(?P<agree>{FLOAT_TEXT_RE})\s+m\s+"
+    rf"(?:blend=(?P<blend>{FLOAT_TEXT_RE})\s+)?"
     r"fused=(?P<fused>[01])\s+suspect=(?P<suspect>[01])"
+)
+FLEX_TDOA_PRIMARY_RE = re.compile(
+    rf"\bprimary=(?P<primary>{FLOAT_TEXT_RE})\s+m"
 )
 FLEX_TDOA_ANCHOR_RE = re.compile(
     r"\bFLEX_TDOA anchor result\s+pair=(?P<initiator>\d+)-(?P<responder>\d+)\s+"
@@ -640,12 +644,18 @@ class DashboardState:
 
         extra_match = FLEX_TDOA_EXTRA_RE.search(raw_message)
         alt_diff_m = None
+        primary_diff_m = None
         agreement_m = None
+        blend_weight = None
         fused = False
         suspect = False
+        primary_match = FLEX_TDOA_PRIMARY_RE.search(raw_message)
+        if primary_match is not None:
+            primary_diff_m = self.optional_float(primary_match.group("primary"))
         if extra_match is not None:
             alt_diff_m = self.optional_float(extra_match.group("alt"))
             agreement_m = self.optional_float(extra_match.group("agree"))
+            blend_weight = self.optional_float(extra_match.group("blend"))
             fused = extra_match.group("fused") == "1"
             suspect = extra_match.group("suspect") == "1"
 
@@ -658,8 +668,10 @@ class DashboardState:
             "seq": seq,
             "diff_m": diff_m,
             "raw_diff_m": raw_diff_m,
+            "primary_diff_m": primary_diff_m,
             "alt_diff_m": alt_diff_m,
             "agreement_m": agreement_m,
+            "blend_weight": blend_weight,
             "fused": fused,
             "suspect": suspect,
             "anchor_distance_m": anchor_distance_m,
@@ -865,6 +877,7 @@ class DashboardState:
                     raw_diffs: list[float] = []
                     reverse_sums: list[float] = []
                     agreement_values: list[float] = []
+                    blend_values: list[float] = []
                     fused_count = 0
                     suspect_count = 0
                     for left, right in matched:
@@ -886,6 +899,11 @@ class DashboardState:
                             )
                             if agreement_m is not None:
                                 agreement_values.append(agreement_m)
+                            blend_weight = self.optional_float(
+                                sample.get("blend_weight")
+                            )
+                            if blend_weight is not None:
+                                blend_values.append(blend_weight)
 
                     diff_m = self.median_float(diffs)
                     reverse_sum_m = self.median_float(reverse_sums)
@@ -893,6 +911,7 @@ class DashboardState:
                         continue
                     raw_diff_m = self.median_float(raw_diffs)
                     agreement_m = self.median_float(agreement_values)
+                    blend_weight = self.median_float(blend_values)
                     latest_left, latest_right = max(
                         matched,
                         key=lambda pair: max(
@@ -920,6 +939,7 @@ class DashboardState:
                         "latest_reverse_sum_m": float(latest_left["diff_m"])
                         + float(latest_right["diff_m"]),
                         "agreement_m": agreement_m,
+                        "blend_weight": blend_weight,
                         "fused_count": fused_count,
                         "suspect_count": suspect_count,
                         "suspect": suspect_count > len(matched),
@@ -1003,8 +1023,10 @@ class DashboardState:
                 "seq": int(item["seq"]),
                 "diff_m": float(item["diff_m"]),
                 "raw_diff_m": float(item["raw_diff_m"]),
+                "primary_diff_m": item.get("primary_diff_m"),
                 "alt_diff_m": item.get("alt_diff_m"),
                 "agreement_m": item.get("agreement_m"),
+                "blend_weight": item.get("blend_weight"),
                 "fused": bool(item.get("fused")),
                 "suspect": bool(item.get("suspect")),
                 "anchor_distance_m": float(item["anchor_distance_m"]),
@@ -4685,11 +4707,13 @@ function renderPositionReadout(model) {
         const fitNote = used ? "fit" : `skip ${item.reject_reason || "outlier"}`;
         const agreement = Number(item.agreement_m);
         const agreementText = Number.isFinite(agreement) ? ` · agree ${fmtCmFromM(agreement, 1)} cm` : "";
+        const blend = Number(item.blend_weight);
+        const blendText = Number.isFinite(blend) ? ` · blend ${(blend * 100).toFixed(0)}%` : "";
         const suspectText = item.suspect ? " · suspect" : "";
         const fusedText = Number(item.fused_count || 0) > 0 ? ` · fused ${esc(item.fused_count)}` : "";
         tdoaRows.push(`<tr class="${used ? "" : "position-skip"}">
           <td>T${esc(tag.tagId)}</td>
-          <td>A${esc(item.initiator_id)}↔A${esc(item.responder_id)}<br><span class="muted">seq ${esc(item.seq)}/${esc(item.reverse_seq)} · n ${esc(item.samples || 1)}${agreementText}${fusedText}${suspectText} · ${esc(fitNote)}</span></td>
+          <td>A${esc(item.initiator_id)}↔A${esc(item.responder_id)}<br><span class="muted">seq ${esc(item.seq)}/${esc(item.reverse_seq)} · n ${esc(item.samples || 1)}${agreementText}${blendText}${fusedText}${suspectText} · ${esc(fitNote)}</span></td>
           <td>${fmtFixed(item.diff_m, 3)}</td>
           <td>${Number.isFinite(reverseSum) ? fmtCmFromM(reverseSum, 1) + " cm" : "-"}</td>
           <td class="${Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${fmtFixed(item.age_sec, 1)}s</td>

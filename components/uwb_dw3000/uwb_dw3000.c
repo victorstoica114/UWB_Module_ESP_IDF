@@ -254,6 +254,7 @@ enum {
 #define UWB_FLEX_TDOA_CMD_ROUND_OFFSET 13U
 #define UWB_FLEX_TDOA_CMD_LEN (UWB_FLEX_TDOA_CMD_ROUND_OFFSET + sizeof(uint32_t))
 #define UWB_FLEX_TDOA_DUAL_DIFF_REJECT_M 0.75
+#define UWB_FLEX_TDOA_DUAL_DIFF_MAX_BLEND 0.50
 
 enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_POLL = 1,
@@ -3930,6 +3931,7 @@ static void uwb_flex_tdoa_log_ds_twr_observation(
     bool dual_valid = false;
     bool fused = false;
     bool suspect = false;
+    double blend_weight = 0.0;
 
     if (observation->have_final) {
         const double reply_a_dtu = (double)uwb_distance_delta_ts(
@@ -3950,22 +3952,29 @@ static void uwb_flex_tdoa_log_ds_twr_observation(
         agreement_m = fabs(primary_diff_m - alternate_diff_m);
         dual_valid = isfinite(alternate_diff_m);
         suspect = dual_valid && agreement_m > UWB_FLEX_TDOA_DUAL_DIFF_REJECT_M;
-        fused = dual_valid && !suspect;
+        if (dual_valid && !suspect) {
+            const double agreement_ratio =
+                fmin(fmax(agreement_m / UWB_FLEX_TDOA_DUAL_DIFF_REJECT_M, 0.0),
+                     1.0);
+            blend_weight =
+                UWB_FLEX_TDOA_DUAL_DIFF_MAX_BLEND * (1.0 - agreement_ratio);
+            fused = blend_weight > 0.0;
+        }
     }
 
     const double diff_m =
-        fused ? (primary_diff_m + alternate_diff_m) * 0.5 : primary_diff_m;
+        primary_diff_m + blend_weight * (alternate_diff_m - primary_diff_m);
     const double raw_diff_m =
-        fused ? (primary_raw_diff_m + alternate_raw_diff_m) * 0.5
-              : primary_raw_diff_m;
+        primary_raw_diff_m +
+        blend_weight * (alternate_raw_diff_m - primary_raw_diff_m);
 
     ESP_LOGI(TAG,
-             "UWB_FLEX_TDOA obs tag=%u initiator=%u responder=%u seq=%u diff=%.3f m raw=%.3f m anchor=%.3f m alt=%.3f m agree=%.3f m fused=%u suspect=%u clk_valid=%u clk_ratio=%.3e clk_samples=%lu final_clk_valid=%u final_clk_ratio=%.3e final_clk_samples=%lu",
+             "UWB_FLEX_TDOA obs tag=%u initiator=%u responder=%u seq=%u diff=%.3f m raw=%.3f m anchor=%.3f m primary=%.3f m alt=%.3f m agree=%.3f m blend=%.3f fused=%u suspect=%u clk_valid=%u clk_ratio=%.3e clk_samples=%lu final_clk_valid=%u final_clk_ratio=%.3e final_clk_samples=%lu",
              (unsigned)tag_id, (unsigned)observation->initiator_id,
              (unsigned)observation->responder_id,
              (unsigned)observation->sequence, diff_m, raw_diff_m,
-             anchor_distance_m, alternate_diff_m, agreement_m, fused ? 1U : 0U,
-             suspect ? 1U : 0U,
+             anchor_distance_m, primary_diff_m, alternate_diff_m, agreement_m,
+             blend_weight, fused ? 1U : 0U, suspect ? 1U : 0U,
              observation->resp_clock_offset_valid ? 1U : 0U,
              clock_offset_ratio,
              (unsigned long)observation->resp_clock_filter_samples,
