@@ -373,6 +373,56 @@ t=100| slot end            | slot end             | slot end             | keeps
 If the coordinator is also the slot initiator, there is no `FLEX_TDOA_CMD`: the
 coordinator starts the DS-TWR `POLL` directly at the beginning of the slot.
 
+#### FlexTDOA Speed Notes
+
+The current runtime is not limited by raw UWB bitrate in the normal case. The
+DWM3000 data sheet lists up to `6.8 Mbps` PHY data rate, while our packets are
+small. The practical update-rate limit is the slot schedule around a full
+DS-TWR exchange:
+
+```text
+non-local slot ~= command_delay
+               + resp_delay
+               + final_delay
+               + report_delay
+               + report2_delay
+               + frame airtime / SPI / software margin
+```
+
+`RESP` and `FINAL` are already DW3000 delayed-TX events. `REPORT` and `REPORT2`
+still use the same runtime `dt_report_delay_ms` as a software wait before TX.
+The coordinator command path also uses `anchor_survey_command_delay_ms` as a
+software wait on the commanded initiator. These are the first places to optimize
+after reducing the configured delays.
+
+The dashboard timing profiles currently mean:
+
+| Profile | slot | round gap | command | RESP | FINAL | REPORT/REPORT2 | programmed slot work | 4-anchor round | paired update |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Stable Baseline | `100 ms` | `10 ms` | `10 ms` | `20 ms` | `20 ms` | `10 ms` | `70 ms` | `610 ms` | `1220 ms` |
+| Safe Fast | `60 ms` | `10 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `45 ms` | `370 ms` | `740 ms` |
+| Balanced | `50 ms` | `10 ms` | `5 ms` | `10 ms` | `10 ms` | `5 ms` | `35 ms` | `310 ms` | `620 ms` |
+| Aggressive | `40 ms` | `10 ms` | `3 ms` | `7 ms` | `7 ms` | `3 ms` | `23 ms` | `250 ms` | `500 ms` |
+
+`paired update` is two rounds because the direction reverses on alternating
+rounds. The dashboard can still solve from the latest paired observations, but
+motion tests should treat this as the effective bidirectional observation age.
+
+Likely next steps:
+
+1. Validate the existing `Safe Fast`, `Balanced`, and `Aggressive` profiles on
+   hardware and log per-pair timeout/fail rates.
+2. Reduce `RESP` and `FINAL` delayed-TX delays first, because they dominate the
+   DS-TWR body and are controlled by the DW3000 timestamp engine.
+3. Convert `REPORT`/`REPORT2` waits to delayed TX or a tighter state-machine
+   path if software delay jitter becomes visible.
+4. Replace follower `command_delay_ms` with a scheduled `POLL` delayed-TX based
+   on command RX time. That would make commanded slots deterministic like the
+   calibration slots and remove one FreeRTOS delay from the hot path.
+5. Keep the full DS-TWR anchor-anchor measurement for geometry. The clean
+   FlexTDOA prototype was faster, but the raw anchor geometry was much noisier;
+   full DS-TWR plus median filtering is the stable base for the passive tag.
+
 #### FlexTDOA Robustness Improvements
 
 `FLEX_TDOA_CMD` carries the full 32-bit round counter, not only the low byte.

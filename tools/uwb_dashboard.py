@@ -2185,6 +2185,43 @@ tr.status-stale td { color: #4f3b1d; }
   color: var(--muted);
   font-size: 12px;
 }
+.position-filter-card {
+  border: 1px solid var(--line);
+  background: #fff;
+  padding: 8px;
+}
+.position-filter-card b {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.position-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.position-pill {
+  border: 1px solid var(--line);
+  background: #f8fafc;
+  color: var(--text);
+  padding: 3px 7px;
+  font-size: 12px;
+}
+.position-pill.good {
+  border-color: #bfe8cc;
+  color: #087a2a;
+  background: #f4fbf6;
+}
+.position-pill.warn {
+  border-color: #f3d29c;
+  color: #a15b00;
+  background: #fff9ed;
+}
+.position-pill.bad {
+  border-color: #f2b8b5;
+  color: #b3261e;
+  background: #fff7f6;
+}
 .position-legend {
   display: flex;
   gap: 10px;
@@ -4275,6 +4312,7 @@ function minTdoaObservationCount(anchorIds) {
 }
 
 function robustTdoaFit(anchorIds, anchors, observations, options = {}) {
+  const strictKalmanInput = options.tdoaMode === "auto";
   const all = (observations || []).filter(item =>
     anchors[Number(item.initiator_id)] &&
     anchors[Number(item.responder_id)] &&
@@ -4287,7 +4325,9 @@ function robustTdoaFit(anchorIds, anchors, observations, options = {}) {
         options.tdoaMode || "static"
       ),
     }));
-  const minCount = minTdoaObservationCount(anchorIds);
+  const minCount = strictKalmanInput && Number(anchorIds?.length || 0) >= 4
+    ? 4
+    : minTdoaObservationCount(anchorIds);
   const notes = new Map();
   if (all.length < minCount) {
     return {
@@ -4315,6 +4355,18 @@ function robustTdoaFit(anchorIds, anchors, observations, options = {}) {
     return ok;
   });
   if (used.length < minCount) {
+    if (strictKalmanInput) {
+      return {
+        position: null,
+        used: [],
+        annotated: all.map(item => ({
+          ...item,
+          used_in_fit: false,
+          reject_reason: notes.get(tdoaObservationKey(item)) || "need clean obs",
+        })),
+        notes,
+      };
+    }
     used = candidates;
     for (const item of candidates) {
       const key = tdoaObservationKey(item);
@@ -5056,6 +5108,65 @@ function fmtPositionSigma(value, digits = 1) {
   return Number.isFinite(Number(value)) ? `±${fmtCmFromM(value, digits)} cm` : "-";
 }
 
+function positionTdoaFilterLabel(mode) {
+  if (mode === "auto") return "Auto Kalman";
+  if (mode === "dynamic") return "Dynamic 1.5s median";
+  return "Static median";
+}
+
+function positionGateClass(status) {
+  if (status === "accepted" || status === "init") return "good";
+  if (status === "predict") return "warn";
+  if (status) return "bad";
+  return "";
+}
+
+function renderPositionFilterStatus(model) {
+  const settings = model.settings || {};
+  if (settings.solver !== "tdoa") {
+    return `<div class="position-filter-card">
+      <b>Solver Status</b>
+      <div class="position-filter-row"><span class="position-pill">DS-TWR ranges</span></div>
+    </div>`;
+  }
+
+  const tags = Object.values(model.tags || {});
+  const filterLabel = positionTdoaFilterLabel(settings.tdoaMode);
+  const activeKalman = settings.tdoaMode === "auto";
+  let filterInfo = null;
+  for (const tag of tags) {
+    if (tag.filterInfo) {
+      filterInfo = tag.filterInfo;
+      break;
+    }
+  }
+
+  const pills = [
+    `<span class="position-pill">Filter: ${esc(filterLabel)}</span>`,
+  ];
+  if (activeKalman) {
+    if (filterInfo) {
+      const status = filterInfo.status || "waiting";
+      pills.push(`<span class="position-pill ${esc(positionGateClass(status))}">Kalman ${esc(filterInfo.mode || "static")}</span>`);
+      pills.push(`<span class="position-pill ${esc(positionGateClass(status))}">gate ${esc(status)}</span>`);
+      pills.push(`<span class="position-pill">v ${fmtFixed(Number(filterInfo.speed_mps || 0), 2)} m/s</span>`);
+      pills.push(`<span class="position-pill">ok/drop ${esc(filterInfo.accepted || 0)}/${esc(filterInfo.rejected || 0)}</span>`);
+      if (Number.isFinite(Number(filterInfo.innovation_m))) {
+        pills.push(`<span class="position-pill">innovation ${fmtCmFromM(filterInfo.innovation_m, 1)} cm</span>`);
+      }
+    } else {
+      pills.push(`<span class="position-pill warn">Kalman waiting</span>`);
+    }
+  } else {
+    pills.push(`<span class="position-pill warn">Kalman off</span>`);
+  }
+
+  return `<div class="position-filter-card">
+    <b>Position Filter</b>
+    <div class="position-filter-row">${pills.join("")}</div>
+  </div>`;
+}
+
 function renderPositionReadout(model) {
   const readout = document.getElementById("positionReadout");
   const accuracyRows = document.getElementById("positionAccuracyRows");
@@ -5079,7 +5190,7 @@ function renderPositionReadout(model) {
       overlay.querySelector("h2").textContent = `${solverName} is not active`;
       overlay.querySelector("p").textContent = "Enable the selected position runtime to clear old measurements and compute a new live position.";
     }
-    readout.innerHTML = `<div class="position-tag-card"><b>${esc(solverName)} inactive</b><span>No stored position is shown while the selected modules are not in the selected runtime.</span></div>`;
+    readout.innerHTML = `${renderPositionFilterStatus(model)}<div class="position-tag-card"><b>${esc(solverName)} inactive</b><span>No stored position is shown while the selected modules are not in the selected runtime.</span></div>`;
     accuracyRows.innerHTML = "";
     title.textContent = model.settings.solver === "tdoa" ? "TDOA Observations" : "Distances";
     rows.innerHTML = "";
@@ -5123,7 +5234,7 @@ function renderPositionReadout(model) {
       : `${fitCount}/${total} fresh distances`;
     return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span>${countText}${accuracyText}${filterText}${rawText}</span></div>`;
   });
-  readout.innerHTML = tagCards.join("") || `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
+  readout.innerHTML = `${renderPositionFilterStatus(model)}${tagCards.join("") || `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`}`;
   const accuracyTableRows = Object.values(model.tags).map(tag => {
     const accuracy = tag.accuracy;
     if (!tag.position || !accuracy) {
@@ -7240,10 +7351,10 @@ function mirrorRangingProfileToUwbFields(values) {
 }
 
 function profileSummaryText(values, anchorCount = 4) {
-  const flexResponseWindowMs = 3 * values.commandDelayMs;
+  const programmedDsTwrMs = profileProgrammedDsTwrMs(values);
   const classicProgrammedMs =
     values.respDelayMs + values.finalDelayMs + 2 * values.reportDelayMs;
-  const marginMs = values.slotMs - flexResponseWindowMs;
+  const marginMs = values.slotMs - programmedDsTwrMs;
   const pairCount = Math.max(1, anchorCount * (anchorCount - 1) / 2);
   const roundMs = pairCount * values.slotMs + values.roundGapMs;
   const bidirectionalMs = 2 * roundMs;
@@ -7252,7 +7363,14 @@ function profileSummaryText(values, anchorCount = 4) {
   if (values.rxSliceMs > values.slotMs) warnings.push("RX slice > slot");
   if (marginMs < 5) warnings.push("low slot margin");
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `${anchorCount} anchors: ${pairCount} pair slots · ~${fmtFixed(roundMs, 0)} ms/round · ~${fmtFixed(bidirectionalMs, 0)} ms bidir · Flex response window ${fmtFixed(flexResponseWindowMs, 0)} ms · classic DS-TWR ${fmtFixed(classicProgrammedMs, 0)} ms · margin ${fmtFixed(marginMs, 0)} ms${warnText}`;
+  return `${anchorCount} anchors: ${pairCount} pair slots · ~${fmtFixed(roundMs, 0)} ms/round · ~${fmtFixed(bidirectionalMs, 0)} ms bidir · programmed FlexTDOA ${fmtFixed(programmedDsTwrMs, 0)} ms · DS-TWR body ${fmtFixed(classicProgrammedMs, 0)} ms · margin ${fmtFixed(marginMs, 0)} ms${warnText}`;
+}
+
+function profileProgrammedDsTwrMs(values) {
+  return values.commandDelayMs +
+    values.respDelayMs +
+    values.finalDelayMs +
+    2 * values.reportDelayMs;
 }
 
 function updateRangingProfileSummary(profileKey) {
@@ -7263,7 +7381,7 @@ function updateRangingProfileSummary(profileKey) {
   const values = readRangingProfile(profileKey);
   const valid = Object.values(values).every(value => Number.isFinite(value));
   summary.textContent = valid ? profileSummaryText(values, 4) : "incomplete profile";
-  summary.className = `profile-summary ${valid && values.slotMs - (3 * values.commandDelayMs) < 5 ? "warn" : ""}`.trim();
+  summary.className = `profile-summary ${valid && values.slotMs - profileProgrammedDsTwrMs(values) < 5 ? "warn" : ""}`.trim();
 }
 
 function updateAllRangingProfileSummaries() {
