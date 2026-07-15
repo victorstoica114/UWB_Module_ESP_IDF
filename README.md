@@ -509,6 +509,35 @@ UWB_FLEX_TDOA obs tag=<tag> initiator=<Ai> responder=<Aj> seq=<seq>
   diff=<m> m raw=<m> m anchor=<m> m alt=<m> m agree=<m> m fused=<0|1> suspect=<0|1> ...
 ```
 
+Dual-leg passive test, 2026-07-15:
+
+The test below used the same room setup that was active during development. It
+does not claim absolute tag accuracy, because the tag position was not measured
+with a tape. It only checks whether the passive solver is internally stable when
+the tag is left fixed.
+
+| Metric | Result |
+| --- | ---: |
+| Duration | `75 s` |
+| Passive observations | `673` |
+| Fused observations | `670 / 673` (`99.6%`) |
+| Suspect observations | `3 / 673` (`0.4%`) |
+| `primary` vs `alt` agreement, median | `13.0 cm` |
+| Paired reverse sum, median | `0.9 cm` |
+| Paired reverse sum, std | `3.9 cm` |
+| Reconstructed anchor edge std, median | `1.05 cm` |
+| Solved tag X std / span | `1.35 cm` / `6.17 cm` |
+| Solved tag Y std / span | `0.97 cm` / `5.49 cm` |
+| Solver residual RMS, median | `7.59 cm` |
+
+This is a useful improvement over the earlier visibly wandering passive view:
+the DS-TWR anchor geometry remains stable, the reverse directed observations are
+near antisymmetric, and the extra `RESP -> FINAL` estimate gives a cheap
+multipath/consistency check without making the tag transmit. One outlier class
+still exists: individual `primary` vs `alt` agreement can spike hard, so the
+dashboard keeps `suspect` rows visible and excludes them from the live fit when
+there are enough healthy pairs.
+
 The passive tag keeps a small clock-offset filter per responder anchor. The raw
 DW3000 carrier-integrator clock ratio is useful but noisy enough that applying a
 single instantaneous value adds visible jitter to `diff`. The firmware therefore
