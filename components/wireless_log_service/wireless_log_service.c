@@ -7,8 +7,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_log.h"
 #include "esp_log_write.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "lwip/netdb.h"
@@ -21,6 +24,8 @@
 #ifndef APP_WIRELESS_LOG_TARGET
 #define APP_WIRELESS_LOG_TARGET ""
 #endif
+
+static const char *TAG = "wireless_log";
 
 enum {
     WIRELESS_LOG_TASK_STACK_WORDS = 4096,
@@ -48,6 +53,18 @@ static volatile enum wireless_log_status s_status =
     WIRELESS_LOG_STATUS_DISABLED;
 static volatile bool s_connected;
 static volatile uint32_t s_dropped_count;
+
+static void wireless_log_delete_queues(void)
+{
+    if (s_log_queue != NULL) {
+        vQueueDeleteWithCaps(s_log_queue);
+        s_log_queue = NULL;
+    }
+    if (s_priority_log_queue != NULL) {
+        vQueueDeleteWithCaps(s_priority_log_queue);
+        s_priority_log_queue = NULL;
+    }
+}
 
 static bool wireless_log_target_configured(void)
 {
@@ -400,22 +417,21 @@ esp_err_t wireless_log_service_start(void)
         return ESP_OK;
     }
 
-    s_log_queue = xQueueCreate(WIRELESS_LOG_QUEUE_LEN,
-                               sizeof(wireless_log_line_t));
-    s_priority_log_queue = xQueueCreate(WIRELESS_LOG_PRIORITY_QUEUE_LEN,
-                                        sizeof(wireless_log_line_t));
+    s_log_queue = xQueueCreateWithCaps(
+        WIRELESS_LOG_QUEUE_LEN, sizeof(wireless_log_line_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_priority_log_queue = xQueueCreateWithCaps(
+        WIRELESS_LOG_PRIORITY_QUEUE_LEN, sizeof(wireless_log_line_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (s_log_queue == NULL || s_priority_log_queue == NULL) {
-        if (s_log_queue != NULL) {
-            vQueueDelete(s_log_queue);
-            s_log_queue = NULL;
-        }
-        if (s_priority_log_queue != NULL) {
-            vQueueDelete(s_priority_log_queue);
-            s_priority_log_queue = NULL;
-        }
+        wireless_log_delete_queues();
         s_status = WIRELESS_LOG_STATUS_FAILED;
         return ESP_ERR_NO_MEM;
     }
+    ESP_LOGI(TAG, "Wireless log queues allocated in PSRAM: normal=%uB priority=%uB",
+             (unsigned)(WIRELESS_LOG_QUEUE_LEN * sizeof(wireless_log_line_t)),
+             (unsigned)(WIRELESS_LOG_PRIORITY_QUEUE_LEN *
+                        sizeof(wireless_log_line_t)));
 
     s_previous_vprintf = esp_log_set_vprintf(wireless_log_vprintf);
     s_hook_installed = true;
@@ -429,10 +445,7 @@ esp_err_t wireless_log_service_start(void)
             esp_log_set_vprintf(s_previous_vprintf);
             s_hook_installed = false;
         }
-        vQueueDelete(s_log_queue);
-        s_log_queue = NULL;
-        vQueueDelete(s_priority_log_queue);
-        s_priority_log_queue = NULL;
+        wireless_log_delete_queues();
         s_status = WIRELESS_LOG_STATUS_FAILED;
         return ESP_ERR_NO_MEM;
     }

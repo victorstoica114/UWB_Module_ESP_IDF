@@ -433,6 +433,7 @@ class DashboardState:
         self.client_counts: dict[str, int] = {}
         self.telemetry_client_counts: dict[str, int] = {}
         self.listener_telemetry_ports: list[int] = []
+        self.status_targets: list[str] = []
         self.status_by_module: dict[int, dict[str, Any]] = {}
         self.status_errors: dict[str, str] = {}
 
@@ -1038,6 +1039,10 @@ class DashboardState:
         with self.lock:
             self.listener_telemetry_ports = list(dict.fromkeys(ports))
 
+    def set_status_targets(self, targets: list[str]) -> None:
+        with self.lock:
+            self.status_targets = list(dict.fromkeys(targets))
+
     def set_status(self, module_id: int, status: dict[str, Any]) -> None:
         status["status_updated_at"] = time.time()
         with self.lock:
@@ -1079,11 +1084,14 @@ class DashboardState:
         with self.lock:
             now = time.time()
             statuses = []
+            seen_targets: set[str] = set()
             for status in self.status_by_module.values():
                 item = dict(status)
                 updated_at = float(item.get("status_updated_at") or 0.0)
                 age_sec = now - updated_at if updated_at > 0.0 else None
                 target = str(item.get("target") or "")
+                if target:
+                    seen_targets.add(target)
                 error = self.status_errors.get(target)
                 online = (
                     age_sec is not None
@@ -1096,17 +1104,41 @@ class DashboardState:
                 if error:
                     item["http_status_error"] = error
                 statuses.append(item)
+            for target in self.status_targets:
+                if target in seen_targets:
+                    continue
+                item = {
+                    "module_id": None,
+                    "hostname": target,
+                    "target": target,
+                    "ip": target,
+                    "wifi_connected": False,
+                    "wifi_connected_rssi": "-",
+                    "wifi_disconnect_count": "-",
+                    "runtime_anchor_ids": [],
+                    "status_updated_at": None,
+                    "http_status_age_sec": None,
+                    "http_status_online": False,
+                    "http_status_error": self.status_errors.get(target, "no status yet"),
+                }
+                statuses.append(item)
             errors = dict(self.status_errors)
             client_count = self.client_count
             telemetry_client_count = self.telemetry_client_count
             client_counts = dict(self.client_counts)
             telemetry_client_counts = dict(self.telemetry_client_counts)
             listener_telemetry_ports = list(self.listener_telemetry_ports)
+            status_target_count = len(self.status_targets)
             log_count = len(self.logs)
             next_log_id = self.next_log_id
             ranging = self.ranging_snapshot_locked(now)
             tdoa = self.tdoa_snapshot_locked(now)
-        statuses.sort(key=lambda item: int(item.get("module_id") or 0))
+        statuses.sort(
+            key=lambda item: (
+                int(item.get("module_id") or 9999),
+                str(item.get("target") or item.get("ip") or ""),
+            )
+        )
         return {
             "client_count": client_count,
             "telemetry_client_count": telemetry_client_count,
@@ -1117,6 +1149,7 @@ class DashboardState:
             "next_log_id": next_log_id,
             "statuses": statuses,
             "status_errors": errors,
+            "status_target_count": status_target_count,
             "status_online_max_age_sec": self.status_online_max_age_sec,
             "accel_history": {},
             "ranging": ranging,
@@ -1570,9 +1603,95 @@ th { color: var(--muted); font-weight: 700; }
 .pd-status-table .col-ops { width: 21%; }
 .pd-pdo-list { margin: 4px 0 0; padding-left: 18px; }
 .pd-pdo-list li { margin: 2px 0; }
+.resource-cell {
+  min-width: 190px;
+  max-width: 260px;
+  font-size: 12px;
+  line-height: 1.3;
+}
+.resource-meter {
+  margin: 0 0 7px;
+}
+.resource-meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+.resource-meter-name {
+  font-weight: 700;
+  color: var(--ink);
+}
+.resource-meter-value {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.resource-bar {
+  height: 8px;
+  border: 1px solid #d7deea;
+  background: #edf2f8;
+  overflow: hidden;
+}
+.resource-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2f6fe4, #5c93f0);
+}
+.resource-meter.internal .resource-bar-fill {
+  background: linear-gradient(90deg, #138a4b, #29b66f);
+}
+.resource-meter.psram .resource-bar-fill {
+  background: linear-gradient(90deg, #2f6fe4, #6aa0f5);
+}
+.resource-meter.cpu0 .resource-bar-fill {
+  background: linear-gradient(90deg, #7a56d9, #9d7cf0);
+}
+.resource-meter.cpu1 .resource-bar-fill {
+  background: linear-gradient(90deg, #b35b00, #df8a28);
+}
+.resource-meter.temp .resource-bar-fill {
+  background: linear-gradient(90deg, #138a4b, #d08a00 62%, #c43a31);
+}
+.resource-meter.task {
+  margin-bottom: 5px;
+}
+.resource-meter.task .resource-bar {
+  height: 6px;
+}
+.resource-meter.task .resource-bar-fill {
+  background: linear-gradient(90deg, #516070, #8996a8);
+}
+.resource-meter-foot {
+  margin-top: 2px;
+  color: var(--muted);
+}
+.resource-task-list {
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+.resource-task-title {
+  color: var(--muted);
+  font-weight: 700;
+  margin-bottom: 5px;
+}
+.resource-task-name {
+  max-width: 136px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.resource-meta {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+}
 .ok { color: var(--green); font-weight: 700; }
 .warn { color: var(--orange); font-weight: 700; }
 .bad { color: var(--red); font-weight: 700; }
+tr.status-stale { background: #fffaf2; }
+tr.status-stale td { color: #4f3b1d; }
 .settings-grid { display: grid; grid-template-columns: minmax(340px, 520px) minmax(420px, 1fr); gap: 14px; align-items: start; }
 .charger-grid { grid-template-columns: minmax(620px, 1.25fr) minmax(360px, 0.75fr); }
 .pd-grid { grid-template-columns: minmax(680px, 1.2fr) minmax(380px, 0.8fr); }
@@ -2097,7 +2216,7 @@ th { color: var(--muted); font-weight: 700; }
     <section id="info" class="page">
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Module</th><th>Wi-Fi</th><th>Runtime</th><th>Components</th><th>GPS</th><th>UWB</th><th>Antenna</th><th>Logs</th><th>Battery</th></tr></thead>
+          <thead><tr><th>Module</th><th>Wi-Fi</th><th>Runtime</th><th>Components</th><th>GPS</th><th>UWB</th><th>Antenna</th><th>Logs</th><th>Resources</th><th>Battery</th></tr></thead>
           <tbody id="infoRows"></tbody>
         </table>
       </div>
@@ -3058,6 +3177,30 @@ function fmtAge(ts) {
   if (!ts) return "-";
   const age = Math.max(0, Date.now() / 1000 - ts);
   return `${age.toFixed(1)}s`;
+}
+function statusIsFresh(item) {
+  return Boolean(item?.http_status_online);
+}
+function statusAgeText(item) {
+  const age = Number(item?.http_status_age_sec);
+  return Number.isFinite(age) && age >= 0 ? `${age.toFixed(1)}s` : fmtAge(item?.status_updated_at);
+}
+function renderModuleCell(item) {
+  const fresh = statusIsFresh(item);
+  const statusLine = fresh
+    ? `<span class="ok">HTTP live</span>`
+    : `<span class="warn">HTTP stale ${esc(statusAgeText(item))}</span>`;
+  const error = !fresh && item.http_status_error
+    ? `<br><span class="muted">${esc(item.http_status_error)}</span>`
+    : "";
+  return `<b>${esc(item.hostname)}</b><br><span class="muted">${esc(item.ip || item.target || "")}</span><br>${statusLine}${error}`;
+}
+function renderWifiCell(item) {
+  const fresh = statusIsFresh(item);
+  const stateClass = item.wifi_connected ? "ok" : "bad";
+  const stateText = item.wifi_connected ? "connected" : "offline";
+  const prefix = fresh ? "" : "last: ";
+  return `<span class="${fresh ? stateClass : "warn"}">${prefix}${stateText}</span><br>RSSI ${esc(item.wifi_connected_rssi)} dBm<br>disc ${esc(item.wifi_disconnect_count)}`;
 }
 function terminalMatchesModule(term, log) {
   return term.modules === "all" || term.modules.includes(Number(log.module_id));
@@ -4667,6 +4810,24 @@ function fmtAgeMs(ageMs) {
   return `${(number / 1000).toFixed(1)}s`;
 }
 
+function fmtBytes(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return "-";
+  if (number >= 1024 * 1024) return `${(number / (1024 * 1024)).toFixed(2)} MiB`;
+  return `${(number / 1024).toFixed(0)} KiB`;
+}
+
+function fmtPercent(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(1)}%` : "-";
+}
+
+function clampPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(0, Math.min(100, number));
+}
+
 function fmtMv(value) {
   const number = Number(value);
   return Number.isFinite(number) ? `${(number / 1000).toFixed(3)} V` : "-";
@@ -4946,6 +5107,139 @@ function renderBatteryCell(item) {
       · age ${fmtAgeMs(item.charger_last_update_age_ms)}</span>`;
 }
 
+function renderResourceCell(item) {
+  if (!item || !item.resource_monitor_running) {
+    return `<span class="muted">not available</span>`;
+  }
+  const memoryMeter = (kind, label, freeValue, totalValue, minFreeValue, largestValue) => {
+    const free = Number(freeValue);
+    const total = Number(totalValue);
+    const minFree = Number(minFreeValue);
+    const largest = Number(largestValue);
+    if (!Number.isFinite(free) || !Number.isFinite(total) || total <= 0) {
+      return `
+        <div class="resource-meter ${kind}">
+          <div class="resource-meter-head">
+            <span class="resource-meter-name">${esc(label)}</span>
+            <span class="resource-meter-value">not available</span>
+          </div>
+          <div class="resource-bar"><div class="resource-bar-fill" style="width:0%"></div></div>
+        </div>`;
+    }
+    const used = Math.max(0, total - free);
+    const usedPercent = clampPercent((used * 100) / total);
+    const freePercent = clampPercent((free * 100) / total);
+    const minUsed = Number.isFinite(minFree) ? Math.max(0, total - minFree) : NaN;
+    const minUsedPercent = Number.isFinite(minUsed) ? clampPercent((minUsed * 100) / total) : NaN;
+    const minText = Number.isFinite(minUsedPercent) ? `peak ${minUsedPercent.toFixed(0)}%` : "peak -";
+    const largestText = Number.isFinite(largest) ? `blk ${fmtBytes(largest)}` : "blk -";
+    return `
+      <div class="resource-meter ${kind}" title="${esc(label)} used ${fmtBytes(used)} / total ${fmtBytes(total)}">
+        <div class="resource-meter-head">
+          <span class="resource-meter-name">${esc(label)}</span>
+          <span class="resource-meter-value">${fmtBytes(free)} free / ${fmtBytes(total)}</span>
+        </div>
+        <div class="resource-bar" aria-label="${esc(label)} ${usedPercent.toFixed(1)} percent used">
+          <div class="resource-bar-fill" style="width:${usedPercent.toFixed(1)}%"></div>
+        </div>
+        <div class="resource-meter-foot">${usedPercent.toFixed(0)}% used · ${freePercent.toFixed(0)}% free · ${minText} · ${largestText}</div>
+      </div>`;
+  };
+  const percentMeter = (kind, label, value, valid, foot = "") => {
+    const percent = Number(value);
+    if (!valid || !Number.isFinite(percent)) {
+      return `
+        <div class="resource-meter ${kind}">
+          <div class="resource-meter-head">
+            <span class="resource-meter-name">${esc(label)}</span>
+            <span class="resource-meter-value">warming up</span>
+          </div>
+          <div class="resource-bar"><div class="resource-bar-fill" style="width:0%"></div></div>
+        </div>`;
+    }
+    const clamped = clampPercent(percent);
+    const footText = foot ? ` · ${foot}` : "";
+    return `
+      <div class="resource-meter ${kind}" title="${esc(label)} load ${percent.toFixed(1)}%">
+        <div class="resource-meter-head">
+          <span class="resource-meter-name">${esc(label)}</span>
+          <span class="resource-meter-value">${percent.toFixed(1)}%</span>
+        </div>
+        <div class="resource-bar" aria-label="${esc(label)} ${percent.toFixed(1)} percent load">
+          <div class="resource-bar-fill" style="width:${clamped.toFixed(1)}%"></div>
+        </div>
+        <div class="resource-meter-foot">${clamped.toFixed(0)}% load${esc(footText)}</div>
+      </div>`;
+  };
+  const tempMeter = () => {
+    const temp = Number(item.resource_temperature_c);
+    if (!item.resource_temperature_valid || !Number.isFinite(temp)) {
+      return `
+        <div class="resource-meter temp">
+          <div class="resource-meter-head">
+            <span class="resource-meter-name">ESP temp</span>
+            <span class="resource-meter-value">${esc(item.resource_temperature_error_name || "not available")}</span>
+          </div>
+          <div class="resource-bar"><div class="resource-bar-fill" style="width:0%"></div></div>
+        </div>`;
+    }
+    const minTemp = 20;
+    const maxTemp = 80;
+    const tempPercent = clampPercent(((temp - minTemp) * 100) / (maxTemp - minTemp));
+    return `
+      <div class="resource-meter temp" title="ESP internal temperature ${temp.toFixed(1)} C">
+        <div class="resource-meter-head">
+          <span class="resource-meter-name">ESP temp</span>
+          <span class="resource-meter-value">${temp.toFixed(1)} C</span>
+        </div>
+        <div class="resource-bar" aria-label="ESP temperature ${temp.toFixed(1)} C">
+          <div class="resource-bar-fill" style="width:${tempPercent.toFixed(1)}%"></div>
+        </div>
+        <div class="resource-meter-foot">scale ${minTemp}-${maxTemp} C · ${tempPercent.toFixed(0)}%</div>
+      </div>`;
+  };
+  const taskMeters = () => {
+    const tasks = Array.isArray(item.resource_top_tasks) ? item.resource_top_tasks : [];
+    if (item.resource_task_list_overflow) {
+      return `<div class="resource-task-list"><span class="warn">task list overflow</span></div>`;
+    }
+    if (!item.resource_task_load_valid) {
+      return `<div class="resource-task-list"><span class="muted">task CPU warming up</span></div>`;
+    }
+    if (!tasks.length) {
+      return `<div class="resource-task-list"><span class="muted">no active tasks</span></div>`;
+    }
+    const rows = tasks.map(task => {
+      const load = Number(task.load_percent);
+      const loadPercent = Number.isFinite(load) ? clampPercent(load) : 0;
+      const core = Number(task.core);
+      const coreText = Number.isFinite(core) && core >= 0 ? `C${core}` : "core -";
+      const name = String(task.name || "?");
+      return `
+        <div class="resource-meter task" title="${esc(name)} ${Number.isFinite(load) ? load.toFixed(1) : "-"}% · ${esc(coreText)}">
+          <div class="resource-meter-head">
+            <span class="resource-meter-name resource-task-name">${esc(name)}</span>
+            <span class="resource-meter-value">${esc(coreText)} · ${Number.isFinite(load) ? load.toFixed(1) : "-"}%</span>
+          </div>
+          <div class="resource-bar" aria-label="${esc(name)} task load">
+            <div class="resource-bar-fill" style="width:${loadPercent.toFixed(1)}%"></div>
+          </div>
+        </div>`;
+    }).join("");
+    return `<div class="resource-task-list"><div class="resource-task-title">Top tasks</div>${rows}</div>`;
+  };
+  return `
+    <div class="resource-cell">
+      ${memoryMeter("internal", "RAM", item.resource_internal_free_bytes, item.resource_internal_total_bytes, item.resource_internal_min_free_bytes, item.resource_internal_largest_free_block_bytes)}
+      ${memoryMeter("psram", "PSRAM", item.resource_psram_free_bytes, item.resource_psram_total_bytes, item.resource_psram_min_free_bytes, item.resource_psram_largest_free_block_bytes)}
+      ${percentMeter("cpu0", "CORE0", item.resource_core0_load_percent, item.resource_cpu_load_valid)}
+      ${percentMeter("cpu1", "CORE1", item.resource_core1_load_percent, item.resource_cpu_load_valid)}
+      ${tempMeter()}
+      ${taskMeters()}
+      <div class="resource-meta">age ${fmtAgeMs(item.resource_last_update_age_ms)}</div>
+    </div>`;
+}
+
 function hexByte(value) {
   const number = Number(value);
   return Number.isFinite(number)
@@ -5200,8 +5494,9 @@ function renderInfo(snapshot) {
   }
   const online = state.statuses.filter(item => item.http_status_online).length;
   const statusPill = document.getElementById("statusPill");
-  statusPill.textContent = `${online}/${state.statuses.length || 5} HTTP online`;
-  statusPill.className = `pill ${online >= 5 ? "good" : "warn"}`;
+  const expectedStatuses = Number(snapshot.status_target_count || state.statuses.length || 5);
+  statusPill.textContent = `${online}/${expectedStatuses} HTTP online`;
+  statusPill.className = `pill ${online >= expectedStatuses ? "good" : "warn"}`;
   const telemetryPorts = snapshot.telemetry_ports || [];
   const portOptions = document.getElementById("telemetryPortOptions");
   if (portOptions && telemetryPorts.length) {
@@ -5230,23 +5525,25 @@ function renderInfo(snapshot) {
   }
   const rows = document.getElementById("infoRows");
   rows.innerHTML = state.statuses.map(item => `
-    <tr>
-      <td><b>${esc(item.hostname)}</b><br><span class="muted">${esc(item.ip || item.target || "")}</span></td>
-      <td><span class="${item.wifi_connected ? "ok" : "bad"}">${item.wifi_connected ? "connected" : "offline"}</span><br>RSSI ${esc(item.wifi_connected_rssi)} dBm<br>disc ${esc(item.wifi_disconnect_count)}</td>
+    <tr class="${statusIsFresh(item) ? "" : "status-stale"}">
+      <td>${renderModuleCell(item)}</td>
+      <td>${renderWifiCell(item)}</td>
       <td>${esc(item.runtime_mode_name)}<br>tag ${esc(item.runtime_tag_id)} anchors ${(item.runtime_anchor_ids || []).join(",")}</td>
       <td>UWB <span class="${item.runtime_uwb_enabled ? "ok" : "muted"}">${item.runtime_uwb_enabled ? "on" : "off"}</span><br>BNO085 <span class="${item.runtime_bno085_accel_enabled ? "ok" : "muted"}">${item.runtime_bno085_accel_enabled ? "on" : "off"}</span><br><span class="muted">${esc(item.runtime_bno085_accel_interval_ms || "-")}/${esc(item.runtime_bno085_log_interval_ms || "-")} ms</span><br>GPS <span class="${item.runtime_gps_enabled ? "ok" : "muted"}">${item.runtime_gps_enabled ? "on" : "off"}</span></td>
       <td>${renderGpsCell(item)}</td>
       <td>${esc(item.uwb_status)}<br>tx ${esc(item.uwb_tx_count)} / rx ${esc(item.uwb_rx_count)}<br>err ${esc(item.uwb_tx_error_count)}/${esc(item.uwb_rx_error_count)}</td>
       <td>${esc(item.uwb_active_antenna_delay_hex)}<br><span class="muted">NVS ${item.uwb_antenna_delay_from_nvs ? "yes" : "no"}</span></td>
       <td>log ${esc(item.wireless_log_status)}<br>dropped ${esc(item.wireless_log_dropped)}<br>tel ${esc(item.wireless_telemetry_status || "-")}<br>port ${esc(item.wireless_telemetry_port ?? item.runtime_wireless_telemetry_port ?? "-")}<br>tel drop ${esc(item.wireless_telemetry_dropped ?? "-")}<br><span class="muted">full ${esc(item.wireless_telemetry_drop_full ?? "-")} · mutex ${esc(item.wireless_telemetry_drop_mutex ?? "-")} · fmt ${esc(item.wireless_telemetry_drop_format ?? "-")}<br>qmax ${esc(item.wireless_telemetry_queue_high_water ?? "-")}<br>bin ${esc(item.wireless_telemetry_binary_frames ?? "-")}f / ${esc(item.wireless_telemetry_binary_samples ?? "-")}s · text ${esc(item.wireless_telemetry_text_frames ?? "-")}</span><br>tel err ${esc(item.wireless_telemetry_last_error ?? "-")}<br>age ${fmtAge(item.status_updated_at)}</td>
+      <td>${renderResourceCell(item)}</td>
       <td>${renderBatteryCell(item)}</td>
     </tr>`).join("");
-  renderUwbRadio(state.statuses[0] || {});
+  const freshStatus = state.statuses.find(statusIsFresh) || {};
+  renderUwbRadio(freshStatus);
   renderCharger(state.statuses);
   renderPd(state.statuses);
   renderPosition();
   scheduleAccelRender();
-  hydrateSettingsFromStatus(state.statuses[0] || {});
+  hydrateSettingsFromStatus(freshStatus);
   hydrateChargerSettings();
   hydratePdSettings();
 }
@@ -8002,6 +8299,7 @@ def main() -> int:
         args.status_interval * 3.0,
         len(targets) * 2.5 + args.status_interval,
     )
+    state.set_status_targets(targets)
 
     log_server = LogServer((args.log_host, args.log_port), state)
     log_thread = threading.Thread(target=log_server.serve_forever, daemon=True)

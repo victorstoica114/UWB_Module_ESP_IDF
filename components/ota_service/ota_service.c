@@ -9,6 +9,7 @@
 #include <sys/types.h>
 
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -23,6 +24,7 @@
 #include "gps_service.h"
 #include "i2c_bus_service.h"
 #include "max77958_service.h"
+#include "resource_monitor_service.h"
 #include "uwb_config.h"
 #include "uwb_dw3000.h"
 #include "wifi_service.h"
@@ -49,7 +51,7 @@ enum {
     OTA_SERVICE_REBOOT_DELAY_MS = 1200,
     OTA_SERVICE_MAX_TOKEN_LEN = 128,
     OTA_SERVICE_MAX_QUERY_LEN = 768,
-    OTA_SERVICE_STATUS_RESPONSE_SIZE = 24000,
+    OTA_SERVICE_STATUS_RESPONSE_SIZE = 28000,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -65,9 +67,40 @@ static bool s_started;
 static bool s_running;
 static volatile bool s_ota_in_progress;
 static volatile enum ota_service_status s_status = OTA_SERVICE_STATUS_IDLE;
-static uint8_t s_ota_buffer[OTA_SERVICE_CHUNK_SIZE];
+
+typedef struct {
+    i2c_bus_service_stats_t i2c_stats;
+    gps_service_snapshot_t gps_snapshot;
+    charger_service_snapshot_t charger_snapshot;
+    max77958_service_snapshot_t pd_snapshot;
+    resource_monitor_snapshot_t resource_snapshot;
+    char charger_raw_hex[(CHARGER_SERVICE_REGISTER_MAP_SIZE * 2U) + 1U];
+    char resource_top_tasks_json[1024];
+    char pd_raw_hex[(MAX77958_SERVICE_REGISTER_MAP_SIZE * 2U) + 1U];
+    char pd_last_response_hex[(MAX77958_SERVICE_AP_DATA_BYTES * 2U) + 1U];
+    char pd_source_pdos_json[128];
+    char pd_sink_pdos_json[96];
+    char response[OTA_SERVICE_STATUS_RESPONSE_SIZE];
+} ota_status_context_t;
 
 static void reboot_task(void *arg);
+
+static ota_status_context_t *alloc_status_context(void)
+{
+    return heap_caps_calloc(
+        1, sizeof(ota_status_context_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+static uint8_t *alloc_ota_buffer(void)
+{
+    uint8_t *buffer = heap_caps_malloc(
+        OTA_SERVICE_CHUNK_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (buffer == NULL) {
+        buffer = heap_caps_malloc(OTA_SERVICE_CHUNK_SIZE, MALLOC_CAP_8BIT);
+    }
+    return buffer;
+}
 
 static const char *ota_status_to_string(enum ota_service_status status)
 {
@@ -111,6 +144,86 @@ static void format_u32_array_json(const uint32_t *values, size_t count,
         written = snprintf(&buffer[offset], buffer_size - offset,
                            "%s%lu", i == 0 ? "" : ",",
                            (unsigned long)values[i]);
+        if (written < 0 || (size_t)written >= buffer_size - offset) {
+            buffer[0] = '\0';
+            return;
+        }
+        offset += (size_t)written;
+    }
+    if (offset + 2U <= buffer_size) {
+        (void)snprintf(&buffer[offset], buffer_size - offset, "]");
+    }
+}
+
+static void format_json_string(const char *value, char *buffer,
+                               size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return;
+    }
+    size_t offset = 0;
+    buffer[offset++] = '"';
+    if (value != NULL) {
+        for (const char *cursor = value;
+             *cursor != '\0' && offset + 2U < buffer_size; ++cursor) {
+            const char ch = *cursor;
+            if (ch == '"' || ch == '\\') {
+                if (offset + 3U >= buffer_size) {
+                    break;
+                }
+                buffer[offset++] = '\\';
+                buffer[offset++] = ch;
+            } else if ((unsigned char)ch < 0x20U) {
+                buffer[offset++] = '?';
+            } else {
+                buffer[offset++] = ch;
+            }
+        }
+    }
+    if (offset < buffer_size) {
+        buffer[offset++] = '"';
+    }
+    if (offset < buffer_size) {
+        buffer[offset] = '\0';
+    } else {
+        buffer[buffer_size - 1U] = '\0';
+    }
+}
+
+static void format_resource_top_tasks_json(
+    const resource_monitor_snapshot_t *snapshot, char *buffer,
+    size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return;
+    }
+    size_t offset = 0;
+    int written = snprintf(buffer, buffer_size, "[");
+    if (written < 0 || (size_t)written >= buffer_size) {
+        buffer[0] = '\0';
+        return;
+    }
+    offset = (size_t)written;
+    if (snapshot == NULL) {
+        (void)snprintf(&buffer[offset], buffer_size - offset, "]");
+        return;
+    }
+
+    const uint32_t count =
+        snapshot->top_task_count > RESOURCE_MONITOR_TOP_TASK_COUNT
+            ? RESOURCE_MONITOR_TOP_TASK_COUNT
+            : snapshot->top_task_count;
+    for (uint32_t i = 0; i < count; ++i) {
+        const resource_monitor_task_load_t *task = &snapshot->top_tasks[i];
+        char name_json[(RESOURCE_MONITOR_TASK_NAME_LEN * 2U) + 3U] = {0};
+        format_json_string(task->name, name_json, sizeof(name_json));
+        written = snprintf(&buffer[offset], buffer_size - offset,
+                           "%s{\"name\":%s,\"core\":%ld,"
+                           "\"load_percent\":%.1f,"
+                           "\"runtime_delta_us\":%llu}",
+                           i == 0 ? "" : ",", name_json,
+                           (long)task->core_id, task->load_percent,
+                           (unsigned long long)task->runtime_delta_us);
         if (written < 0 || (size_t)written >= buffer_size - offset) {
             buffer[0] = '\0';
             return;
@@ -478,6 +591,24 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
+    ota_status_context_t *ctx = alloc_status_context();
+    if (ctx == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "status allocation failed");
+    }
+
+#define i2c_stats (ctx->i2c_stats)
+#define gps_snapshot (ctx->gps_snapshot)
+#define charger_snapshot (ctx->charger_snapshot)
+#define pd_snapshot (ctx->pd_snapshot)
+#define resource_snapshot (ctx->resource_snapshot)
+#define charger_raw_hex (ctx->charger_raw_hex)
+#define resource_top_tasks_json (ctx->resource_top_tasks_json)
+#define pd_raw_hex (ctx->pd_raw_hex)
+#define pd_last_response_hex (ctx->pd_last_response_hex)
+#define pd_source_pdos_json (ctx->pd_source_pdos_json)
+#define pd_sink_pdos_json (ctx->pd_sink_pdos_json)
+
     const esp_app_desc_t *app = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
     const esp_partition_t *boot = esp_ota_get_boot_partition();
@@ -486,39 +617,29 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     const uint16_t configured_antenna_delay =
         app_identity_get_uwb_antenna_delay();
     const app_runtime_config_t *runtime_config = app_runtime_config_get();
-    i2c_bus_service_stats_t i2c_stats = {0};
     i2c_bus_service_get_stats(&i2c_stats);
-    gps_service_snapshot_t gps_snapshot = {0};
     gps_service_get_snapshot(&gps_snapshot);
-    charger_service_snapshot_t charger_snapshot = {0};
     charger_service_get_snapshot(&charger_snapshot);
-    char charger_raw_hex[(CHARGER_SERVICE_REGISTER_MAP_SIZE * 2U) + 1U] = {0};
     charger_service_format_raw_hex(&charger_snapshot, charger_raw_hex,
                                    sizeof(charger_raw_hex));
-    max77958_service_snapshot_t pd_snapshot = {0};
     max77958_service_get_snapshot(&pd_snapshot);
-    char pd_raw_hex[(MAX77958_SERVICE_REGISTER_MAP_SIZE * 2U) + 1U] = {0};
+    resource_monitor_service_get_snapshot(&resource_snapshot);
+    format_resource_top_tasks_json(&resource_snapshot, resource_top_tasks_json,
+                                   sizeof(resource_top_tasks_json));
     max77958_service_format_raw_hex(&pd_snapshot, pd_raw_hex,
                                     sizeof(pd_raw_hex));
-    char pd_last_response_hex[(MAX77958_SERVICE_AP_DATA_BYTES * 2U) + 1U] = {0};
     format_bytes_hex(pd_snapshot.last_response,
                      sizeof(pd_snapshot.last_response),
                      pd_last_response_hex, sizeof(pd_last_response_hex));
-    char pd_source_pdos_json[128] = {0};
     format_u32_array_json(pd_snapshot.source_pdos,
                           pd_snapshot.source_pdo_count,
                           pd_source_pdos_json,
                           sizeof(pd_source_pdos_json));
-    char pd_sink_pdos_json[96] = {0};
     format_u32_array_json(pd_snapshot.sink_pdos,
                           pd_snapshot.sink_pdo_count,
                           pd_sink_pdos_json, sizeof(pd_sink_pdos_json));
 
-    char *response = malloc(OTA_SERVICE_STATUS_RESPONSE_SIZE);
-    if (response == NULL) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                   "status allocation failed");
-    }
+    char *response = ctx->response;
 
     const int len = snprintf(
         response, OTA_SERVICE_STATUS_RESPONSE_SIZE,
@@ -612,6 +733,32 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"i2c_realtime_lock_count\":%lu,"
         "\"i2c_background_lock_count\":%lu,"
         "\"i2c_background_deferred_count\":%lu,"
+        "\"resource_monitor_running\":%s,"
+        "\"resource_update_count\":%lu,"
+        "\"resource_last_update_age_ms\":%lu,"
+        "\"resource_cpu_load_valid\":%s,"
+        "\"resource_task_load_valid\":%s,"
+        "\"resource_task_list_overflow\":%s,"
+        "\"resource_top_task_count\":%lu,"
+        "\"resource_top_tasks\":%s,"
+        "\"resource_core0_load_percent\":%.1f,"
+        "\"resource_core1_load_percent\":%.1f,"
+        "\"resource_heap_free_bytes\":%lu,"
+        "\"resource_heap_total_bytes\":%lu,"
+        "\"resource_heap_min_free_bytes\":%lu,"
+        "\"resource_heap_largest_free_block_bytes\":%lu,"
+        "\"resource_internal_free_bytes\":%lu,"
+        "\"resource_internal_total_bytes\":%lu,"
+        "\"resource_internal_min_free_bytes\":%lu,"
+        "\"resource_internal_largest_free_block_bytes\":%lu,"
+        "\"resource_psram_free_bytes\":%lu,"
+        "\"resource_psram_total_bytes\":%lu,"
+        "\"resource_psram_min_free_bytes\":%lu,"
+        "\"resource_psram_largest_free_block_bytes\":%lu,"
+        "\"resource_temperature_valid\":%s,"
+        "\"resource_temperature_c\":%.1f,"
+        "\"resource_temperature_error\":%d,"
+        "\"resource_temperature_error_name\":\"%s\","
         "\"runtime_gps_enabled\":%s,"
         "\"gps_powered\":%s,"
         "\"gps_task_running\":%s,"
@@ -989,6 +1136,32 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)i2c_stats.realtime_lock_count,
         (unsigned long)i2c_stats.background_lock_count,
         (unsigned long)i2c_stats.background_deferred_count,
+        resource_snapshot.running ? "true" : "false",
+        (unsigned long)resource_snapshot.update_count,
+        (unsigned long)resource_snapshot.last_update_age_ms,
+        resource_snapshot.cpu_load_valid ? "true" : "false",
+        resource_snapshot.task_load_valid ? "true" : "false",
+        resource_snapshot.task_list_overflow ? "true" : "false",
+        (unsigned long)resource_snapshot.top_task_count,
+        resource_top_tasks_json[0] != '\0' ? resource_top_tasks_json : "[]",
+        resource_snapshot.core0_load_percent,
+        resource_snapshot.core1_load_percent,
+        (unsigned long)resource_snapshot.heap_free_bytes,
+        (unsigned long)resource_snapshot.heap_total_bytes,
+        (unsigned long)resource_snapshot.heap_min_free_bytes,
+        (unsigned long)resource_snapshot.heap_largest_free_block_bytes,
+        (unsigned long)resource_snapshot.internal_free_bytes,
+        (unsigned long)resource_snapshot.internal_total_bytes,
+        (unsigned long)resource_snapshot.internal_min_free_bytes,
+        (unsigned long)resource_snapshot.internal_largest_free_block_bytes,
+        (unsigned long)resource_snapshot.psram_free_bytes,
+        (unsigned long)resource_snapshot.psram_total_bytes,
+        (unsigned long)resource_snapshot.psram_min_free_bytes,
+        (unsigned long)resource_snapshot.psram_largest_free_block_bytes,
+        resource_snapshot.temperature_valid ? "true" : "false",
+        resource_snapshot.temperature_c,
+        resource_snapshot.temperature_error,
+        esp_err_to_name(resource_snapshot.temperature_error),
         runtime_config->gps_enabled ? "true" : "false",
         gps_snapshot.powered ? "true" : "false",
         gps_snapshot.task_running ? "true" : "false",
@@ -1287,14 +1460,25 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         wireless_telemetry_service_get_last_error());
 
     if (len < 0 || len >= OTA_SERVICE_STATUS_RESPONSE_SIZE) {
-        free(response);
+        free(ctx);
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                                    "status too long");
     }
 
     httpd_resp_set_type(req, "application/json");
     const esp_err_t response_err = httpd_resp_send(req, response, (ssize_t)len);
-    free(response);
+    free(ctx);
+#undef i2c_stats
+#undef gps_snapshot
+#undef charger_snapshot
+#undef pd_snapshot
+#undef resource_snapshot
+#undef charger_raw_hex
+#undef resource_top_tasks_json
+#undef pd_raw_hex
+#undef pd_last_response_hex
+#undef pd_source_pdos_json
+#undef pd_sink_pdos_json
     return response_err;
 }
 
@@ -2945,6 +3129,15 @@ static esp_err_t ota_post_handler(httpd_req_t *req)
                                    "esp_ota_begin failed");
     }
 
+    uint8_t *ota_buffer = alloc_ota_buffer();
+    if (ota_buffer == NULL) {
+        esp_ota_abort(ota_handle);
+        s_ota_in_progress = false;
+        s_status = OTA_SERVICE_STATUS_FAILED;
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "OTA buffer allocation failed");
+    }
+
     int remaining = req->content_len;
     size_t written = 0;
     size_t next_progress_log = 256 * 1024;
@@ -2954,7 +3147,7 @@ static esp_err_t ota_post_handler(httpd_req_t *req)
                                    ? (size_t)remaining
                                    : OTA_SERVICE_CHUNK_SIZE;
         const int received =
-            httpd_req_recv(req, (char *)s_ota_buffer, to_read);
+            httpd_req_recv(req, (char *)ota_buffer, to_read);
 
         if (received == HTTPD_SOCK_ERR_TIMEOUT) {
             continue;
@@ -2962,15 +3155,17 @@ static esp_err_t ota_post_handler(httpd_req_t *req)
 
         if (received <= 0) {
             esp_ota_abort(ota_handle);
+            heap_caps_free(ota_buffer);
             s_ota_in_progress = false;
             s_status = OTA_SERVICE_STATUS_FAILED;
             return send_ota_error(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                                   "Failed to receive OTA data");
         }
 
-        err = esp_ota_write(ota_handle, s_ota_buffer, (size_t)received);
+        err = esp_ota_write(ota_handle, ota_buffer, (size_t)received);
         if (err != ESP_OK) {
             esp_ota_abort(ota_handle);
+            heap_caps_free(ota_buffer);
             s_ota_in_progress = false;
             s_status = OTA_SERVICE_STATUS_FAILED;
             ESP_LOGE(TAG, "esp_ota_write failed after %u bytes: %s",
@@ -2988,6 +3183,8 @@ static esp_err_t ota_post_handler(httpd_req_t *req)
             next_progress_log += 256 * 1024;
         }
     }
+
+    heap_caps_free(ota_buffer);
 
     err = esp_ota_end(ota_handle);
     if (err != ESP_OK) {

@@ -19,6 +19,7 @@
 #include "gps_service.h"
 #include "max77958_service.h"
 #include "ota_service.h"
+#include "resource_monitor_service.h"
 #include "sdkconfig.h"
 #include "uwb_anchor_survey_service.h"
 #include "uwb_calibration_service.h"
@@ -293,9 +294,15 @@ void app_manager_start(void)
 
     if (boot_guard_recovery_mode()) {
         ESP_LOGW(TAG,
-                 "Boot recovery mode active; Wi-Fi, wireless log, telemetry, and OTA are running, risky services are skipped");
+                 "Boot recovery mode active; Wi-Fi, wireless log, telemetry, and OTA are running, risky services including resource monitor are skipped");
         (void)uwb_dw3000_hold_in_reset();
         return;
+    }
+
+    const esp_err_t resource_err = resource_monitor_service_start();
+    if (resource_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start resource monitor: %s",
+                 esp_err_to_name(resource_err));
     }
 
     const esp_err_t gps_err = gps_service_start();
