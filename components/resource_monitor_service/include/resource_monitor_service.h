@@ -18,12 +18,15 @@ typedef struct {
     uint32_t last_update_age_ms;
 
     size_t heap_free_bytes;
+    size_t heap_total_bytes;
     size_t heap_min_free_bytes;
     size_t heap_largest_free_block_bytes;
     size_t internal_free_bytes;
+    size_t internal_total_bytes;
     size_t internal_min_free_bytes;
     size_t internal_largest_free_block_bytes;
     size_t psram_free_bytes;
+    size_t psram_total_bytes;
     size_t psram_min_free_bytes;
     size_t psram_largest_free_block_bytes;
 

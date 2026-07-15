@@ -622,12 +622,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"resource_core0_load_percent\":%.1f,"
         "\"resource_core1_load_percent\":%.1f,"
         "\"resource_heap_free_bytes\":%lu,"
+        "\"resource_heap_total_bytes\":%lu,"
         "\"resource_heap_min_free_bytes\":%lu,"
         "\"resource_heap_largest_free_block_bytes\":%lu,"
         "\"resource_internal_free_bytes\":%lu,"
+        "\"resource_internal_total_bytes\":%lu,"
         "\"resource_internal_min_free_bytes\":%lu,"
         "\"resource_internal_largest_free_block_bytes\":%lu,"
         "\"resource_psram_free_bytes\":%lu,"
+        "\"resource_psram_total_bytes\":%lu,"
         "\"resource_psram_min_free_bytes\":%lu,"
         "\"resource_psram_largest_free_block_bytes\":%lu,"
         "\"resource_temperature_valid\":%s,"
@@ -1018,12 +1021,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         resource_snapshot.core0_load_percent,
         resource_snapshot.core1_load_percent,
         (unsigned long)resource_snapshot.heap_free_bytes,
+        (unsigned long)resource_snapshot.heap_total_bytes,
         (unsigned long)resource_snapshot.heap_min_free_bytes,
         (unsigned long)resource_snapshot.heap_largest_free_block_bytes,
         (unsigned long)resource_snapshot.internal_free_bytes,
+        (unsigned long)resource_snapshot.internal_total_bytes,
         (unsigned long)resource_snapshot.internal_min_free_bytes,
         (unsigned long)resource_snapshot.internal_largest_free_block_bytes,
         (unsigned long)resource_snapshot.psram_free_bytes,
+        (unsigned long)resource_snapshot.psram_total_bytes,
         (unsigned long)resource_snapshot.psram_min_free_bytes,
         (unsigned long)resource_snapshot.psram_largest_free_block_bytes,
         resource_snapshot.temperature_valid ? "true" : "false",

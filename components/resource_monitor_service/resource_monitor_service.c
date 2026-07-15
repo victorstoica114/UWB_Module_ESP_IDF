@@ -48,6 +48,7 @@ static uint32_t age_ms_from_time_us(int64_t timestamp_us)
 static void update_heap_stats(resource_monitor_snapshot_t *snapshot)
 {
     snapshot->heap_free_bytes = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    snapshot->heap_total_bytes = heap_caps_get_total_size(MALLOC_CAP_8BIT);
     snapshot->heap_min_free_bytes =
         heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
     snapshot->heap_largest_free_block_bytes =
@@ -55,6 +56,8 @@ static void update_heap_stats(resource_monitor_snapshot_t *snapshot)
 
     snapshot->internal_free_bytes =
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    snapshot->internal_total_bytes =
+        heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     snapshot->internal_min_free_bytes =
         heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     snapshot->internal_largest_free_block_bytes =
@@ -62,6 +65,8 @@ static void update_heap_stats(resource_monitor_snapshot_t *snapshot)
 
     snapshot->psram_free_bytes =
         heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    snapshot->psram_total_bytes =
+        heap_caps_get_total_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     snapshot->psram_min_free_bytes =
         heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     snapshot->psram_largest_free_block_bytes =

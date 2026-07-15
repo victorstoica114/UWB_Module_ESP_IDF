@@ -1570,6 +1570,56 @@ th { color: var(--muted); font-weight: 700; }
 .pd-status-table .col-ops { width: 21%; }
 .pd-pdo-list { margin: 4px 0 0; padding-left: 18px; }
 .pd-pdo-list li { margin: 2px 0; }
+.resource-cell {
+  min-width: 190px;
+  max-width: 260px;
+  font-size: 12px;
+  line-height: 1.3;
+}
+.resource-meter {
+  margin: 0 0 7px;
+}
+.resource-meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+.resource-meter-name {
+  font-weight: 700;
+  color: var(--ink);
+}
+.resource-meter-value {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.resource-bar {
+  height: 8px;
+  border: 1px solid #d7deea;
+  background: #edf2f8;
+  overflow: hidden;
+}
+.resource-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2f6fe4, #5c93f0);
+}
+.resource-meter.internal .resource-bar-fill {
+  background: linear-gradient(90deg, #138a4b, #29b66f);
+}
+.resource-meter.psram .resource-bar-fill {
+  background: linear-gradient(90deg, #2f6fe4, #6aa0f5);
+}
+.resource-meter-foot {
+  margin-top: 2px;
+  color: var(--muted);
+}
+.resource-meta {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+}
 .ok { color: var(--green); font-weight: 700; }
 .warn { color: var(--orange); font-weight: 700; }
 .bad { color: var(--red); font-weight: 700; }
@@ -4679,6 +4729,12 @@ function fmtPercent(value) {
   return Number.isFinite(number) ? `${number.toFixed(1)}%` : "-";
 }
 
+function clampPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(0, Math.min(100, number));
+}
+
 function fmtMv(value) {
   const number = Number(value);
   return Number.isFinite(number) ? `${(number / 1000).toFixed(3)} V` : "-";
@@ -4962,6 +5018,40 @@ function renderResourceCell(item) {
   if (!item || !item.resource_monitor_running) {
     return `<span class="muted">not available</span>`;
   }
+  const meter = (kind, label, freeValue, totalValue, minFreeValue, largestValue) => {
+    const free = Number(freeValue);
+    const total = Number(totalValue);
+    const minFree = Number(minFreeValue);
+    const largest = Number(largestValue);
+    if (!Number.isFinite(free) || !Number.isFinite(total) || total <= 0) {
+      return `
+        <div class="resource-meter ${kind}">
+          <div class="resource-meter-head">
+            <span class="resource-meter-name">${esc(label)}</span>
+            <span class="resource-meter-value">not available</span>
+          </div>
+          <div class="resource-bar"><div class="resource-bar-fill" style="width:0%"></div></div>
+        </div>`;
+    }
+    const used = Math.max(0, total - free);
+    const usedPercent = clampPercent((used * 100) / total);
+    const freePercent = clampPercent((free * 100) / total);
+    const minUsed = Number.isFinite(minFree) ? Math.max(0, total - minFree) : NaN;
+    const minUsedPercent = Number.isFinite(minUsed) ? clampPercent((minUsed * 100) / total) : NaN;
+    const minText = Number.isFinite(minUsedPercent) ? `peak ${minUsedPercent.toFixed(0)}%` : "peak -";
+    const largestText = Number.isFinite(largest) ? `blk ${fmtBytes(largest)}` : "blk -";
+    return `
+      <div class="resource-meter ${kind}" title="${esc(label)} used ${fmtBytes(used)} / total ${fmtBytes(total)}">
+        <div class="resource-meter-head">
+          <span class="resource-meter-name">${esc(label)}</span>
+          <span class="resource-meter-value">${fmtBytes(free)} free / ${fmtBytes(total)}</span>
+        </div>
+        <div class="resource-bar" aria-label="${esc(label)} ${usedPercent.toFixed(1)} percent used">
+          <div class="resource-bar-fill" style="width:${usedPercent.toFixed(1)}%"></div>
+        </div>
+        <div class="resource-meter-foot">${usedPercent.toFixed(0)}% used · ${freePercent.toFixed(0)}% free · ${minText} · ${largestText}</div>
+      </div>`;
+  };
   const cpu = item.resource_cpu_load_valid
     ? `C0 ${fmtPercent(item.resource_core0_load_percent)} / C1 ${fmtPercent(item.resource_core1_load_percent)}`
     : "CPU warming up";
@@ -4969,10 +5059,11 @@ function renderResourceCell(item) {
     ? `${fmtMaybeNumber(item.resource_temperature_c, 1)} C`
     : `temp ${item.resource_temperature_error_name || "-"}`;
   return `
-    RAM ${fmtBytes(item.resource_internal_free_bytes)}<br>
-    <span class="muted">min ${fmtBytes(item.resource_internal_min_free_bytes)} · blk ${fmtBytes(item.resource_internal_largest_free_block_bytes)}</span><br>
-    PSRAM ${fmtBytes(item.resource_psram_free_bytes)}<br>
-    <span class="muted">${esc(cpu)} · ESP ${esc(temp)} · age ${fmtAgeMs(item.resource_last_update_age_ms)}</span>`;
+    <div class="resource-cell">
+      ${meter("internal", "RAM", item.resource_internal_free_bytes, item.resource_internal_total_bytes, item.resource_internal_min_free_bytes, item.resource_internal_largest_free_block_bytes)}
+      ${meter("psram", "PSRAM", item.resource_psram_free_bytes, item.resource_psram_total_bytes, item.resource_psram_min_free_bytes, item.resource_psram_largest_free_block_bytes)}
+      <div class="resource-meta">${esc(cpu)} · ESP ${esc(temp)} · age ${fmtAgeMs(item.resource_last_update_age_ms)}</div>
+    </div>`;
 }
 
 function hexByte(value) {
