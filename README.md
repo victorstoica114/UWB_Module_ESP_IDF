@@ -458,20 +458,44 @@ geometry would no longer come from the complete DS-TWR exchange we have already
 validated as stable, so this should be treated as a separate protocol step, not
 as a small optimization of the current DS-TWR-based FlexTDOA runtime.
 
+Static speed test, 2026-07-16:
+
+The modules were in the temporary charging-room geometry, so this test should be
+read as a timing/robustness run, not as an absolute-location accuracy run. The
+tag was left static and the dashboard log stream was sampled after each profile
+change. `obs Hz` counts passive tag observations, `observed cycle` is inferred
+from those observations for a 12-directed-slot four-anchor cycle, `fresh pairs`
+is the number of paired TDOA observations available to the solver at the end of
+the run, and `rev p90` is the 90th percentile of `abs(Ai->Aj + Aj->Ai)`.
+
+| Profile | slot | command | RESP | FINAL | REPORT | timeout | run | fail | fresh pairs | obs Hz | observed cycle | rev p90 | anchor std med | Read |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Stable baseline | `100 ms` | `10 ms` | `20 ms` | `20 ms` | `10 ms` | `90 ms` | `30 s` | `0` | `5/6` | `8.06` | `1.49 s` | `96.0 cm` | `0.55 cm` | Robust, but slower and missed one fresh pair in this geometry. |
+| Safe Fast preset | `60 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `35 ms` | `30 s` | `36` | `1/6` | `8.36` | `1.44 s` | `32.2 cm` | `0.46 cm` | Too short; mostly `RESP wait failed`. |
+| Balanced preset | `50 ms` | `5 ms` | `10 ms` | `10 ms` | `5 ms` | `25 ms` | `30 s` | `63` | `1/6` | `9.79` | `1.23 s` | `35.2 cm` | `0.83 cm` | Faster observations, but not robust. |
+| Aggressive preset | `40 ms` | `3 ms` | `7 ms` | `7 ms` | `3 ms` | `18 ms` | `30 s` | `142` | `2/6` | `10.89` | `1.10 s` | `45.2 cm` | `0.54 cm` | Beyond the current reliable DS-TWR limit. |
+| Reduced-delay 90 | `90 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `80 ms` | `60 s` | `0` | `6/6` | `9.10` | `1.32 s` | `64.9 cm` | `0.68 cm` | Best fast candidate in this run. |
+| Reduced-delay 100 | `100 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `90 ms` | `60 s` | `0` | `6/6` | `8.87` | `1.35 s` | `102.3 cm` | `0.71 cm` | Safest current operational profile; similar speed to 90 ms with more slot margin. |
+
+Two conclusions matter. First, simply shrinking the slot to `60/50/40 ms` is
+not enough, because the full DS-TWR exchange still needs real wall-clock time
+and starts colliding/overrunning the next slot. Second, reducing the programmed
+turnaround delays while keeping a `90-100 ms` slot is productive: the current
+working range is `command=5 ms`, `RESP=15 ms`, `FINAL=15 ms`, `REPORT=5 ms`.
+The module set was left on the safer `Reduced-delay 100` profile after the
+test. `Reduced-delay 90` is the next profile to try during a controlled walking
+test.
+
 Likely next steps:
 
-1. Validate the existing `Safe Fast`, `Balanced`, and `Aggressive` profiles on
-   hardware and log per-pair timeout/fail rates.
-2. Validate the adjacent pair round-trip ordering on hardware. It should reduce
-   paired-observation age for moving tags with minimal risk.
-3. Reduce `RESP` and `FINAL` delayed-TX delays first, because they dominate the
-   DS-TWR body and are controlled by the DW3000 timestamp engine.
-4. Convert `REPORT`/`REPORT2` waits to delayed TX or a tighter state-machine
+1. Promote the reduced-delay `100 ms` or `90 ms` profile into the dashboard
+   presets once it is also validated during a walking test.
+2. Convert `REPORT`/`REPORT2` waits to delayed TX or a tighter state-machine
    path if software delay jitter becomes visible.
-5. Replace follower `command_delay_ms` with a scheduled `POLL` delayed-TX based
+3. Replace follower `command_delay_ms` with a scheduled `POLL` delayed-TX based
    on command RX time. That would make commanded slots deterministic like the
    calibration slots and remove one FreeRTOS delay from the hot path.
-6. Keep the full DS-TWR anchor-anchor measurement for geometry. The clean
+4. Keep the full DS-TWR anchor-anchor measurement for geometry. The clean
    FlexTDOA prototype was faster, but the raw anchor geometry was much noisier;
    full DS-TWR plus median filtering is the stable base for the passive tag.
 
