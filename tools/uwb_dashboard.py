@@ -878,6 +878,8 @@ class DashboardState:
                     diffs: list[float] = []
                     raw_diffs: list[float] = []
                     reverse_sums: list[float] = []
+                    classic_diffs: list[float] = []
+                    classic_reverse_sums: list[float] = []
                     agreement_values: list[float] = []
                     blend_values: list[float] = []
                     fused_count = 0
@@ -891,6 +893,19 @@ class DashboardState:
                         right_raw = float(right.get("raw_diff_m") or math.nan)
                         if math.isfinite(left_raw) and math.isfinite(right_raw):
                             raw_diffs.append((left_raw - right_raw) / 2.0)
+                        left_classic = self.optional_float(
+                            left.get("primary_diff_m")
+                        )
+                        right_classic = self.optional_float(
+                            right.get("primary_diff_m")
+                        )
+                        if left_classic is not None and right_classic is not None:
+                            classic_diffs.append(
+                                (left_classic - right_classic) / 2.0
+                            )
+                            classic_reverse_sums.append(
+                                left_classic + right_classic
+                            )
                         for sample in (left, right):
                             if sample.get("fused"):
                                 fused_count += 1
@@ -912,6 +927,10 @@ class DashboardState:
                     if diff_m is None or reverse_sum_m is None:
                         continue
                     raw_diff_m = self.median_float(raw_diffs)
+                    classic_diff_m = self.median_float(classic_diffs)
+                    classic_reverse_sum_m = self.median_float(
+                        classic_reverse_sums
+                    )
                     agreement_m = self.median_float(agreement_values)
                     blend_weight = self.median_float(blend_values)
                     latest_left, latest_right = max(
@@ -924,6 +943,24 @@ class DashboardState:
                     latest_left_diff = float(latest_left["diff_m"])
                     latest_right_diff = float(latest_right["diff_m"])
                     latest_diff_m = (latest_left_diff - latest_right_diff) / 2.0
+                    latest_left_classic = self.optional_float(
+                        latest_left.get("primary_diff_m")
+                    )
+                    latest_right_classic = self.optional_float(
+                        latest_right.get("primary_diff_m")
+                    )
+                    latest_classic_diff_m = (
+                        (latest_left_classic - latest_right_classic) / 2.0
+                        if latest_left_classic is not None
+                        and latest_right_classic is not None
+                        else latest_diff_m
+                    )
+                    latest_classic_reverse_sum_m = (
+                        latest_left_classic + latest_right_classic
+                        if latest_left_classic is not None
+                        and latest_right_classic is not None
+                        else latest_left_diff + latest_right_diff
+                    )
                     latest_raw_diff_m = None
                     latest_left_raw = float(latest_left.get("raw_diff_m") or math.nan)
                     latest_right_raw = float(latest_right.get("raw_diff_m") or math.nan)
@@ -940,7 +977,9 @@ class DashboardState:
                         float(latest_left.get("received_at") or 0.0),
                         float(latest_right.get("received_at") or 0.0),
                     )
-                    def dynamic_stats(window_sec: float) -> dict[str, Any]:
+                    def dynamic_stats(
+                        window_sec: float, value_key: str = "diff_m"
+                    ) -> dict[str, Any]:
                         selected = [
                             pair
                             for pair in matched
@@ -962,14 +1001,23 @@ class DashboardState:
                             for sample in pair
                         ]
                         for left, right in selected:
-                            left_diff = float(left["diff_m"])
-                            right_diff = float(right["diff_m"])
+                            left_diff = self.optional_float(left.get(value_key))
+                            right_diff = self.optional_float(right.get(value_key))
+                            if left_diff is None or right_diff is None:
+                                continue
                             diffs.append((left_diff - right_diff) / 2.0)
                             reverse_sums.append(left_diff + right_diff)
-                            left_raw = float(left.get("raw_diff_m") or math.nan)
-                            right_raw = float(right.get("raw_diff_m") or math.nan)
-                            if math.isfinite(left_raw) and math.isfinite(right_raw):
-                                raw_diffs.append((left_raw - right_raw) / 2.0)
+                            if value_key == "diff_m":
+                                left_raw = float(left.get("raw_diff_m") or math.nan)
+                                right_raw = float(
+                                    right.get("raw_diff_m") or math.nan
+                                )
+                                if math.isfinite(left_raw) and math.isfinite(
+                                    right_raw
+                                ):
+                                    raw_diffs.append(
+                                        (left_raw - right_raw) / 2.0
+                                    )
                         return {
                             "diff_m": self.median_float(diffs),
                             "raw_diff_m": self.median_float(raw_diffs),
@@ -980,6 +1028,12 @@ class DashboardState:
 
                     dynamic_15 = dynamic_stats(DYNAMIC_TDOA_WINDOW_SEC)
                     dynamic_12 = dynamic_stats(FAST_DYNAMIC_TDOA_WINDOW_SEC)
+                    classic_dynamic_15 = dynamic_stats(
+                        DYNAMIC_TDOA_WINDOW_SEC, "primary_diff_m"
+                    )
+                    classic_dynamic_12 = dynamic_stats(
+                        FAST_DYNAMIC_TDOA_WINDOW_SEC, "primary_diff_m"
+                    )
                     paired_observations[
                         f"{tag_id}:{initiator_id}:{responder_id}"
                     ] = {
@@ -989,13 +1043,23 @@ class DashboardState:
                         "seq": int(latest_left["seq"]),
                         "reverse_seq": int(latest_right["seq"]),
                         "diff_m": diff_m,
+                        "classic_diff_m": classic_diff_m
+                        if classic_diff_m is not None
+                        else latest_classic_diff_m,
                         "dynamic_diff_m": dynamic_15["diff_m"]
                         if dynamic_15["diff_m"] is not None
                         else latest_diff_m,
+                        "dynamic_classic_diff_m": classic_dynamic_15["diff_m"]
+                        if classic_dynamic_15["diff_m"] is not None
+                        else latest_classic_diff_m,
                         "dynamic_1_2_diff_m": dynamic_12["diff_m"]
                         if dynamic_12["diff_m"] is not None
                         else latest_diff_m,
+                        "dynamic_1_2_classic_diff_m": classic_dynamic_12["diff_m"]
+                        if classic_dynamic_12["diff_m"] is not None
+                        else latest_classic_diff_m,
                         "latest_diff_m": latest_diff_m,
+                        "latest_classic_diff_m": latest_classic_diff_m,
                         "raw_diff_m": raw_diff_m
                         if raw_diff_m is not None
                         else float(latest_left["raw_diff_m"]),
@@ -1017,14 +1081,28 @@ class DashboardState:
                         if latest_raw_diff_m is not None
                         else float(latest_left["raw_diff_m"]),
                         "reverse_sum_m": reverse_sum_m,
+                        "classic_reverse_sum_m": classic_reverse_sum_m
+                        if classic_reverse_sum_m is not None
+                        else latest_classic_reverse_sum_m,
                         "dynamic_reverse_sum_m": dynamic_15["reverse_sum_m"]
                         if dynamic_15["reverse_sum_m"] is not None
                         else float(latest_left["diff_m"]) + float(latest_right["diff_m"]),
+                        "dynamic_classic_reverse_sum_m": classic_dynamic_15[
+                            "reverse_sum_m"
+                        ]
+                        if classic_dynamic_15["reverse_sum_m"] is not None
+                        else latest_classic_reverse_sum_m,
                         "dynamic_1_2_reverse_sum_m": dynamic_12["reverse_sum_m"]
                         if dynamic_12["reverse_sum_m"] is not None
                         else float(latest_left["diff_m"]) + float(latest_right["diff_m"]),
+                        "dynamic_1_2_classic_reverse_sum_m": classic_dynamic_12[
+                            "reverse_sum_m"
+                        ]
+                        if classic_dynamic_12["reverse_sum_m"] is not None
+                        else latest_classic_reverse_sum_m,
                         "latest_reverse_sum_m": float(latest_left["diff_m"])
                         + float(latest_right["diff_m"]),
+                        "latest_classic_reverse_sum_m": latest_classic_reverse_sum_m,
                         "agreement_m": agreement_m,
                         "blend_weight": blend_weight,
                         "fused_count": fused_count,
@@ -2340,7 +2418,7 @@ tr.status-stale td { color: #4f3b1d; }
             <label for="positionAnchorCount">Anchors used</label>
             <select id="positionAnchorCount"><option value="4">4 anchors</option><option value="3">3 anchors</option></select>
             <label for="positionSolver">Solver</label>
-            <select id="positionSolver"><option value="tdoa" selected>FlexTDOA</option><option value="ranging">DS-TWR ranges</option></select>
+            <select id="positionSolver"><option value="hybrid" selected>Hybrid FlexTDOA</option><option value="flextdoa">FlexTDOA classic</option><option value="ranging">DS-TWR ranges</option></select>
             <label for="positionAnchors">Anchor IDs</label>
             <input id="positionAnchors" value="2,3,4,5">
             <label for="positionTags">Tag IDs</label>
@@ -2349,12 +2427,20 @@ tr.status-stale td { color: #4f3b1d; }
             <input id="positionMaxAgeSec" value="3" type="number" min="0.2" step="0.1">
             <label for="positionTdoaMode">TDOA filter</label>
             <select id="positionTdoaMode"><option value="static" selected>Static median</option><option value="dynamic">Dynamic 1.5s median</option><option value="dynamic12">Dynamic 1.2s median</option><option value="auto">Auto Kalman</option></select>
+            <label for="positionRevSumRejectM">Rev-sum gate m</label>
+            <input id="positionRevSumRejectM" value="0.75" type="number" min="0" step="0.05">
+            <label for="positionResidualRejectM">Residual gate m</label>
+            <input id="positionResidualRejectM" value="0.45" type="number" min="0" step="0.05">
+            <label for="positionKalmanPredictSec">Kalman hold s</label>
+            <input id="positionKalmanPredictSec" value="2.5" type="number" min="0.2" step="0.1">
           </div>
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
-            <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
-            <div><b>Geometry</b><span>FlexTDOA uses live anchor-anchor ranges, so the anchors do not need to form a perfect square.</span></div>
+            <div><b>Solver</b><span>DS-TWR uses active tag-anchor distances. FlexTDOA classic uses the primary passive range difference. Hybrid uses the guarded dual-leg range difference.</span></div>
+            <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA and Hybrid modes, tags only listen on UWB and the dashboard solves from range differences.</span></div>
+            <div><b>Geometry</b><span>FlexTDOA and Hybrid use live anchor-anchor ranges, so the anchors do not need to form a perfect square.</span></div>
             <div><b>TDOA filter</b><span>Static uses the median of recent paired observations. Dynamic uses a short 1.5 s or 1.2 s median. Auto Kalman uses dynamic observations, gates outliers, and switches between static and moving behavior.</span></div>
+            <div><b>Gates</b><span>Rev-sum and residual gates reject inconsistent TDOA rows. Kalman hold is the prediction timeout when updates are missing.</span></div>
           </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
@@ -2857,7 +2943,7 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p class="muted profile-note">Apply writes every timing parameter in the selected profile to ESP32 NVS through runtime config. The same profile updates FlexTDOA anchor slots and classic ranging slots.</p>
+          <p class="muted profile-note">Apply writes every timing parameter in the selected profile to ESP32 NVS through runtime config. The same profile updates FlexTDOA anchor slots, classic ranging slots, and selects the Hybrid position solver.</p>
           <div class="profile-grid">
             <div class="profile-card" data-profile="static3">
               <h3>Static median, 3 s</h3>
@@ -3214,9 +3300,9 @@ const state = {
   positionResults: {},
   positionWasActive: false,
 };
-const tdoaReverseSumRejectM = 0.75;
-const tdoaResidualRejectM = 0.45;
-const kalmanMaxPredictionAgeSec = 2.5;
+const defaultTdoaReverseSumRejectM = 0.75;
+const defaultTdoaResidualRejectM = 0.45;
+const defaultKalmanMaxPredictionAgeSec = 2.5;
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
 const maxSeriesPoints = 1600;
@@ -3761,9 +3847,29 @@ function parseIdList(text, expected = null) {
   return expected ? unique.slice(0, expected) : unique;
 }
 
+function normalizePositionSolver(value) {
+  if (value === "tdoa" || value === "hybrid") return "hybrid";
+  if (value === "flextdoa") return "flextdoa";
+  return "ranging";
+}
+
+function positionProtocolUsesTdoa(solver) {
+  return solver === "flextdoa" || solver === "hybrid";
+}
+
+function positionRuntimeModeForSolver(solver) {
+  return positionProtocolUsesTdoa(solver) ? "flex_tdoa" : "ranging";
+}
+
+function positionSolverLabel(solver) {
+  if (solver === "hybrid") return "Hybrid FlexTDOA";
+  if (solver === "flextdoa") return "FlexTDOA classic";
+  return "DS-TWR ranges";
+}
+
 function positionSettings() {
   const anchorCount = Math.max(3, Math.min(4, Number(document.getElementById("positionAnchorCount")?.value || 4)));
-  const solver = document.getElementById("positionSolver")?.value === "tdoa" ? "tdoa" : "ranging";
+  const solver = normalizePositionSolver(document.getElementById("positionSolver")?.value || "hybrid");
   const anchorIds = parseIdList(document.getElementById("positionAnchors")?.value, anchorCount);
   const tagIds = parseIdList(document.getElementById("positionTags")?.value);
   const maxAge = Math.max(0.2, Number(document.getElementById("positionMaxAgeSec")?.value || 3));
@@ -3771,7 +3877,20 @@ function positionSettings() {
   const tdoaMode = ["static", "dynamic", "dynamic12", "auto"].includes(rawTdoaMode)
     ? rawTdoaMode
     : "static";
-  return {anchorCount, solver, anchorIds, tagIds, maxAge, tdoaMode};
+  const revSumRejectM = Math.max(0, Number(document.getElementById("positionRevSumRejectM")?.value || defaultTdoaReverseSumRejectM));
+  const residualRejectM = Math.max(0, Number(document.getElementById("positionResidualRejectM")?.value || defaultTdoaResidualRejectM));
+  const kalmanPredictionSec = Math.max(0.2, Number(document.getElementById("positionKalmanPredictSec")?.value || defaultKalmanMaxPredictionAgeSec));
+  return {
+    anchorCount,
+    solver,
+    anchorIds,
+    tagIds,
+    maxAge,
+    tdoaMode,
+    revSumRejectM,
+    residualRejectM,
+    kalmanPredictionSec,
+  };
 }
 
 function selectedPositionModuleIds(settings = positionSettings()) {
@@ -3790,7 +3909,7 @@ function moduleHttpOnline(item) {
 function moduleInPositionRuntime(item, solver) {
   if (!item || !moduleHttpOnline(item)) return false;
   const mode = String(item.runtime_mode_name || item.runtime_mode || "").toLowerCase();
-  const wanted = solver === "tdoa" ? "flex_tdoa" : "ranging";
+  const wanted = positionRuntimeModeForSolver(solver);
   return Boolean(item.runtime_uwb_enabled) && mode.includes(wanted);
 }
 
@@ -4091,24 +4210,47 @@ function tdoaModeUsesDynamicObservations(mode) {
   return mode === "dynamic" || mode === "dynamic12" || mode === "auto";
 }
 
-function tdoaObservationForMode(item, mode) {
+function tdoaProtocolUsesClassic(protocol) {
+  return protocol === "flextdoa";
+}
+
+function tdoaObservationForMode(item, mode, protocol = "hybrid") {
+  const classic = tdoaProtocolUsesClassic(protocol);
+  const staticDiff = Number(classic ? item.classic_diff_m : item.diff_m);
+  const staticReverseSum = Number(classic ? item.classic_reverse_sum_m : item.reverse_sum_m);
+  const latestDiff = Number(classic ? item.latest_classic_diff_m : item.latest_diff_m);
+  const latestReverseSum = Number(classic ? item.latest_classic_reverse_sum_m : item.latest_reverse_sum_m);
   if (!tdoaModeUsesDynamicObservations(mode)) {
-    return {...item, tdoa_filter: "static"};
+    return {
+      ...item,
+      diff_m: Number.isFinite(staticDiff) ? staticDiff : item.diff_m,
+      reverse_sum_m: Number.isFinite(staticReverseSum) ? staticReverseSum : item.reverse_sum_m,
+      latest_diff_m: Number.isFinite(latestDiff) ? latestDiff : item.latest_diff_m,
+      latest_reverse_sum_m: Number.isFinite(latestReverseSum) ? latestReverseSum : item.latest_reverse_sum_m,
+      tdoa_protocol: classic ? "flextdoa" : "hybrid",
+      tdoa_filter: "static",
+    };
   }
   const fastDynamic = mode === "dynamic12";
-  const dynamicDiff = Number(fastDynamic ? item.dynamic_1_2_diff_m : item.dynamic_diff_m);
+  const dynamicDiff = Number(
+    classic
+      ? (fastDynamic ? item.dynamic_1_2_classic_diff_m : item.dynamic_classic_diff_m)
+      : (fastDynamic ? item.dynamic_1_2_diff_m : item.dynamic_diff_m)
+  );
   const dynamicRawDiff = Number(fastDynamic ? item.dynamic_1_2_raw_diff_m : item.dynamic_raw_diff_m);
-  const dynamicReverseSum = Number(fastDynamic ? item.dynamic_1_2_reverse_sum_m : item.dynamic_reverse_sum_m);
+  const dynamicReverseSum = Number(
+    classic
+      ? (fastDynamic ? item.dynamic_1_2_classic_reverse_sum_m : item.dynamic_classic_reverse_sum_m)
+      : (fastDynamic ? item.dynamic_1_2_reverse_sum_m : item.dynamic_reverse_sum_m)
+  );
   const dynamicSpan = Number(fastDynamic ? item.dynamic_1_2_span_sec : item.dynamic_span_sec);
   const dynamicSamples = Number(fastDynamic ? item.dynamic_1_2_samples : item.dynamic_samples);
-  const latestDiff = Number(item.latest_diff_m);
   const latestRawDiff = Number(item.latest_raw_diff_m);
-  const latestReverseSum = Number(item.latest_reverse_sum_m);
   return {
     ...item,
     diff_m: Number.isFinite(dynamicDiff)
       ? dynamicDiff
-      : (Number.isFinite(latestDiff) ? latestDiff : item.diff_m),
+      : (Number.isFinite(latestDiff) ? latestDiff : staticDiff),
     raw_diff_m: Number.isFinite(dynamicRawDiff)
       ? dynamicRawDiff
       : (Number.isFinite(latestRawDiff) ? latestRawDiff : item.raw_diff_m),
@@ -4116,14 +4258,15 @@ function tdoaObservationForMode(item, mode) {
       ? dynamicReverseSum
       : (Number.isFinite(latestReverseSum)
         ? latestReverseSum
-        : item.reverse_sum_m),
+        : staticReverseSum),
     dynamic_span_sec: Number.isFinite(dynamicSpan) ? dynamicSpan : item.dynamic_span_sec,
     dynamic_samples: Number.isFinite(dynamicSamples) ? dynamicSamples : item.dynamic_samples,
+    tdoa_protocol: classic ? "flextdoa" : "hybrid",
     tdoa_filter: mode === "auto" ? "auto" : (fastDynamic ? "dynamic12" : "dynamic"),
   };
 }
 
-function pairedTdoaObservations(tagId, anchorIds, maxAge, mode = "static") {
+function pairedTdoaObservations(tagId, anchorIds, maxAge, mode = "static", protocol = "hybrid") {
   const selected = new Set(anchorIds.map(Number));
   const serverPaired = Object.values(state.tdoa?.paired_observations || {})
     .filter(item =>
@@ -4136,7 +4279,7 @@ function pairedTdoaObservations(tagId, anchorIds, maxAge, mode = "static") {
       Number(left.initiator_id) - Number(right.initiator_id) ||
       Number(left.responder_id) - Number(right.responder_id));
   if (serverPaired.length) {
-    return serverPaired.map(item => tdoaObservationForMode(item, mode));
+    return serverPaired.map(item => tdoaObservationForMode(item, mode, protocol));
   }
 
   const fresh = freshTdoaObservations(tagId, anchorIds, maxAge);
@@ -4152,8 +4295,8 @@ function pairedTdoaObservations(tagId, anchorIds, maxAge, mode = "static") {
     const ba = byDirection.get(`${b}-${a}`);
     if (!ab || !ba || !tdoaSequencesArePaired(ab, ba, pairCount)) continue;
 
-    const abDiff = Number(ab.diff_m);
-    const baDiff = Number(ba.diff_m);
+    const abDiff = Number(tdoaProtocolUsesClassic(protocol) ? ab.primary_diff_m : ab.diff_m);
+    const baDiff = Number(tdoaProtocolUsesClassic(protocol) ? ba.primary_diff_m : ba.diff_m);
     if (!Number.isFinite(abDiff) || !Number.isFinite(baDiff)) continue;
 
     const rawAbDiff = Number(ab.raw_diff_m);
@@ -4186,7 +4329,7 @@ function pairedTdoaObservations(tagId, anchorIds, maxAge, mode = "static") {
     });
   }
 
-  return paired.map(item => tdoaObservationForMode(item, mode)).sort((left, right) =>
+  return paired.map(item => tdoaObservationForMode(item, mode, protocol)).sort((left, right) =>
     Number(left.initiator_id) - Number(right.initiator_id) ||
     Number(left.responder_id) - Number(right.responder_id));
 }
@@ -4302,6 +4445,15 @@ function minTdoaObservationCount(anchorIds) {
 
 function robustTdoaFit(anchorIds, anchors, observations, options = {}) {
   const strictKalmanInput = options.tdoaMode === "auto";
+  const useSuspectGate = options.solver === "hybrid";
+  const reverseSumRejectM = Math.max(
+    0,
+    Number(options.revSumRejectM ?? defaultTdoaReverseSumRejectM)
+  );
+  const residualRejectM = Math.max(
+    0,
+    Number(options.residualRejectM ?? defaultTdoaResidualRejectM)
+  );
   const all = (observations || []).filter(item =>
     anchors[Number(item.initiator_id)] &&
     anchors[Number(item.responder_id)] &&
@@ -4328,7 +4480,7 @@ function robustTdoaFit(anchorIds, anchors, observations, options = {}) {
   }
 
   let candidates = all.filter(item => {
-    const ok = !item.suspect;
+    const ok = !useSuspectGate || !item.suspect;
     if (!ok) notes.set(tdoaObservationKey(item), "suspect");
     return ok;
   });
@@ -4339,7 +4491,7 @@ function robustTdoaFit(anchorIds, anchors, observations, options = {}) {
 
   let used = candidates.filter(item => {
     const reverseSum = Number(item.reverse_sum_m);
-    const ok = !Number.isFinite(reverseSum) || Math.abs(reverseSum) <= tdoaReverseSumRejectM;
+    const ok = !Number.isFinite(reverseSum) || Math.abs(reverseSum) <= reverseSumRejectM;
     if (!ok) notes.set(tdoaObservationKey(item), "rev sum");
     return ok;
   });
@@ -4386,14 +4538,14 @@ function robustTdoaFit(anchorIds, anchors, observations, options = {}) {
         worstAbs = absResidual;
       }
     }
-    if (!worst || worstAbs <= tdoaResidualRejectM) break;
+    if (!worst || worstAbs <= residualRejectM) break;
 
     const trialUsed = used.filter(item => item !== worst);
     const trialPosition = solveTdoa(anchors, trialUsed);
     if (!trialPosition) break;
     const trialResiduals = tdoaResiduals(trialPosition, anchors, trialUsed);
     const trialRms = tdoaRmsForResiduals(trialResiduals, trialUsed);
-    if (!(trialRms < rms * 0.85 || rms > tdoaResidualRejectM)) break;
+    if (!(trialRms < rms * 0.85 || rms > residualRejectM)) break;
 
     notes.set(tdoaObservationKey(worst), "resid");
     used = trialUsed;
@@ -4675,7 +4827,7 @@ function kalmanUpdate2d(filter, measurement, accuracy, fitObservations, now) {
 }
 
 function applyAutoKalman(tagId, position, accuracy, fitObservations, settings, now) {
-  if (settings.solver !== "tdoa" || settings.tdoaMode !== "auto") {
+  if (!positionProtocolUsesTdoa(settings.solver) || settings.tdoaMode !== "auto") {
     return {position, accuracy, filterInfo: null};
   }
   const key = kalmanFilterKey(tagId, settings);
@@ -4707,7 +4859,11 @@ function applyAutoKalman(tagId, position, accuracy, fitObservations, settings, n
   }
 
   const predictionAge = now - Number(filter.lastUpdate || 0);
-  if (!hasMeasurement && predictionAge > kalmanMaxPredictionAgeSec) {
+  const maxPredictionAgeSec = Math.max(
+    0.2,
+    Number(settings.kalmanPredictionSec ?? defaultKalmanMaxPredictionAgeSec)
+  );
+  if (!hasMeasurement && predictionAge > maxPredictionAgeSec) {
     delete state.positionFilters[key];
     return {position: null, accuracy, filterInfo: null};
   }
@@ -4792,12 +4948,13 @@ function computePositionModel() {
       let residuals = {};
       let accuracy = null;
       let filterInfo = null;
-      if (settings.solver === "tdoa") {
+      if (positionProtocolUsesTdoa(settings.solver)) {
         observations = pairedTdoaObservations(
           tagId,
           settings.anchorIds,
           settings.maxAge,
-          settings.tdoaMode
+          settings.tdoaMode,
+          settings.solver
         )
           .filter(item => anchors[Number(item.initiator_id)] && anchors[Number(item.responder_id)]);
         const fit = robustTdoaFit(settings.anchorIds, anchors, observations, settings);
@@ -4996,7 +5153,7 @@ function drawPosition(model) {
     ctx.stroke();
   }
 
-  if (model.settings.solver !== "tdoa") {
+  if (!positionProtocolUsesTdoa(model.settings.solver)) {
     for (const tag of Object.values(model.tags)) {
       for (const [anchorId, distance] of Object.entries(tag.distances || {})) {
         const anchor = model.anchors[Number(anchorId)];
@@ -5113,7 +5270,7 @@ function positionGateClass(status) {
 
 function renderPositionFilterStatus(model) {
   const settings = model.settings || {};
-  if (settings.solver !== "tdoa") {
+  if (!positionProtocolUsesTdoa(settings.solver)) {
     return `<div class="position-filter-card">
       <b>Solver Status</b>
       <div class="position-filter-row"><span class="position-pill">DS-TWR ranges</span></div>
@@ -5132,7 +5289,10 @@ function renderPositionFilterStatus(model) {
   }
 
   const pills = [
+    `<span class="position-pill">Protocol: ${esc(positionSolverLabel(settings.solver))}</span>`,
     `<span class="position-pill">Filter: ${esc(filterLabel)}</span>`,
+    `<span class="position-pill">rev ${fmtFixed(settings.revSumRejectM, 2)} m</span>`,
+    `<span class="position-pill">resid ${fmtFixed(settings.residualRejectM, 2)} m</span>`,
   ];
   if (activeKalman) {
     if (filterInfo) {
@@ -5140,6 +5300,7 @@ function renderPositionFilterStatus(model) {
       pills.push(`<span class="position-pill ${esc(positionGateClass(status))}">Kalman ${esc(filterInfo.mode || "static")}</span>`);
       pills.push(`<span class="position-pill ${esc(positionGateClass(status))}">gate ${esc(status)}</span>`);
       pills.push(`<span class="position-pill">v ${fmtFixed(Number(filterInfo.speed_mps || 0), 2)} m/s</span>`);
+      pills.push(`<span class="position-pill">hold ${fmtFixed(settings.kalmanPredictionSec, 1)} s</span>`);
       pills.push(`<span class="position-pill">ok/drop ${esc(filterInfo.accepted || 0)}/${esc(filterInfo.rejected || 0)}</span>`);
       if (Number.isFinite(Number(filterInfo.innovation_m))) {
         pills.push(`<span class="position-pill">innovation ${fmtCmFromM(filterInfo.innovation_m, 1)} cm</span>`);
@@ -5165,8 +5326,8 @@ function renderPositionReadout(model) {
   const title = document.getElementById("positionMeasurementTitle");
   const overlay = document.getElementById("positionOverlay");
   if (!readout || !accuracyRows || !rows || !head || !title || !overlay) return;
-  const solverName = model.settings.solver === "tdoa" ? "FlexTDOA" : "ranging";
-  const enableText = model.settings.solver === "tdoa" ? "Enable FlexTDOA" : "Enable Ranging";
+  const solverName = positionSolverLabel(model.settings.solver);
+  const enableText = `Enable ${solverName}`;
   document.querySelectorAll("#positionEnableRanging, #positionEnableRangingSide")
     .forEach(button => { button.textContent = enableText; });
   renderPositionGeometryPanel(model);
@@ -5182,7 +5343,7 @@ function renderPositionReadout(model) {
     }
     readout.innerHTML = `${renderPositionFilterStatus(model)}<div class="position-tag-card"><b>${esc(solverName)} inactive</b><span>No stored position is shown while the selected modules are not in the selected runtime.</span></div>`;
     accuracyRows.innerHTML = "";
-    title.textContent = model.settings.solver === "tdoa" ? "TDOA Observations" : "Distances";
+    title.textContent = positionProtocolUsesTdoa(model.settings.solver) ? "TDOA Observations" : "Distances";
     rows.innerHTML = "";
     return;
   }
@@ -5199,17 +5360,18 @@ function renderPositionReadout(model) {
   }
 
   const tagCards = Object.values(model.tags).map(tag => {
-    const fitCount = model.settings.solver === "tdoa"
+    const usesTdoa = positionProtocolUsesTdoa(model.settings.solver);
+    const fitCount = usesTdoa
       ? (tag.fitObservations || []).length
       : Object.keys(tag.distances || {}).length;
-    const freshCount = model.settings.solver === "tdoa"
+    const freshCount = usesTdoa
       ? (tag.observations || []).length
       : Object.keys(tag.distances || {}).length;
-    const total = model.settings.solver === "tdoa"
+    const total = usesTdoa
       ? Math.max(0, model.settings.anchorIds.length * (model.settings.anchorIds.length - 1) / 2)
       : model.settings.anchorIds.length;
     if (!tag.position) {
-      return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}</b><span>${freshCount}/${total} fresh ${model.settings.solver === "tdoa" ? "TDOA observations" : "distances"}</span></div>`;
+      return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}</b><span>${freshCount}/${total} fresh ${usesTdoa ? "TDOA observations" : "distances"}</span></div>`;
     }
     const sigma = tag.accuracy?.sigma_major_m;
     const accuracyText = Number.isFinite(Number(sigma)) ? ` · est. ${fmtPositionSigma(sigma, 1)}` : "";
@@ -5219,7 +5381,7 @@ function renderPositionReadout(model) {
     const rawText = tag.rawPosition && tag.filterInfo
       ? ` · raw ${fmtFixed(tag.rawPosition.x, 2)},${fmtFixed(tag.rawPosition.y, 2)}`
       : "";
-    const countText = model.settings.solver === "tdoa"
+    const countText = usesTdoa
       ? `${fitCount}/${total} fit · ${freshCount} fresh`
       : `${fitCount}/${total} fresh distances`;
     return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span>${countText}${accuracyText}${filterText}${rawText}</span></div>`;
@@ -5243,7 +5405,7 @@ function renderPositionReadout(model) {
   });
   accuracyRows.innerHTML = accuracyTableRows.join("") || `<tr><td colspan="4"><span class="muted">waiting</span></td></tr>`;
 
-  if (model.settings.solver === "tdoa") {
+  if (positionProtocolUsesTdoa(model.settings.solver)) {
     title.textContent = "TDOA Observations";
     head.innerHTML = `<tr><th>Tag</th><th>Pair</th><th>diff m</th><th>rev sum</th><th>age</th><th>resid.</th></tr>`;
     const tdoaRows = [];
@@ -5258,6 +5420,7 @@ function renderPositionReadout(model) {
         const agreementText = Number.isFinite(agreement) ? ` · agree ${fmtCmFromM(agreement, 1)} cm` : "";
         const blend = Number(item.blend_weight);
         const blendText = Number.isFinite(blend) ? ` · blend ${(blend * 100).toFixed(0)}%` : "";
+        const protocolText = item.tdoa_protocol === "flextdoa" ? "classic" : "hybrid";
         const weight = Number(item.solve_weight);
         const weightText = tdoaModeUsesDynamicObservations(model.settings.tdoaMode) && Number.isFinite(weight)
           ? ` · w ${(weight * 100).toFixed(0)}%`
@@ -5269,7 +5432,7 @@ function renderPositionReadout(model) {
         const fusedText = Number(item.fused_count || 0) > 0 ? ` · fused ${esc(item.fused_count)}` : "";
         tdoaRows.push(`<tr class="${used ? "" : "position-skip"}">
           <td>T${esc(tag.tagId)}</td>
-          <td>A${esc(item.initiator_id)}↔A${esc(item.responder_id)}<br><span class="muted">seq ${esc(item.seq)}/${esc(item.reverse_seq)} · n ${esc(item.samples || 1)}${filterText}${agreementText}${blendText}${weightText}${fusedText}${suspectText} · ${esc(fitNote)}</span></td>
+          <td>A${esc(item.initiator_id)}↔A${esc(item.responder_id)}<br><span class="muted">${esc(protocolText)} · seq ${esc(item.seq)}/${esc(item.reverse_seq)} · n ${esc(item.samples || 1)}${filterText}${agreementText}${blendText}${weightText}${fusedText}${suspectText} · ${esc(fitNote)}</span></td>
           <td>${fmtFixed(item.diff_m, 3)}</td>
           <td>${Number.isFinite(reverseSum) ? fmtCmFromM(reverseSum, 1) + " cm" : "-"}</td>
           <td class="${Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${fmtFixed(item.age_sec, 1)}s</td>
@@ -7342,7 +7505,7 @@ function mirrorRangingProfileToUwbFields(values) {
 
 function applyRangingProfilePositionSettings(profile) {
   const fields = {
-    positionSolver: "tdoa",
+    positionSolver: "hybrid",
     positionTdoaMode: profile.tdoaMode,
     positionMaxAgeSec: profile.positionMaxAgeSec,
   };
@@ -7425,7 +7588,8 @@ function persistedSettingIds() {
     "runtimeUwb", "runtimeBno085", "runtimeGps", "runtimeTelemetryPort",
     "accelTimebase", "accelSampleHz", "accelTargets",
     "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
-    "positionMaxAgeSec", "positionTdoaMode",
+    "positionMaxAgeSec", "positionTdoaMode", "positionRevSumRejectM",
+    "positionResidualRejectM", "positionKalmanPredictSec",
     "uwbTargets", "uwbRadioChannel", "uwbSurveyRxMs", "uwbSurveyDelayMs", "uwbSurveySlotMs",
     "uwbSurveyGapMs", "uwbSurveyLogEvery", "uwbRangingSlotMs",
     "uwbRangingGapMs", "uwbRangingRxMs", "uwbDtInitiator", "uwbDtResponder",
@@ -7486,15 +7650,19 @@ function migrateCalibrationPairSetting() {
 
 function migratePositionSolverSetting() {
   const legacyCoordsKey = settingKey("positionAnchorCoords");
-  if (localStorage.getItem(legacyCoordsKey) === null) return;
-  localStorage.removeItem(legacyCoordsKey);
+  if (localStorage.getItem(legacyCoordsKey) !== null) {
+    localStorage.removeItem(legacyCoordsKey);
+  }
 
   const solverKey = settingKey("positionSolver");
   const solverEl = document.getElementById("positionSolver");
   const savedSolver = localStorage.getItem(solverKey);
-  if (savedSolver === null || savedSolver === "ranging") {
-    if (solverEl) solverEl.value = "tdoa";
-    localStorage.setItem(solverKey, "tdoa");
+  if (savedSolver === null || savedSolver === "tdoa") {
+    if (solverEl) solverEl.value = "hybrid";
+    localStorage.setItem(solverKey, "hybrid");
+  } else if (solverEl) {
+    solverEl.value = normalizePositionSolver(savedSolver);
+    localStorage.setItem(solverKey, solverEl.value);
   }
 }
 
@@ -7537,7 +7705,7 @@ async function enablePositionRanging() {
     return;
   }
   const anchors = settings.anchorIds.join(",");
-  const mode = settings.solver === "tdoa" ? "flex_tdoa" : "ranging";
+  const mode = positionRuntimeModeForSolver(settings.solver);
   const params = {
     mode,
     tag: String(tagId),
@@ -7586,7 +7754,11 @@ function wireSettings() {
       renderAccelGraphs();
     });
   }
-  ["positionAnchorCount", "positionSolver", "positionAnchors", "positionTags", "positionMaxAgeSec", "positionTdoaMode"].forEach(id => {
+  [
+    "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
+    "positionMaxAgeSec", "positionTdoaMode", "positionRevSumRejectM",
+    "positionResidualRejectM", "positionKalmanPredictSec",
+  ].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("input", () => {

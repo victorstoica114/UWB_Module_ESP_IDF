@@ -741,18 +741,31 @@ spreads any geometry error across all fresh edges. The geometry table reports
 residual error in centimeters, so the real setup can be a slightly skewed
 quadrilateral instead of a perfect square.
 
-With `FlexTDOA` selected, the dashboard takes fresh `diff` observations and
-solves the tag position on the PC with a local least-squares range-difference
-fit. When both directions of a pair are fresh, the dashboard uses the
-antisymmetric median `(Ai->Aj - Aj->Ai) / 2` and reports the reverse sum as a
-health check. A reverse sum near zero means the two directed observations agree;
-a large reverse sum means the pair has common-mode bias even if each individual
-line looks stable. The live fit now ignores observations with very large reverse
-sum and can drop a single high-residual outlier when enough other pairs remain;
-the table keeps those rows visible as `skip ...` diagnostics. `DS-TWR ranges`
-can use the same measured anchor geometry for absolute tag-anchor ranges, but
-the blue distance circles only make sense for absolute ranges, not TDOA range
-differences.
+The `Position Setup` solver selector is intentionally protocol-level, so field
+tests can compare the same geometry and tag path without changing dashboard
+code:
+
+| Solver | Firmware runtime | Tag radio behavior | Range value used by dashboard | Best use |
+| --- | --- | --- | --- | --- |
+| `DS-TWR ranges` | `uwb_ranging` | tag actively responds to each anchor | absolute tag-anchor DS-TWR distance | Baseline comparison with direct ranges. |
+| `FlexTDOA classic` | `uwb_flex_tdoa` | tag only listens | `primary`, the classic `POLL -> RESP` passive range difference | Compare against the FlexTDOA-style single-leg observation. |
+| `Hybrid FlexTDOA` | `uwb_flex_tdoa` | tag only listens | guarded dual-leg `diff`, fused from `primary` and `alt` when they agree | Current practical default. Gives a consistency signal and reduces directional bias. |
+
+For the two passive solvers, the dashboard solves the tag position on the PC
+with a local least-squares range-difference fit. When both directions of a pair
+are fresh, it uses the antisymmetric median `(Ai->Aj - Aj->Ai) / 2` and reports
+the reverse sum as a health check. A reverse sum near zero means the two
+directed observations agree; a large reverse sum means the pair has common-mode
+bias even if each individual line looks stable. The live fit ignores
+observations with very large reverse sum and can drop a single high-residual
+outlier when enough other pairs remain; the table keeps those rows visible as
+`skip ...` diagnostics. `DS-TWR ranges` can use the same measured anchor
+geometry for absolute tag-anchor ranges, but the blue distance circles only
+make sense for absolute ranges, not TDOA range differences.
+
+The dashboard exposes the main solver gates directly in `Position Setup`:
+`Rev-sum gate m`, `Residual gate m`, and `Kalman hold s`. These are PC-side
+parameters and can be changed during field tests without OTA.
 
 Dynamic solver replay, 2026-07-15:
 
@@ -770,10 +783,11 @@ for fresh, compact rows.
 | Dynamic median, 1.2 s | `0.51 s` | `1039` | `4.67 / 6.81 cm` | `2.17 cm` | `13.96 / 2.00 cm` | Fresher, but starts to jitter more |
 | Dynamic median, 1.0 s | `0.31 s` | `969` | `4.19 / 6.59 cm` | `4.51 cm` | `16.10 / 2.77 cm` | Too sparse for stable tracking |
 
-The dashboard exposes both `Static median` and `Dynamic 1.5s median`. Static is
-better for fixed-tag measurements and calibration sanity checks. Dynamic should
-be used for walking tests because it roughly halves observation age while keeping
-least-squares residuals in the same range.
+The dashboard exposes `Static median`, `Dynamic 1.5s median`, and
+`Dynamic 1.2s median`. Static is better for fixed-tag measurements and
+calibration sanity checks. Dynamic should be used for walking tests because it
+roughly halves observation age while keeping least-squares residuals in the same
+range; `1.2 s` is the more responsive option when the geometry is healthy.
 
 Kalman/gating note, 2026-07-16:
 
