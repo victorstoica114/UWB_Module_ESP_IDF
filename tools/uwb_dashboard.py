@@ -82,6 +82,7 @@ TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
 DYNAMIC_TDOA_WINDOW_SEC = 1.5
+FAST_DYNAMIC_TDOA_WINDOW_SEC = 1.2
 
 
 class CalibrationCancelled(RuntimeError):
@@ -939,38 +940,46 @@ class DashboardState:
                         float(latest_left.get("received_at") or 0.0),
                         float(latest_right.get("received_at") or 0.0),
                     )
-                    dynamic_matched = [
-                        pair
-                        for pair in matched
-                        if now
-                        - max(
-                            float(pair[0].get("received_at") or 0.0),
-                            float(pair[1].get("received_at") or 0.0),
-                        )
-                        <= DYNAMIC_TDOA_WINDOW_SEC
-                    ]
-                    if not dynamic_matched:
-                        dynamic_matched = [(latest_left, latest_right)]
-                    dynamic_diffs: list[float] = []
-                    dynamic_raw_diffs: list[float] = []
-                    dynamic_reverse_sums: list[float] = []
-                    dynamic_times = [
-                        float(sample.get("received_at") or 0.0)
-                        for pair in dynamic_matched
-                        for sample in pair
-                    ]
-                    for left, right in dynamic_matched:
-                        left_diff = float(left["diff_m"])
-                        right_diff = float(right["diff_m"])
-                        dynamic_diffs.append((left_diff - right_diff) / 2.0)
-                        dynamic_reverse_sums.append(left_diff + right_diff)
-                        left_raw = float(left.get("raw_diff_m") or math.nan)
-                        right_raw = float(right.get("raw_diff_m") or math.nan)
-                        if math.isfinite(left_raw) and math.isfinite(right_raw):
-                            dynamic_raw_diffs.append((left_raw - right_raw) / 2.0)
-                    dynamic_diff_m = self.median_float(dynamic_diffs)
-                    dynamic_raw_diff_m = self.median_float(dynamic_raw_diffs)
-                    dynamic_reverse_sum_m = self.median_float(dynamic_reverse_sums)
+                    def dynamic_stats(window_sec: float) -> dict[str, Any]:
+                        selected = [
+                            pair
+                            for pair in matched
+                            if now
+                            - max(
+                                float(pair[0].get("received_at") or 0.0),
+                                float(pair[1].get("received_at") or 0.0),
+                            )
+                            <= window_sec
+                        ]
+                        if not selected:
+                            selected = [(latest_left, latest_right)]
+                        diffs: list[float] = []
+                        raw_diffs: list[float] = []
+                        reverse_sums: list[float] = []
+                        times = [
+                            float(sample.get("received_at") or 0.0)
+                            for pair in selected
+                            for sample in pair
+                        ]
+                        for left, right in selected:
+                            left_diff = float(left["diff_m"])
+                            right_diff = float(right["diff_m"])
+                            diffs.append((left_diff - right_diff) / 2.0)
+                            reverse_sums.append(left_diff + right_diff)
+                            left_raw = float(left.get("raw_diff_m") or math.nan)
+                            right_raw = float(right.get("raw_diff_m") or math.nan)
+                            if math.isfinite(left_raw) and math.isfinite(right_raw):
+                                raw_diffs.append((left_raw - right_raw) / 2.0)
+                        return {
+                            "diff_m": self.median_float(diffs),
+                            "raw_diff_m": self.median_float(raw_diffs),
+                            "reverse_sum_m": self.median_float(reverse_sums),
+                            "span_sec": max(times) - min(times) if times else 0.0,
+                            "samples": len(selected),
+                        }
+
+                    dynamic_15 = dynamic_stats(DYNAMIC_TDOA_WINDOW_SEC)
+                    dynamic_12 = dynamic_stats(FAST_DYNAMIC_TDOA_WINDOW_SEC)
                     paired_observations[
                         f"{tag_id}:{initiator_id}:{responder_id}"
                     ] = {
@@ -980,15 +989,25 @@ class DashboardState:
                         "seq": int(latest_left["seq"]),
                         "reverse_seq": int(latest_right["seq"]),
                         "diff_m": diff_m,
-                        "dynamic_diff_m": dynamic_diff_m
-                        if dynamic_diff_m is not None
+                        "dynamic_diff_m": dynamic_15["diff_m"]
+                        if dynamic_15["diff_m"] is not None
+                        else latest_diff_m,
+                        "dynamic_1_2_diff_m": dynamic_12["diff_m"]
+                        if dynamic_12["diff_m"] is not None
                         else latest_diff_m,
                         "latest_diff_m": latest_diff_m,
                         "raw_diff_m": raw_diff_m
                         if raw_diff_m is not None
                         else float(latest_left["raw_diff_m"]),
-                        "dynamic_raw_diff_m": dynamic_raw_diff_m
-                        if dynamic_raw_diff_m is not None
+                        "dynamic_raw_diff_m": dynamic_15["raw_diff_m"]
+                        if dynamic_15["raw_diff_m"] is not None
+                        else (
+                            latest_raw_diff_m
+                            if latest_raw_diff_m is not None
+                            else float(latest_left["raw_diff_m"])
+                        ),
+                        "dynamic_1_2_raw_diff_m": dynamic_12["raw_diff_m"]
+                        if dynamic_12["raw_diff_m"] is not None
                         else (
                             latest_raw_diff_m
                             if latest_raw_diff_m is not None
@@ -998,8 +1017,11 @@ class DashboardState:
                         if latest_raw_diff_m is not None
                         else float(latest_left["raw_diff_m"]),
                         "reverse_sum_m": reverse_sum_m,
-                        "dynamic_reverse_sum_m": dynamic_reverse_sum_m
-                        if dynamic_reverse_sum_m is not None
+                        "dynamic_reverse_sum_m": dynamic_15["reverse_sum_m"]
+                        if dynamic_15["reverse_sum_m"] is not None
+                        else float(latest_left["diff_m"]) + float(latest_right["diff_m"]),
+                        "dynamic_1_2_reverse_sum_m": dynamic_12["reverse_sum_m"]
+                        if dynamic_12["reverse_sum_m"] is not None
                         else float(latest_left["diff_m"]) + float(latest_right["diff_m"]),
                         "latest_reverse_sum_m": float(latest_left["diff_m"])
                         + float(latest_right["diff_m"]),
@@ -1017,12 +1039,10 @@ class DashboardState:
                             if matched_times
                             else 0.0
                         ),
-                        "dynamic_span_sec": (
-                            max(dynamic_times) - min(dynamic_times)
-                            if dynamic_times
-                            else 0.0
-                        ),
-                        "dynamic_samples": len(dynamic_matched),
+                        "dynamic_span_sec": dynamic_15["span_sec"],
+                        "dynamic_samples": dynamic_15["samples"],
+                        "dynamic_1_2_span_sec": dynamic_12["span_sec"],
+                        "dynamic_1_2_samples": dynamic_12["samples"],
                         "samples": len(matched),
                         "source_module_id": latest_left.get("source_module_id"),
                         "log_id": latest_left.get("log_id"),
@@ -2328,13 +2348,13 @@ tr.status-stale td { color: #4f3b1d; }
             <label for="positionMaxAgeSec">Fresh age s</label>
             <input id="positionMaxAgeSec" value="3" type="number" min="0.2" step="0.1">
             <label for="positionTdoaMode">TDOA filter</label>
-            <select id="positionTdoaMode"><option value="static" selected>Static median</option><option value="dynamic">Dynamic 1.5s median</option><option value="auto">Auto Kalman</option></select>
+            <select id="positionTdoaMode"><option value="static" selected>Static median</option><option value="dynamic">Dynamic 1.5s median</option><option value="dynamic12">Dynamic 1.2s median</option><option value="auto">Auto Kalman</option></select>
           </div>
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
             <div><b>Geometry</b><span>FlexTDOA uses live anchor-anchor ranges, so the anchors do not need to form a perfect square.</span></div>
-            <div><b>TDOA filter</b><span>Static uses the median of recent paired observations. Dynamic uses a short 1.5 s median. Auto Kalman uses dynamic observations, gates outliers, and switches between static and moving behavior.</span></div>
+            <div><b>TDOA filter</b><span>Static uses the median of recent paired observations. Dynamic uses a short 1.5 s or 1.2 s median. Auto Kalman uses dynamic observations, gates outliers, and switches between static and moving behavior.</span></div>
           </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
@@ -2839,120 +2859,91 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <p class="muted profile-note">Apply writes every timing parameter in the selected profile to ESP32 NVS through runtime config. The same profile updates FlexTDOA anchor slots and classic ranging slots.</p>
           <div class="profile-grid">
-            <div class="profile-card" data-profile="baseline">
-              <h3>Stable Baseline</h3>
-              <p class="muted">Known-good reference profile using the currently validated timing values.</p>
+            <div class="profile-card" data-profile="static3">
+              <h3>Static median, 3 s</h3>
+              <p class="muted">Stable fixed-tag profile. Uses the validated 100 ms FlexTDOA timing and a 3 s static median.</p>
               <div class="form-grid compact">
-                <label for="profileBaselineSlotMs">Slot ms</label>
-                <input id="profileBaselineSlotMs" value="100" type="number" min="1" step="1">
-                <label for="profileBaselineRoundGapMs">Round gap ms</label>
-                <input id="profileBaselineRoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileBaselineRxSliceMs">RX slice ms</label>
-                <input id="profileBaselineRxSliceMs" value="100" type="number" min="1" step="1">
-                <label for="profileBaselineCommandDelayMs">Command delay ms</label>
-                <input id="profileBaselineCommandDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileBaselineTimeoutMs">Classic DS-TWR timeout ms</label>
-                <input id="profileBaselineTimeoutMs" value="90" type="number" min="1" step="1">
-                <label for="profileBaselineRespDelayMs">RESP delay ms</label>
-                <input id="profileBaselineRespDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileBaselineFinalDelayMs">FINAL delay ms</label>
-                <input id="profileBaselineFinalDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileBaselineReportDelayMs">REPORT delay ms</label>
-                <input id="profileBaselineReportDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileBaselineAutoRxDelayUus">Auto RX delay UUS</label>
-                <input id="profileBaselineAutoRxDelayUus" value="500" type="number" min="1" step="1">
+                <label for="profileStatic3SlotMs">Slot ms</label>
+                <input id="profileStatic3SlotMs" value="100" type="number" min="1" step="1">
+                <label for="profileStatic3RoundGapMs">Round gap ms</label>
+                <input id="profileStatic3RoundGapMs" value="10" type="number" min="1" step="1">
+                <label for="profileStatic3RxSliceMs">RX slice ms</label>
+                <input id="profileStatic3RxSliceMs" value="100" type="number" min="1" step="1">
+                <label for="profileStatic3CommandDelayMs">Command delay ms</label>
+                <input id="profileStatic3CommandDelayMs" value="5" type="number" min="1" step="1">
+                <label for="profileStatic3TimeoutMs">Classic DS-TWR timeout ms</label>
+                <input id="profileStatic3TimeoutMs" value="90" type="number" min="1" step="1">
+                <label for="profileStatic3RespDelayMs">RESP delay ms</label>
+                <input id="profileStatic3RespDelayMs" value="15" type="number" min="1" step="1">
+                <label for="profileStatic3FinalDelayMs">FINAL delay ms</label>
+                <input id="profileStatic3FinalDelayMs" value="15" type="number" min="1" step="1">
+                <label for="profileStatic3ReportDelayMs">REPORT delay ms</label>
+                <input id="profileStatic3ReportDelayMs" value="5" type="number" min="1" step="1">
+                <label for="profileStatic3AutoRxDelayUus">Auto RX delay UUS</label>
+                <input id="profileStatic3AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
-              <div class="profile-summary" id="profileBaselineSummary"></div>
+              <div class="profile-summary" id="profileStatic3Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="baseline">Apply Stable Baseline</button>
-                <button class="reset-ranging-profile" data-profile="baseline">Reset Defaults</button>
+                <button class="primary apply-ranging-profile" data-profile="static3">Apply Static 3s</button>
+                <button class="reset-ranging-profile" data-profile="static3">Reset Defaults</button>
               </div>
             </div>
-            <div class="profile-card" data-profile="safe">
-              <h3>Safe Fast</h3>
-              <p class="muted">First fast profile to try when stability matters more than minimum latency.</p>
+            <div class="profile-card" data-profile="dynamic15">
+              <h3>Dynamic median, 1.5 s</h3>
+              <p class="muted">Default walking profile. Keeps the robust 100 ms timing and uses the short 1.5 s median.</p>
               <div class="form-grid compact">
-                <label for="profileSafeSlotMs">Slot ms</label>
-                <input id="profileSafeSlotMs" value="60" type="number" min="1" step="1">
-                <label for="profileSafeRoundGapMs">Round gap ms</label>
-                <input id="profileSafeRoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileSafeRxSliceMs">RX slice ms</label>
-                <input id="profileSafeRxSliceMs" value="60" type="number" min="1" step="1">
-                <label for="profileSafeCommandDelayMs">Command delay ms</label>
-                <input id="profileSafeCommandDelayMs" value="5" type="number" min="1" step="1">
-                <label for="profileSafeTimeoutMs">Classic DS-TWR timeout ms</label>
-                <input id="profileSafeTimeoutMs" value="35" type="number" min="1" step="1">
-                <label for="profileSafeRespDelayMs">RESP delay ms</label>
-                <input id="profileSafeRespDelayMs" value="15" type="number" min="1" step="1">
-                <label for="profileSafeFinalDelayMs">FINAL delay ms</label>
-                <input id="profileSafeFinalDelayMs" value="15" type="number" min="1" step="1">
-                <label for="profileSafeReportDelayMs">REPORT delay ms</label>
-                <input id="profileSafeReportDelayMs" value="5" type="number" min="1" step="1">
-                <label for="profileSafeAutoRxDelayUus">Auto RX delay UUS</label>
-                <input id="profileSafeAutoRxDelayUus" value="500" type="number" min="1" step="1">
+                <label for="profileDynamic15SlotMs">Slot ms</label>
+                <input id="profileDynamic15SlotMs" value="100" type="number" min="1" step="1">
+                <label for="profileDynamic15RoundGapMs">Round gap ms</label>
+                <input id="profileDynamic15RoundGapMs" value="10" type="number" min="1" step="1">
+                <label for="profileDynamic15RxSliceMs">RX slice ms</label>
+                <input id="profileDynamic15RxSliceMs" value="100" type="number" min="1" step="1">
+                <label for="profileDynamic15CommandDelayMs">Command delay ms</label>
+                <input id="profileDynamic15CommandDelayMs" value="5" type="number" min="1" step="1">
+                <label for="profileDynamic15TimeoutMs">Classic DS-TWR timeout ms</label>
+                <input id="profileDynamic15TimeoutMs" value="90" type="number" min="1" step="1">
+                <label for="profileDynamic15RespDelayMs">RESP delay ms</label>
+                <input id="profileDynamic15RespDelayMs" value="15" type="number" min="1" step="1">
+                <label for="profileDynamic15FinalDelayMs">FINAL delay ms</label>
+                <input id="profileDynamic15FinalDelayMs" value="15" type="number" min="1" step="1">
+                <label for="profileDynamic15ReportDelayMs">REPORT delay ms</label>
+                <input id="profileDynamic15ReportDelayMs" value="5" type="number" min="1" step="1">
+                <label for="profileDynamic15AutoRxDelayUus">Auto RX delay UUS</label>
+                <input id="profileDynamic15AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
-              <div class="profile-summary" id="profileSafeSummary"></div>
+              <div class="profile-summary" id="profileDynamic15Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="safe">Apply Safe Fast</button>
-                <button class="reset-ranging-profile" data-profile="safe">Reset Defaults</button>
+                <button class="primary apply-ranging-profile" data-profile="dynamic15">Apply Dynamic 1.5s</button>
+                <button class="reset-ranging-profile" data-profile="dynamic15">Reset Defaults</button>
               </div>
             </div>
-            <div class="profile-card" data-profile="balanced">
-              <h3>Balanced</h3>
-              <p class="muted">Recommended next target: much faster than current settings, still with useful margin.</p>
+            <div class="profile-card" data-profile="dynamic12">
+              <h3>Dynamic median, 1.2 s</h3>
+              <p class="muted">More responsive walking profile. Same radio timing, shorter dashboard median window.</p>
               <div class="form-grid compact">
-                <label for="profileBalancedSlotMs">Slot ms</label>
-                <input id="profileBalancedSlotMs" value="50" type="number" min="1" step="1">
-                <label for="profileBalancedRoundGapMs">Round gap ms</label>
-                <input id="profileBalancedRoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileBalancedRxSliceMs">RX slice ms</label>
-                <input id="profileBalancedRxSliceMs" value="50" type="number" min="1" step="1">
-                <label for="profileBalancedCommandDelayMs">Command delay ms</label>
-                <input id="profileBalancedCommandDelayMs" value="5" type="number" min="1" step="1">
-                <label for="profileBalancedTimeoutMs">Classic DS-TWR timeout ms</label>
-                <input id="profileBalancedTimeoutMs" value="25" type="number" min="1" step="1">
-                <label for="profileBalancedRespDelayMs">RESP delay ms</label>
-                <input id="profileBalancedRespDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileBalancedFinalDelayMs">FINAL delay ms</label>
-                <input id="profileBalancedFinalDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileBalancedReportDelayMs">REPORT delay ms</label>
-                <input id="profileBalancedReportDelayMs" value="5" type="number" min="1" step="1">
-                <label for="profileBalancedAutoRxDelayUus">Auto RX delay UUS</label>
-                <input id="profileBalancedAutoRxDelayUus" value="500" type="number" min="1" step="1">
+                <label for="profileDynamic12SlotMs">Slot ms</label>
+                <input id="profileDynamic12SlotMs" value="100" type="number" min="1" step="1">
+                <label for="profileDynamic12RoundGapMs">Round gap ms</label>
+                <input id="profileDynamic12RoundGapMs" value="10" type="number" min="1" step="1">
+                <label for="profileDynamic12RxSliceMs">RX slice ms</label>
+                <input id="profileDynamic12RxSliceMs" value="100" type="number" min="1" step="1">
+                <label for="profileDynamic12CommandDelayMs">Command delay ms</label>
+                <input id="profileDynamic12CommandDelayMs" value="5" type="number" min="1" step="1">
+                <label for="profileDynamic12TimeoutMs">Classic DS-TWR timeout ms</label>
+                <input id="profileDynamic12TimeoutMs" value="90" type="number" min="1" step="1">
+                <label for="profileDynamic12RespDelayMs">RESP delay ms</label>
+                <input id="profileDynamic12RespDelayMs" value="15" type="number" min="1" step="1">
+                <label for="profileDynamic12FinalDelayMs">FINAL delay ms</label>
+                <input id="profileDynamic12FinalDelayMs" value="15" type="number" min="1" step="1">
+                <label for="profileDynamic12ReportDelayMs">REPORT delay ms</label>
+                <input id="profileDynamic12ReportDelayMs" value="5" type="number" min="1" step="1">
+                <label for="profileDynamic12AutoRxDelayUus">Auto RX delay UUS</label>
+                <input id="profileDynamic12AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
-              <div class="profile-summary" id="profileBalancedSummary"></div>
+              <div class="profile-summary" id="profileDynamic12Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="balanced">Apply Balanced</button>
-                <button class="reset-ranging-profile" data-profile="balanced">Reset Defaults</button>
-              </div>
-            </div>
-            <div class="profile-card" data-profile="aggressive">
-              <h3>Aggressive</h3>
-              <p class="muted">Lowest-latency candidate. Use after Safe Fast/Balanced look clean.</p>
-              <div class="form-grid compact">
-                <label for="profileAggressiveSlotMs">Slot ms</label>
-                <input id="profileAggressiveSlotMs" value="40" type="number" min="1" step="1">
-                <label for="profileAggressiveRoundGapMs">Round gap ms</label>
-                <input id="profileAggressiveRoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileAggressiveRxSliceMs">RX slice ms</label>
-                <input id="profileAggressiveRxSliceMs" value="40" type="number" min="1" step="1">
-                <label for="profileAggressiveCommandDelayMs">Command delay ms</label>
-                <input id="profileAggressiveCommandDelayMs" value="3" type="number" min="1" step="1">
-                <label for="profileAggressiveTimeoutMs">Classic DS-TWR timeout ms</label>
-                <input id="profileAggressiveTimeoutMs" value="18" type="number" min="1" step="1">
-                <label for="profileAggressiveRespDelayMs">RESP delay ms</label>
-                <input id="profileAggressiveRespDelayMs" value="7" type="number" min="1" step="1">
-                <label for="profileAggressiveFinalDelayMs">FINAL delay ms</label>
-                <input id="profileAggressiveFinalDelayMs" value="7" type="number" min="1" step="1">
-                <label for="profileAggressiveReportDelayMs">REPORT delay ms</label>
-                <input id="profileAggressiveReportDelayMs" value="3" type="number" min="1" step="1">
-                <label for="profileAggressiveAutoRxDelayUus">Auto RX delay UUS</label>
-                <input id="profileAggressiveAutoRxDelayUus" value="500" type="number" min="1" step="1">
-              </div>
-              <div class="profile-summary" id="profileAggressiveSummary"></div>
-              <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="aggressive">Apply Aggressive</button>
-                <button class="reset-ranging-profile" data-profile="aggressive">Reset Defaults</button>
+                <button class="primary apply-ranging-profile" data-profile="dynamic12">Apply Dynamic 1.2s</button>
+                <button class="reset-ranging-profile" data-profile="dynamic12">Reset Defaults</button>
               </div>
             </div>
           </div>
@@ -3245,56 +3236,49 @@ const rangingProfileFields = [
   {key: "autoRxDelayUus", suffix: "AutoRxDelayUus"},
 ];
 const rangingProfileDefaults = {
-  baseline: {
-    prefix: "profileBaseline",
-    label: "Stable Baseline",
+  static3: {
+    prefix: "profileStatic3",
+    label: "Static median, 3 s",
+    tdoaMode: "static",
+    positionMaxAgeSec: 3,
     slotMs: 100,
     roundGapMs: 10,
     rxSliceMs: 100,
-    commandDelayMs: 10,
-    timeoutMs: 90,
-    respDelayMs: 20,
-    finalDelayMs: 20,
-    reportDelayMs: 10,
-    autoRxDelayUus: 500,
-  },
-  safe: {
-    prefix: "profileSafe",
-    label: "Safe Fast",
-    slotMs: 60,
-    roundGapMs: 10,
-    rxSliceMs: 60,
     commandDelayMs: 5,
-    timeoutMs: 35,
+    timeoutMs: 90,
     respDelayMs: 15,
     finalDelayMs: 15,
     reportDelayMs: 5,
     autoRxDelayUus: 500,
   },
-  balanced: {
-    prefix: "profileBalanced",
-    label: "Balanced",
-    slotMs: 50,
+  dynamic15: {
+    prefix: "profileDynamic15",
+    label: "Dynamic median, 1.5 s",
+    tdoaMode: "dynamic",
+    positionMaxAgeSec: 1.5,
+    slotMs: 100,
     roundGapMs: 10,
-    rxSliceMs: 50,
+    rxSliceMs: 100,
     commandDelayMs: 5,
-    timeoutMs: 25,
-    respDelayMs: 10,
-    finalDelayMs: 10,
+    timeoutMs: 90,
+    respDelayMs: 15,
+    finalDelayMs: 15,
     reportDelayMs: 5,
     autoRxDelayUus: 500,
   },
-  aggressive: {
-    prefix: "profileAggressive",
-    label: "Aggressive",
-    slotMs: 40,
+  dynamic12: {
+    prefix: "profileDynamic12",
+    label: "Dynamic median, 1.2 s",
+    tdoaMode: "dynamic12",
+    positionMaxAgeSec: 1.2,
+    slotMs: 100,
     roundGapMs: 10,
-    rxSliceMs: 40,
-    commandDelayMs: 3,
-    timeoutMs: 18,
-    respDelayMs: 7,
-    finalDelayMs: 7,
-    reportDelayMs: 3,
+    rxSliceMs: 100,
+    commandDelayMs: 5,
+    timeoutMs: 90,
+    respDelayMs: 15,
+    finalDelayMs: 15,
+    reportDelayMs: 5,
     autoRxDelayUus: 500,
   },
 };
@@ -3784,7 +3768,7 @@ function positionSettings() {
   const tagIds = parseIdList(document.getElementById("positionTags")?.value);
   const maxAge = Math.max(0.2, Number(document.getElementById("positionMaxAgeSec")?.value || 3));
   const rawTdoaMode = document.getElementById("positionTdoaMode")?.value || "static";
-  const tdoaMode = ["static", "dynamic", "auto"].includes(rawTdoaMode)
+  const tdoaMode = ["static", "dynamic", "dynamic12", "auto"].includes(rawTdoaMode)
     ? rawTdoaMode
     : "static";
   return {anchorCount, solver, anchorIds, tagIds, maxAge, tdoaMode};
@@ -4104,16 +4088,19 @@ function tdoaSequencesArePaired(left, right, pairCount) {
 }
 
 function tdoaModeUsesDynamicObservations(mode) {
-  return mode === "dynamic" || mode === "auto";
+  return mode === "dynamic" || mode === "dynamic12" || mode === "auto";
 }
 
 function tdoaObservationForMode(item, mode) {
   if (!tdoaModeUsesDynamicObservations(mode)) {
     return {...item, tdoa_filter: "static"};
   }
-  const dynamicDiff = Number(item.dynamic_diff_m);
-  const dynamicRawDiff = Number(item.dynamic_raw_diff_m);
-  const dynamicReverseSum = Number(item.dynamic_reverse_sum_m);
+  const fastDynamic = mode === "dynamic12";
+  const dynamicDiff = Number(fastDynamic ? item.dynamic_1_2_diff_m : item.dynamic_diff_m);
+  const dynamicRawDiff = Number(fastDynamic ? item.dynamic_1_2_raw_diff_m : item.dynamic_raw_diff_m);
+  const dynamicReverseSum = Number(fastDynamic ? item.dynamic_1_2_reverse_sum_m : item.dynamic_reverse_sum_m);
+  const dynamicSpan = Number(fastDynamic ? item.dynamic_1_2_span_sec : item.dynamic_span_sec);
+  const dynamicSamples = Number(fastDynamic ? item.dynamic_1_2_samples : item.dynamic_samples);
   const latestDiff = Number(item.latest_diff_m);
   const latestRawDiff = Number(item.latest_raw_diff_m);
   const latestReverseSum = Number(item.latest_reverse_sum_m);
@@ -4130,7 +4117,9 @@ function tdoaObservationForMode(item, mode) {
       : (Number.isFinite(latestReverseSum)
         ? latestReverseSum
         : item.reverse_sum_m),
-    tdoa_filter: mode === "auto" ? "auto" : "dynamic",
+    dynamic_span_sec: Number.isFinite(dynamicSpan) ? dynamicSpan : item.dynamic_span_sec,
+    dynamic_samples: Number.isFinite(dynamicSamples) ? dynamicSamples : item.dynamic_samples,
+    tdoa_filter: mode === "auto" ? "auto" : (fastDynamic ? "dynamic12" : "dynamic"),
   };
 }
 
@@ -5111,6 +5100,7 @@ function fmtPositionSigma(value, digits = 1) {
 function positionTdoaFilterLabel(mode) {
   if (mode === "auto") return "Auto Kalman";
   if (mode === "dynamic") return "Dynamic 1.5s median";
+  if (mode === "dynamic12") return "Dynamic 1.2s median";
   return "Static median";
 }
 
@@ -7350,6 +7340,21 @@ function mirrorRangingProfileToUwbFields(values) {
   }
 }
 
+function applyRangingProfilePositionSettings(profile) {
+  const fields = {
+    positionSolver: "tdoa",
+    positionTdoaMode: profile.tdoaMode,
+    positionMaxAgeSec: profile.positionMaxAgeSec,
+  };
+  for (const [id, value] of Object.entries(fields)) {
+    const el = document.getElementById(id);
+    if (!el || value === undefined || value === null) continue;
+    el.value = String(value);
+    localStorage.setItem(settingKey(id), el.value);
+  }
+  resetPositionFilters();
+}
+
 function profileSummaryText(values, anchorCount = 4) {
   const programmedDsTwrMs = profileProgrammedDsTwrMs(values);
   const classicProgrammedMs =
@@ -7380,7 +7385,13 @@ function updateRangingProfileSummary(profileKey) {
   if (!summary) return;
   const values = readRangingProfile(profileKey);
   const valid = Object.values(values).every(value => Number.isFinite(value));
-  summary.textContent = valid ? profileSummaryText(values, 4) : "incomplete profile";
+  const profileLabel = positionTdoaFilterLabel(profile.tdoaMode);
+  const ageText = Number.isFinite(Number(profile.positionMaxAgeSec))
+    ? `fresh ${fmtFixed(profile.positionMaxAgeSec, 1)} s`
+    : "fresh custom";
+  summary.textContent = valid
+    ? `${profileLabel} · ${ageText} · ${profileSummaryText(values, 4)}`
+    : "incomplete profile";
   summary.className = `profile-summary ${valid && values.slotMs - profileProgrammedDsTwrMs(values) < 5 ? "warn" : ""}`.trim();
 }
 
@@ -7403,6 +7414,7 @@ async function applyRangingProfile(profileKey) {
   }, "rangingProfileToast");
   if (apiResponseOk(data)) {
     mirrorRangingProfileToUwbFields(values);
+    applyRangingProfilePositionSettings(profile);
     setTimeout(fetchSnapshot, 500);
   }
 }

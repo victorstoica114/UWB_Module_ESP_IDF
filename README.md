@@ -396,15 +396,14 @@ The coordinator command path also uses `anchor_survey_command_delay_ms` as a
 software wait on the commanded initiator. These are the first places to optimize
 after reducing the configured delays.
 
-The dashboard timing profiles currently mean, with adjacent pair round-trip
-scheduling:
+The dashboard exposes three operational timing/filter profiles, with adjacent
+pair round-trip scheduling:
 
-| Profile | slot | round gap | command | RESP | FINAL | REPORT/REPORT2 | programmed slot work | reverse separation | full directed cycle |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Stable Baseline | `100 ms` | `10 ms` | `10 ms` | `20 ms` | `20 ms` | `10 ms` | `70 ms` | `100 ms` | `1210 ms` |
-| Safe Fast | `60 ms` | `10 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `45 ms` | `60 ms` | `730 ms` |
-| Balanced | `50 ms` | `10 ms` | `5 ms` | `10 ms` | `10 ms` | `5 ms` | `35 ms` | `50 ms` | `610 ms` |
-| Aggressive | `40 ms` | `10 ms` | `3 ms` | `7 ms` | `7 ms` | `3 ms` | `23 ms` | `40 ms` | `490 ms` |
+| Dashboard profile | Position filter | fresh age | slot | round gap | command | RESP | FINAL | REPORT/REPORT2 | programmed slot work | reverse separation | full directed cycle |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Static median, 3 s | static median | `3.0 s` | `100 ms` | `10 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `45 ms` | `100 ms` | `1210 ms` |
+| Dynamic median, 1.5 s | dynamic median | `1.5 s` | `100 ms` | `10 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `45 ms` | `100 ms` | `1210 ms` |
+| Dynamic median, 1.2 s | dynamic median | `1.2 s` | `100 ms` | `10 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `45 ms` | `100 ms` | `1210 ms` |
 
 `reverse separation` is the time between `Ai->Aj` and `Aj->Ai` for one pair.
 `full directed cycle` is the time until all six anchor pairs have been measured
@@ -418,15 +417,10 @@ Slot-order scenarios for four anchors:
 | Current adjacent pair round-trip | `2->3, 3->2, 2->4, 4->2, ...` | `1 * slot` | `12 * slot + gap` | Same number of directed DS-TWR slots, but each pair gets its reverse immediately. Better candidate for moving tags. |
 | Classic FlexTDOA-style multi-response | one request, `K` responders in subslots | one request slot | for `K=3`, about `5.05 ms` per initiator slot using the paper timing | Faster and closer to the paper, but would require a protocol change because our stable geometry currently comes from full DS-TWR per pair. |
 
-For the current profiles, the adjacent experiment changes the reverse
-separation like this compared with the previous order:
-
-| Profile | current reverse separation | adjacent reverse separation | full directed cycle, current | full directed cycle, adjacent |
-| --- | ---: | ---: | ---: | ---: |
-| Stable Baseline | `610 ms` | `100 ms` | `1220 ms` | `1210 ms` |
-| Safe Fast | `370 ms` | `60 ms` | `740 ms` | `730 ms` |
-| Balanced | `310 ms` | `50 ms` | `620 ms` | `610 ms` |
-| Aggressive | `250 ms` | `40 ms` | `500 ms` | `490 ms` |
+For the operational `100 ms` profiles, the adjacent experiment changes reverse
+separation from about `610 ms` in the old round-reverse order to `100 ms`,
+while the full directed cycle stays effectively the same: `1220 ms` before,
+`1210 ms` now.
 
 This is attractive because it does not increase channel usage. It only changes
 the slot order, so every pair sees `Ai->Aj` and `Aj->Ai` while the tag is in
@@ -486,10 +480,15 @@ The module set was left on the safer `Reduced-delay 100` profile after the
 test. `Reduced-delay 90` is the next profile to try during a controlled walking
 test.
 
+After this run, the `Ranging Settings` tab was simplified to the three
+operational profiles above. They all use the validated `Reduced-delay 100`
+radio timing; the difference between them is the dashboard-side position
+filtering window.
+
 Likely next steps:
 
-1. Promote the reduced-delay `100 ms` or `90 ms` profile into the dashboard
-   presets once it is also validated during a walking test.
+1. Validate `Dynamic median, 1.2 s` during a controlled walking test and compare
+   it against `Dynamic median, 1.5 s`.
 2. Convert `REPORT`/`REPORT2` waits to delayed TX or a tighter state-machine
    path if software delay jitter becomes visible.
 3. Replace follower `command_delay_ms` with a scheduled `POLL` delayed-TX based
