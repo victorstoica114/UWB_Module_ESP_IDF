@@ -393,6 +393,12 @@ t=end| listen window ends  | listen window ends   | listen window ends   | keeps
 If the coordinator is also the slot initiator, there is no `FLEX_TDOA_CMD`: the
 coordinator waits the `250 us` guard and broadcasts `FLEX_TDOA_REQ` directly.
 
+The paper describes subslots from the TDMA slot boundary. The firmware schedules
+each delayed response from the DW3000 request-RX timestamp, so the programmed
+response delay includes the reserved `request_subslot` too. With the current
+constants, responder indexes `0,1,2` transmit at approximately
+`2250/2500/2750 us` after the request RX timestamp.
+
 The passive tag computes the paper TDOA observation:
 
 ```text

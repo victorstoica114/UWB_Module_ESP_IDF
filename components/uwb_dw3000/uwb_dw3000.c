@@ -4297,9 +4297,12 @@ static esp_err_t uwb_flex_tdoa_send_response_for_request(
         return ESP_OK;
     }
 
-    // The response subslot is scheduled from the actual request RX timestamp,
-    // so responder CPU latency does not move the on-air response time.
+    // The paper defines response timing from the slot boundary. This firmware
+    // schedules from the actual request RX timestamp, so include the reserved
+    // request subslot to preserve the slot shape and leave enough delayed-TX
+    // lead time for the ESP32/DW3000 path.
     const uint32_t response_delay_us =
+        UWB_FLEX_TDOA_PAPER_REQ_SUBSLOT_US +
         UWB_FLEX_TDOA_PAPER_REQ_PROCESS_US +
         ((uint32_t)responder_index * UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US);
     const uint64_t response_due = uwb_dw3000_add_timestamp_delta(
