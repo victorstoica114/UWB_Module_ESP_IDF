@@ -3861,6 +3861,12 @@ function positionRuntimeModeForSolver(solver) {
   return positionProtocolUsesTdoa(solver) ? "flex_tdoa" : "ranging";
 }
 
+function positionGeometryMaxAge(settings) {
+  return positionProtocolUsesTdoa(settings.solver)
+    ? settings.maxAge
+    : Number.POSITIVE_INFINITY;
+}
+
 function positionSolverLabel(solver) {
   if (solver === "hybrid") return "Hybrid FlexTDOA";
   if (solver === "flextdoa") return "FlexTDOA classic";
@@ -4923,7 +4929,7 @@ function computePositionModel() {
   const selectedIds = selectedPositionModuleIds(settings);
   const offlineModuleIds = selectedIds.filter(id => !moduleHttpOnline(statusForModule(id)));
   const active = positionRangingActive(settings);
-  const geometry = measuredAnchorGeometry(settings.anchorIds, settings.maxAge);
+  const geometry = measuredAnchorGeometry(settings.anchorIds, positionGeometryMaxAge(settings));
   const anchors = {...(geometry?.anchors || {})};
 
   if (!active && state.positionWasActive) {
@@ -5352,7 +5358,9 @@ function renderPositionReadout(model) {
   if (missingCoords.length) {
     overlay.classList.add("active");
     overlay.querySelector("h2").textContent = "Waiting for measured anchor geometry";
-    overlay.querySelector("p").textContent = `Waiting for fresh anchor-anchor ranges involving: ${missingCoords.join(", ")}.`;
+    overlay.querySelector("p").textContent = positionProtocolUsesTdoa(model.settings.solver)
+      ? `Waiting for fresh anchor-anchor ranges involving: ${missingCoords.join(", ")}.`
+      : `No measured anchor geometry is available yet for anchors: ${missingCoords.join(", ")}. Run FlexTDOA once to measure the anchor layout, then DS-TWR ranges can use the last measured geometry.`;
   } else {
     overlay.classList.remove("active");
     overlay.querySelector("h2").textContent = `${solverName} is not active`;
