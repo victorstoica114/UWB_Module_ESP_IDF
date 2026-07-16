@@ -2418,7 +2418,7 @@ tr.status-stale td { color: #4f3b1d; }
             <label for="positionAnchorCount">Anchors used</label>
             <select id="positionAnchorCount"><option value="4">4 anchors</option><option value="3">3 anchors</option></select>
             <label for="positionSolver">Solver</label>
-            <select id="positionSolver"><option value="hybrid" selected>Hybrid FlexTDOA</option><option value="flextdoa">FlexTDOA classic</option><option value="ranging">DS-TWR ranges</option></select>
+            <select id="positionSolver"><option value="flextdoa" selected>FlexTDOA</option><option value="ranging">DS-TWR ranges</option><option value="hybrid">Legacy hybrid logs</option></select>
             <label for="positionAnchors">Anchor IDs</label>
             <input id="positionAnchors" value="2,3,4,5">
             <label for="positionTags">Tag IDs</label>
@@ -2436,9 +2436,9 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
-            <div><b>Solver</b><span>DS-TWR uses active tag-anchor distances. FlexTDOA classic uses the primary passive range difference. Hybrid uses the guarded dual-leg range difference.</span></div>
-            <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA and Hybrid modes, tags only listen on UWB and the dashboard solves from range differences.</span></div>
-            <div><b>Geometry</b><span>FlexTDOA and Hybrid use live anchor-anchor ranges, so the anchors do not need to form a perfect square.</span></div>
+            <div><b>Solver</b><span>FlexTDOA uses passive tag range differences from request/response anchor slots. DS-TWR uses active tag-anchor distances. Legacy hybrid is only for older dual-leg logs.</span></div>
+            <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
+            <div><b>Geometry</b><span>FlexTDOA uses live anchor-anchor ranges, so the anchors do not need to form a perfect square.</span></div>
             <div><b>TDOA filter</b><span>Static uses the median of recent paired observations. Dynamic uses a short 1.5 s or 1.2 s median. Auto Kalman uses dynamic observations, gates outliers, and switches between static and moving behavior.</span></div>
             <div><b>Gates</b><span>Rev-sum and residual gates reject inconsistent TDOA rows. Kalman hold is the prediction timeout when updates are missing.</span></div>
           </div>
@@ -2943,7 +2943,7 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p class="muted profile-note">Apply writes every timing parameter in the selected profile to ESP32 NVS through runtime config. The same profile updates FlexTDOA anchor slots, classic ranging slots, and selects the Hybrid position solver.</p>
+          <p class="muted profile-note">Apply writes every timing parameter in the selected profile to ESP32 NVS through runtime config. The same profile updates FlexTDOA anchor slots, DS-TWR ranging slots, and selects the FlexTDOA position solver.</p>
           <div class="profile-grid">
             <div class="profile-card" data-profile="static3">
               <h3>Static median, 3 s</h3>
@@ -2957,7 +2957,7 @@ tr.status-stale td { color: #4f3b1d; }
                 <input id="profileStatic3RxSliceMs" value="100" type="number" min="1" step="1">
                 <label for="profileStatic3CommandDelayMs">Command delay ms</label>
                 <input id="profileStatic3CommandDelayMs" value="5" type="number" min="1" step="1">
-                <label for="profileStatic3TimeoutMs">Classic DS-TWR timeout ms</label>
+                <label for="profileStatic3TimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileStatic3TimeoutMs" value="90" type="number" min="1" step="1">
                 <label for="profileStatic3RespDelayMs">RESP delay ms</label>
                 <input id="profileStatic3RespDelayMs" value="15" type="number" min="1" step="1">
@@ -2986,7 +2986,7 @@ tr.status-stale td { color: #4f3b1d; }
                 <input id="profileDynamic15RxSliceMs" value="100" type="number" min="1" step="1">
                 <label for="profileDynamic15CommandDelayMs">Command delay ms</label>
                 <input id="profileDynamic15CommandDelayMs" value="5" type="number" min="1" step="1">
-                <label for="profileDynamic15TimeoutMs">Classic DS-TWR timeout ms</label>
+                <label for="profileDynamic15TimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileDynamic15TimeoutMs" value="90" type="number" min="1" step="1">
                 <label for="profileDynamic15RespDelayMs">RESP delay ms</label>
                 <input id="profileDynamic15RespDelayMs" value="15" type="number" min="1" step="1">
@@ -3015,7 +3015,7 @@ tr.status-stale td { color: #4f3b1d; }
                 <input id="profileDynamic12RxSliceMs" value="100" type="number" min="1" step="1">
                 <label for="profileDynamic12CommandDelayMs">Command delay ms</label>
                 <input id="profileDynamic12CommandDelayMs" value="5" type="number" min="1" step="1">
-                <label for="profileDynamic12TimeoutMs">Classic DS-TWR timeout ms</label>
+                <label for="profileDynamic12TimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileDynamic12TimeoutMs" value="90" type="number" min="1" step="1">
                 <label for="profileDynamic12RespDelayMs">RESP delay ms</label>
                 <input id="profileDynamic12RespDelayMs" value="15" type="number" min="1" step="1">
@@ -3848,7 +3848,8 @@ function parseIdList(text, expected = null) {
 }
 
 function normalizePositionSolver(value) {
-  if (value === "tdoa" || value === "hybrid") return "hybrid";
+  if (value === "hybrid") return "hybrid";
+  if (value === "tdoa") return "flextdoa";
   if (value === "flextdoa") return "flextdoa";
   return "ranging";
 }
@@ -3868,14 +3869,14 @@ function positionGeometryMaxAge(settings) {
 }
 
 function positionSolverLabel(solver) {
-  if (solver === "hybrid") return "Hybrid FlexTDOA";
-  if (solver === "flextdoa") return "FlexTDOA classic";
+  if (solver === "hybrid") return "Legacy hybrid logs";
+  if (solver === "flextdoa") return "FlexTDOA";
   return "DS-TWR ranges";
 }
 
 function positionSettings() {
   const anchorCount = Math.max(3, Math.min(4, Number(document.getElementById("positionAnchorCount")?.value || 4)));
-  const solver = normalizePositionSolver(document.getElementById("positionSolver")?.value || "hybrid");
+  const solver = normalizePositionSolver(document.getElementById("positionSolver")?.value || "flextdoa");
   const anchorIds = parseIdList(document.getElementById("positionAnchors")?.value, anchorCount);
   const tagIds = parseIdList(document.getElementById("positionTags")?.value);
   const maxAge = Math.max(0.2, Number(document.getElementById("positionMaxAgeSec")?.value || 3));
@@ -4220,7 +4221,7 @@ function tdoaProtocolUsesClassic(protocol) {
   return protocol === "flextdoa";
 }
 
-function tdoaObservationForMode(item, mode, protocol = "hybrid") {
+function tdoaObservationForMode(item, mode, protocol = "flextdoa") {
   const classic = tdoaProtocolUsesClassic(protocol);
   const staticDiff = Number(classic ? item.classic_diff_m : item.diff_m);
   const staticReverseSum = Number(classic ? item.classic_reverse_sum_m : item.reverse_sum_m);
@@ -4272,7 +4273,7 @@ function tdoaObservationForMode(item, mode, protocol = "hybrid") {
   };
 }
 
-function pairedTdoaObservations(tagId, anchorIds, maxAge, mode = "static", protocol = "hybrid") {
+function pairedTdoaObservations(tagId, anchorIds, maxAge, mode = "static", protocol = "flextdoa") {
   const selected = new Set(anchorIds.map(Number));
   const serverPaired = Object.values(state.tdoa?.paired_observations || {})
     .filter(item =>
@@ -5428,7 +5429,7 @@ function renderPositionReadout(model) {
         const agreementText = Number.isFinite(agreement) ? ` · agree ${fmtCmFromM(agreement, 1)} cm` : "";
         const blend = Number(item.blend_weight);
         const blendText = Number.isFinite(blend) ? ` · blend ${(blend * 100).toFixed(0)}%` : "";
-        const protocolText = item.tdoa_protocol === "flextdoa" ? "classic" : "hybrid";
+        const protocolText = item.tdoa_protocol === "flextdoa" ? "FlexTDOA" : "legacy";
         const weight = Number(item.solve_weight);
         const weightText = tdoaModeUsesDynamicObservations(model.settings.tdoaMode) && Number.isFinite(weight)
           ? ` · w ${(weight * 100).toFixed(0)}%`
@@ -7513,7 +7514,7 @@ function mirrorRangingProfileToUwbFields(values) {
 
 function applyRangingProfilePositionSettings(profile) {
   const fields = {
-    positionSolver: "hybrid",
+    positionSolver: "flextdoa",
     positionTdoaMode: profile.tdoaMode,
     positionMaxAgeSec: profile.positionMaxAgeSec,
   };
@@ -7527,26 +7528,26 @@ function applyRangingProfilePositionSettings(profile) {
 }
 
 function profileSummaryText(values, anchorCount = 4) {
-  const programmedDsTwrMs = profileProgrammedDsTwrMs(values);
-  const classicProgrammedMs =
-    values.respDelayMs + values.finalDelayMs + 2 * values.reportDelayMs;
-  const marginMs = values.slotMs - programmedDsTwrMs;
-  const pairCount = Math.max(1, anchorCount * (anchorCount - 1) / 2);
-  const directedSlotCount = pairCount * 2;
-  const cycleMs = directedSlotCount * values.slotMs + values.roundGapMs;
+  const paperBodyMs = profileFlexTdoaPaperBodyMs(anchorCount);
+  const cycleMs = anchorCount * values.slotMs + values.roundGapMs;
+  const slotMarginMs = values.slotMs - values.commandDelayMs - paperBodyMs;
   const warnings = [];
   if (values.timeoutMs >= values.slotMs) warnings.push("timeout >= slot");
   if (values.rxSliceMs > values.slotMs) warnings.push("RX slice > slot");
-  if (marginMs < 5) warnings.push("low slot margin");
+  if (slotMarginMs < 5) warnings.push("low FlexTDOA margin");
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `${anchorCount} anchors: ${directedSlotCount} directed slots · reverse after ~${fmtFixed(values.slotMs, 0)} ms · ~${fmtFixed(cycleMs, 0)} ms/cycle · programmed FlexTDOA ${fmtFixed(programmedDsTwrMs, 0)} ms · DS-TWR body ${fmtFixed(classicProgrammedMs, 0)} ms · margin ${fmtFixed(marginMs, 0)} ms${warnText}`;
+  return `${anchorCount} anchors: ${anchorCount} initiator slots · paper body ~${fmtFixed(paperBodyMs, 2)} ms · command ${fmtFixed(values.commandDelayMs, 0)} ms · ~${fmtFixed(cycleMs, 0)} ms/frame · FlexTDOA margin ${fmtFixed(slotMarginMs, 0)} ms${warnText}`;
 }
 
-function profileProgrammedDsTwrMs(values) {
-  return values.commandDelayMs +
-    values.respDelayMs +
-    values.finalDelayMs +
-    2 * values.reportDelayMs;
+function profileFlexTdoaPaperBodyMs(anchorCount = 4) {
+  const responderCount = Math.max(1, anchorCount - 1);
+  return (
+    250 + 2000 + 250 + responderCount * 250 + responderCount * 600
+  ) / 1000;
+}
+
+function profileFlexTdoaSlotMarginMs(values, anchorCount = 4) {
+  return values.slotMs - values.commandDelayMs - profileFlexTdoaPaperBodyMs(anchorCount);
 }
 
 function updateRangingProfileSummary(profileKey) {
@@ -7563,7 +7564,7 @@ function updateRangingProfileSummary(profileKey) {
   summary.textContent = valid
     ? `${profileLabel} · ${ageText} · ${profileSummaryText(values, 4)}`
     : "incomplete profile";
-  summary.className = `profile-summary ${valid && values.slotMs - profileProgrammedDsTwrMs(values) < 5 ? "warn" : ""}`.trim();
+  summary.className = `profile-summary ${valid && profileFlexTdoaSlotMarginMs(values, 4) < 5 ? "warn" : ""}`.trim();
 }
 
 function updateAllRangingProfileSummaries() {
@@ -7666,8 +7667,8 @@ function migratePositionSolverSetting() {
   const solverEl = document.getElementById("positionSolver");
   const savedSolver = localStorage.getItem(solverKey);
   if (savedSolver === null || savedSolver === "tdoa") {
-    if (solverEl) solverEl.value = "hybrid";
-    localStorage.setItem(solverKey, "hybrid");
+    if (solverEl) solverEl.value = "flextdoa";
+    localStorage.setItem(solverKey, "flextdoa");
   } else if (solverEl) {
     solverEl.value = normalizePositionSolver(savedSolver);
     localStorage.setItem(solverKey, solverEl.value);

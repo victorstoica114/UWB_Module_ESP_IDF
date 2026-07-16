@@ -307,160 +307,164 @@ The tag does not call any UWB TX function in this mode. It only receives anchor
 frames, records its own RX timestamps, and sends compact range-difference logs to
 the dashboard.
 
-The coordinator is the first configured anchor ID. In every round, the anchors
-walk all unordered anchor pairs as adjacent directed round-trips. With anchors
-`2,3,4,5`, the pair order is:
+The current firmware is aligned with the FlexTDOA paper at the radio slot level:
+one anchor is the initiator in a slot, it broadcasts one request, and `K`
+responders answer in ordered response subslots. With four configured anchors,
+`K = 3` and a full frame has four initiator slots. The tag remains passive and
+derives range-difference observations only from the packets it hears.
+
+With anchors `2,3,4,5`, the changing-initiator/changing-responder schedule is:
 
 ```text
-round 0: A2->A3, A3->A2, A2->A4, A4->A2, A2->A5, A5->A2,
-         A3->A4, A4->A3, A3->A5, A5->A3, A4->A5, A5->A4
-round 1: A3->A2, A2->A3, A4->A2, A2->A4, A5->A2, A2->A5,
-         A4->A3, A3->A4, A5->A3, A3->A5, A5->A4, A4->A5
-...
+round 0
+  slot 0: A2 requests, responders A3,A4,A5
+  slot 1: A3 requests, responders A4,A5,A2
+  slot 2: A4 requests, responders A5,A2,A3
+  slot 3: A5 requests, responders A2,A3,A4
+
+round 1
+  slot 0: A2 requests, responders A4,A5,A3
+  slot 1: A3 requests, responders A5,A2,A4
+  slot 2: A4 requests, responders A2,A3,A5
+  slot 3: A5 requests, responders A3,A4,A2
 ```
 
-Inside one slot, the assigned anchor pair performs the full DS-TWR exchange:
-`POLL`, `RESP`, `FINAL`, `REPORT`, and `REPORT2`. The responder computes the
-anchor-anchor distance from the complete DS-TWR timestamp set and logs it as the
-live FlexTDOA anchor geometry. The tag remains radio-passive: it does not
-transmit UWB, it only listens to the same DS-TWR frames and solves a
-range-difference observation when `REPORT2` arrives.
+The responder list rotates as `(round + slot_index) % K`, which implements the
+paper's CI-CR scheme: changing initiator and changing responder order.
 
 The active FlexTDOA frame set is:
 
 | Frame | Direction | Purpose |
 | --- | --- | --- |
-| `FLEX_TDOA_CMD` | coordinator -> initiator | Used only when the coordinator is not the current pair initiator; carries initiator, responder, slot, and round. |
-| `POLL` | initiator -> responder | Starts the DS-TWR measurement for the assigned anchor pair; the passive tag timestamps it too. |
-| `RESP` | responder -> initiator | Delayed-TX response; the passive tag timestamps it and records the responder clock ratio. |
-| `FINAL` | initiator -> responder | Completes the DS-TWR timing triangle. |
-| `REPORT` | initiator -> responder | Carries initiator timestamps to the responder. |
-| `REPORT2` | responder -> initiator | Carries responder-side distance/timestamps; the passive tag uses it to finish the TDOA observation. |
+| `FLEX_TDOA_CMD` | coordinator -> initiator | Lab coordination helper used when the first anchor is not the current initiator. It carries the initiator ID, frame slot index, and full 32-bit round. |
+| `FLEX_TDOA_REQ` | initiator -> broadcast | Paper request. Carries a 32-bit slot ID, responder count, and responder order. |
+| `FLEX_TDOA_RESP` | responder -> broadcast | Paper response. Carries the same slot ID, initiator ID, responder index, responder reply delay, and the latest cached initiator-responder distance. |
 
-During the short-slot lab tests, the active FlexTDOA timing config was:
+`FLEX_TDOA_CMD` is the one deliberate lab deviation from the paper. The paper
+describes a fully distributed TDMA schedule where nodes synchronize from any
+localization packet. Our firmware still uses the first configured anchor as a
+coordinator to start non-local initiator slots. The slot contents are
+paper-style `REQUEST + K RESP`; only the frame start is coordinator-assisted.
 
-| Parameter | Value | Meaning |
-| --- | ---: | --- |
-| `anchor_survey_slot_ms` | `100 ms` | Time budget for one directed DS-TWR anchor-pair slot. |
-| `anchor_survey_round_gap_ms` | `10 ms` | Quiet gap after all directed anchor-pair slots in one cycle. |
-| `anchor_survey_command_delay_ms` | `10 ms` | Delay after a coordinator command before a follower starts DS-TWR. |
-| `anchor_survey_rx_slice_ms` | `100 ms` | Listen window used by followers/tag while waiting for UWB frames. |
+#### FlexTDOA Slot Timing
 
-With four anchors this gives one full directed cycle:
+The paper uses:
 
 ```text
-one cycle = 12 directed slots * 100 ms + 10 ms round gap ~= 1210 ms
+t_slot = guard + request_subslot + request_process
+       + K * response_subslot + K * response_process
+
+guard            = 250 us
+request_subslot  = 2000 us
+request_process  = 250 us
+response_subslot = 250 us
+response_process = K * 600 us
 ```
 
-For a slot where the coordinator is not the pair initiator, for example
-`A3 -> A4` with `A2` as coordinator, the slot looks like this:
+For our four-anchor setup, `K = 3`, so the paper-style slot body is:
 
 ```text
-slot A3 -> A4, total budget 100 ms
+250 + 2000 + 250 + 3*250 + 3*600 = 5050 us
+```
+
+The firmware still keeps `anchor_survey_slot_ms` as an outer safety/listen
+budget. In the lab profiles this is `100 ms`, so a slot has a paper-timed body
+near the beginning and then the anchors/tag continue listening until the budget
+ends.
+
+For a slot where `A3` is the initiator and `A2` is the coordinator:
+
+```text
+outer slot budget = anchor_survey_slot_ms, usually 100 ms
 
 A2 coordinator        A3 initiator        A4 responder              Tag M1
      |                     |                      |                       |
 t=0  |-- FLEX_TDOA_CMD --> |                      |                       |
-     |                     | wait 10 ms           |                       |
+     |                     | wait command delay   |                       |
+     |                     | guard 250 us         |                       |
      |                     |                      |                       |
-t~10 |                     |-- POLL ------------->|---------------------> RX POLL
-t~30 |                     |<-- RESP -------------|---------------------> RX RESP
-t~50 |                     |-- FINAL ------------>|                       |
-t~60 |                     |-- REPORT ----------->|                       |
-t~70 |                     |<-- REPORT2 ----------|---------------------> RX REPORT2, log diff
-t=100| slot end            | slot end             | slot end             | keeps listening
+t~d  |                     |-- FLEX_TDOA_REQ ---->|---------------------> RX REQ
+     |                     |<-- RESP index 0 -----|---------------------> RX RESP, log diff
+     |                     |<-- RESP index 1 -----|---------------------> RX RESP, log diff
+     |                     |<-- RESP index 2 -----|---------------------> RX RESP, log diff
+t=end| listen window ends  | listen window ends   | listen window ends   | keeps listening
 ```
 
 If the coordinator is also the slot initiator, there is no `FLEX_TDOA_CMD`: the
-coordinator starts the DS-TWR `POLL` directly at the beginning of the slot.
+coordinator waits the `250 us` guard and broadcasts `FLEX_TDOA_REQ` directly.
+
+The passive tag computes the paper TDOA observation:
+
+```text
+diff_dtu = (RESP_RX_tag - REQ_RX_tag)
+         - responder_reply_dtu_corrected
+         - anchor_anchor_tof_dtu
+```
+
+`responder_reply_dtu_corrected` uses the DW3000 carrier-integrator clock ratio
+filtered per responder anchor. `anchor_anchor_tof_dtu` comes from the cached
+anchor-anchor distance piggybacked in the response, with the latest local cache
+used until the pair has a fresh value.
+
+#### FlexTDOA Alignment Audit
+
+| Paper requirement | Firmware state |
+| --- | --- |
+| Passive DL-TDOA tag | Implemented. The tag only receives `FLEX_TDOA_REQ/RESP`. |
+| One request and `K` responses per slot | Implemented for FlexTDOA runtime. |
+| Request carries responder count/list/order | Implemented in `FLEX_TDOA_REQ`. |
+| Every localization packet carries 32-bit slot ID | Implemented in request/response; command carries the full 32-bit round. |
+| CI-CR schedule | Implemented by rotating initiator and responder order every slot/round. |
+| CFO-based reply delay correction | Implemented with a capped per-responder clock-ratio filter. |
+| Anchor self-localization via TWR distances piggybacked in packets | Implemented as short request/response TWR distance cached with a 9-sample median and piggybacked in `FLEX_TDOA_RESP`. |
+| Fully distributed slot synchronization from any packet | Not yet. Current lab runtime is coordinator-assisted for remote initiator slots. |
+| Paper radio setup | Use CH5, 6.8 Mb/s, PRF 64 MHz, preamble 128 when matching the paper. |
 
 #### FlexTDOA Speed Notes
 
 The current runtime is not limited by raw UWB bitrate in the normal case. The
-DWM3000 data sheet lists up to `6.8 Mbps` PHY data rate, while our packets are
-small. The practical update-rate limit is the slot schedule around a full
-DS-TWR exchange:
+DWM3000 data sheet lists up to `6.8 Mbps` PHY data rate, while the FlexTDOA
+request/response packets are small. The practical update-rate limit is now the
+outer slot budget and the coordinator-assisted slot start, not a DS-TWR body.
 
 ```text
-non-local slot ~= command_delay
-               + resp_delay
-               + final_delay
-               + report_delay
-               + report2_delay
-               + frame airtime / SPI / software margin
+paper body, K=3 ~= 5.05 ms
+lab outer slot   = anchor_survey_slot_ms, currently profiled at 100 ms
+frame cycle      = anchor_count * anchor_survey_slot_ms + round_gap
 ```
 
-`RESP` and `FINAL` are already DW3000 delayed-TX events. `REPORT` and `REPORT2`
-still use the same runtime `dt_report_delay_ms` as a software wait before TX.
-The coordinator command path also uses `anchor_survey_command_delay_ms` as a
-software wait on the commanded initiator. These are the first places to optimize
-after reducing the configured delays.
+With four anchors and the `100 ms / 10 ms` lab profile, a full changing-initiator
+frame is about `410 ms`. The paper-style body itself is much shorter, so the next
+speed work is reducing the outer slot budget and eventually replacing
+`FLEX_TDOA_CMD` with distributed slot synchronization.
 
-The dashboard exposes three operational timing/filter profiles, with adjacent
-pair round-trip scheduling:
+The dashboard exposes three operational timing/filter profiles:
 
-| Dashboard profile | Position filter | fresh age | slot | round gap | command | RESP | FINAL | REPORT/REPORT2 | programmed slot work | reverse separation | full directed cycle |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Static median, 3 s | static median | `3.0 s` | `100 ms` | `10 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `45 ms` | `100 ms` | `1210 ms` |
-| Dynamic median, 1.5 s | dynamic median | `1.5 s` | `100 ms` | `10 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `45 ms` | `100 ms` | `1210 ms` |
-| Dynamic median, 1.2 s | dynamic median | `1.2 s` | `100 ms` | `10 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `45 ms` | `100 ms` | `1210 ms` |
+| Dashboard profile | Position filter | fresh age | outer slot | round gap | command delay | paper body K=3 | frame cycle |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Static median, 3 s | static median | `3.0 s` | `100 ms` | `10 ms` | `5 ms` | `5.05 ms` | `410 ms` |
+| Dynamic median, 1.5 s | dynamic median | `1.5 s` | `100 ms` | `10 ms` | `5 ms` | `5.05 ms` | `410 ms` |
+| Dynamic median, 1.2 s | dynamic median | `1.2 s` | `100 ms` | `10 ms` | `5 ms` | `5.05 ms` | `410 ms` |
 
-`reverse separation` is the time between `Ai->Aj` and `Aj->Ai` for one pair.
-`full directed cycle` is the time until all six anchor pairs have been measured
-in both directions once.
-
-Slot-order scenarios for four anchors:
+Historical slot-order scenarios:
 
 | Scenario | Directed slot order | Pair reverse separation | Full directed cycle | Read |
 | --- | --- | ---: | ---: | --- |
 | Previous round-reverse | `2->3, 2->4, 2->5, 3->4, 3->5, 4->5`, then all reversed next round | `6 * slot + gap` | `12 * slot + 2 * gap` | Good for sweeping all pairs, but each paired TDOA observation mixes directions separated by most of a round. |
-| Current adjacent pair round-trip | `2->3, 3->2, 2->4, 4->2, ...` | `1 * slot` | `12 * slot + gap` | Same number of directed DS-TWR slots, but each pair gets its reverse immediately. Better candidate for moving tags. |
-| Classic FlexTDOA-style multi-response | one request, `K` responders in subslots | one request slot | for `K=3`, about `5.05 ms` per initiator slot using the paper timing | Faster and closer to the paper, but would require a protocol change because our stable geometry currently comes from full DS-TWR per pair. |
+| DS-TWR adjacent pair round-trip | `2->3, 3->2, 2->4, 4->2, ...` | `1 * slot` | `12 * slot + gap` | Previous practical hybrid: stable anchor geometry, slower tag updates. |
+| Paper-style FlexTDOA | one request, `K` responders in subslots | within one frame | `N * slot + gap` | Current FlexTDOA runtime. Faster and matches the paper's CI-CR slot model. |
 
-For the operational `100 ms` profiles, the adjacent experiment changes reverse
-separation from about `610 ms` in the old round-reverse order to `100 ms`,
-while the full directed cycle stays effectively the same: `1220 ms` before,
-`1210 ms` now.
-
-This is attractive because it does not increase channel usage. It only changes
-the slot order, so every pair sees `Ai->Aj` and `Aj->Ai` while the tag is in
-almost the same physical position. That should reduce dynamic error without
-giving up the full DS-TWR anchor-anchor geometry.
-
-The FlexTDOA paper also points in this direction at the scheduling level: its
-TDMA frame assigns slots to initiators, allows the initiator and responder order
-to change, and evaluates changing-initiator/changing-responder schedules. Their
-implementation uses shorter request/response subslots (`250 us` guard,
-request/response subslots on the order of microseconds to a few milliseconds).
-Our current protocol is deliberately heavier because each directed pair carries
-full DS-TWR plus `REPORT2`, but the scheduling idea is compatible.
-
-Using the paper's timing formula,
-
-```text
-t_slot = guard + request_subslot + process
-       + K * response_subslot + K * response_process
-       = 250 us + 2000 us + 250 us + K * 250 us + K * 600 us
-```
-
-a four-anchor passive-tag setup with one initiator and the other three anchors
-as responders would have `K = 3`, so one classic FlexTDOA slot would be roughly
-`5.05 ms`. A full four-initiator changing-initiator cycle would be roughly
-`20.2 ms` before extra idle time. That is the long-term speed target if we
-decide to move closer to the paper. The trade-off is that the anchor-anchor
-geometry would no longer come from the complete DS-TWR exchange we have already
-validated as stable, so this should be treated as a separate protocol step, not
-as a small optimization of the current DS-TWR-based FlexTDOA runtime.
-
-Static speed test, 2026-07-16:
+Legacy hybrid static speed test, 2026-07-16:
 
 The modules were in the temporary charging-room geometry, so this test should be
 read as a timing/robustness run, not as an absolute-location accuracy run. The
 tag was left static and the dashboard log stream was sampled after each profile
-change. `obs Hz` counts passive tag observations, `observed cycle` is inferred
-from those observations for a 12-directed-slot four-anchor cycle, `fresh pairs`
-is the number of paired TDOA observations available to the solver at the end of
-the run, and `rev p90` is the 90th percentile of `abs(Ai->Aj + Aj->Ai)`.
+change. This table belongs to the previous DS-TWR-based hybrid, not to the
+paper-aligned FlexTDOA runtime above. `obs Hz` counts passive tag observations,
+`observed cycle` is inferred from those observations for a 12-directed-slot
+four-anchor cycle, `fresh pairs` is the number of paired TDOA observations
+available to the solver at the end of the run, and `rev p90` is the 90th
+percentile of `abs(Ai->Aj + Aj->Ai)`.
 
 | Profile | slot | command | RESP | FINAL | REPORT | timeout | run | fail | fresh pairs | obs Hz | observed cycle | rev p90 | anchor std med | Read |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -471,32 +475,10 @@ the run, and `rev p90` is the 90th percentile of `abs(Ai->Aj + Aj->Ai)`.
 | Reduced-delay 90 | `90 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `80 ms` | `60 s` | `0` | `6/6` | `9.10` | `1.32 s` | `64.9 cm` | `0.68 cm` | Best fast candidate in this run. |
 | Reduced-delay 100 | `100 ms` | `5 ms` | `15 ms` | `15 ms` | `5 ms` | `90 ms` | `60 s` | `0` | `6/6` | `8.87` | `1.35 s` | `102.3 cm` | `0.71 cm` | Safest current operational profile; similar speed to 90 ms with more slot margin. |
 
-Two conclusions matter. First, simply shrinking the slot to `60/50/40 ms` is
-not enough, because the full DS-TWR exchange still needs real wall-clock time
-and starts colliding/overrunning the next slot. Second, reducing the programmed
-turnaround delays while keeping a `90-100 ms` slot is productive: the current
-working range is `command=5 ms`, `RESP=15 ms`, `FINAL=15 ms`, `REPORT=5 ms`.
-The module set was left on the safer `Reduced-delay 100` profile after the
-test. `Reduced-delay 90` is the next profile to try during a controlled walking
-test.
-
-After this run, the `Ranging Settings` tab was simplified to the three
-operational profiles above. They all use the validated `Reduced-delay 100`
-radio timing; the difference between them is the dashboard-side position
-filtering window.
-
-Likely next steps:
-
-1. Validate `Dynamic median, 1.2 s` during a controlled walking test and compare
-   it against `Dynamic median, 1.5 s`.
-2. Convert `REPORT`/`REPORT2` waits to delayed TX or a tighter state-machine
-   path if software delay jitter becomes visible.
-3. Replace follower `command_delay_ms` with a scheduled `POLL` delayed-TX based
-   on command RX time. That would make commanded slots deterministic like the
-   calibration slots and remove one FreeRTOS delay from the hot path.
-4. Keep the full DS-TWR anchor-anchor measurement for geometry. The clean
-   FlexTDOA prototype was faster, but the raw anchor geometry was much noisier;
-   full DS-TWR plus median filtering is the stable base for the passive tag.
+The main conclusion from that older branch was that full DS-TWR slots were
+robust but expensive. That pushed the current branch toward the paper-style
+FlexTDOA slot above: one request, ordered response subslots, and a passive tag
+that does not need the full `POLL/RESP/FINAL/REPORT/REPORT2` exchange.
 
 #### FlexTDOA Robustness Improvements
 
@@ -507,17 +489,16 @@ after 256 rounds a follower could infer the wrong directed pair ordering if the
 schedule changes. Sending all 32 bits is cheap and keeps coordinator and
 followers aligned for long positioning sessions.
 
-The responder uses the full DS-TWR timestamp set to refresh live anchor
-geometry:
+The initiator also refreshes live anchor geometry from the request/response
+exchange in the same slot. This is the short TWR measurement described by the
+paper as anchor self-localization payload, not the older full DS-TWR
+`POLL/RESP/FINAL/REPORT/REPORT2` sequence:
 
 ```text
-round_a = RESP_RX_initiator - POLL_TX_initiator
-reply_a = FINAL_TX_initiator - RESP_RX_initiator
-reply_b = RESP_TX_responder - POLL_RX_responder
-round_b = FINAL_RX_responder - RESP_TX_responder
+round = RESP_RX_initiator - REQ_TX_initiator
+reply = RESP_TX_responder - REQ_RX_responder
 
-tof = (round_a * round_b - reply_a * reply_b)
-      / (round_a + round_b + reply_a + reply_b)
+tof = (round - reply_corrected) / 2
 
 anchor_distance = c * tof
 ```
@@ -538,9 +519,10 @@ unfiltered corrected single-shot value from that short-anchor prototype, while
 The DS-TWR run used `APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY`, which performs the
 full `POLL/RESP/FINAL/REPORT/REPORT2` exchange. The `DS-TWR median9` rows apply
 the same 9-sample rolling median offline to the raw DS-TWR stream, so the table
-compares both raw-to-raw and median-to-median behavior. Current FlexTDOA keeps
-the passive tag behavior but uses the DS-TWR anchor geometry path because of
-this result.
+compares both raw-to-raw and median-to-median behavior. This result explains
+why the legacy hybrid geometry looked so stable, while the current FlexTDOA
+runtime intentionally keeps the shorter paper-style request/response geometry
+path.
 
 | Protocol/value | Pair | n | avg cm | median cm | min cm | max cm | std cm | span cm |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -571,20 +553,23 @@ this result.
 
 The conclusion is useful: the full DS-TWR anchor-anchor exchange is already
 stable raw, roughly `0.7-2.1 cm` standard deviation in this run, and the same
-9-sample median brings it to roughly `0.3-0.9 cm`. The short
-FlexTDOA anchor measurement is much noisier raw, roughly `14.5-21.1 cm`
-standard deviation, but a 9-sample rolling median brings the cached geometry
-back to roughly `0.3-2.7 cm`. That means the older hybrid looked more stable
-because its anchor geometry came from full DS-TWR. For passive-tag FlexTDOA, a
-good practical direction is to keep the radio-passive tag observations, but use
-full DS-TWR plus a median filter for anchor geometry. The uncorrected FlexTDOA
-`raw` field was much wider than `sample` in this run, so the clock-ratio
-correction is still required even before any median/mean filtering is
-considered.
+9-sample median brings it to roughly `0.3-0.9 cm`. The short FlexTDOA anchor
+measurement is much noisier raw, roughly `14.5-21.1 cm` standard deviation, but
+a 9-sample rolling median brings the cached geometry back to roughly
+`0.3-2.7 cm`. The current paper-aligned runtime uses the short FlexTDOA
+measurement because it matches the article and is much faster. The full DS-TWR
+geometry path remains a documented fallback if the lab later decides to trade
+paper purity for extra geometry stability. The uncorrected FlexTDOA `raw` field
+was much wider than `sample` in this run, so the clock-ratio correction is still
+required even before any median/mean filtering is considered.
 
-For one directed observation `Ai -> Aj`, the tag now derives two passive
-range-difference estimates from the same DS-TWR slot. This keeps the tag
-radio-passive while still using more of the DS-TWR timing triangle.
+#### Legacy Hybrid Experiments
+
+Before the paper-aligned FlexTDOA runtime, the firmware used a DS-TWR-based
+hybrid. The tag was still radio-passive, but each anchor pair ran a full DS-TWR
+slot and the tag derived two passive range-difference estimates from the frames
+it heard. This section is kept as lab history and comparison data; it is not the
+current FlexTDOA slot implementation.
 
 The tag hears:
 
@@ -620,22 +605,21 @@ range_diff_ij_alt = c * (tof_ij + reply_ai_corrected - rx_delta_tag)
                   = distance(tag, Aj) - distance(tag, Ai)
 ```
 
-If both estimates are present and they agree within
-`UWB_FLEX_TDOA_DUAL_DIFF_REJECT_M` (`0.75 m` at the moment), the firmware uses
-a guarded dual-leg average:
+If both estimates were present and agreed within the legacy `0.75 m` guard, the
+firmware used a guarded dual-leg average:
 
 ```text
 blend = 0.5
 diff  = primary + blend * (alt - primary)
 ```
 
-So the normal fused result is the 50/50 average of the `POLL -> RESP` and
-`RESP -> FINAL` estimates. If the two estimates disagree beyond the reject
-limit, the firmware falls back to the classic `POLL -> RESP` estimate and marks
-the row with `suspect=1`; the dashboard can keep it visible while excluding it
-from the live least-squares fit when enough other observations are available.
+So the normal fused result was the 50/50 average of the `POLL -> RESP` and
+`RESP -> FINAL` estimates. If the two estimates disagreed beyond the reject
+limit, the firmware fell back to the classic `POLL -> RESP` estimate and marked
+the row with `suspect=1`; the dashboard kept it visible while excluding it from
+the live least-squares fit when enough other observations were available.
 
-The firmware log line includes both estimates:
+The legacy firmware log line included both estimates:
 
 ```text
 UWB_FLEX_TDOA obs tag=<tag> initiator=<Ai> responder=<Aj> seq=<seq>
@@ -664,7 +648,7 @@ the tag is left fixed.
 | Solved tag Y std / span | `0.97 cm` / `5.49 cm` |
 | Solver residual RMS, median | `7.59 cm` |
 
-This is a useful improvement over the earlier visibly wandering passive view:
+This was a useful improvement over the earlier visibly wandering passive view:
 the DS-TWR anchor geometry remains stable, the reverse directed observations are
 near antisymmetric, and the extra `RESP -> FINAL` estimate gives a cheap
 multipath/consistency check without making the tag transmit. One outlier class
@@ -719,9 +703,9 @@ numbers compare math only, not different room layouts.
 | Solved tag Y std / span | `1.21 cm` / `8.52 cm` | `1.04 cm` / `5.98 cm` | Better |
 | Solver residual RMS, median | `14.91 cm` | `7.77 cm` | Roughly half in this geometry |
 
-This is the current practical hybrid: full DS-TWR is kept for anchor-anchor
-geometry, while the radio-passive tag uses both DS-TWR legs as a consistency
-check and as a fused range-difference measurement.
+This was the practical hybrid before the paper-aligned rewrite: full DS-TWR was
+kept for anchor-anchor geometry, while the radio-passive tag used both DS-TWR
+legs as a consistency check and as a fused range-difference measurement.
 
 The passive tag keeps a small clock-offset filter per responder anchor. The raw
 DW3000 carrier-integrator clock ratio is useful but noisy enough that applying a
@@ -732,14 +716,13 @@ The log still includes both `raw` and corrected `diff` so the correction can be
 audited later.
 
 The dashboard `Position` tab reconstructs the relative anchor geometry from live
-anchor-anchor ranges emitted by the FlexTDOA DS-TWR anchor slots. It uses the recent
-median for each anchor edge, not just the latest sample, so one noisy range is
-less likely to move the whole coordinate frame. The first selected anchor is
-placed at `(0,0)`, the second defines the X axis, the third/fourth are
-trilaterated from the measured edges, and a small least-squares refinement
-spreads any geometry error across all fresh edges. The geometry table reports
-residual error in centimeters, so the real setup can be a slightly skewed
-quadrilateral instead of a perfect square.
+anchor-anchor ranges. It uses the recent median for each anchor edge, not just
+the latest sample, so one noisy range is less likely to move the whole
+coordinate frame. The first selected anchor is placed at `(0,0)`, the second
+defines the X axis, the third/fourth are trilaterated from the measured edges,
+and a small least-squares refinement spreads any geometry error across all fresh
+edges. The geometry table reports residual error in centimeters, so the real
+setup can be a slightly skewed quadrilateral instead of a perfect square.
 
 The `Position Setup` solver selector is intentionally protocol-level, so field
 tests can compare the same geometry and tag path without changing dashboard
@@ -748,20 +731,20 @@ code:
 | Solver | Firmware runtime | Tag radio behavior | Range value used by dashboard | Best use |
 | --- | --- | --- | --- | --- |
 | `DS-TWR ranges` | `uwb_ranging` | tag actively responds to each anchor | absolute tag-anchor DS-TWR distance | Baseline comparison with direct ranges. |
-| `FlexTDOA classic` | `uwb_flex_tdoa` | tag only listens | `primary`, the classic `POLL -> RESP` passive range difference | Compare against the FlexTDOA-style single-leg observation. |
-| `Hybrid FlexTDOA` | `uwb_flex_tdoa` | tag only listens | guarded dual-leg `diff`, fused from `primary` and `alt` when they agree | Current practical default. Gives a consistency signal and reduces directional bias. |
+| `FlexTDOA` | `uwb_flex_tdoa` | tag only listens | paper-style request/response passive range difference | Current default. Matches the FlexTDOA paper slot model. |
+| `Legacy hybrid logs` | `uwb_flex_tdoa` legacy captures | tag only listens | guarded dual-leg `diff`, fused from `primary` and `alt` when they agree | Historical comparison only. Useful for replaying older captures. |
 
-For the two passive solvers, the dashboard solves the tag position on the PC
-with a local least-squares range-difference fit. When both directions of a pair
-are fresh, it uses the antisymmetric median `(Ai->Aj - Aj->Ai) / 2` and reports
-the reverse sum as a health check. A reverse sum near zero means the two
-directed observations agree; a large reverse sum means the pair has common-mode
-bias even if each individual line looks stable. The live fit ignores
-observations with very large reverse sum and can drop a single high-residual
-outlier when enough other pairs remain; the table keeps those rows visible as
-`skip ...` diagnostics. `DS-TWR ranges` can use the same measured anchor
-geometry for absolute tag-anchor ranges, but the blue distance circles only
-make sense for absolute ranges, not TDOA range differences.
+For passive solvers, the dashboard solves the tag position on the PC with a
+local least-squares range-difference fit. When both directions of a pair are
+fresh, it uses the antisymmetric median `(Ai->Aj - Aj->Ai) / 2` and reports the
+reverse sum as a health check. A reverse sum near zero means the two directed
+observations agree; a large reverse sum means the pair has common-mode bias even
+if each individual line looks stable. The live fit ignores observations with
+very large reverse sum and can drop a single high-residual outlier when enough
+other pairs remain; the table keeps those rows visible as `skip ...`
+diagnostics. `DS-TWR ranges` can use the same measured anchor geometry for
+absolute tag-anchor ranges, but the blue distance circles only make sense for
+absolute ranges, not TDOA range differences.
 
 The dashboard exposes the main solver gates directly in `Position Setup`:
 `Rev-sum gate m`, `Residual gate m`, and `Kalman hold s`. These are PC-side
