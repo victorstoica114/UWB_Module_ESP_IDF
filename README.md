@@ -364,12 +364,12 @@ response_process = K * 600 us
 For our four-anchor setup, `K = 3`, so the firmware slot body is:
 
 ```text
-250 + 2000 + 1500 + 3*250 + 3*600 = 6300 us
+250 + 2000 + 3000 + 3*250 + 3*600 = 7800 us
 ```
 
 The FlexTDOA paper uses a shorter `250 us` request-processing interval. The
 firmware keeps the same request/ordered-response slot structure, but uses a
-`1500 us` request-processing guard so the ESP32 has enough time to schedule the
+`3000 us` request-processing guard so the ESP32 has enough time to schedule the
 DW3000 delayed response without landing in the past during high-rate lab runs.
 
 The firmware still keeps `anchor_survey_slot_ms` as an outer safety/listen
@@ -458,10 +458,10 @@ the maximum age accepted for raw observations:
 
 | Dashboard profile | fresh age | outer slot | round gap | command delay | slot body K=3 | frame cycle |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Raw FlexTDOA, 3 s | `3.0 s` | `100 ms` | `10 ms` | `5 ms` | `6.30 ms` | `410 ms` |
-| Raw FlexTDOA, 1.5 s | `1.5 s` | `100 ms` | `10 ms` | `5 ms` | `6.30 ms` | `410 ms` |
-| Raw FlexTDOA, 1.2 s | `1.2 s` | `100 ms` | `10 ms` | `5 ms` | `6.30 ms` | `410 ms` |
-| Raw FlexTDOA, 15 ms slots | `0.5 s` | `15 ms` | `2 ms` | `2 ms` | `6.30 ms` | `62 ms` |
+| Raw FlexTDOA, 3 s | `3.0 s` | `100 ms` | `10 ms` | `5 ms` | `7.80 ms` | `410 ms` |
+| Raw FlexTDOA, 1.5 s | `1.5 s` | `100 ms` | `10 ms` | `5 ms` | `7.80 ms` | `410 ms` |
+| Raw FlexTDOA, 1.2 s | `1.2 s` | `100 ms` | `10 ms` | `5 ms` | `7.80 ms` | `410 ms` |
+| Raw FlexTDOA, 15 ms slots | `0.5 s` | `15 ms` | `2 ms` | `2 ms` | `7.80 ms` | `62 ms` |
 
 Historical slot-order scenarios:
 

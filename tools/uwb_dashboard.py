@@ -6654,7 +6654,7 @@ function profileSummaryText(values, anchorCount = 4) {
 function profileFlexTdoaPaperBodyMs(anchorCount = 4) {
   const responderCount = Math.max(1, anchorCount - 1);
   return (
-    250 + 2000 + 1500 + responderCount * 250 + responderCount * 600
+    250 + 2000 + 3000 + responderCount * 250 + responderCount * 600
   ) / 1000;
 }
 
