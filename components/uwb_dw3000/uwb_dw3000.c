@@ -4503,6 +4503,18 @@ static void uwb_flex_tdoa_listen_until(
     }
 }
 
+static void uwb_flex_tdoa_delay_gap_ms(uint32_t gap_ms)
+{
+    if (gap_ms == 0) {
+        return;
+    }
+    if (gap_ms < portTICK_PERIOD_MS) {
+        esp_rom_delay_us(gap_ms * 1000U);
+        return;
+    }
+    uwb_dw3000_delay_ms(gap_ms);
+}
+
 static void uwb_flex_tdoa_anchor_loop(uint8_t coordinator_id,
                                         const uint8_t *anchor_ids,
                                         size_t anchor_count)
@@ -4581,7 +4593,7 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t coordinator_id,
         round++;
         ESP_LOGI(TAG, "FLEX_TDOA round=%lu complete",
                  (unsigned long)(round - 1UL));
-        uwb_dw3000_delay_ms(
+        uwb_flex_tdoa_delay_gap_ms(
             app_runtime_config_get()->anchor_survey_round_gap_ms);
     }
 }
