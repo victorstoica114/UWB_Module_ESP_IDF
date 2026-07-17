@@ -444,13 +444,15 @@ frame is about `410 ms`. The paper-style body itself is much shorter, so the nex
 speed work is reducing the outer slot budget and eventually replacing
 `FLEX_TDOA_CMD` with distributed slot synchronization.
 
-The dashboard exposes three operational timing/filter profiles:
+The dashboard exposes three operational timing/freshness profiles. They do not
+enable any Position-side filtering; they only change the timing parameters and
+the maximum age accepted for raw observations:
 
-| Dashboard profile | Position filter | fresh age | outer slot | round gap | command delay | paper body K=3 | frame cycle |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Static median, 3 s | static median | `3.0 s` | `100 ms` | `10 ms` | `5 ms` | `5.05 ms` | `410 ms` |
-| Dynamic median, 1.5 s | dynamic median | `1.5 s` | `100 ms` | `10 ms` | `5 ms` | `5.05 ms` | `410 ms` |
-| Dynamic median, 1.2 s | dynamic median | `1.2 s` | `100 ms` | `10 ms` | `5 ms` | `5.05 ms` | `410 ms` |
+| Dashboard profile | fresh age | outer slot | round gap | command delay | paper body K=3 | frame cycle |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Raw FlexTDOA, 3 s | `3.0 s` | `100 ms` | `10 ms` | `5 ms` | `5.05 ms` | `410 ms` |
+| Raw FlexTDOA, 1.5 s | `1.5 s` | `100 ms` | `10 ms` | `5 ms` | `5.05 ms` | `410 ms` |
+| Raw FlexTDOA, 1.2 s | `1.2 s` | `100 ms` | `10 ms` | `5 ms` | `5.05 ms` | `410 ms` |
 
 Historical slot-order scenarios:
 
@@ -509,9 +511,9 @@ tof = (round - reply_corrected) / 2
 anchor_distance = c * tof
 ```
 
-That distance is cached as an unordered anchor pair and passed through the
-9-sample rolling median before it is emitted to the dashboard as live anchor
-geometry.
+That distance is cached as an unordered anchor pair and emitted to the dashboard
+as the latest valid corrected sample. No rolling median is applied in the
+current FlexTDOA runtime.
 
 Lab stability comparison, 2026-07-15:
 
@@ -520,15 +522,14 @@ accuracy. The modules were left in the current room/charging layout, so the
 important number is short-term spread, not whether the measured edge length is a
 known physical value. The FlexTDOA run used the short `REQ/RESP` anchor
 measurement used by the earlier clean FlexTDOA prototype. `sample` is the
-unfiltered corrected single-shot value from that short-anchor prototype, while
-`median9` is the firmware rolling median sent as the cached anchor distance.
-The DS-TWR run used `APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY`, which performs the
-full `POLL/RESP/FINAL/REPORT/REPORT2` exchange. The `DS-TWR median9` rows apply
-the same 9-sample rolling median offline to the raw DS-TWR stream, so the table
-compares both raw-to-raw and median-to-median behavior. This result explains
-why the legacy hybrid geometry looked so stable, while the current FlexTDOA
-runtime intentionally keeps the shorter paper-style request/response geometry
-path.
+unfiltered corrected single-shot value from that short-anchor prototype. The
+`median9` rows are historical offline/firmware comparisons only; the current
+FlexTDOA runtime no longer applies them. The DS-TWR run used
+`APP_RUNTIME_MODE_UWB_ANCHOR_SURVEY`, which performs the full
+`POLL/RESP/FINAL/REPORT/REPORT2` exchange. This result explains why the legacy
+hybrid geometry looked so stable, while the current FlexTDOA runtime
+intentionally keeps the shorter paper-style request/response geometry path and
+shows raw behavior.
 
 | Protocol/value | Pair | n | avg cm | median cm | min cm | max cm | std cm | span cm |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -558,16 +559,14 @@ path.
 | DS-TWR `median9` | 4-5 | 78 | 551.7 | 551.7 | 550.4 | 552.8 | 0.5 | 2.4 |
 
 The conclusion is useful: the full DS-TWR anchor-anchor exchange is already
-stable raw, roughly `0.7-2.1 cm` standard deviation in this run, and the same
-9-sample median brings it to roughly `0.3-0.9 cm`. The short FlexTDOA anchor
-measurement is much noisier raw, roughly `14.5-21.1 cm` standard deviation, but
-a 9-sample rolling median brings the cached geometry back to roughly
-`0.3-2.7 cm`. The current paper-aligned runtime uses the short FlexTDOA
+stable raw, roughly `0.7-2.1 cm` standard deviation in this run. The short
+FlexTDOA anchor measurement is much noisier raw, roughly `14.5-21.1 cm`
+standard deviation. The current paper-aligned runtime uses the short FlexTDOA
 measurement because it matches the article and is much faster. The full DS-TWR
 geometry path remains a documented fallback if the lab later decides to trade
 paper purity for extra geometry stability. The uncorrected FlexTDOA `raw` field
-was much wider than `sample` in this run, so the clock-ratio correction is still
-required even before any median/mean filtering is considered.
+was much wider than `sample` in this run, so the per-frame clock-ratio
+correction is still required.
 
 #### Legacy Hybrid Experiments
 
@@ -713,22 +712,19 @@ This was the practical hybrid before the paper-aligned rewrite: full DS-TWR was
 kept for anchor-anchor geometry, while the radio-passive tag used both DS-TWR
 legs as a consistency check and as a fused range-difference measurement.
 
-The passive tag keeps a small clock-offset filter per responder anchor. The raw
-DW3000 carrier-integrator clock ratio is useful but noisy enough that applying a
-single instantaneous value adds visible jitter to `diff`. The firmware therefore
-uses a capped running average, currently up to 64 samples per responder, before
-converting `reply_aj` from the responder clock domain into the tag clock domain.
-The log still includes both `raw` and corrected `diff` so the correction can be
-audited later.
+The passive tag uses the instantaneous DW3000 carrier-integrator clock ratio
+from the received response frame to convert `reply_aj` from the responder clock
+domain into the tag clock domain. There is no running clock-ratio filter in the
+current FlexTDOA runtime. The log still includes both uncorrected `raw` and
+clock-corrected `diff` so the correction can be audited.
 
 The dashboard `Position` tab reconstructs the relative anchor geometry from live
-anchor-anchor ranges. It uses the recent median for each anchor edge, not just
-the latest sample, so one noisy range is less likely to move the whole
-coordinate frame. The first selected anchor is placed at `(0,0)`, the second
-defines the X axis, the third/fourth are trilaterated from the measured edges,
-and a small least-squares refinement spreads any geometry error across all fresh
-edges. The geometry table reports residual error in centimeters, so the real
-setup can be a slightly skewed quadrilateral instead of a perfect square.
+anchor-anchor ranges. It uses the latest fresh anchor edge sample directly. The
+first selected anchor is placed at `(0,0)`, the second defines the X axis, the
+third/fourth are trilaterated from the measured edges, and a small least-squares
+refinement spreads any geometry error across all fresh edges. The geometry table
+reports residual error in centimeters, so the real setup can be a slightly
+skewed quadrilateral instead of a perfect square.
 
 The `Position Setup` solver selector is intentionally protocol-level, so field
 tests can compare the same geometry and tag path without changing dashboard
@@ -741,64 +737,21 @@ code:
 | `Legacy hybrid logs` | `uwb_flex_tdoa` legacy captures | tag only listens | guarded dual-leg `diff`, fused from `primary` and `alt` when they agree | Historical comparison only. Useful for replaying older captures. |
 
 For passive solvers, the dashboard solves the tag position on the PC with a
-local least-squares range-difference fit. When both directions of a pair are
-fresh, it uses the antisymmetric median `(Ai->Aj - Aj->Ai) / 2` and reports the
-reverse sum as a health check. A reverse sum near zero means the two directed
-observations agree; a large reverse sum means the pair has common-mode bias even
-if each individual line looks stable. The live fit ignores observations with
-very large reverse sum and can drop a single high-residual outlier when enough
-other pairs remain; the table keeps those rows visible as `skip ...`
-diagnostics. `DS-TWR ranges` can use the same measured anchor geometry for
-absolute tag-anchor ranges, but the blue distance circles only make sense for
-absolute ranges, not TDOA range differences.
+local least-squares range-difference fit. In the current diagnostic mode it uses
+the latest fresh directed observations directly. It does not apply reverse-sum
+gates, residual outlier pruning, medians, dynamic weights, or Kalman prediction.
+This intentionally exposes the raw protocol behavior so firmware/radio changes
+can be evaluated without PC-side smoothing hiding the result. `DS-TWR ranges`
+can use the same measured anchor geometry for absolute tag-anchor ranges, but
+the blue distance circles only make sense for absolute ranges, not TDOA range
+differences.
 
-The dashboard exposes the main solver gates directly in `Position Setup`:
-`Rev-sum gate m`, `Residual gate m`, and `Kalman hold s`. These are PC-side
-parameters and can be changed during field tests without OTA.
+Historical solver replay, 2026-07-15:
 
-Dynamic solver replay, 2026-07-15:
-
-The position solver was replayed offline on a real dashboard capture with the
-tag moving and then held still. This isolates the PC-side solver/filtering from
-the radio protocol and firmware. Pure latest-sample solving was rejected because
-it follows motion sooner but produces visibly more jitter. The best current
-dynamic compromise is a short 1.5 s median window with per-observation weights
-for fresh, compact rows.
-
-| Solver filter | Median max observation age | Solutions | RMS median / p90 | Step p90 | Fixed-tail span / std | Read |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| Static median, 3 s | `1.15 s` | `1062` | `4.93 / 6.87 cm` | `2.10 cm` | `7.65 / 1.37 cm` | Best stationary smoothing |
-| Dynamic median, 1.5 s | `0.62 s` | `1057` | `4.66 / 6.73 cm` | `1.64 cm` | `10.54 / 1.71 cm` | Current walking/default dynamic mode |
-| Dynamic median, 1.2 s | `0.51 s` | `1039` | `4.67 / 6.81 cm` | `2.17 cm` | `13.96 / 2.00 cm` | Fresher, but starts to jitter more |
-| Dynamic median, 1.0 s | `0.31 s` | `969` | `4.19 / 6.59 cm` | `4.51 cm` | `16.10 / 2.77 cm` | Too sparse for stable tracking |
-
-The dashboard exposes `Static median`, `Dynamic 1.5s median`, and
-`Dynamic 1.2s median`. Static is better for fixed-tag measurements and
-calibration sanity checks. Dynamic should be used for walking tests because it
-roughly halves observation age while keeping least-squares residuals in the same
-range; `1.2 s` is the more responsive option when the geometry is healthy.
-
-Kalman/gating note, 2026-07-16:
-
-The FlexTDOA paper also separates two solver roles. `AlgMin` is a raw
-least-squares solver used to compare parameters without smoothing. `AlgEKF` is
-used for motion/update-rate experiments because it can update the position with
-each incoming measurement instead of waiting for a full minimum equation set.
-Their motion experiments use a rail/actuator, then add idle time to simulate
-larger effective tag speeds. They report that very sparse updates degrade the
-estimate, while more TDOA measurements per update become preferable as the
-effective speed increases. In their office setup, FlexTDOA reaches about
-`13-17 cm` median 3D error in LOS and `15-22 cm` median 3D error in NLOS,
-with up to `38%` lower P95 error than classic fixed-initiator TDOA in NLOS.
-
-The dashboard therefore has an `Auto Kalman` TDOA filter mode. It uses the same
-short dynamic paired observations as `Dynamic 1.5s median`, then applies a
-constant-velocity Kalman filter per tag. The filter gates updates by
-least-squares quality, innovation size, and jump/Mahalanobis distance. If a row
-is rejected, the displayed point is predicted briefly instead of jumping to a
-bad measurement. The filter automatically raises process noise when the tag
-appears to move and settles back toward a static mode when speed and innovation
-drop.
+Earlier dashboard experiments compared static/dynamic median windows and an
+Auto-Kalman display mode. Those filters were useful for exploratory walking
+tests, but they were removed on 2026-07-17. Current FlexTDOA development uses
+raw observations only.
 
 Walking-test note, 2026-07-16:
 
