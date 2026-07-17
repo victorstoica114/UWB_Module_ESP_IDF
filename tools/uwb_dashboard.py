@@ -6648,13 +6648,13 @@ function profileSummaryText(values, anchorCount = 4) {
   if (values.rxSliceMs > values.slotMs) warnings.push("RX slice > slot");
   if (slotMarginMs < 5) warnings.push("low FlexTDOA margin");
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `${anchorCount} anchors: ${anchorCount} initiator slots · paper body ~${fmtFixed(paperBodyMs, 2)} ms · command ${fmtFixed(values.commandDelayMs, 0)} ms · ~${fmtFixed(cycleMs, 0)} ms/frame · FlexTDOA margin ${fmtFixed(slotMarginMs, 0)} ms${warnText}`;
+  return `${anchorCount} anchors: ${anchorCount} initiator slots · slot body ~${fmtFixed(paperBodyMs, 2)} ms · command ${fmtFixed(values.commandDelayMs, 0)} ms · ~${fmtFixed(cycleMs, 0)} ms/frame · FlexTDOA margin ${fmtFixed(slotMarginMs, 0)} ms${warnText}`;
 }
 
 function profileFlexTdoaPaperBodyMs(anchorCount = 4) {
   const responderCount = Math.max(1, anchorCount - 1);
   return (
-    250 + 2000 + 250 + responderCount * 250 + responderCount * 600
+    250 + 2000 + 1500 + responderCount * 250 + responderCount * 600
   ) / 1000;
 }
 

@@ -264,7 +264,7 @@ enum {
     (UWB_FLEX_TDOA_RESP_DISTANCE_MM_OFFSET + sizeof(int32_t))
 #define UWB_FLEX_TDOA_PAPER_GUARD_US 250U
 #define UWB_FLEX_TDOA_PAPER_REQ_SUBSLOT_US 2000U
-#define UWB_FLEX_TDOA_PAPER_REQ_PROCESS_US 250U
+#define UWB_FLEX_TDOA_REQ_PROCESS_GUARD_US 1500U
 #define UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US 250U
 #define UWB_FLEX_TDOA_PAPER_RESP_PROCESS_US 600U
 
@@ -3833,7 +3833,7 @@ static uint32_t uwb_flex_tdoa_paper_slot_duration_us(size_t responder_count)
 {
     return UWB_FLEX_TDOA_PAPER_GUARD_US +
            UWB_FLEX_TDOA_PAPER_REQ_SUBSLOT_US +
-           UWB_FLEX_TDOA_PAPER_REQ_PROCESS_US +
+           UWB_FLEX_TDOA_REQ_PROCESS_GUARD_US +
            ((uint32_t)responder_count * UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US) +
            ((uint32_t)responder_count * UWB_FLEX_TDOA_PAPER_RESP_PROCESS_US);
 }
@@ -4192,7 +4192,7 @@ static esp_err_t uwb_flex_tdoa_send_response_for_request(
     // lead time for the ESP32/DW3000 path.
     const uint32_t response_delay_us =
         UWB_FLEX_TDOA_PAPER_REQ_SUBSLOT_US +
-        UWB_FLEX_TDOA_PAPER_REQ_PROCESS_US +
+        UWB_FLEX_TDOA_REQ_PROCESS_GUARD_US +
         ((uint32_t)responder_index * UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US);
     const uint64_t response_due = uwb_dw3000_add_timestamp_delta(
         request->rx_timestamp, uwb_dw3000_us_to_dtu(response_delay_us));
