@@ -2693,6 +2693,35 @@ tr.status-stale td { color: #4f3b1d; }
                 <button class="reset-ranging-profile" data-profile="dynamic12">Reset Defaults</button>
               </div>
             </div>
+            <div class="profile-card" data-profile="fastRaw">
+              <h3>Raw FlexTDOA, 15 ms slots</h3>
+              <p class="muted">Small-slot profile for high-rate position variation tests. Edit downward carefully if the lab link stays clean.</p>
+              <div class="form-grid compact">
+                <label for="profileFastRawSlotMs">Slot ms</label>
+                <input id="profileFastRawSlotMs" value="15" type="number" min="1" step="1">
+                <label for="profileFastRawRoundGapMs">Round gap ms</label>
+                <input id="profileFastRawRoundGapMs" value="2" type="number" min="1" step="1">
+                <label for="profileFastRawRxSliceMs">RX slice ms</label>
+                <input id="profileFastRawRxSliceMs" value="5" type="number" min="1" step="1">
+                <label for="profileFastRawCommandDelayMs">Command delay ms</label>
+                <input id="profileFastRawCommandDelayMs" value="2" type="number" min="1" step="1">
+                <label for="profileFastRawTimeoutMs">DS-TWR timeout ms</label>
+                <input id="profileFastRawTimeoutMs" value="12" type="number" min="1" step="1">
+                <label for="profileFastRawRespDelayMs">RESP delay ms</label>
+                <input id="profileFastRawRespDelayMs" value="8" type="number" min="1" step="1">
+                <label for="profileFastRawFinalDelayMs">FINAL delay ms</label>
+                <input id="profileFastRawFinalDelayMs" value="8" type="number" min="1" step="1">
+                <label for="profileFastRawReportDelayMs">REPORT delay ms</label>
+                <input id="profileFastRawReportDelayMs" value="3" type="number" min="1" step="1">
+                <label for="profileFastRawAutoRxDelayUus">Auto RX delay UUS</label>
+                <input id="profileFastRawAutoRxDelayUus" value="500" type="number" min="1" step="1">
+              </div>
+              <div class="profile-summary" id="profileFastRawSummary"></div>
+              <div class="form-actions">
+                <button class="primary apply-ranging-profile" data-profile="fastRaw">Apply Fast Raw</button>
+                <button class="reset-ranging-profile" data-profile="fastRaw">Reset Defaults</button>
+              </div>
+            </div>
           </div>
           <div class="form-actions">
             <button id="resetAllRangingProfiles">Reset All Profile Defaults</button>
@@ -3019,6 +3048,20 @@ const rangingProfileDefaults = {
     respDelayMs: 15,
     finalDelayMs: 15,
     reportDelayMs: 5,
+    autoRxDelayUus: 500,
+  },
+  fastRaw: {
+    prefix: "profileFastRaw",
+    label: "Raw FlexTDOA, 15 ms slots",
+    positionMaxAgeSec: 0.5,
+    slotMs: 15,
+    roundGapMs: 2,
+    rxSliceMs: 5,
+    commandDelayMs: 2,
+    timeoutMs: 12,
+    respDelayMs: 8,
+    finalDelayMs: 8,
+    reportDelayMs: 3,
     autoRxDelayUus: 500,
   },
 };

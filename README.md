@@ -368,7 +368,10 @@ For our four-anchor setup, `K = 3`, so the paper-style slot body is:
 ```
 
 The firmware still keeps `anchor_survey_slot_ms` as an outer safety/listen
-budget. In the lab profiles this is `100 ms`, so a slot has a paper-timed body
+budget. FlexTDOA coordinator slots are bounded with `esp_timer_get_time()` in
+microseconds, not the 10 ms FreeRTOS tick, so small-slot profiles can be tested
+without slot-end quantization. In the conservative lab profiles this is
+`100 ms`; in the fast raw profile it is `15 ms`. A slot has a paper-timed body
 near the beginning and then the anchors/tag continue listening until the budget
 ends.
 
@@ -444,7 +447,7 @@ frame is about `410 ms`. The paper-style body itself is much shorter, so the nex
 speed work is reducing the outer slot budget and eventually replacing
 `FLEX_TDOA_CMD` with distributed slot synchronization.
 
-The dashboard exposes three operational timing/freshness profiles. They do not
+The dashboard exposes four operational timing/freshness profiles. They do not
 enable any Position-side filtering; they only change the timing parameters and
 the maximum age accepted for raw observations:
 
@@ -453,6 +456,7 @@ the maximum age accepted for raw observations:
 | Raw FlexTDOA, 3 s | `3.0 s` | `100 ms` | `10 ms` | `5 ms` | `5.05 ms` | `410 ms` |
 | Raw FlexTDOA, 1.5 s | `1.5 s` | `100 ms` | `10 ms` | `5 ms` | `5.05 ms` | `410 ms` |
 | Raw FlexTDOA, 1.2 s | `1.2 s` | `100 ms` | `10 ms` | `5 ms` | `5.05 ms` | `410 ms` |
+| Raw FlexTDOA, 15 ms slots | `0.5 s` | `15 ms` | `2 ms` | `2 ms` | `5.05 ms` | `62 ms` |
 
 Historical slot-order scenarios:
 

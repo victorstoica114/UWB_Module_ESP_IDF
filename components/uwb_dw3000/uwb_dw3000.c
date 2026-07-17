@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -4471,13 +4472,16 @@ static void uwb_flex_tdoa_process_frame(
 }
 
 static void uwb_flex_tdoa_listen_until(
-    TickType_t end_tick, uint8_t coordinator_id, const uint8_t *anchor_ids,
+    int64_t end_us, uint8_t coordinator_id, const uint8_t *anchor_ids,
     size_t anchor_count)
 {
-    while ((int32_t)(xTaskGetTickCount() - end_tick) < 0) {
-        const TickType_t now = xTaskGetTickCount();
+    while (true) {
+        const int64_t remaining_us = end_us - esp_timer_get_time();
+        if (remaining_us <= 0) {
+            break;
+        }
         const uint32_t remaining_ms =
-            (uint32_t)(end_tick - now) * portTICK_PERIOD_MS;
+            (uint32_t)((remaining_us + 999LL) / 1000LL);
         uint32_t slice_ms = app_runtime_config_get()->anchor_survey_rx_slice_ms;
         if (remaining_ms < slice_ms) {
             slice_ms = remaining_ms;
@@ -4548,9 +4552,11 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t coordinator_id,
             const uint8_t initiator_id = anchor_ids[slot_index];
             const uint32_t slot_id =
                 (round * (uint32_t)anchor_count) + (uint32_t)slot_index;
-            const TickType_t slot_end =
-                xTaskGetTickCount() +
-                pdMS_TO_TICKS(config->anchor_survey_slot_ms);
+            // Fast FlexTDOA profiles use sub-20 ms slots. Keep slot boundaries
+            // on esp_timer microseconds instead of the 10 ms FreeRTOS tick.
+            const int64_t slot_end_us =
+                esp_timer_get_time() +
+                ((int64_t)config->anchor_survey_slot_ms * 1000LL);
             const uint16_t slot_sequence = sequence++;
 
             if (initiator_id == s_source_id) {
@@ -4568,7 +4574,7 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t coordinator_id,
                     initiator_id, (uint8_t)slot_index, round, slot_sequence);
             }
 
-            uwb_flex_tdoa_listen_until(slot_end, coordinator_id, anchor_ids,
+            uwb_flex_tdoa_listen_until(slot_end_us, coordinator_id, anchor_ids,
                                        anchor_count);
         }
 
