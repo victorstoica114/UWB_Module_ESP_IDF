@@ -321,16 +321,16 @@ enum {
 #define UWB_FLEX_TDOA_PAPER_GUARD_US 250U
 #define UWB_FLEX_TDOA_PAPER_REQ_SUBSLOT_US 2000U
 #define UWB_FLEX_TDOA_PAPER_REQ_PROCESS_US 250U
-#define UWB_FLEX_TDOA_REQ_PROCESS_US 1500U
+#define UWB_FLEX_TDOA_REQ_PROCESS_US UWB_FLEX_TDOA_PAPER_REQ_PROCESS_US
 #define UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US 250U
-#define UWB_FLEX_TDOA_RESP_SUBSLOT_US 350U
+#define UWB_FLEX_TDOA_RESP_SUBSLOT_US UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US
 #define UWB_FLEX_TDOA_PAPER_RESP_PROCESS_US 600U
 #define UWB_FLEX_TDOA_BOOTSTRAP_LISTEN_US 2000000LL
 #define UWB_FLEX_TDOA_REQUEST_TX_LEAD_US 5000LL
 #define UWB_FLEX_TDOA_REQUEST_LATE_US 500LL
 #define UWB_FLEX_TDOA_RX_EPOCH_MAX_GAP_US 30000LL
 // This is an ESP32/DW3000 programming margin, not an over-the-air subslot.
-#define UWB_FLEX_TDOA_DELAYED_TX_MIN_LEAD_US 300.0
+#define UWB_FLEX_TDOA_DELAYED_TX_MIN_LEAD_US 25.0
 
 enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_POLL = 1,
@@ -3277,10 +3277,13 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                 }
                 spi_bus_acquired = true;
             }
+            // RX_FINFO, RX_TIME and the payload are valid as soon as the
+            // double buffer reports a good frame. FlexTDOA requests do not
+            // need CIA diagnostics, so waiting for CIA_DONE here would spend
+            // most of the paper's 250 us request-processing window.
             const bool flex_buffered_fast_path =
                 s_rx_double_buffer_enabled &&
-                s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA &&
-                (rdb_status & uwb_dw3000_current_rdb_cia_done_mask()) != 0U;
+                s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA;
             esp_err_t read_err = ESP_OK;
             esp_err_t ts_err = ESP_OK;
             if (flex_buffered_fast_path) {
@@ -5301,9 +5304,9 @@ static esp_err_t uwb_flex_tdoa_send_response_preparsed(
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Figure 2 places a processing phase before the ordered response
-    // subslots. The paper evaluates 250/250 us on STM32; measured ESP32-S3
-    // margins are 1500 us for request processing and 350 us per response.
+    // Figure 2 places a 250 us processing phase before 250 us ordered
+    // response subslots. DTX_RS programs this delay in DW3000 radio time, so
+    // host scheduling jitter does not move a response that was armed in time.
     const uint32_t response_delay_us =
         UWB_FLEX_TDOA_REQ_PROCESS_US +
         ((uint32_t)responder_index *
