@@ -4959,8 +4959,14 @@ function renderPositionReadout(model) {
   if (!readout || !accuracyRows || !rows || !head || !title || !overlay) return;
   const solverName = positionSolverLabel(model.settings.solver);
   const enableText = `Enable ${solverName}`;
-  document.querySelectorAll("#positionEnableRanging, #positionEnableRangingSide")
-    .forEach(button => { button.textContent = enableText; });
+  const overlayButton = document.getElementById("positionEnableRanging");
+  const sideButton = document.getElementById("positionEnableRangingSide");
+  if (sideButton) sideButton.textContent = enableText;
+  if (overlayButton) {
+    overlayButton.textContent = enableText;
+    overlayButton.disabled = false;
+    overlayButton.dataset.action = "enable";
+  }
   renderPositionGeometryPanel(model);
 
   if (!model.active) {
@@ -4986,10 +4992,25 @@ function renderPositionReadout(model) {
     overlay.querySelector("p").textContent = positionProtocolUsesTdoa(model.settings.solver)
       ? `Waiting for fresh anchor-anchor ranges involving: ${missingCoords.join(", ")}.`
       : `No measured anchor geometry is available yet for anchors: ${missingCoords.join(", ")}. Run FlexTDOA once to measure the anchor layout, then DS-TWR ranges can use the last measured geometry.`;
+    if (overlayButton) {
+      overlayButton.textContent = "Waiting for Anchor Ranges";
+      overlayButton.disabled = true;
+      overlayButton.dataset.action = "wait";
+    }
   } else if (!model.geometry?.positionReady) {
     overlay.classList.add("active");
-    overlay.querySelector("h2").textContent = "Anchor self-localization in progress";
-    overlay.querySelector("p").textContent = "FlexTDOA positioning starts after the TWR-EKF geometry is fixed. Let it converge for several minutes, then use Fix Anchor Geometry.";
+    const canFix = Boolean(model.geometry?.canFix);
+    overlay.querySelector("h2").textContent = canFix
+      ? "Anchor geometry is ready"
+      : "Anchor self-localization in progress";
+    overlay.querySelector("p").textContent = canFix
+      ? "Review the measured geometry, then fix it to start live FlexTDOA positioning."
+      : "FlexTDOA positioning starts after the TWR-EKF has a complete anchor geometry.";
+    if (overlayButton) {
+      overlayButton.textContent = canFix ? "Fix Anchor Geometry" : "Waiting for Anchor Geometry";
+      overlayButton.disabled = !canFix;
+      overlayButton.dataset.action = canFix ? "fix" : "wait";
+    }
   } else {
     overlay.classList.remove("active");
     overlay.querySelector("h2").textContent = `${solverName} is not active`;
@@ -5017,7 +5038,10 @@ function renderPositionReadout(model) {
       : `${fitCount}/${total} fresh distances`;
     return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span>${countText}${accuracyText}</span></div>`;
   });
-  readout.innerHTML = `${renderPositionSolverStatus(model)}${tagCards.join("") || `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`}`;
+  const emptyTagCard = !model.geometry?.positionReady
+    ? `<div class="position-tag-card"><b>waiting for fixed geometry</b><span>Fix the anchor geometry before tag positioning starts.</span></div>`
+    : `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
+  readout.innerHTML = `${renderPositionSolverStatus(model)}${tagCards.join("") || emptyTagCard}`;
   const accuracyTableRows = Object.values(model.tags).map(tag => {
     const accuracy = tag.accuracy;
     if (!tag.position || !accuracy) {
@@ -7373,6 +7397,15 @@ async function enablePositionRanging() {
   setTimeout(fetchSnapshot, 1500);
 }
 
+function runPositionOverlayAction(event) {
+  const action = event.currentTarget?.dataset?.action || "enable";
+  if (action === "fix") {
+    fixCurrentAnchorGeometry();
+  } else if (action === "enable") {
+    enablePositionRanging();
+  }
+}
+
 function restartAnchorSelfLocalization() {
   const settings = positionSettings();
   resetPaperAnchorSelfLocalization(settings.anchorIds, true);
@@ -7448,7 +7481,7 @@ function wireSettings() {
   });
   document.getElementById("positionRestartAnchorSelfLocalization").addEventListener("click", restartAnchorSelfLocalization);
   document.getElementById("positionFixAnchorGeometry").addEventListener("click", fixCurrentAnchorGeometry);
-  document.getElementById("positionEnableRanging").addEventListener("click", enablePositionRanging);
+  document.getElementById("positionEnableRanging").addEventListener("click", runPositionOverlayAction);
   document.getElementById("positionEnableRangingSide").addEventListener("click", enablePositionRanging);
   document.querySelectorAll(".cm-input").forEach(el => {
     el.addEventListener("change", () => {
