@@ -17,7 +17,8 @@ enum {
     FLEX_SOLVER_TASK_STACK_BYTES = 12288,
     FLEX_SOLVER_TASK_PRIORITY = 3,
     FLEX_SOLVER_POSITION_MAX_AGE_MS = 500,
-    FLEX_SOLVER_GEOMETRY_MIN_PERIOD_MS = 20,
+    FLEX_SOLVER_GEOMETRY_MIN_PERIOD_MS = 100,
+    FLEX_SOLVER_MAX_ITEMS_PER_BATCH = 64,
     FLEX_SOLVER_MAX_VARIABLES = 2 * APP_RUNTIME_CONFIG_MAX_ANCHORS - 3,
 };
 
@@ -58,6 +59,9 @@ struct flex_solver_state {
     bool position_valid;
     double position_x;
     double position_y;
+    bool position_pending;
+    uint8_t pending_tag_id;
+    uint32_t pending_position_slot_id;
 };
 
 static QueueHandle_t s_queue;
@@ -369,6 +373,7 @@ static void flex_solver_task(void *arg)
     ESP_LOGI(TAG, "FlexTDOA local solver active: anchors=%u core=%d",
              (unsigned)state.anchor_count, xPortGetCoreID());
 
+    size_t batch_count = 0;
     while (true) {
         struct flex_solver_item item = {0};
         if (xQueueReceive(s_queue, &item, portMAX_DELAY) != pdTRUE) {
@@ -396,6 +401,12 @@ static void flex_solver_task(void *arg)
                 state.last_geometry_tick = now;
             }
         } else if (item.type == FLEX_SOLVER_ITEM_OBSERVATION) {
+            if (state.position_pending &&
+                item.slot_id != state.pending_position_slot_id) {
+                flex_solver_update_position(
+                    &state, state.pending_tag_id,
+                    state.pending_position_slot_id);
+            }
             state.observations[first][second] =
                 (struct flex_solver_measurement){
                     .valid = true,
@@ -403,7 +414,16 @@ static void flex_solver_task(void *arg)
                     .slot_id = item.slot_id,
                     .updated_tick = now,
                 };
-            flex_solver_update_position(&state, item.tag_id, item.slot_id);
+            state.position_pending = true;
+            state.pending_tag_id = item.tag_id;
+            state.pending_position_slot_id = item.slot_id;
+        }
+
+        // A continuously fed queue must still let the core-0 idle task run;
+        // taskYIELD() alone cannot schedule a lower-priority task.
+        if (++batch_count >= FLEX_SOLVER_MAX_ITEMS_PER_BATCH) {
+            batch_count = 0;
+            vTaskDelay(1);
         }
     }
 }
