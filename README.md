@@ -58,18 +58,17 @@ Active pin mapping lives in `components/config/include/board_config.h`.
 ### DW3000 SPI Clock
 
 The DWM3000 data sheet specifies a maximum SPI clock of `38 MHz` in mode 0
-after OTP boot has completed. The ESP32-S3 SPI2 peripheral uses an `80 MHz`
-APB source in this design and cannot synthesize every intermediate frequency:
-the two relevant divider outputs are `40 MHz` and `26.666 MHz`. Because
-`40 MHz` exceeds the DW3000 limit, the fastest safe realizable clock is
-`26.666 MHz`.
+after OTP boot has completed. ESP32-S3 SPI2 is sourced from the `80 MHz` APB
+clock. With the stock ESP-IDF divider, the fastest realizable clock below the
+radio limit is `80 / 3 = 26.666 MHz`; the next divider is `40 MHz`, which would
+exceed the DWM3000 specification.
 
 The driver therefore uses two phases:
 
 1. reset, `DEV_ID` probe, soft reset, OTP reads, and radio configuration at
    `4 MHz`;
-2. operational RX/TX traffic at an actual `26.666 MHz` after eight consecutive
-   `DEV_ID` read-backs succeed.
+2. operational RX/TX traffic requested at `32 MHz` and realized at
+   `26.666 MHz`, after eight consecutive `DEV_ID` read-backs succeed.
 
 If the operational verification fails, the driver automatically restores the
 `4 MHz` device configuration so the module remains reachable. `/status`
@@ -81,13 +80,12 @@ Hardware validation on all five modules, 2026-07-18:
 | Metric | Result |
 | --- | ---: |
 | Effective SPI clock, every module | `26.666 MHz` |
-| FlexTDOA test duration | `30 s` |
-| Request slots | `2449` (`81.63/s`) |
-| Complete four-anchor frames | `20.41/s` |
-| Anchor-anchor results | `2445` |
-| Scheduled request failures | `1` |
-| Response failures | `1` |
-| Slot synchronization misses | `0` |
+| FlexTDOA final validation window | `120 s` |
+| Selected outer slot / frame gap | `7 ms / 1 ms` |
+| Passive observations, median / mean | `361/s` / `361.13/s` |
+| Telemetry drops | `0` |
+| Scheduled TX / slot failures | `0 / 0` |
+| Rejected tag / anchor observations | `0.96%` / `0.10%` |
 
 The radio test exercises TX-buffer writes, delayed-TX programming, timestamp
 and status reads, and RX-buffer reads. It is therefore a stronger link check
@@ -379,12 +377,10 @@ The active FlexTDOA frame set is:
 
 There is no separate coordinator command in the active protocol. After two
 seconds of radio silence, the first configured anchor bootstraps slot `0`.
-Every anchor then reconstructs the same TDMA phase from any valid request or
-response it receives. A response carries the full 32-bit slot ID and its
-measured reply interval, so a node that missed the request can recover the
-request phase from the response RX timestamp. Each node schedules only its own
-next initiator slot; subsequent radio packets continually correct local clock
-drift.
+Every anchor reconstructs the TDMA phase from valid request packets. Responses
+still carry the full 32-bit slot ID for observation integrity, but they do not
+move the distributed schedule. Each node schedules only its own next initiator
+slot; subsequent requests continually correct local clock drift.
 
 #### FlexTDOA Slot Timing
 
@@ -401,50 +397,62 @@ response_subslot = 250 us
 response_process = K * 600 us
 ```
 
-For our four-anchor setup, `K = 3`, so the firmware slot body is:
+For four anchors, `K = 3`, and the exact paper body is:
 
 ```text
-250 + 2000 + 4000 + 3*250 + 3*600 = 8800 us
+250 + 2000 + 250 + 3*250 + 3*600 = 5050 us
 ```
 
-The FlexTDOA paper uses a shorter `250 us` request-processing interval. The
-firmware keeps the same request/ordered-response slot structure, but uses a
-`4000 us` request-processing guard so the ESP32 has enough time to schedule the
-DW3000 delayed response without landing in the past during high-rate lab runs.
+The ESP32 implementation keeps the same request/ordered-response structure but
+uses two measured host margins:
+
+```text
+request_process  = 2000 us
+response_subslot = 300 us
+
+practical K=3 body = 250 + 2000 + 2000 + 3*300 + 3*600
+                   = 6950 us
+```
+
+The additional request margin lets the ESP32 parse the request and program a
+DW3000 delayed transmission without `HPDWARN`. The additional `50 us` per
+response gives AUTO RX and the host enough time to release each double buffer.
+These are deliberate hardware margins over the paper's `250/250 us`; they do
+not change the FlexTDOA equations or packet roles.
+
+Before preparing a delayed response, the firmware also requires at least
+`1000 us` of remaining lead time. A request that reaches the task too late is
+skipped without per-frame logging, preventing one lost response from delaying
+the following distributed slot.
 
 The firmware still keeps `anchor_survey_slot_ms` as an outer safety/listen
 budget. FlexTDOA slots are bounded with `esp_timer_get_time()` in
 microseconds, not the 10 ms FreeRTOS tick, so small-slot profiles can be tested
-without slot-end quantization. The validated fast runtime uses `12 ms` slots
-and a `1 ms` frame gap. A slot has a paper-timed body near the beginning and
-then the anchors/tag continue listening until the budget ends.
+without slot-end quantization. The validated fast runtime uses `7 ms` slots
+and a `1 ms` frame gap. Firmware rejects a FlexTDOA slot shorter than the
+computed `6950 us` body.
 
 For a slot where `A3` is the initiator:
 
 ```text
-outer slot budget = anchor_survey_slot_ms, validated at 12 ms
+outer slot budget = anchor_survey_slot_ms, validated at 7 ms
 
 A3 initiator                  A2/A4/A5 responders             Tag M1
      |                                  |                         |
 t=0  |-- FLEX_TDOA_REQ ---------------->|------------------------> RX REQ
      |                                  |                         |
-t=6.00 ms <---------------- RESP index 0 |------------------------> RX RESP
-t=6.85 ms <---------------- RESP index 1 |------------------------> RX RESP
-t=7.70 ms <---------------- RESP index 2 |------------------------> RX RESP
+t=REQ_RX+2.00 ms <---------- RESP index 0 |-----------------------> RX RESP
+t=REQ_RX+2.30 ms <---------- RESP index 1 |-----------------------> RX RESP
+t=REQ_RX+2.60 ms <---------- RESP index 2 |-----------------------> RX RESP
      |                                  |                         |
-t=12 ms next distributed slot boundary  |                         |
+t=7 ms next distributed slot boundary   |                         |
 ```
 
 The paper describes subslots from the TDMA slot boundary. The firmware schedules
-each delayed response from the DW3000 request-RX timestamp, so the programmed
-response delay includes the reserved `request_subslot` too. With the current
-constants, responder indexes `0,1,2` transmit at approximately
-`6000/6850/7700 us` after the request RX timestamp. The current `850 us`
-separation is a receiver-drain margin used by this implementation. It is not the
-paper's exact timing: FlexTDOA uses `250 us` response subslots and reserves the
-`K * 600 us` response-processing budget after the response train. Once RX can
-drain every adjacent frame reliably, the implementation should be tightened to
-the paper's `250 us` spacing.
+each delayed response from the DW3000 request-RX timestamp. The request has
+already occupied its radio subslot at that point, so the `2000 us` request
+subslot must not be added a second time to delayed TX. The `K * 600 us` term is
+the final initiator processing budget, not spacing between responses.
 
 The passive tag computes the paper TDOA observation:
 
@@ -460,18 +468,24 @@ comes from the cached
 anchor-anchor distance piggybacked in the response, with the latest local cache
 used until the pair has a fresh value.
 
+No median, moving average, or position filter is applied to FlexTDOA data.
+Firmware only rejects structurally impossible observations: mismatched
+`slot_id`/responder index, missing CIA clock data, incoherent timestamps, or a
+range difference that violates the triangle inequality by more than a `2 m`
+diagnostic margin.
+
 #### FlexTDOA Alignment Audit
 
 | Paper requirement | Firmware state |
 | --- | --- |
 | Passive DL-TDOA tag | Implemented. The tag only receives `FLEX_TDOA_REQ/RESP`. |
-| One request and `K` responses per slot | Implemented. Response spacing is currently `850 us`; the paper uses `250 us`. |
+| One request and `K` responses per slot | Implemented. Hardware-validated response spacing is `300 us`; the paper uses `250 us`. |
 | Request carries responder count/list/order | Implemented in `FLEX_TDOA_REQ`. |
 | Every localization packet carries 32-bit slot ID | Implemented in every request and response. This avoids the 256-slot wrap ambiguity of an 8-bit counter. |
 | CI-CR schedule | Implemented by rotating initiator and responder order every slot/round. |
-| CFO-based reply delay correction | Implemented from the instantaneous carrier-integrator value. Hardware reciprocal tests selected the local `(1 + ratio)` conversion convention. |
-| Anchor self-localization via TWR distances piggybacked in packets | Implemented as short request/response TWR distance cached with a 9-sample median and piggybacked in `FLEX_TDOA_RESP`. |
-| Fully distributed slot synchronization from any packet | Implemented. Request RX gives the phase directly; response RX reconstructs it from the carried reply interval. |
+| CFO-based reply delay correction | Implemented from buffered `CIA_DIAG_0`, with the Qorvo sign convention and no clock Kalman filter. |
+| Anchor self-localization via TWR distances piggybacked in packets | Implemented as an unfiltered short request/response TWR range cached and piggybacked in `FLEX_TDOA_RESP`. |
+| Fully distributed slot synchronization | Implemented from request RX timestamps. Responses do not perturb the schedule. |
 | Paper radio setup | Use CH5, 6.8 Mb/s, PRF 64 MHz, preamble 128 when matching the paper. |
 
 #### FlexTDOA Speed Notes
@@ -480,20 +494,36 @@ The current runtime is not limited by raw UWB bitrate in the normal case. The
 DWM3000 data sheet lists up to `6.8 Mbps` PHY data rate, while the FlexTDOA
 request/response packets are small. The practical update-rate limit is the
 outer slot budget and how quickly the ESP32 can drain and process adjacent
-responses, not a DS-TWR body. DW3000 SPI now runs at the fastest safe ESP32-S3
-divider below the radio's limit: `26.666 MHz`.
+responses, not a DS-TWR body. DW3000 SPI runs at `26.666 MHz`, the fastest verified
+ESP32-S3 divider below the data-sheet limit of `38 MHz`. The FlexTDOA hot path
+uses polling SPI, one contiguous `RX_FINFO + RX_TIME + CIA_DIAG_0` burst,
+DW3000 `CLR_IRQS/DB_TOGGLE` fast commands, and component-local `-O2`.
 
 ```text
-paper-shaped body, K=3 = 8.80 ms with the current processing guard
-fast outer slot        = 12 ms
+paper body, K=3        = 5.05 ms
+practical body, K=3    = 6.95 ms
+fast outer slot        = 7 ms
 fast frame gap         = 1 ms
 frame cycle      = anchor_count * anchor_survey_slot_ms + round_gap
 ```
 
-With four anchors, the validated `12 ms / 1 ms` profile produces a `49 ms`
-frame, about `20.4` complete changing-initiator frames per second. The request
-transmitter wakes `7 ms` before its programmed DW3000 timestamp; this lead is
-host preparation time and does not add to the radio slot.
+With four anchors, the validated `7 ms / 1 ms` profile produces a `29 ms`
+frame, about `34.5` complete changing-initiator frames per second and a
+theoretical `413.8` passive observations/s. A 45-second hardware run measured
+about `370` observations/s with the earlier `1500 us` request guard. The final
+`2000 us` guard measured `361.13/s` over 120 seconds, with no telemetry drops,
+delayed-TX failures, or missed slots. The request transmitter wakes `7 ms`
+before its programmed DW3000 timestamp; this lead is host preparation time and
+does not add to the radio slot.
+
+Hardware timing comparison, 2026-07-18:
+
+| response subslot | outer slot / gap | request guard | tag median | effective tag rate | result |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| `250 us` | `6 / 1 ms` | `1150 us` | `295.5/s` | `298.6/s` | RX release reached the subslot boundary; occasional delayed-TX/slot failures. |
+| `300 us` | `7 / 1 ms` | `1500 us` | `364/s` | `370.2/s` | Fast 45 s run; zero TX/slot failures and zero telemetry drops. |
+| `300 us` | `7 / 1 ms` | `2000 us` | `361/s` | `361.13/s` | Selected: zero TX/slot/response failures and zero telemetry drops in 120 s. One CIA-not-ready anchor result was rejected. |
+| `350 us` | `7 / 1 ms` | `1500 us` | `369/s` | `374.3/s` | Only ~4/s faster, but one delayed TX rejection and one missed slot. |
 
 The dashboard exposes four operational timing/freshness profiles. They do not
 enable any Position-side filtering; they only change the timing parameters and
@@ -501,10 +531,10 @@ the maximum age accepted for raw observations:
 
 | Dashboard profile | fresh age | outer slot | round gap | command delay | DS-TWR timeout | RESP / FINAL / REPORT | slot body K=3 | frame cycle |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Stable Profile | `3.0 s` | `100 ms` | `10 ms` | `5 ms` | `90 ms` | `20 / 20 / 10 ms` | `8.80 ms` | `410 ms` |
-| Balanced Profile | `1.5 s` | `100 ms` | `10 ms` | `5 ms` | `90 ms` | `20 / 20 / 10 ms` | `8.80 ms` | `410 ms` |
-| Reactive Profile | `1.2 s` | `100 ms` | `10 ms` | `5 ms` | `90 ms` | `20 / 20 / 10 ms` | `8.80 ms` | `410 ms` |
-| Fast Profile | `0.5 s` | `12 ms` | `1 ms` | `2 ms` | `12 ms` | `8 / 8 / 3 ms` | `8.80 ms` | `49 ms` |
+| Stable Profile | `3.0 s` | `100 ms` | `10 ms` | `5 ms` | `90 ms` | `20 / 20 / 10 ms` | `6.95 ms` | `410 ms` |
+| Balanced Profile | `1.5 s` | `100 ms` | `10 ms` | `5 ms` | `90 ms` | `20 / 20 / 10 ms` | `6.95 ms` | `410 ms` |
+| Reactive Profile | `1.2 s` | `100 ms` | `10 ms` | `5 ms` | `90 ms` | `20 / 20 / 10 ms` | `6.95 ms` | `410 ms` |
+| Fast Profile | `0.5 s` | `7 ms` | `1 ms` | `2 ms` | `12 ms` | `8 / 8 / 3 ms` | `6.95 ms` | `29 ms` |
 
 `command delay` is retained because the same profile card also configures the
 DS-TWR-compatible runtimes. The distributed FlexTDOA scheduler does not send a
