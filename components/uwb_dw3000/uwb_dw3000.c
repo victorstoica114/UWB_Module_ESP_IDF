@@ -376,8 +376,10 @@ struct uwb_anchor_survey_pair {
 struct uwb_flex_tdoa_observation {
     bool in_use;
     uint16_t sequence;
+    uint32_t slot_id;
     uint8_t initiator_id;
     uint8_t responder_id;
+    uint8_t responder_index;
     uint64_t request_rx_tag_ts;
     uint64_t response_rx_tag_ts;
     uint64_t responder_reply_dtu;
@@ -4020,10 +4022,12 @@ static void uwb_flex_tdoa_log_paper_observation(
     // Dashboard-compatible line: current FlexTDOA has one paper observation,
     // so legacy dual-leg fields are reported as absent/neutral.
     ESP_LOGI(TAG,
-             "UWB_FLEX_TDOA obs tag=%u initiator=%u responder=%u seq=%u diff=%.3f m raw=%.3f m anchor=%.3f m primary=%.3f m alt=nan m agree=nan m blend=0.000 fused=0 suspect=0 clk_valid=%u clk_ratio=%.3e",
+             "UWB_FLEX_TDOA obs tag=%u initiator=%u responder=%u seq=%u slot=%lu index=%u diff=%.3f m raw=%.3f m anchor=%.3f m primary=%.3f m alt=nan m agree=nan m blend=0.000 fused=0 suspect=0 clk_valid=%u clk_ratio=%.3e",
              (unsigned)tag_id, (unsigned)observation->initiator_id,
              (unsigned)observation->responder_id,
-             (unsigned)observation->sequence, diff_m, raw_diff_m,
+             (unsigned)observation->sequence,
+             (unsigned long)observation->slot_id,
+             (unsigned)observation->responder_index, diff_m, raw_diff_m,
              anchor_distance_m, diff_m,
              observation->resp_clock_offset_valid ? 1U : 0U,
              clock_offset_ratio);
@@ -4069,6 +4073,8 @@ static void uwb_flex_tdoa_tag_process_frame(
                 continue;
             }
             observation->request_rx_tag_ts = frame->rx_timestamp;
+            observation->slot_id = slot_id;
+            observation->responder_index = (uint8_t)i;
             observation->anchor_distance_mm =
                 uwb_flex_tdoa_cached_anchor_distance_mm(initiator_id,
                                                         responders[i]);
@@ -4111,6 +4117,8 @@ static void uwb_flex_tdoa_tag_process_frame(
             return;
         }
         observation->response_rx_tag_ts = frame->rx_timestamp;
+        observation->slot_id = slot_id;
+        observation->responder_index = responder_index;
         observation->responder_reply_dtu = reply_dtu;
         if (observation->anchor_distance_mm <= 0) {
             observation->anchor_distance_mm = anchor_distance_mm;
@@ -4126,8 +4134,6 @@ static void uwb_flex_tdoa_tag_process_frame(
         }
         observation->updated_tick = xTaskGetTickCount();
         uwb_flex_tdoa_log_paper_observation(tag_id, observation);
-        (void)slot_id;
-        (void)responder_index;
         break;
     }
 

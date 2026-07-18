@@ -56,7 +56,9 @@ FLOAT_TEXT_RE = r"[-+]?(?:\d+(?:\.\d+)?|nan|inf)"
 FLEX_TDOA_RE = re.compile(
     r"\bUWB_FLEX_TDOA obs\s+tag=(?P<tag>\d+)\s+"
     r"initiator=(?P<initiator>\d+)\s+responder=(?P<responder>\d+)\s+"
-    r"seq=(?P<seq>\d+)\s+diff=(?P<diff>[-+]?\d+(?:\.\d+)?)\s+m\s+"
+    r"seq=(?P<seq>\d+)\s+"
+    r"(?:slot=(?P<slot>\d+)\s+index=(?P<index>\d+)\s+)?"
+    r"diff=(?P<diff>[-+]?\d+(?:\.\d+)?)\s+m\s+"
     r"raw=(?P<raw>[-+]?\d+(?:\.\d+)?)\s+m\s+"
     r"anchor=(?P<anchor_distance>[-+]?\d+(?:\.\d+)?)\s+m"
 )
@@ -636,6 +638,12 @@ class DashboardState:
             initiator_id = int(match.group("initiator"))
             responder_id = int(match.group("responder"))
             seq = int(match.group("seq"))
+            slot_id = (
+                int(match.group("slot")) if match.group("slot") is not None else None
+            )
+            responder_index = (
+                int(match.group("index")) if match.group("index") is not None else None
+            )
             diff_m = float(match.group("diff"))
             raw_diff_m = float(match.group("raw"))
             anchor_distance_m = float(match.group("anchor_distance"))
@@ -666,6 +674,8 @@ class DashboardState:
             "initiator_id": initiator_id,
             "responder_id": responder_id,
             "seq": seq,
+            "slot_id": slot_id,
+            "responder_index": responder_index,
             "diff_m": diff_m,
             "raw_diff_m": raw_diff_m,
             "primary_diff_m": primary_diff_m,
@@ -844,6 +854,7 @@ class DashboardState:
     def tdoa_snapshot_locked(self, now: float) -> dict[str, Any]:
         observations: dict[str, Any] = {}
         anchor_distances: dict[str, Any] = {}
+        recent_observations: list[dict[str, Any]] = []
         max_age_sec = 3.0
         for (tag_id, initiator_id, responder_id), item in sorted(
             self.tdoa_observations.items()
@@ -869,6 +880,8 @@ class DashboardState:
                 "initiator_id": initiator_id,
                 "responder_id": responder_id,
                 "seq": int(item["seq"]),
+                "slot_id": item.get("slot_id"),
+                "responder_index": item.get("responder_index"),
                 "diff_m": float(item["diff_m"]),
                 "raw_diff_m": float(item["raw_diff_m"]),
                 "primary_diff_m": item.get("primary_diff_m"),
@@ -891,6 +904,27 @@ class DashboardState:
                     "max_m": max(values) if values else None,
                 },
             }
+            for sample in history:
+                age_sec = now - float(sample.get("received_at") or 0.0)
+                if age_sec > 10.0:
+                    continue
+                recent_observations.append(
+                    {
+                        "tag_id": int(sample["tag_id"]),
+                        "initiator_id": int(sample["initiator_id"]),
+                        "responder_id": int(sample["responder_id"]),
+                        "seq": int(sample["seq"]),
+                        "slot_id": sample.get("slot_id"),
+                        "responder_index": sample.get("responder_index"),
+                        "diff_m": float(sample["diff_m"]),
+                        "raw_diff_m": float(sample["raw_diff_m"]),
+                        "primary_diff_m": sample.get("primary_diff_m"),
+                        "anchor_distance_m": float(sample["anchor_distance_m"]),
+                        "age_sec": age_sec,
+                        "received_at": float(sample.get("received_at") or 0.0),
+                        "log_id": sample.get("log_id"),
+                    }
+                )
         for (anchor_a_id, anchor_b_id), item in sorted(
             self.tdoa_anchor_distances.items()
         ):
@@ -934,6 +968,10 @@ class DashboardState:
             }
         return {
             "observations": observations,
+            "recent_observations": sorted(
+                recent_observations,
+                key=lambda sample: float(sample.get("received_at") or 0.0),
+            )[-300:],
             "anchor_distances": anchor_distances,
             "max_age_sec": max_age_sec,
         }
@@ -2101,16 +2139,18 @@ tr.status-stale td { color: #4f3b1d; }
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
             <div><b>Solver</b><span>FlexTDOA uses passive tag range differences from request/response anchor slots. DS-TWR uses active tag-anchor distances. Legacy hybrid is only for older dual-leg logs.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
-            <div><b>Geometry</b><span>FlexTDOA uses the latest live anchor-anchor ranges. No median, gating, or Kalman filtering is applied.</span></div>
+            <div><b>Geometry</b><span>Anchor coordinates are learned from stable median TWR ranges, then frozen for positioning. Relearn after physically moving an anchor.</span></div>
           </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
+            <button id="positionRelearnGeometry">Relearn Geometry</button>
+            <button id="positionFreezeGeometry">Freeze Geometry</button>
             <button class="primary" id="positionEnableRangingSide">Enable Position Runtime</button>
           </div>
           <div id="positionToast" class="toast"></div>
           <div class="section" style="margin-top:12px;">
             <h2>Measured Anchor Geometry</h2>
-            <div class="muted" style="margin-bottom:8px;">Relative anchor coordinates are reconstructed from live anchor-anchor ranges.</div>
+            <div id="positionGeometryStatus" class="muted" style="margin-bottom:8px;">Waiting to learn anchor geometry.</div>
             <table>
               <thead><tr><th>Pair</th><th>m / avg</th><th>std</th><th>age</th><th>fit</th></tr></thead>
               <tbody id="positionGeometryRows"></tbody>
@@ -2988,6 +3028,8 @@ const state = {
   positionAnchorTrail: {},
   positionResults: {},
   positionWasActive: false,
+  positionGeometry: {key: "", frozen: null, candidate: null, stableSince: null, lastEvalAt: 0},
+  positionSeeds: {},
 };
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
@@ -3721,6 +3763,17 @@ function freshAnchorPairDistance(a, b, maxAge) {
   return item;
 }
 
+function stableAnchorPairDistance(a, b, maxAge) {
+  const item = freshAnchorPairDistance(a, b, maxAge);
+  if (!item) return null;
+  const median = Number(item.stats?.median_m);
+  return {
+    ...item,
+    live_distance_m: Number(item.distance_m),
+    distance_m: Number.isFinite(median) ? median : Number(item.distance_m),
+  };
+}
+
 function selectedAnchorPairs(anchorIds) {
   const pairs = [];
   for (let i = 0; i < anchorIds.length; i++) {
@@ -3815,7 +3868,7 @@ function measuredAnchorGeometry(anchorIds, maxAge) {
   const distanceItems = {};
   const missingPairs = [];
   for (const [a, b] of selectedAnchorPairs(ids)) {
-    const item = freshAnchorPairDistance(a, b, maxAge);
+    const item = stableAnchorPairDistance(a, b, maxAge);
     if (item) distanceItems[anchorPairKey(a, b)] = item;
     else missingPairs.push([a, b]);
   }
@@ -3878,6 +3931,140 @@ function measuredAnchorGeometry(anchorIds, maxAge) {
   return result;
 }
 
+function positionGeometryKey(anchorIds) {
+  return anchorIds.map(Number).filter(Number.isFinite).join(",");
+}
+
+function positionGeometryStorageKey(anchorIds) {
+  return `uwbDash.positionGeometry.${positionGeometryKey(anchorIds)}`;
+}
+
+function cloneAnchorCoordinates(anchors) {
+  return Object.fromEntries(Object.entries(anchors || {}).map(([id, point]) => [
+    id,
+    {x: Number(point.x), y: Number(point.y)},
+  ]));
+}
+
+function loadFrozenPositionGeometry(anchorIds) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(positionGeometryStorageKey(anchorIds)) || "null");
+    if (!parsed || positionGeometryKey(parsed.anchorIds || []) !== positionGeometryKey(anchorIds)) return null;
+    const anchors = cloneAnchorCoordinates(parsed.anchors);
+    if (Object.keys(anchors).length !== anchorIds.length) return null;
+    if (!Object.values(anchors).every(point => Number.isFinite(point.x) && Number.isFinite(point.y))) return null;
+    return {...parsed, anchors};
+  } catch (_) {
+    return null;
+  }
+}
+
+function geometryCoordinateDelta(left, right) {
+  const ids = Object.keys(left || {}).filter(id => right?.[id]);
+  if (!ids.length) return Number.POSITIVE_INFINITY;
+  const sumSq = ids.reduce((sum, id) => {
+    const dx = Number(left[id].x) - Number(right[id].x);
+    const dy = Number(left[id].y) - Number(right[id].y);
+    return sum + dx * dx + dy * dy;
+  }, 0);
+  return Math.sqrt(sumSq / ids.length);
+}
+
+function freezePositionGeometry(candidate, anchorIds, reason = "manual") {
+  if (!candidate?.complete || Object.keys(candidate.anchors || {}).length !== anchorIds.length) return false;
+  const referenceDistances = Object.fromEntries(Object.entries(candidate.distanceItems || {}).map(([key, item]) => [
+    key,
+    Number(item.distance_m),
+  ]));
+  const frozen = {
+    anchorIds: anchorIds.map(Number),
+    anchors: cloneAnchorCoordinates(candidate.anchors),
+    referenceDistances,
+    frozenAt: Date.now() / 1000,
+    reason,
+  };
+  state.positionGeometry.frozen = frozen;
+  state.positionGeometry.candidate = candidate;
+  state.positionGeometry.stableSince = null;
+  state.positionSeeds = {};
+  localStorage.setItem(positionGeometryStorageKey(anchorIds), JSON.stringify(frozen));
+  return true;
+}
+
+function resetPositionGeometry(anchorIds, forgetStored = true) {
+  const key = positionGeometryKey(anchorIds);
+  if (forgetStored) localStorage.removeItem(positionGeometryStorageKey(anchorIds));
+  state.positionGeometry = {key, frozen: null, candidate: null, stableSince: null, lastEvalAt: 0};
+  state.positionSeeds = {};
+  state.positionAnchorTrail = {};
+}
+
+function positionGeometryQuality(candidate) {
+  const items = Object.values(candidate?.distanceItems || {});
+  const residuals = Object.values(candidate?.residuals || {}).map(value => Math.abs(Number(value)));
+  const samples = items.map(item => Number(item.stats?.samples || 0));
+  const stdValues = items.map(item => Number(item.stats?.std_m)).filter(Number.isFinite);
+  return {
+    complete: Boolean(candidate?.complete),
+    minSamples: samples.length ? Math.min(...samples) : 0,
+    maxStdM: stdValues.length ? Math.max(...stdValues) : Number.POSITIVE_INFINITY,
+    maxResidualM: residuals.length ? Math.max(...residuals) : Number.POSITIVE_INFINITY,
+  };
+}
+
+function stabilizedAnchorGeometry(anchorIds, maxAge) {
+  const key = positionGeometryKey(anchorIds);
+  const now = Date.now() / 1000;
+  if (state.positionGeometry.key !== key) {
+    state.positionGeometry = {
+      key,
+      frozen: loadFrozenPositionGeometry(anchorIds),
+      candidate: null,
+      stableSince: null,
+      lastEvalAt: 0,
+    };
+    state.positionSeeds = {};
+  }
+
+  const candidate = measuredAnchorGeometry(anchorIds, maxAge);
+  const session = state.positionGeometry;
+  if (session.frozen) {
+    return {
+      ...candidate,
+      anchors: cloneAnchorCoordinates(session.frozen.anchors),
+      residuals: anchorGeometryResiduals(session.frozen.anchors, candidate.distanceItems),
+      complete: true,
+      status: "frozen",
+      frozenAt: session.frozen.frozenAt,
+      freezeReason: session.frozen.reason,
+      referenceDistances: session.frozen.referenceDistances || {},
+    };
+  }
+
+  if (now - session.lastEvalAt >= 0.25) {
+    const quality = positionGeometryQuality(candidate);
+    const delta = geometryCoordinateDelta(session.candidate?.anchors, candidate.anchors);
+    const stable = quality.complete && quality.minSamples >= 9 &&
+      quality.maxStdM <= 0.05 && quality.maxResidualM <= 0.05 &&
+      (!session.candidate || delta <= 0.02);
+    session.stableSince = stable ? (session.stableSince || now) : null;
+    session.candidate = candidate;
+    session.lastEvalAt = now;
+    if (session.stableSince && now - session.stableSince >= 5.0) {
+      freezePositionGeometry(candidate, anchorIds, "automatic");
+      return stabilizedAnchorGeometry(anchorIds, maxAge);
+    }
+  }
+
+  const quality = positionGeometryQuality(candidate);
+  return {
+    ...candidate,
+    status: candidate.complete ? "learning" : candidate.status,
+    stableForSec: session.stableSince ? now - session.stableSince : 0,
+    quality,
+  };
+}
+
 function freshTdoaObservations(tagId, anchorIds, maxAge) {
   const selected = new Set(anchorIds.map(Number));
   return Object.values(state.tdoa?.observations || {})
@@ -3892,28 +4079,74 @@ function freshTdoaObservations(tagId, anchorIds, maxAge) {
       Number(a.responder_id) - Number(b.responder_id));
 }
 
-function rawTdoaObservations(tagId, anchorIds, maxAge, protocol = "flextdoa") {
-  return freshTdoaObservations(tagId, anchorIds, maxAge)
-    .map(item => {
-      const legacyDiff = Number(item.primary_diff_m);
-      const diff = protocol === "hybrid" && Number.isFinite(legacyDiff)
-        ? legacyDiff
-        : Number(item.diff_m);
-      return {
-        ...item,
-        diff_m: diff,
-        tdoa_protocol: protocol === "hybrid" ? "legacy" : "flextdoa",
-        used_in_fit: true,
-        reject_reason: "",
-      };
-    })
-    .filter(item => Number.isFinite(Number(item.diff_m)))
-    .sort((left, right) =>
-      Number(left.initiator_id) - Number(right.initiator_id) ||
-      Number(left.responder_id) - Number(right.responder_id));
+function normalizeTdoaObservation(item, protocol) {
+  const legacyDiff = Number(item.primary_diff_m);
+  const diff = protocol === "hybrid" && Number.isFinite(legacyDiff)
+    ? legacyDiff
+    : Number(item.diff_m);
+  return {
+    ...item,
+    diff_m: diff,
+    tdoa_protocol: protocol === "hybrid" ? "legacy" : "flextdoa",
+    used_in_fit: true,
+    reject_reason: "",
+  };
 }
 
-function solveTdoa(anchors, observations) {
+function coherentTdoaBatch(tagId, anchorIds, maxAge, protocol = "flextdoa") {
+  const selected = new Set(anchorIds.map(Number));
+  const recent = Array.isArray(state.tdoa?.recent_observations) && state.tdoa.recent_observations.length
+    ? state.tdoa.recent_observations
+    : freshTdoaObservations(tagId, anchorIds, maxAge);
+  const groups = new Map();
+  for (const rawItem of recent) {
+    if (Number(rawItem.tag_id) !== Number(tagId) ||
+        !selected.has(Number(rawItem.initiator_id)) ||
+        !selected.has(Number(rawItem.responder_id)) ||
+        Number(rawItem.age_sec) > maxAge) continue;
+    const item = normalizeTdoaObservation(rawItem, protocol);
+    if (!Number.isFinite(Number(item.diff_m))) continue;
+    const slotValue = Number(item.slot_id);
+    const slotKey = Number.isInteger(slotValue)
+      ? `slot:${slotValue}`
+      : `legacy:${Number(item.seq)}:${Number(item.initiator_id)}`;
+    const group = groups.get(slotKey) || {
+      key: slotKey,
+      slotId: Number.isInteger(slotValue) ? slotValue : null,
+      seq: Number(item.seq),
+      initiatorId: Number(item.initiator_id),
+      itemsByResponder: new Map(),
+      newestAt: 0,
+      oldestAt: Number.POSITIVE_INFINITY,
+    };
+    const receivedAt = Number(item.received_at) || (Date.now() / 1000 - Number(item.age_sec || 0));
+    group.itemsByResponder.set(Number(item.responder_id), item);
+    group.newestAt = Math.max(group.newestAt, receivedAt);
+    group.oldestAt = Math.min(group.oldestAt, receivedAt);
+    groups.set(slotKey, group);
+  }
+
+  const expected = Math.max(2, anchorIds.length - 1);
+  const ordered = [...groups.values()].sort((left, right) => right.newestAt - left.newestAt);
+  const selectedGroup = ordered.find(group => group.itemsByResponder.size >= expected) || ordered[0];
+  if (!selectedGroup) {
+    return {items: [], complete: false, expected, slotId: null, seq: null, spanMs: null};
+  }
+  const items = [...selectedGroup.itemsByResponder.values()].sort((left, right) =>
+    Number(left.responder_index ?? 99) - Number(right.responder_index ?? 99));
+  return {
+    items,
+    complete: items.length >= expected,
+    expected,
+    slotId: selectedGroup.slotId,
+    seq: selectedGroup.seq,
+    initiatorId: selectedGroup.initiatorId,
+    frameId: selectedGroup.slotId === null ? null : Math.floor(selectedGroup.slotId / anchorIds.length),
+    spanMs: Math.max(0, (selectedGroup.newestAt - selectedGroup.oldestAt) * 1000),
+  };
+}
+
+function solveTdoa(anchors, observations, initialPosition = null) {
   const usable = observations
     .map(item => ({
       item,
@@ -3925,8 +4158,12 @@ function solveTdoa(anchors, observations) {
   if (usable.length < 2) return null;
 
   const anchorValues = Object.values(anchors);
-  let x = anchorValues.reduce((sum, anchor) => sum + anchor.x, 0) / anchorValues.length;
-  let y = anchorValues.reduce((sum, anchor) => sum + anchor.y, 0) / anchorValues.length;
+  let x = Number(initialPosition?.x);
+  let y = Number(initialPosition?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    x = anchorValues.reduce((sum, anchor) => sum + anchor.x, 0) / anchorValues.length;
+    y = anchorValues.reduce((sum, anchor) => sum + anchor.y, 0) / anchorValues.length;
+  }
 
   for (let iter = 0; iter < 24; iter++) {
     let nxx = 1e-6;
@@ -3989,7 +4226,7 @@ function minTdoaObservationCount(anchorIds) {
   return Math.max(2, Math.min(3, Number(anchorIds?.length || 0) - 1));
 }
 
-function rawTdoaFit(anchorIds, anchors, observations) {
+function rawTdoaFit(anchorIds, anchors, observations, initialPosition = null) {
   const all = (observations || []).filter(item =>
     anchors[Number(item.initiator_id)] &&
     anchors[Number(item.responder_id)] &&
@@ -4004,7 +4241,7 @@ function rawTdoaFit(anchorIds, anchors, observations) {
   }
 
   const used = all;
-  let position = solveTdoa(anchors, used);
+  let position = solveTdoa(anchors, used, initialPosition);
   if (!position) {
     return {
       position: null,
@@ -4135,13 +4372,14 @@ function computePositionModel() {
   const selectedIds = selectedPositionModuleIds(settings);
   const offlineModuleIds = selectedIds.filter(id => !moduleHttpOnline(statusForModule(id)));
   const active = positionRangingActive(settings);
-  const geometry = measuredAnchorGeometry(settings.anchorIds, positionGeometryMaxAge(settings));
+  const geometry = stabilizedAnchorGeometry(settings.anchorIds, positionGeometryMaxAge(settings));
   const anchors = {...(geometry?.anchors || {})};
 
   if (!active && state.positionWasActive) {
     state.positionTrail = {};
     state.positionAnchorTrail = {};
     state.positionResults = {};
+    state.positionSeeds = {};
   }
   state.positionWasActive = active;
 
@@ -4157,15 +4395,24 @@ function computePositionModel() {
       let position = null;
       let residuals = {};
       let accuracy = null;
+      let coherence = null;
       if (positionProtocolUsesTdoa(settings.solver)) {
-        observations = rawTdoaObservations(
+        coherence = coherentTdoaBatch(
           tagId,
           settings.anchorIds,
           settings.maxAge,
           settings.solver
-        )
+        );
+        observations = coherence.items
           .filter(item => anchors[Number(item.initiator_id)] && anchors[Number(item.responder_id)]);
-        const fit = rawTdoaFit(settings.anchorIds, anchors, observations);
+        const seedKey = `${positionGeometryKey(settings.anchorIds)}:${tagId}`;
+        const fitInput = coherence.complete ? observations : [];
+        const fit = rawTdoaFit(
+          settings.anchorIds,
+          anchors,
+          fitInput,
+          state.positionSeeds[seedKey] || null
+        );
         position = fit.position;
         fitObservations = fit.used || [];
         observations = fit.annotated || observations.map(item => ({...item, used_in_fit: true, reject_reason: ""}));
@@ -4176,6 +4423,7 @@ function computePositionModel() {
           fitObservations.length ? fitObservations : observations,
           tdoaResiduals(position, anchors, fitObservations.length ? fitObservations : observations)
         );
+        if (position) state.positionSeeds[seedKey] = {x: position.x, y: position.y};
       } else {
         for (const anchorId of settings.anchorIds) {
           const item = freshDistanceFor(tagId, anchorId, settings.maxAge);
@@ -4197,6 +4445,7 @@ function computePositionModel() {
         position,
         residuals,
         accuracy,
+        coherence,
       };
       if (position) {
         const key = String(tagId);
@@ -4413,9 +4662,27 @@ function drawPosition(model) {
 
 function renderPositionGeometryPanel(model) {
   const rows = document.getElementById("positionGeometryRows");
+  const status = document.getElementById("positionGeometryStatus");
+  const freezeButton = document.getElementById("positionFreezeGeometry");
   if (!rows) return;
 
   const geometry = model.geometry || {};
+  if (status) {
+    if (geometry.status === "frozen") {
+      status.textContent = `Frozen geometry · ${fmtAge(Number(geometry.frozenAt || 0))} · ${geometry.freezeReason || "saved"}`;
+      status.className = "muted fresh";
+    } else if (geometry.status === "learning") {
+      const quality = geometry.quality || {};
+      status.textContent = `Learning geometry · stable ${fmtFixed(geometry.stableForSec || 0, 1)} / 5.0 s · min ${quality.minSamples || 0} samples · max std ${fmtPositionCm(quality.maxStdM, 1)}`;
+      status.className = "muted";
+    } else {
+      status.textContent = "Waiting for all fresh anchor-anchor ranges.";
+      status.className = "muted stale";
+    }
+  }
+  if (freezeButton) {
+    freezeButton.disabled = !geometry.complete || geometry.status === "frozen";
+  }
   const pairRows = selectedAnchorPairs(model.settings.anchorIds).map(([a, b]) => {
     const key = anchorPairKey(a, b);
     const item = geometry.distanceItems?.[key];
@@ -4461,6 +4728,16 @@ function renderPositionSolverStatus(model) {
     `<span class="position-pill good">raw observations</span>`,
     `<span class="position-pill">fresh ${fmtFixed(settings.maxAge, 1)} s</span>`,
   ];
+  const firstTag = Object.values(model.tags || {})[0];
+  const coherence = firstTag?.coherence;
+  if (coherence) {
+    const slotText = coherence.slotId === null ? `seq ${coherence.seq ?? "-"}` : `slot ${coherence.slotId}`;
+    pills.push(`<span class="position-pill ${coherence.complete ? "good" : "warn"}">${esc(slotText)} · ${coherence.items?.length || 0}/${coherence.expected} coherent</span>`);
+    if (Number.isFinite(Number(coherence.frameId))) {
+      pills.push(`<span class="position-pill">frame ${esc(coherence.frameId)} · span ${fmtFixed(coherence.spanMs, 1)} ms</span>`);
+    }
+  }
+  pills.push(`<span class="position-pill ${model.geometry?.status === "frozen" ? "good" : "warn"}">geometry ${esc(model.geometry?.status || "waiting")}</span>`);
 
   return `<div class="position-filter-card">
     <b>Position Solver</b>
@@ -6884,7 +7161,28 @@ async function enablePositionRanging() {
   await postConfig({target_modules: "all", params}, "positionToast");
   state.positionTrail = {};
   state.positionAnchorTrail = {};
+  state.positionSeeds = {};
   setTimeout(fetchSnapshot, 1500);
+}
+
+function relearnPositionGeometry() {
+  const settings = positionSettings();
+  resetPositionGeometry(settings.anchorIds, true);
+  state.positionTrail = {};
+  setToast("positionToast", "Anchor geometry learning restarted", "good");
+  renderPosition();
+}
+
+function freezeCurrentPositionGeometry() {
+  const settings = positionSettings();
+  const candidate = state.positionGeometry.candidate ||
+    measuredAnchorGeometry(settings.anchorIds, positionGeometryMaxAge(settings));
+  if (!freezePositionGeometry(candidate, settings.anchorIds, "manual")) {
+    setToast("positionToast", "Complete anchor geometry is not available yet", "bad");
+    return;
+  }
+  setToast("positionToast", "Anchor geometry frozen", "good");
+  renderPosition();
 }
 
 function wireSettings() {
@@ -6929,6 +7227,8 @@ function wireSettings() {
     state.positionAnchorTrail = {};
     renderPosition();
   });
+  document.getElementById("positionRelearnGeometry").addEventListener("click", relearnPositionGeometry);
+  document.getElementById("positionFreezeGeometry").addEventListener("click", freezeCurrentPositionGeometry);
   document.getElementById("positionEnableRanging").addEventListener("click", enablePositionRanging);
   document.getElementById("positionEnableRangingSide").addEventListener("click", enablePositionRanging);
   document.querySelectorAll(".cm-input").forEach(el => {
