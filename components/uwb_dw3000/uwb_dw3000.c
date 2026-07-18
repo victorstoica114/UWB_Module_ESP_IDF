@@ -1176,6 +1176,16 @@ static double uwb_dw3000_clock_offset_ratio(int32_t clock_offset_raw)
     return (double)clock_offset_raw * factor;
 }
 
+static double uwb_dw3000_remote_interval_in_local_dtu(
+    double remote_interval_dtu, double clock_offset_ratio)
+{
+    // DRX_CAR_INT uses the DW3000 convention: a positive converted ratio means
+    // the local receiver clock is slower than the remote transmitter clock.
+    // Qorvo SS-TWR and FlexTDOA therefore map a remote interval into the local
+    // time base with (1 - ratio).
+    return remote_interval_dtu * (1.0 - clock_offset_ratio);
+}
+
 static uint64_t uwb_dw3000_add_timestamp_delta(uint64_t timestamp,
                                                uint64_t delta)
 {
@@ -4011,7 +4021,8 @@ static void uwb_flex_tdoa_log_paper_observation(
     double reply_corrected_dtu = reply_dtu;
     if (observation->resp_clock_offset_valid) {
         clock_offset_ratio = observation->resp_clock_offset_ratio;
-        reply_corrected_dtu = reply_dtu * (1.0 + clock_offset_ratio);
+        reply_corrected_dtu = uwb_dw3000_remote_interval_in_local_dtu(
+            reply_dtu, clock_offset_ratio);
     }
 
     const double diff_dtu =
@@ -4275,7 +4286,8 @@ static void uwb_flex_tdoa_handle_response_measurement(
     if (frame->clock_offset_valid) {
         clock_offset_ratio =
             uwb_dw3000_clock_offset_ratio(frame->clock_offset_raw);
-        corrected_reply_dtu = (double)reply_dtu * (1.0 + clock_offset_ratio);
+        corrected_reply_dtu = uwb_dw3000_remote_interval_in_local_dtu(
+            (double)reply_dtu, clock_offset_ratio);
     }
     const double tof_dtu = (round_dtu - corrected_reply_dtu) / 2.0;
     const double distance_m = uwb_distance_tof_to_meters(tof_dtu);
