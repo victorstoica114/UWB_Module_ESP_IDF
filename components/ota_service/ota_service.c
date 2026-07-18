@@ -1026,6 +1026,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"uwb_event_counters_enabled\":%s,"
         "\"uwb_event_counters_log_every\":%u,"
         "\"uwb_device_id\":\"0x%08lx\","
+        "\"uwb_spi_clock_hz\":%lu,"
         "\"uwb_source_id\":%u,"
         "\"uwb_active_antenna_delay\":%u,"
         "\"uwb_active_antenna_delay_hex\":\"0x%04x\","
@@ -1453,6 +1454,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         APP_UWB_EVENT_COUNTERS_ENABLED ? "true" : "false",
         (unsigned)APP_UWB_EVENT_COUNTERS_LOG_EVERY,
         (unsigned long)uwb_dw3000_get_device_id(),
+        (unsigned long)uwb_dw3000_get_spi_clock_hz(),
         (unsigned)uwb_dw3000_get_source_id(),
         (unsigned)active_antenna_delay, (unsigned)active_antenna_delay,
         (unsigned)configured_antenna_delay,

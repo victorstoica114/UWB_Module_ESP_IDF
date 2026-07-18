@@ -30,7 +30,10 @@ static const char *TAG = "uwb_dw3000";
 enum {
     UWB_DW3000_TASK_STACK_WORDS = 8192,
     UWB_DW3000_TASK_PRIORITY = 8,
-    UWB_DW3000_SPI_CLOCK_HZ = 4 * 1000 * 1000,
+    UWB_DW3000_SPI_BOOT_CLOCK_HZ = 4 * 1000 * 1000,
+    UWB_DW3000_SPI_OPERATION_REQUEST_HZ = 32 * 1000 * 1000,
+    UWB_DW3000_SPI_DATASHEET_MAX_HZ = 38 * 1000 * 1000,
+    UWB_DW3000_SPI_VERIFY_READS = 8,
     UWB_DW3000_SPI_MAX_TRANSFER_BYTES = 96,
     UWB_DW3000_RESET_SETTLE_MS = 5,
     UWB_DW3000_RESET_PULSE_MS = 20,
@@ -260,12 +263,12 @@ enum {
     (UWB_FLEX_TDOA_RESP_DISTANCE_MM_OFFSET + sizeof(int32_t))
 #define UWB_FLEX_TDOA_PAPER_GUARD_US 250U
 #define UWB_FLEX_TDOA_PAPER_REQ_SUBSLOT_US 2000U
-#define UWB_FLEX_TDOA_REQ_PROCESS_GUARD_US 3000U
+#define UWB_FLEX_TDOA_REQ_PROCESS_GUARD_US 4000U
 #define UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US 250U
 #define UWB_FLEX_TDOA_PAPER_RESP_PROCESS_US 600U
 #define UWB_FLEX_TDOA_BOOTSTRAP_LISTEN_US 2000000LL
-#define UWB_FLEX_TDOA_REQUEST_TX_LEAD_US 1500LL
-#define UWB_FLEX_TDOA_REQUEST_LATE_US 250LL
+#define UWB_FLEX_TDOA_REQUEST_TX_LEAD_US 7000LL
+#define UWB_FLEX_TDOA_REQUEST_LATE_US 5000LL
 
 enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_POLL = 1,
@@ -459,6 +462,7 @@ uwb_distance_log_tag_verification(const struct uwb_distance_measurement *measure
 #define DW3000_PMSC_STATE_IDLE 0x03
 
 static spi_device_handle_t s_spi;
+static uint32_t s_spi_clock_hz;
 static bool s_started;
 static bool s_rx_armed;
 static bool s_irq_enabled;
@@ -979,6 +983,45 @@ static esp_err_t uwb_dw3000_hardware_reset(void)
     return ESP_OK;
 }
 
+static esp_err_t uwb_dw3000_add_spi_device(uint32_t requested_clock_hz)
+{
+    spi_device_interface_config_t device_config = {
+        .clock_speed_hz = (int)requested_clock_hz,
+        .mode = 0,
+        .spics_io_num = BOARD_CONFIG_UWB_CS_GPIO,
+        .queue_size = 1,
+    };
+
+    ESP_RETURN_ON_ERROR(
+        spi_bus_add_device(UWB_DW3000_SPI_HOST, &device_config, &s_spi), TAG,
+        "spi_bus_add_device failed");
+
+    int actual_clock_khz = 0;
+    esp_err_t err = spi_device_get_actual_freq(s_spi, &actual_clock_khz);
+    if (err != ESP_OK || actual_clock_khz <= 0) {
+        (void)spi_bus_remove_device(s_spi);
+        s_spi = NULL;
+        return err == ESP_OK ? ESP_FAIL : err;
+    }
+
+    s_spi_clock_hz = (uint32_t)actual_clock_khz * 1000U;
+    if (s_spi_clock_hz > UWB_DW3000_SPI_DATASHEET_MAX_HZ) {
+        ESP_LOGE(TAG,
+                 "DW3000 SPI actual clock %lu Hz exceeds datasheet maximum %u Hz",
+                 (unsigned long)s_spi_clock_hz,
+                 (unsigned)UWB_DW3000_SPI_DATASHEET_MAX_HZ);
+        (void)spi_bus_remove_device(s_spi);
+        s_spi = NULL;
+        s_spi_clock_hz = 0;
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "DW3000 SPI clock: requested=%lu Hz actual=%lu Hz",
+             (unsigned long)requested_clock_hz,
+             (unsigned long)s_spi_clock_hz);
+    return ESP_OK;
+}
+
 static esp_err_t uwb_dw3000_init_spi(void)
 {
     spi_bus_config_t bus_config = {
@@ -997,20 +1040,7 @@ static esp_err_t uwb_dw3000_init_spi(void)
         return err;
     }
 
-    spi_device_interface_config_t device_config = {
-        .clock_speed_hz = UWB_DW3000_SPI_CLOCK_HZ,
-        .mode = 0,
-        .spics_io_num = BOARD_CONFIG_UWB_CS_GPIO,
-        .queue_size = 1,
-    };
-
-    err = spi_bus_add_device(UWB_DW3000_SPI_HOST, &device_config, &s_spi);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "spi_bus_add_device failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    return ESP_OK;
+    return uwb_dw3000_add_spi_device(UWB_DW3000_SPI_BOOT_CLOCK_HZ);
 }
 
 static size_t uwb_dw3000_build_header(uint8_t *header, size_t header_size,
@@ -1137,6 +1167,72 @@ static esp_err_t uwb_dw3000_read32(uint8_t base, uint8_t sub, uint32_t *value)
     return ESP_OK;
 }
 
+static esp_err_t uwb_dw3000_verify_spi_link(uint32_t expected_device_id,
+                                            uint32_t read_count)
+{
+    for (uint32_t read_index = 0; read_index < read_count; ++read_index) {
+        uint32_t device_id = 0;
+        const esp_err_t err = uwb_dw3000_read32(
+            DW3000_REG_GEN_CFG_AES_LOW, DW3000_SUB_NONE, &device_id);
+        if (err != ESP_OK || device_id != expected_device_id) {
+            ESP_LOGE(TAG,
+                     "DW3000 SPI verify %lu/%lu failed: err=%s dev_id=0x%08lx expected=0x%08lx",
+                     (unsigned long)(read_index + 1U),
+                     (unsigned long)read_count, esp_err_to_name(err),
+                     (unsigned long)device_id,
+                     (unsigned long)expected_device_id);
+            return err == ESP_OK ? ESP_ERR_INVALID_RESPONSE : err;
+        }
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t uwb_dw3000_restore_boot_spi(uint32_t expected_device_id)
+{
+    if (s_spi != NULL) {
+        ESP_RETURN_ON_ERROR(spi_bus_remove_device(s_spi), TAG,
+                            "remove operational SPI device failed");
+        s_spi = NULL;
+        s_spi_clock_hz = 0;
+    }
+
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_add_spi_device(UWB_DW3000_SPI_BOOT_CLOCK_HZ), TAG,
+        "restore boot SPI clock failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_verify_spi_link(expected_device_id, 1), TAG,
+        "boot SPI fallback verification failed");
+    ESP_LOGW(TAG, "DW3000 continues with boot SPI clock %lu Hz",
+             (unsigned long)s_spi_clock_hz);
+    return ESP_OK;
+}
+
+static esp_err_t uwb_dw3000_enable_operational_spi(uint32_t expected_device_id)
+{
+    ESP_RETURN_ON_ERROR(spi_bus_remove_device(s_spi), TAG,
+                        "remove boot SPI device failed");
+    s_spi = NULL;
+    s_spi_clock_hz = 0;
+
+    esp_err_t err =
+        uwb_dw3000_add_spi_device(UWB_DW3000_SPI_OPERATION_REQUEST_HZ);
+    if (err == ESP_OK) {
+        err = uwb_dw3000_verify_spi_link(expected_device_id,
+                                         UWB_DW3000_SPI_VERIFY_READS);
+    }
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "DW3000 operational SPI verified: %lu DEV_ID reads at %lu Hz",
+                 (unsigned long)UWB_DW3000_SPI_VERIFY_READS,
+                 (unsigned long)s_spi_clock_hz);
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "DW3000 operational SPI rejected, restoring boot clock");
+    return uwb_dw3000_restore_boot_spi(expected_device_id);
+}
+
 static esp_err_t uwb_dw3000_read_timestamp40(uint8_t base, uint8_t sub,
                                              uint64_t *timestamp)
 {
@@ -1201,11 +1297,12 @@ static double uwb_dw3000_clock_offset_ratio(int32_t clock_offset_raw)
 static double uwb_dw3000_remote_interval_in_local_dtu(
     double remote_interval_dtu, double clock_offset_ratio)
 {
-    // DRX_CAR_INT uses the DW3000 convention: a positive converted ratio means
-    // the local receiver clock is slower than the remote transmitter clock.
-    // Qorvo SS-TWR and FlexTDOA therefore map a remote interval into the local
-    // time base with (1 - ratio).
-    return remote_interval_dtu * (1.0 - clock_offset_ratio);
+    // uwb_dw3000_clock_offset_ratio() already applies the channel-specific
+    // negative DRX_CAR_INT scale. Reciprocal anchor measurements on hardware
+    // converge only when that converted value is applied with (1 + ratio);
+    // applying the API-guide sign a second time makes the two directions
+    // diverge symmetrically by metres for a 5 ms reply interval.
+    return remote_interval_dtu * (1.0 + clock_offset_ratio);
 }
 
 static uint64_t uwb_dw3000_add_timestamp_delta(uint64_t timestamp,
@@ -1376,6 +1473,12 @@ static bool uwb_dw3000_should_capture_rx_diagnostics(const uint8_t *payload,
 #if APP_UWB_DIAGNOSTICS_ENABLED
     if (!uwb_dw3000_payload_is_distance_frame(payload, payload_len) ||
         APP_UWB_DIAGNOSTICS_LOG_EVERY == 0) {
+        return false;
+    }
+
+    const uint8_t frame_type = payload[5];
+    if (frame_type == UWB_DISTANCE_FRAME_FLEX_TDOA_REQ ||
+        frame_type == UWB_DISTANCE_FRAME_FLEX_TDOA_RESP) {
         return false;
     }
 
@@ -2520,7 +2623,8 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             frame->clock_offset_raw = 0;
             if (read_err == ESP_OK &&
                 uwb_dw3000_payload_is_distance_frame(frame->payload,
-                                                     frame->payload_len)) {
+                                                     frame->payload_len) &&
+                frame->payload[5] != UWB_DISTANCE_FRAME_FLEX_TDOA_REQ) {
                 clock_err =
                     uwb_dw3000_read_clock_offset_raw(&frame->clock_offset_raw);
                 frame->clock_offset_valid = clock_err == ESP_OK;
@@ -4250,7 +4354,9 @@ static esp_err_t uwb_flex_tdoa_send_response_for_request(
     const uint32_t response_delay_us =
         UWB_FLEX_TDOA_PAPER_REQ_SUBSLOT_US +
         UWB_FLEX_TDOA_REQ_PROCESS_GUARD_US +
-        ((uint32_t)responder_index * UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US);
+        ((uint32_t)responder_index *
+         (UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US +
+          UWB_FLEX_TDOA_PAPER_RESP_PROCESS_US));
     const uint64_t response_due = uwb_dw3000_add_timestamp_delta(
         request->rx_timestamp, uwb_dw3000_us_to_dtu(response_delay_us));
     const uint32_t delayed_time_word =
@@ -4610,8 +4716,13 @@ static void uwb_flex_tdoa_arm_schedule_alarm(int64_t request_due_host_us)
                              UWB_FLEX_TDOA_REQUEST_TX_LEAD_US -
                              esp_timer_get_time();
     if (alarm_us > 0) {
-        (void)esp_timer_start_once(s_flex_tdoa_schedule_timer,
-                                  (uint64_t)alarm_us);
+        const esp_err_t err = esp_timer_start_once(
+            s_flex_tdoa_schedule_timer, (uint64_t)alarm_us);
+        if (err != ESP_OK) {
+            s_flex_tdoa_schedule_alarm_fired = true;
+            ESP_LOGW(TAG, "FLEX_TDOA schedule alarm failed: %s",
+                     esp_err_to_name(err));
+        }
     } else {
         s_flex_tdoa_schedule_alarm_fired = true;
     }
@@ -5557,6 +5668,15 @@ static void uwb_dw3000_task(void *arg)
         return;
     }
 
+    err = uwb_dw3000_enable_operational_spi(s_device_id);
+    if (err != ESP_OK) {
+        s_status = UWB_DW3000_STATUS_FAILED;
+        ESP_LOGE(TAG, "DW3000 SPI clock setup failed: %s",
+                 esp_err_to_name(err));
+        vTaskDelete(NULL);
+        return;
+    }
+
     if (s_runtime_mode == UWB_DW3000_RUNTIME_DISTANCE_TEST) {
         uwb_dw3000_distance_test_loop();
     } else if (s_runtime_mode == UWB_DW3000_RUNTIME_CALIBRATION) {
@@ -5657,6 +5777,11 @@ const char *uwb_dw3000_status_to_string(enum uwb_dw3000_status status)
 uint32_t uwb_dw3000_get_device_id(void)
 {
     return s_device_id;
+}
+
+uint32_t uwb_dw3000_get_spi_clock_hz(void)
+{
+    return s_spi_clock_hz;
 }
 
 uint8_t uwb_dw3000_get_source_id(void)

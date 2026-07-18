@@ -2735,12 +2735,12 @@ tr.status-stale td { color: #4f3b1d; }
             </div>
             <div class="profile-card" data-profile="fastRaw">
               <h3>Fast Profile</h3>
-              <p class="muted">FlexTDOA 15 ms / 2 ms timing for speed tests. This is aggressive and may hit the delayed-TX limit.</p>
+              <p class="muted">Validated FlexTDOA 12 ms / 1 ms timing. Command delay is retained only for DS-TWR-compatible modes.</p>
               <div class="form-grid compact">
                 <label for="profileFastRawSlotMs">Slot ms</label>
-                <input id="profileFastRawSlotMs" value="15" type="number" min="1" step="1">
+                <input id="profileFastRawSlotMs" value="12" type="number" min="1" step="1">
                 <label for="profileFastRawRoundGapMs">Round gap ms</label>
-                <input id="profileFastRawRoundGapMs" value="2" type="number" min="1" step="1">
+                <input id="profileFastRawRoundGapMs" value="1" type="number" min="1" step="1">
                 <label for="profileFastRawRxSliceMs">RX slice ms</label>
                 <input id="profileFastRawRxSliceMs" value="5" type="number" min="1" step="1">
                 <label for="profileFastRawCommandDelayMs">Command delay ms</label>
@@ -3097,8 +3097,8 @@ const rangingProfileDefaults = {
     prefix: "profileFastRaw",
     label: "Fast Profile",
     positionMaxAgeSec: 0.5,
-    slotMs: 15,
-    roundGapMs: 2,
+    slotMs: 12,
+    roundGapMs: 1,
     rxSliceMs: 5,
     commandDelayMs: 2,
     timeoutMs: 12,
@@ -3108,7 +3108,7 @@ const rangingProfileDefaults = {
     autoRxDelayUus: 500,
   },
 };
-const rangingProfileDefaultsVersion = "2026-07-17-profile-labels-v2";
+const rangingProfileDefaultsVersion = "2026-07-18-flex-12ms-v3";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
