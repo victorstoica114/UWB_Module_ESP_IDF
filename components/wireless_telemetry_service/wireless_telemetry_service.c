@@ -39,7 +39,7 @@ enum {
     WIRELESS_TELEMETRY_FRAME_HEADER_LEN = 12,
     WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN = 21,
     WIRELESS_TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26,
-    WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 16,
+    WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20,
     WIRELESS_TELEMETRY_FRAME_VERSION = 1,
     WIRELESS_TELEMETRY_STREAM_BNO085_ACCEL = 1,
     WIRELESS_TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION = 2,
@@ -84,6 +84,7 @@ typedef struct {
 } wireless_telemetry_flex_observation_t;
 
 typedef struct {
+    uint32_t slot_id;
     int32_t distance_mm;
     int32_t raw_distance_mm;
     uint16_t sequence;
@@ -542,13 +543,15 @@ static bool wireless_telemetry_append_binary_sample(
         break;
     case WIRELESS_TELEMETRY_ITEM_FLEX_ANCHOR_RANGE:
         wireless_telemetry_write_i32_le(
-            &sample[4], item->data.flex_anchor_range.distance_mm);
+            &sample[8], item->data.flex_anchor_range.distance_mm);
         wireless_telemetry_write_i32_le(
-            &sample[8], item->data.flex_anchor_range.raw_distance_mm);
+            &sample[12], item->data.flex_anchor_range.raw_distance_mm);
+        wireless_telemetry_write_u32_le(
+            &sample[4], item->data.flex_anchor_range.slot_id);
         wireless_telemetry_write_u16_le(
-            &sample[12], item->data.flex_anchor_range.sequence);
-        sample[14] = item->data.flex_anchor_range.initiator_id;
-        sample[15] = item->data.flex_anchor_range.responder_id;
+            &sample[16], item->data.flex_anchor_range.sequence);
+        sample[18] = item->data.flex_anchor_range.initiator_id;
+        sample[19] = item->data.flex_anchor_range.responder_id;
         break;
     default:
         return false;
@@ -1004,7 +1007,7 @@ bool wireless_telemetry_service_submit_flex_tdoa_observation(
 
 bool wireless_telemetry_service_submit_flex_anchor_range(
     uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
-    int32_t distance_mm, int32_t raw_distance_mm)
+    uint32_t slot_id, int32_t distance_mm, int32_t raw_distance_mm)
 {
     if (!s_connected) {
         return false;
@@ -1017,6 +1020,7 @@ bool wireless_telemetry_service_submit_flex_anchor_range(
         .uptime_ms = uptime_ms,
         .data = {
             .flex_anchor_range = {
+                .slot_id = slot_id,
                 .distance_mm = distance_mm,
                 .raw_distance_mm = raw_distance_mm,
                 .sequence = sequence,

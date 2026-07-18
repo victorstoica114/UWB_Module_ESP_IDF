@@ -85,10 +85,10 @@ TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION = 2
 TELEMETRY_STREAM_FLEX_ANCHOR_RANGE = 3
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
-TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 16
+TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
 TELEMETRY_FLEX_OBSERVATION_STRUCT = struct.Struct("<IIiiiHBBBB")
-TELEMETRY_FLEX_ANCHOR_RANGE_STRUCT = struct.Struct("<IiiHBB")
+TELEMETRY_FLEX_ANCHOR_RANGE_STRUCT = struct.Struct("<IIiiHBB")
 TELEMETRY_STREAM_SAMPLE_SIZES = {
     TELEMETRY_STREAM_BNO085_ACCEL: TELEMETRY_ACCEL_SAMPLE_LEN,
     TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION:
@@ -468,6 +468,7 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
         elif stream_type == TELEMETRY_STREAM_FLEX_ANCHOR_RANGE:
             (
                 uptime_ms,
+                slot_id,
                 distance_mm,
                 raw_distance_mm,
                 sequence,
@@ -479,6 +480,7 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     **common,
                     "uptime_ms": int(uptime_ms),
                     "topic": "uwb.flex_tdoa.anchor_range",
+                    "slot_id": int(slot_id),
                     "distance_m": distance_mm / 1000.0,
                     "raw_distance_m": raw_distance_mm / 1000.0,
                     "seq": int(sequence),
@@ -773,6 +775,7 @@ class DashboardState:
             initiator_id=initiator_id,
             responder_id=responder_id,
             seq=seq,
+            slot_id=None,
             distance_m=anchor_distance_m,
             raw_distance_m=None,
             item=item,
@@ -835,6 +838,7 @@ class DashboardState:
             initiator_id=initiator_id,
             responder_id=responder_id,
             seq=seq,
+            slot_id=slot_id,
             distance_m=anchor_distance_m,
             raw_distance_m=None,
             item=item,
@@ -861,6 +865,7 @@ class DashboardState:
             initiator_id=initiator_id,
             responder_id=responder_id,
             seq=seq,
+            slot_id=None,
             distance_m=distance_m,
             raw_distance_m=raw_distance_m,
             item=item,
@@ -872,6 +877,7 @@ class DashboardState:
             initiator_id = int(item["initiator_id"])
             responder_id = int(item["responder_id"])
             seq = int(item["seq"])
+            slot_id = int(item["slot_id"])
             distance_m = float(item["distance_m"])
             raw_distance_m = float(item["raw_distance_m"])
         except (KeyError, TypeError, ValueError):
@@ -881,6 +887,7 @@ class DashboardState:
             initiator_id=initiator_id,
             responder_id=responder_id,
             seq=seq,
+            slot_id=slot_id,
             distance_m=distance_m,
             raw_distance_m=raw_distance_m,
             item=item,
@@ -893,6 +900,7 @@ class DashboardState:
         initiator_id: int,
         responder_id: int,
         seq: int,
+        slot_id: int | None,
         distance_m: float,
         raw_distance_m: float | None,
         item: dict[str, Any],
@@ -920,6 +928,7 @@ class DashboardState:
             "initiator_id": initiator_id,
             "responder_id": responder_id,
             "seq": seq,
+            "slot_id": slot_id,
             "distance_m": distance_m,
             "raw_distance_m": raw_distance_m,
             "received_at": now,
@@ -1012,6 +1021,7 @@ class DashboardState:
         observations: dict[str, Any] = {}
         anchor_distances: dict[str, Any] = {}
         recent_observations: list[dict[str, Any]] = []
+        recent_anchor_ranges: list[dict[str, Any]] = []
         max_age_sec = 3.0
         for (tag_id, initiator_id, responder_id), item in sorted(
             self.tdoa_observations.items()
@@ -1094,7 +1104,6 @@ class DashboardState:
                 if now - float(sample.get("received_at") or 0.0) <= 10.0
             ]
             mean_m = sum(values) / len(values) if values else None
-            median_m = self.median_float(values)
             std_m = None
             if len(values) >= 2 and mean_m is not None:
                 variance = sum((value - mean_m) ** 2 for value in values) / (
@@ -1117,18 +1126,40 @@ class DashboardState:
                 "stats": {
                     "samples": len(values),
                     "mean_m": mean_m,
-                    "median_m": median_m,
                     "std_m": std_m,
                     "min_m": min(values) if values else None,
                     "max_m": max(values) if values else None,
                 },
             }
+            for sample in history:
+                slot_id = sample.get("slot_id")
+                age_sec = now - float(sample.get("received_at") or 0.0)
+                if slot_id is None or age_sec > max_age_sec or sample.get("source") != "anchor_result":
+                    continue
+                recent_anchor_ranges.append(
+                    {
+                        "anchor_a_id": int(sample["anchor_a_id"]),
+                        "anchor_b_id": int(sample["anchor_b_id"]),
+                        "initiator_id": int(sample["initiator_id"]),
+                        "responder_id": int(sample["responder_id"]),
+                        "seq": int(sample["seq"]),
+                        "slot_id": int(slot_id),
+                        "distance_m": float(sample["distance_m"]),
+                        "raw_distance_m": sample.get("raw_distance_m"),
+                        "age_sec": age_sec,
+                        "received_at": float(sample.get("received_at") or 0.0),
+                    }
+                )
         return {
             "observations": observations,
             "recent_observations": sorted(
                 recent_observations,
                 key=lambda sample: float(sample.get("received_at") or 0.0),
             )[-300:],
+            "recent_anchor_ranges": sorted(
+                recent_anchor_ranges,
+                key=lambda sample: float(sample.get("received_at") or 0.0),
+            )[-600:],
             "anchor_distances": anchor_distances,
             "max_age_sec": max_age_sec,
         }
@@ -2296,12 +2327,12 @@ tr.status-stale td { color: #4f3b1d; }
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
             <div><b>Solver</b><span>FlexTDOA uses passive tag range differences from request/response anchor slots. DS-TWR uses active tag-anchor distances. Legacy hybrid is only for older dual-leg logs.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
-            <div><b>Geometry</b><span>Anchor coordinates are learned from stable median TWR ranges, then frozen for positioning. Relearn after physically moving an anchor.</span></div>
+            <div><b>Geometry</b><span>Paper-style anchor self-localization uses batched TWR ranges and an EKF. Fix the resulting coordinates once before positioning, and restart self-localization after moving an anchor.</span></div>
           </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
-            <button id="positionRelearnGeometry">Relearn Geometry</button>
-            <button id="positionFreezeGeometry">Freeze Geometry</button>
+            <button id="positionRestartAnchorSelfLocalization">Restart Anchor Self-Localization</button>
+            <button id="positionFixAnchorGeometry">Fix Anchor Geometry</button>
             <button class="primary" id="positionEnableRangingSide">Enable Position Runtime</button>
           </div>
           <div id="positionToast" class="toast"></div>
@@ -3185,7 +3216,7 @@ const state = {
   positionAnchorTrail: {},
   positionResults: {},
   positionWasActive: false,
-  positionGeometry: {key: "", frozen: null, candidate: null, stableSince: null, lastEvalAt: 0},
+  positionGeometry: {key: "", fixed: null, ekf: null},
   positionSeeds: {},
 };
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
@@ -3920,17 +3951,6 @@ function freshAnchorPairDistance(a, b, maxAge) {
   return item;
 }
 
-function stableAnchorPairDistance(a, b, maxAge) {
-  const item = freshAnchorPairDistance(a, b, maxAge);
-  if (!item) return null;
-  const median = Number(item.stats?.median_m);
-  return {
-    ...item,
-    live_distance_m: Number(item.distance_m),
-    distance_m: Number.isFinite(median) ? median : Number(item.distance_m),
-  };
-}
-
 function selectedAnchorPairs(anchorIds) {
   const pairs = [];
   for (let i = 0; i < anchorIds.length; i++) {
@@ -3953,139 +3973,177 @@ function anchorGeometryResiduals(anchors, distanceItems) {
   return residuals;
 }
 
-function refineMeasuredAnchorGeometry(anchorIds, anchors, distanceItems) {
+function currentAnchorDistanceBatch(anchorIds, maxAge) {
+  const ids = anchorIds.map(Number).filter(id => Number.isInteger(id) && id > 0);
+  const liveItems = {};
+  for (const [a, b] of selectedAnchorPairs(ids)) {
+    const item = freshAnchorPairDistance(a, b, maxAge);
+    if (item) liveItems[anchorPairKey(a, b)] = item;
+  }
+
+  const selected = new Set(ids);
+  const groups = new Map();
+  for (const sample of state.tdoa?.recent_anchor_ranges || []) {
+    const initiator = Number(sample.initiator_id);
+    const responder = Number(sample.responder_id);
+    const slotId = Number(sample.slot_id);
+    if (!selected.has(initiator) || !selected.has(responder) ||
+        !Number.isInteger(slotId) || Number(sample.age_sec) > maxAge) continue;
+    const frameId = Math.floor(slotId / ids.length);
+    const group = groups.get(frameId) || {frameId, items: {}, newestAt: 0};
+    const pair = anchorPairKey(initiator, responder);
+    group.items[pair] = {...(liveItems[pair] || {}), ...sample};
+    group.newestAt = Math.max(group.newestAt, Number(sample.received_at) || 0);
+    groups.set(frameId, group);
+  }
+
+  const expectedPairs = selectedAnchorPairs(ids);
+  const complete = [...groups.values()]
+    .filter(group => expectedPairs.every(([a, b]) => group.items[anchorPairKey(a, b)]))
+    .sort((left, right) => right.frameId - left.frameId)[0];
+  const distanceItems = complete?.items || liveItems;
+  const missingPairs = expectedPairs.filter(
+    ([a, b]) => !distanceItems[anchorPairKey(a, b)]);
+  return {
+    ids,
+    distanceItems,
+    missingPairs,
+    coherent: Boolean(complete),
+    frameId: complete?.frameId ?? null,
+  };
+}
+
+function initialPaperAnchorCoordinates(anchorIds, distanceItems) {
   const ids = anchorIds.map(Number);
-  const variables = [];
-  if (anchors[ids[1]]) {
-    variables.push({id: ids[1], axis: "x"});
-  }
-  for (const id of ids.slice(2)) {
-    if (anchors[id]) {
-      variables.push({id, axis: "x"});
-      variables.push({id, axis: "y"});
-    }
-  }
-  if (!variables.length) return anchors;
+  if (ids.length < 3 || ids.length > 4) return null;
+  const distance = (a, b) => Number(distanceItems[anchorPairKey(a, b)]?.distance_m);
+  const d01 = distance(ids[0], ids[1]);
+  const d02 = distance(ids[0], ids[2]);
+  const d12 = distance(ids[1], ids[2]);
+  if (![d01, d02, d12].every(value => Number.isFinite(value) && value > 0)) return null;
 
-  const indexFor = new Map(
-    variables.map((variable, index) => [`${variable.id}:${variable.axis}`, index])
-  );
-  for (let iter = 0; iter < 20; iter++) {
-    const n = variables.length;
-    const normal = Array.from({length: n}, () => Array(n).fill(0));
-    const rhs = Array(n).fill(0);
-    let used = 0;
+  // Paper frame convention adapted to 2D: A0=(0,0), A1 on +Y, A2 on +X.
+  const y2 = (d02 * d02 + d01 * d01 - d12 * d12) / (2 * d01);
+  const x2sq = d02 * d02 - y2 * y2;
+  if (x2sq < -0.02) return null;
+  const anchors = {
+    [ids[0]]: {x: 0, y: 0},
+    [ids[1]]: {x: 0, y: d01},
+    [ids[2]]: {x: Math.sqrt(Math.max(0, x2sq)), y: y2},
+  };
 
-    for (const item of Object.values(distanceItems || {})) {
-      const a = anchors[Number(item.anchor_a_id)];
-      const b = anchors[Number(item.anchor_b_id)];
-      const measured = Number(item.distance_m);
-      if (!a || !b || !Number.isFinite(measured) || measured <= 0) continue;
-      const dx = a.x - b.x;
-      const dy = a.y - b.y;
-      const predicted = Math.max(1e-6, Math.hypot(dx, dy));
-      const residual = predicted - measured;
-      const gradient = Array(n).fill(0);
-
-      const ax = indexFor.get(`${item.anchor_a_id}:x`);
-      const ay = indexFor.get(`${item.anchor_a_id}:y`);
-      const bx = indexFor.get(`${item.anchor_b_id}:x`);
-      const by = indexFor.get(`${item.anchor_b_id}:y`);
-      if (ax !== undefined) gradient[ax] = dx / predicted;
-      if (ay !== undefined) gradient[ay] = dy / predicted;
-      if (bx !== undefined) gradient[bx] = -dx / predicted;
-      if (by !== undefined) gradient[by] = -dy / predicted;
-
-      for (let r = 0; r < n; r++) {
-        rhs[r] += -gradient[r] * residual;
-        for (let c = 0; c < n; c++) normal[r][c] += gradient[r] * gradient[c];
-      }
-      used++;
-    }
-
-    if (used < variables.length) break;
-    for (let i = 0; i < n; i++) normal[i][i] += 1e-6;
-    const step = solveLinearSystem(normal, rhs);
-    if (!step) break;
-
-    let stepNorm = 0;
-    for (let i = 0; i < variables.length; i++) {
-      const variable = variables[i];
-      const delta = Math.max(-0.25, Math.min(0.25, Number(step[i]) || 0));
-      anchors[variable.id][variable.axis] += delta;
-      stepNorm += delta * delta;
-    }
-    if (Math.sqrt(stepNorm) < 0.0005) break;
+  if (ids.length === 4) {
+    const d03 = distance(ids[0], ids[3]);
+    const d13 = distance(ids[1], ids[3]);
+    const d23 = distance(ids[2], ids[3]);
+    if (![d03, d13, d23].every(value => Number.isFinite(value) && value > 0)) return null;
+    const y3 = (d03 * d03 + d01 * d01 - d13 * d13) / (2 * d01);
+    const x3sq = d03 * d03 - y3 * y3;
+    if (x3sq < -0.02) return null;
+    const x3abs = Math.sqrt(Math.max(0, x3sq));
+    const candidates = [{x: x3abs, y: y3}, {x: -x3abs, y: y3}];
+    candidates.sort((left, right) =>
+      Math.abs(Math.hypot(left.x - anchors[ids[2]].x, left.y - anchors[ids[2]].y) - d23) -
+      Math.abs(Math.hypot(right.x - anchors[ids[2]].x, right.y - anchors[ids[2]].y) - d23));
+    anchors[ids[3]] = candidates[0];
   }
   return anchors;
 }
 
-function measuredAnchorGeometry(anchorIds, maxAge) {
-  const ids = anchorIds.map(Number).filter(id => Number.isInteger(id) && id > 0);
-  const distanceItems = {};
-  const missingPairs = [];
-  for (const [a, b] of selectedAnchorPairs(ids)) {
-    const item = stableAnchorPairDistance(a, b, maxAge);
-    if (item) distanceItems[anchorPairKey(a, b)] = item;
-    else missingPairs.push([a, b]);
+function paperAnchorVariables(anchorIds) {
+  const ids = anchorIds.map(Number);
+  const variables = [{id: ids[1], axis: "y"}];
+  for (const id of ids.slice(2)) {
+    variables.push({id, axis: "x"}, {id, axis: "y"});
   }
+  return variables;
+}
 
-  const result = {
-    anchors: {},
-    distanceItems,
-    missingPairs,
-    residuals: {},
-    complete: false,
-    status: "waiting",
-  };
-  if (ids.length < 3) return result;
+function paperAnchorStateFromCoordinates(variables, anchors) {
+  return variables.map(variable => Number(anchors[variable.id][variable.axis]));
+}
 
-  const distance = (a, b) => {
-    const item = distanceItems[anchorPairKey(a, b)];
-    return item ? Number(item.distance_m) : NaN;
-  };
-  const d01 = distance(ids[0], ids[1]);
-  const d02 = distance(ids[0], ids[2]);
-  const d12 = distance(ids[1], ids[2]);
-  if (![d01, d02, d12].every(value => Number.isFinite(value) && value > 0)) {
-    return result;
+function paperAnchorCoordinatesFromState(anchorIds, variables, vector) {
+  const ids = anchorIds.map(Number);
+  const anchors = {[ids[0]]: {x: 0, y: 0}, [ids[1]]: {x: 0, y: 0}};
+  for (const id of ids.slice(2)) anchors[id] = {x: 0, y: 0};
+  variables.forEach((variable, index) => {
+    anchors[variable.id][variable.axis] = Number(vector[index]);
+  });
+  return anchors;
+}
+
+function invertMatrix(matrix) {
+  const n = matrix.length;
+  const inverse = Array.from({length: n}, () => Array(n).fill(0));
+  for (let col = 0; col < n; col++) {
+    const rhs = Array(n).fill(0);
+    rhs[col] = 1;
+    const solution = solveLinearSystem(matrix, rhs);
+    if (!solution) return null;
+    for (let row = 0; row < n; row++) inverse[row][col] = solution[row];
   }
+  return inverse;
+}
 
-  const p0 = {x: 0, y: 0};
-  const p1 = {x: d01, y: 0};
-  const x2 = (d02 * d02 + d01 * d01 - d12 * d12) / (2 * d01);
-  const y2sq = d02 * d02 - x2 * x2;
-  const p2 = {x: x2, y: Math.sqrt(Math.max(0, y2sq))};
-  result.anchors[ids[0]] = p0;
-  result.anchors[ids[1]] = p1;
-  result.anchors[ids[2]] = p2;
-  result.complete = missingPairs.length === 0 && y2sq >= -0.02;
-  result.status = result.complete ? "ok" : "inconsistent";
+function multiplyMatrixVector(matrix, vector) {
+  return matrix.map(row => row.reduce(
+    (sum, value, index) => sum + value * vector[index], 0));
+}
 
-  if (ids.length >= 4) {
-    const d03 = distance(ids[0], ids[3]);
-    const d13 = distance(ids[1], ids[3]);
-    const d23 = distance(ids[2], ids[3]);
-    if ([d03, d13, d23].every(value => Number.isFinite(value) && value > 0)) {
-      const x3 = (d03 * d03 + d01 * d01 - d13 * d13) / (2 * d01);
-      const y3sq = d03 * d03 - x3 * x3;
-      const y3abs = Math.sqrt(Math.max(0, y3sq));
-      const candidates = [{x: x3, y: y3abs}, {x: x3, y: -y3abs}];
-      candidates.sort((left, right) =>
-        Math.abs(Math.hypot(left.x - p2.x, left.y - p2.y) - d23) -
-        Math.abs(Math.hypot(right.x - p2.x, right.y - p2.y) - d23));
-      result.anchors[ids[3]] = candidates[0];
-      result.complete = result.complete && y3sq >= -0.02;
-      result.status = result.complete ? "ok" : "inconsistent";
-    } else {
-      result.complete = false;
-      result.status = "waiting";
+function updatePaperAnchorEkf(ekf, anchorIds, distanceItems) {
+  const variables = ekf.variables;
+  const n = variables.length;
+  const anchors = paperAnchorCoordinatesFromState(anchorIds, variables, ekf.state);
+  const indexFor = new Map(
+    variables.map((variable, index) => [`${variable.id}:${variable.axis}`, index])
+  );
+
+  // FlexTDOA paper parameters: sigma_Q^2=1 cm^2, sigma_R^2=10 cm^2.
+  const qVarianceM2 = 1 * 0.01 * 0.01;
+  const rVarianceM2 = 10 * 0.01 * 0.01;
+  const predictedCovariance = ekf.covariance.map((row, r) =>
+    row.map((value, c) => value + (r === c ? qVarianceM2 : 0)));
+  const information = invertMatrix(predictedCovariance);
+  if (!information) return false;
+  const rhs = Array(n).fill(0);
+
+  for (const item of Object.values(distanceItems)) {
+    const a = anchors[Number(item.anchor_a_id)];
+    const b = anchors[Number(item.anchor_b_id)];
+    const measured = Number(item.distance_m);
+    if (!a || !b || !Number.isFinite(measured) || measured <= 0) return false;
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    const predicted = Math.max(1e-6, Math.hypot(dx, dy));
+    const innovation = measured - predicted;
+    const gradient = Array(n).fill(0);
+    const ax = indexFor.get(`${item.anchor_a_id}:x`);
+    const ay = indexFor.get(`${item.anchor_a_id}:y`);
+    const bx = indexFor.get(`${item.anchor_b_id}:x`);
+    const by = indexFor.get(`${item.anchor_b_id}:y`);
+    if (ax !== undefined) gradient[ax] = dx / predicted;
+    if (ay !== undefined) gradient[ay] = dy / predicted;
+    if (bx !== undefined) gradient[bx] = -dx / predicted;
+    if (by !== undefined) gradient[by] = -dy / predicted;
+
+    for (let r = 0; r < n; r++) {
+      rhs[r] += gradient[r] * innovation / rVarianceM2;
+      for (let c = 0; c < n; c++) {
+        information[r][c] += gradient[r] * gradient[c] / rVarianceM2;
+      }
     }
   }
 
-  refineMeasuredAnchorGeometry(ids, result.anchors, distanceItems);
-  result.residuals = anchorGeometryResiduals(result.anchors, distanceItems);
-  return result;
+  const posteriorCovariance = invertMatrix(information);
+  if (!posteriorCovariance) return false;
+  const correction = multiplyMatrixVector(posteriorCovariance, rhs);
+  if (!correction.every(Number.isFinite)) return false;
+  ekf.state = ekf.state.map((value, index) => value + correction[index]);
+  ekf.covariance = posteriorCovariance;
+  ekf.updates++;
+  ekf.lastUpdateAt = Date.now() / 1000;
+  return true;
 }
 
 function positionGeometryKey(anchorIds) {
@@ -4093,7 +4151,7 @@ function positionGeometryKey(anchorIds) {
 }
 
 function positionGeometryStorageKey(anchorIds) {
-  return `uwbDash.positionGeometry.${positionGeometryKey(anchorIds)}`;
+  return `uwbDash.flexTdoaPaperGeometry.v1.${positionGeometryKey(anchorIds)}`;
 }
 
 function cloneAnchorCoordinates(anchors) {
@@ -4103,7 +4161,7 @@ function cloneAnchorCoordinates(anchors) {
   ]));
 }
 
-function loadFrozenPositionGeometry(anchorIds) {
+function loadFixedPaperAnchorGeometry(anchorIds) {
   try {
     const parsed = JSON.parse(localStorage.getItem(positionGeometryStorageKey(anchorIds)) || "null");
     if (!parsed || positionGeometryKey(parsed.anchorIds || []) !== positionGeometryKey(anchorIds)) return null;
@@ -4116,109 +4174,99 @@ function loadFrozenPositionGeometry(anchorIds) {
   }
 }
 
-function geometryCoordinateDelta(left, right) {
-  const ids = Object.keys(left || {}).filter(id => right?.[id]);
-  if (!ids.length) return Number.POSITIVE_INFINITY;
-  const sumSq = ids.reduce((sum, id) => {
-    const dx = Number(left[id].x) - Number(right[id].x);
-    const dy = Number(left[id].y) - Number(right[id].y);
-    return sum + dx * dx + dy * dy;
-  }, 0);
-  return Math.sqrt(sumSq / ids.length);
-}
-
-function freezePositionGeometry(candidate, anchorIds, reason = "manual") {
-  if (!candidate?.complete || Object.keys(candidate.anchors || {}).length !== anchorIds.length) return false;
-  const referenceDistances = Object.fromEntries(Object.entries(candidate.distanceItems || {}).map(([key, item]) => [
-    key,
-    Number(item.distance_m),
-  ]));
-  const frozen = {
-    anchorIds: anchorIds.map(Number),
-    anchors: cloneAnchorCoordinates(candidate.anchors),
-    referenceDistances,
-    frozenAt: Date.now() / 1000,
-    reason,
-  };
-  state.positionGeometry.frozen = frozen;
-  state.positionGeometry.candidate = candidate;
-  state.positionGeometry.stableSince = null;
-  state.positionSeeds = {};
-  localStorage.setItem(positionGeometryStorageKey(anchorIds), JSON.stringify(frozen));
-  return true;
-}
-
-function resetPositionGeometry(anchorIds, forgetStored = true) {
-  const key = positionGeometryKey(anchorIds);
+function resetPaperAnchorSelfLocalization(anchorIds, forgetStored = true) {
   if (forgetStored) localStorage.removeItem(positionGeometryStorageKey(anchorIds));
-  state.positionGeometry = {key, frozen: null, candidate: null, stableSince: null, lastEvalAt: 0};
+  state.positionGeometry = {
+    key: positionGeometryKey(anchorIds),
+    fixed: null,
+    ekf: null,
+  };
   state.positionSeeds = {};
   state.positionAnchorTrail = {};
 }
 
-function positionGeometryQuality(candidate) {
-  const items = Object.values(candidate?.distanceItems || {});
-  const residuals = Object.values(candidate?.residuals || {}).map(value => Math.abs(Number(value)));
-  const samples = items.map(item => Number(item.stats?.samples || 0));
-  const stdValues = items.map(item => Number(item.stats?.std_m)).filter(Number.isFinite);
-  return {
-    complete: Boolean(candidate?.complete),
-    minSamples: samples.length ? Math.min(...samples) : 0,
-    maxStdM: stdValues.length ? Math.max(...stdValues) : Number.POSITIVE_INFINITY,
-    maxResidualM: residuals.length ? Math.max(...residuals) : Number.POSITIVE_INFINITY,
-  };
-}
-
-function stabilizedAnchorGeometry(anchorIds, maxAge) {
+function paperAnchorGeometry(anchorIds, maxAge) {
   const key = positionGeometryKey(anchorIds);
-  const now = Date.now() / 1000;
   if (state.positionGeometry.key !== key) {
     state.positionGeometry = {
       key,
-      frozen: loadFrozenPositionGeometry(anchorIds),
-      candidate: null,
-      stableSince: null,
-      lastEvalAt: 0,
+      fixed: loadFixedPaperAnchorGeometry(anchorIds),
+      ekf: null,
     };
     state.positionSeeds = {};
   }
 
-  const candidate = measuredAnchorGeometry(anchorIds, maxAge);
+  const batch = currentAnchorDistanceBatch(anchorIds, maxAge);
   const session = state.positionGeometry;
-  if (session.frozen) {
+  if (session.fixed) {
+    const anchors = cloneAnchorCoordinates(session.fixed.anchors);
     return {
-      ...candidate,
-      anchors: cloneAnchorCoordinates(session.frozen.anchors),
-      residuals: anchorGeometryResiduals(session.frozen.anchors, candidate.distanceItems),
+      anchors,
+      distanceItems: batch.distanceItems,
+      missingPairs: batch.missingPairs,
+      residuals: anchorGeometryResiduals(anchors, batch.distanceItems),
       complete: true,
-      status: "frozen",
-      frozenAt: session.frozen.frozenAt,
-      freezeReason: session.frozen.reason,
-      referenceDistances: session.frozen.referenceDistances || {},
+      positionReady: true,
+      canFix: false,
+      status: "fixed",
+      fixedAt: Number(session.fixed.fixedAt),
+      updates: Number(session.fixed.updates || 0),
     };
   }
 
-  if (now - session.lastEvalAt >= 0.25) {
-    const quality = positionGeometryQuality(candidate);
-    const delta = geometryCoordinateDelta(session.candidate?.anchors, candidate.anchors);
-    const stable = quality.complete && quality.minSamples >= 9 &&
-      quality.maxStdM <= 0.05 && quality.maxResidualM <= 0.05 &&
-      (!session.candidate || delta <= 0.02);
-    session.stableSince = stable ? (session.stableSince || now) : null;
-    session.candidate = candidate;
-    session.lastEvalAt = now;
-    if (session.stableSince && now - session.stableSince >= 5.0) {
-      freezePositionGeometry(candidate, anchorIds, "automatic");
-      return stabilizedAnchorGeometry(anchorIds, maxAge);
+  if (!session.ekf && batch.coherent && batch.missingPairs.length === 0) {
+    const anchors = initialPaperAnchorCoordinates(batch.ids, batch.distanceItems);
+    if (anchors) {
+      const variables = paperAnchorVariables(batch.ids);
+      const n = variables.length;
+      session.ekf = {
+        variables,
+        state: paperAnchorStateFromCoordinates(variables, anchors),
+        covariance: Array.from({length: n}, (_, r) =>
+          Array.from({length: n}, (_, c) => r === c ? 1 : 0)),
+        lastFrameId: batch.frameId,
+        updates: 0,
+        startedAt: Date.now() / 1000,
+        lastUpdateAt: 0,
+      };
+    }
+  } else if (session.ekf && batch.coherent && batch.missingPairs.length === 0) {
+    if (batch.frameId !== session.ekf.lastFrameId &&
+        updatePaperAnchorEkf(session.ekf, batch.ids, batch.distanceItems)) {
+      session.ekf.lastFrameId = batch.frameId;
     }
   }
 
-  const quality = positionGeometryQuality(candidate);
+  if (!session.ekf) {
+    return {
+      anchors: {},
+      distanceItems: batch.distanceItems,
+      missingPairs: batch.missingPairs,
+      residuals: {},
+      complete: false,
+      positionReady: false,
+      canFix: false,
+      status: batch.missingPairs.length ? "waiting" : "inconsistent",
+    };
+  }
+
+  const anchors = paperAnchorCoordinatesFromState(
+    batch.ids, session.ekf.variables, session.ekf.state);
+  const sigmaValues = session.ekf.covariance.map(
+    (row, index) => Math.sqrt(Math.max(0, Number(row[index]))));
   return {
-    ...candidate,
-    status: candidate.complete ? "learning" : candidate.status,
-    stableForSec: session.stableSince ? now - session.stableSince : 0,
-    quality,
+    anchors,
+    distanceItems: batch.distanceItems,
+    missingPairs: batch.missingPairs,
+    residuals: anchorGeometryResiduals(anchors, batch.distanceItems),
+    complete: true,
+    positionReady: false,
+    canFix: batch.coherent && batch.missingPairs.length === 0 && session.ekf.updates > 0,
+    status: "self_localizing",
+    updates: session.ekf.updates,
+    frameId: session.ekf.lastFrameId,
+    elapsedSec: Date.now() / 1000 - session.ekf.startedAt,
+    maxSigmaM: sigmaValues.length ? Math.max(...sigmaValues) : NaN,
   };
 }
 
@@ -4529,7 +4577,7 @@ function computePositionModel() {
   const selectedIds = selectedPositionModuleIds(settings);
   const offlineModuleIds = selectedIds.filter(id => !moduleHttpOnline(statusForModule(id)));
   const active = positionRangingActive(settings);
-  const geometry = stabilizedAnchorGeometry(settings.anchorIds, positionGeometryMaxAge(settings));
+  const geometry = paperAnchorGeometry(settings.anchorIds, positionGeometryMaxAge(settings));
   const anchors = {...(geometry?.anchors || {})};
 
   if (!active && state.positionWasActive) {
@@ -4543,7 +4591,7 @@ function computePositionModel() {
   const tags = {};
   const now = Date.now() / 1000;
   updatePositionAnchorTrail(anchors, now);
-  if (active) {
+  if (active && geometry.positionReady) {
     for (const tagId of settings.tagIds) {
       const distances = {};
       const distanceItems = {};
@@ -4820,25 +4868,24 @@ function drawPosition(model) {
 function renderPositionGeometryPanel(model) {
   const rows = document.getElementById("positionGeometryRows");
   const status = document.getElementById("positionGeometryStatus");
-  const freezeButton = document.getElementById("positionFreezeGeometry");
+  const fixButton = document.getElementById("positionFixAnchorGeometry");
   if (!rows) return;
 
   const geometry = model.geometry || {};
   if (status) {
-    if (geometry.status === "frozen") {
-      status.textContent = `Frozen geometry · ${fmtAge(Number(geometry.frozenAt || 0))} · ${geometry.freezeReason || "saved"}`;
+    if (geometry.status === "fixed") {
+      status.textContent = `Fixed paper geometry · ${fmtAge(Number(geometry.fixedAt || 0))} · ${geometry.updates || 0} EKF updates`;
       status.className = "muted fresh";
-    } else if (geometry.status === "learning") {
-      const quality = geometry.quality || {};
-      status.textContent = `Learning geometry · stable ${fmtFixed(geometry.stableForSec || 0, 1)} / 5.0 s · min ${quality.minSamples || 0} samples · max std ${fmtPositionCm(quality.maxStdM, 1)}`;
+    } else if (geometry.status === "self_localizing") {
+      status.textContent = `Paper TWR-EKF self-localization · ${geometry.updates || 0} updates · ${fmtFixed(geometry.elapsedSec || 0, 0)} s · max σ ${fmtPositionCm(geometry.maxSigmaM, 1)}`;
       status.className = "muted";
     } else {
       status.textContent = "Waiting for all fresh anchor-anchor ranges.";
       status.className = "muted stale";
     }
   }
-  if (freezeButton) {
-    freezeButton.disabled = !geometry.complete || geometry.status === "frozen";
+  if (fixButton) {
+    fixButton.disabled = !geometry.canFix || geometry.status === "fixed";
   }
   const pairRows = selectedAnchorPairs(model.settings.anchorIds).map(([a, b]) => {
     const key = anchorPairKey(a, b);
@@ -4894,7 +4941,7 @@ function renderPositionSolverStatus(model) {
       pills.push(`<span class="position-pill">frame ${esc(coherence.frameId)} · span ${fmtFixed(coherence.spanMs, 1)} ms</span>`);
     }
   }
-  pills.push(`<span class="position-pill ${model.geometry?.status === "frozen" ? "good" : "warn"}">geometry ${esc(model.geometry?.status || "waiting")}</span>`);
+  pills.push(`<span class="position-pill ${model.geometry?.status === "fixed" ? "good" : "warn"}">geometry ${esc(model.geometry?.status || "waiting")}</span>`);
 
   return `<div class="position-filter-card">
     <b>Position Solver</b>
@@ -4939,6 +4986,10 @@ function renderPositionReadout(model) {
     overlay.querySelector("p").textContent = positionProtocolUsesTdoa(model.settings.solver)
       ? `Waiting for fresh anchor-anchor ranges involving: ${missingCoords.join(", ")}.`
       : `No measured anchor geometry is available yet for anchors: ${missingCoords.join(", ")}. Run FlexTDOA once to measure the anchor layout, then DS-TWR ranges can use the last measured geometry.`;
+  } else if (!model.geometry?.positionReady) {
+    overlay.classList.add("active");
+    overlay.querySelector("h2").textContent = "Anchor self-localization in progress";
+    overlay.querySelector("p").textContent = "FlexTDOA positioning starts after the TWR-EKF geometry is fixed. Let it converge for several minutes, then use Fix Anchor Geometry.";
   } else {
     overlay.classList.remove("active");
     overlay.querySelector("h2").textContent = `${solverName} is not active`;
@@ -7322,23 +7373,34 @@ async function enablePositionRanging() {
   setTimeout(fetchSnapshot, 1500);
 }
 
-function relearnPositionGeometry() {
+function restartAnchorSelfLocalization() {
   const settings = positionSettings();
-  resetPositionGeometry(settings.anchorIds, true);
+  resetPaperAnchorSelfLocalization(settings.anchorIds, true);
   state.positionTrail = {};
-  setToast("positionToast", "Anchor geometry learning restarted", "good");
+  setToast("positionToast", "Paper TWR-EKF anchor self-localization restarted", "good");
   renderPosition();
 }
 
-function freezeCurrentPositionGeometry() {
+function fixCurrentAnchorGeometry() {
   const settings = positionSettings();
-  const candidate = state.positionGeometry.candidate ||
-    measuredAnchorGeometry(settings.anchorIds, positionGeometryMaxAge(settings));
-  if (!freezePositionGeometry(candidate, settings.anchorIds, "manual")) {
-    setToast("positionToast", "Complete anchor geometry is not available yet", "bad");
+  const session = state.positionGeometry;
+  if (session.key !== positionGeometryKey(settings.anchorIds) || !session.ekf || session.ekf.updates < 1) {
+    setToast("positionToast", "Anchor EKF has no complete update yet", "bad");
     return;
   }
-  setToast("positionToast", "Anchor geometry frozen", "good");
+  const anchors = paperAnchorCoordinatesFromState(
+    settings.anchorIds, session.ekf.variables, session.ekf.state);
+  const fixed = {
+    anchorIds: settings.anchorIds.map(Number),
+    anchors: cloneAnchorCoordinates(anchors),
+    fixedAt: Date.now() / 1000,
+    updates: session.ekf.updates,
+  };
+  session.fixed = fixed;
+  localStorage.setItem(positionGeometryStorageKey(settings.anchorIds), JSON.stringify(fixed));
+  state.positionSeeds = {};
+  state.positionTrail = {};
+  setToast("positionToast", "Anchor geometry fixed for FlexTDOA positioning", "good");
   renderPosition();
 }
 
@@ -7384,8 +7446,8 @@ function wireSettings() {
     state.positionAnchorTrail = {};
     renderPosition();
   });
-  document.getElementById("positionRelearnGeometry").addEventListener("click", relearnPositionGeometry);
-  document.getElementById("positionFreezeGeometry").addEventListener("click", freezeCurrentPositionGeometry);
+  document.getElementById("positionRestartAnchorSelfLocalization").addEventListener("click", restartAnchorSelfLocalization);
+  document.getElementById("positionFixAnchorGeometry").addEventListener("click", fixCurrentAnchorGeometry);
   document.getElementById("positionEnableRanging").addEventListener("click", enablePositionRanging);
   document.getElementById("positionEnableRangingSide").addEventListener("click", enablePositionRanging);
   document.querySelectorAll(".cm-input").forEach(el => {

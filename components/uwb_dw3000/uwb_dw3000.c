@@ -499,6 +499,7 @@ static esp_err_t uwb_dw3000_fast_command(uint8_t command);
 static esp_err_t uwb_dw3000_clear_status(void);
 static void uwb_flex_tdoa_log_anchor_result(
     uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
+    uint32_t slot_id,
     double distance_m, double raw_distance_m, bool clock_offset_valid,
     double clock_offset_ratio);
 static void uwb_distance_fill_tag_measurement(
@@ -5107,7 +5108,7 @@ static void uwb_flex_tdoa_handle_response_measurement(
             s_flex_tdoa_anchor_index_since_summary[responder_index]++;
         }
         uwb_flex_tdoa_log_anchor_result(
-            initiator_id, responder_id, frame->sequence,
+            initiator_id, responder_id, frame->sequence, slot_id,
             distance_m, raw_distance_m, frame->clock_offset_valid,
             clock_offset_ratio);
     }
@@ -5125,11 +5126,12 @@ static void uwb_flex_tdoa_handle_response_measurement(
 
 static void uwb_flex_tdoa_log_anchor_result(
     uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
+    uint32_t slot_id,
     double distance_m, double raw_distance_m, bool clock_offset_valid,
     double clock_offset_ratio)
 {
     const bool queued = wireless_telemetry_service_submit_flex_anchor_range(
-        initiator_id, responder_id, sequence,
+        initiator_id, responder_id, sequence, slot_id,
         uwb_distance_meters_to_mm(distance_m),
         uwb_distance_meters_to_mm(raw_distance_m));
     s_flex_tdoa_anchor_results_since_summary++;

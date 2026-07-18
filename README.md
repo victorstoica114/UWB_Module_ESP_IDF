@@ -468,8 +468,9 @@ comes from the cached
 anchor-anchor distance piggybacked in the response, with the latest local cache
 used until the pair has a fresh value.
 
-No median, moving average, or position filter is applied to FlexTDOA data.
-Firmware only rejects structurally impossible observations: mismatched
+No median, moving average, or position filter is applied to the passive tag's
+FlexTDOA observations. Anchor self-localization is a separate paper-defined
+TWR-EKF phase described below. Firmware only rejects structurally impossible observations: mismatched
 `slot_id`/responder index, missing CIA clock data, incoherent timestamps, or a
 range difference that violates the triangle inequality by more than a `2 m`
 diagnostic margin.
@@ -484,7 +485,7 @@ diagnostic margin.
 | Every localization packet carries 32-bit slot ID | Implemented in every request and response. This avoids the 256-slot wrap ambiguity of an 8-bit counter. |
 | CI-CR schedule | Implemented by rotating initiator and responder order every slot/round. |
 | CFO-based reply delay correction | Implemented from buffered `CIA_DIAG_0`, with the Qorvo sign convention and no clock Kalman filter. |
-| Anchor self-localization via TWR distances piggybacked in packets | Implemented as an unfiltered short request/response TWR range cached and piggybacked in `FLEX_TDOA_RESP`. |
+| Anchor self-localization via TWR distances piggybacked in packets | Implemented. Raw short request/response TWR ranges carry the 32-bit slot ID, are grouped into complete TDMA frames, and update the anchor EKF as a batch. |
 | Fully distributed slot synchronization | Implemented from request RX timestamps. Responses do not perturb the schedule. |
 | Paper radio setup | Use CH5, 6.8 Mb/s, PRF 64 MHz, preamble 128 when matching the paper. |
 
@@ -582,13 +583,31 @@ An earlier experiment carried only the low byte; after 256 slots that could
 make a recovering follower infer a different response order. Keeping all 32
 bits is cheap and removes that long-run ambiguity.
 
-The dashboard consumes observations coherently by slot ID instead of mixing
-fresh-looking rows from unrelated slots. Anchor geometry is learned from live
-anchor-anchor measurements, frozen only after every selected edge is present,
-and persisted locally. It is not continuously rebuilt underneath the tag
-solver. Each new least-squares solve is seeded from the previous valid tag
-position, which keeps convergence on the same physical branch without adding a
-position filter.
+The dashboard consumes tag observations coherently by slot ID instead of mixing
+fresh-looking rows from unrelated slots. Anchor ranges also carry the full
+32-bit slot ID. The dashboard groups all pair ranges from one complete TDMA
+frame and performs one multi-range EKF update, matching the paper's anchor
+self-localization procedure.
+
+The anchor EKF uses the paper's published covariance values:
+
+```text
+anchor model variance      sigma_Q^2 = 1 cm^2
+TWR measurement variance  sigma_R^2 = 10 cm^2
+```
+
+For the current planar setup, the paper's coordinate convention is adapted to
+2D: the first selected anchor is fixed at `(0,0)`, the second is on the positive
+Y axis, and the third has positive X. Anchor coordinates remain in the explicit
+`self-localizing` phase until the operator chooses `Fix Anchor Geometry`. They
+are then kept fixed, as in the paper, and persisted locally for subsequent
+positioning. `Restart Anchor Self-Localization` discards them after an anchor is
+physically moved. There is no median window, stability threshold, or automatic
+freeze in this path.
+
+Each new least-squares tag solve is seeded from the previous valid tag position,
+as described for AlgMin in the paper. This selects the same physical solution
+branch but does not average or smooth tag measurements.
 
 The initiator also refreshes live anchor geometry from the request/response
 exchange in the same slot. This is the short TWR measurement described by the
@@ -605,8 +624,8 @@ anchor_distance = c * tof
 ```
 
 That distance is cached as an unordered anchor pair and emitted to the dashboard
-as the latest valid corrected sample. No rolling median is applied in the
-current FlexTDOA runtime.
+with its 32-bit slot ID. No rolling median is applied. The anchor EKF only
+updates when a complete coherent frame contains every selected pair.
 
 Lab stability comparison, 2026-07-15:
 
@@ -811,13 +830,13 @@ domain into the tag clock domain. There is no running clock-ratio filter in the
 current FlexTDOA runtime. The log still includes both uncorrected `raw` and
 clock-corrected `diff` so the correction can be audited.
 
-The dashboard `Position` tab reconstructs the relative anchor geometry from live
-anchor-anchor ranges. It uses the latest fresh anchor edge sample directly. The
-first selected anchor is placed at `(0,0)`, the second defines the X axis, the
-third/fourth are trilaterated from the measured edges, and a small least-squares
-refinement spreads any geometry error across all fresh edges. The geometry table
-reports residual error in centimeters, so the real setup can be a slightly
-skewed quadrilateral instead of a perfect square.
+The dashboard `Position` tab reconstructs relative anchor geometry through the
+paper-style TWR-EKF phase. Raw pair ranges are grouped by TDMA frame and all
+available edges update the anchor state simultaneously. Tag positioning remains
+disabled until the operator fixes the resulting geometry. The geometry table
+continues to report current raw TWR residuals in centimeters after fixing, so a
+moved or unhealthy anchor remains visible without silently moving the solver's
+coordinate frame.
 
 The `Position Setup` solver selector is intentionally protocol-level, so field
 tests can compare the same geometry and tag path without changing dashboard
