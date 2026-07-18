@@ -309,6 +309,7 @@ enum {
 #define UWB_FLEX_TDOA_BOOTSTRAP_LISTEN_US 2000000LL
 #define UWB_FLEX_TDOA_REQUEST_TX_LEAD_US 5000LL
 #define UWB_FLEX_TDOA_REQUEST_LATE_US 500LL
+#define UWB_FLEX_TDOA_RADIO_EPOCH_REFRESH_US 1000000LL
 // This is an ESP32/DW3000 programming margin, not an over-the-air subslot.
 #define UWB_FLEX_TDOA_DELAYED_TX_MIN_LEAD_US 300.0
 
@@ -542,6 +543,11 @@ static uint32_t s_rx_double_buffer_release_max_us;
 static uint32_t s_flex_tdoa_request_age_max_us;
 static uint32_t s_flex_tdoa_response_prepare_max_us;
 static uint32_t s_flex_tdoa_stale_request_count;
+static bool s_flex_tdoa_radio_epoch_valid;
+static uint64_t s_flex_tdoa_radio_epoch_timestamp;
+static int64_t s_flex_tdoa_radio_epoch_host_us;
+static int64_t s_flex_tdoa_radio_epoch_sync_host_us;
+static uint32_t s_flex_tdoa_radio_epoch_refresh_count;
 static bool s_started;
 static bool s_rx_armed;
 static bool s_irq_enabled;
@@ -1724,6 +1730,11 @@ static esp_err_t uwb_dw3000_release_rx_double_buffer(void)
 
 static esp_err_t uwb_dw3000_configure_flex_rx_double_buffer(void)
 {
+    s_flex_tdoa_radio_epoch_valid = false;
+    s_flex_tdoa_radio_epoch_timestamp = 0;
+    s_flex_tdoa_radio_epoch_host_us = 0;
+    s_flex_tdoa_radio_epoch_sync_host_us = 0;
+    s_flex_tdoa_radio_epoch_refresh_count = 0;
     ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF), TAG,
                         "stop RX before double-buffer setup failed");
     s_rx_armed = false;
@@ -2138,9 +2149,54 @@ static esp_err_t uwb_dw3000_read_rx_payload(
 
 // The minimum double-buffer diagnostic set is contiguous: RX_FINFO starts at
 // byte 0, RX_TIME at byte 4, and CIA_DIAG_0 at byte 12. Read the payload and
-// metadata in two compact bursts, then reconstruct the RX_TIME epoch from
-// SYS_TIME; the upper byte in the buffered diagnostic set is not reliable
-// while adjacent response subslots are being drained.
+// metadata in two compact bursts. RX_TIME is reconstructed from a software
+// radio-time epoch because the upper byte in the buffered diagnostic set is
+// not reliable while adjacent response subslots are being drained. The epoch
+// is refreshed from SYS_TIME on a response at most once per second, never in
+// the request-to-response critical path.
+static esp_err_t uwb_flex_tdoa_radio_reference(
+    bool request_frame, uint64_t *reference_timestamp,
+    int64_t *reference_host_us)
+{
+    if (reference_timestamp == NULL || reference_host_us == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+    const bool refresh_due =
+        !s_flex_tdoa_radio_epoch_valid ||
+        now_us - s_flex_tdoa_radio_epoch_sync_host_us >=
+            UWB_FLEX_TDOA_RADIO_EPOCH_REFRESH_US;
+    if (refresh_due && (!request_frame || !s_flex_tdoa_radio_epoch_valid)) {
+        uint32_t system_time_word = 0;
+        ESP_RETURN_ON_ERROR(
+            uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW,
+                              DW3000_SYS_TIME_SUB, &system_time_word),
+            TAG, "FlexTDOA radio epoch refresh failed");
+        s_flex_tdoa_radio_epoch_timestamp =
+            (uint64_t)system_time_word << 8U;
+        s_flex_tdoa_radio_epoch_host_us = esp_timer_get_time();
+        s_flex_tdoa_radio_epoch_sync_host_us =
+            s_flex_tdoa_radio_epoch_host_us;
+        s_flex_tdoa_radio_epoch_valid = true;
+        s_flex_tdoa_radio_epoch_refresh_count++;
+    } else {
+        const int64_t elapsed_us =
+            now_us - s_flex_tdoa_radio_epoch_host_us;
+        if (elapsed_us > 0) {
+            s_flex_tdoa_radio_epoch_timestamp =
+                uwb_dw3000_add_timestamp_delta(
+                    s_flex_tdoa_radio_epoch_timestamp,
+                    uwb_dw3000_us_to_dtu((uint32_t)elapsed_us));
+            s_flex_tdoa_radio_epoch_host_us = now_us;
+        }
+    }
+
+    *reference_timestamp = s_flex_tdoa_radio_epoch_timestamp;
+    *reference_host_us = s_flex_tdoa_radio_epoch_host_us;
+    return ESP_OK;
+}
+
 static esp_err_t uwb_dw3000_read_flex_buffered_frame(
     struct uwb_dw3000_rx_frame *frame)
 {
@@ -2185,18 +2241,22 @@ static esp_err_t uwb_dw3000_read_flex_buffered_frame(
                                    ((uint32_t)metadata[5] << 8U) |
                                    ((uint32_t)metadata[6] << 16U) |
                                    ((uint32_t)metadata[7] << 24U);
-    uint32_t system_time_word = 0;
+    uint64_t reference = 0;
+    int64_t reference_host_us = 0;
+    const bool request_frame =
+        uwb_dw3000_payload_is_distance_frame(frame->payload,
+                                             frame->payload_len) &&
+        frame->payload[5] == UWB_DISTANCE_FRAME_FLEX_TDOA_REQ;
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW,
-                          DW3000_SYS_TIME_SUB, &system_time_word),
-        TAG, "FlexTDOA RX timestamp reference read failed");
-    const uint64_t reference = (uint64_t)system_time_word << 8U;
+        uwb_flex_tdoa_radio_reference(request_frame, &reference,
+                                      &reference_host_us),
+        TAG, "FlexTDOA RX timestamp epoch failed");
     const int32_t delta =
         (int32_t)(rx_time_low32 - (uint32_t)reference);
     frame->rx_timestamp =
         (reference + (int64_t)delta) & UWB_DW3000_TIMESTAMP_MASK;
     frame->radio_reference_timestamp = reference;
-    frame->radio_reference_host_time_us = esp_timer_get_time();
+    frame->radio_reference_host_time_us = reference_host_us;
 
     const uint16_t raw =
         (uint16_t)(((uint16_t)metadata[12]) |
@@ -5384,7 +5444,7 @@ static void uwb_flex_tdoa_log_anchor_result(
         now - s_flex_tdoa_anchor_summary_tick >= pdMS_TO_TICKS(1000)) {
         ESP_LOGI(TAG,
                  "FLEX_TDOA anchor summary samples=%lu drops=%lu incoherent=%lu latest=%u-%u "
-                 "seq=%u distance=%.3f m clk=%.2fppm idx=[%lu,%lu,%lu] rdb_release_us=%lu req_age_us=%lu resp_prepare_us=%lu stale_req=%lu cia_pending=%lu",
+                 "seq=%u distance=%.3f m clk=%.2fppm idx=[%lu,%lu,%lu] rdb_release_us=%lu req_age_us=%lu resp_prepare_us=%lu stale_req=%lu epoch_refresh=%lu cia_pending=%lu",
                  (unsigned long)s_flex_tdoa_anchor_results_since_summary,
                  (unsigned long)s_flex_tdoa_anchor_drops_since_summary,
                  (unsigned long)s_flex_tdoa_anchor_incoherent_since_summary,
@@ -5398,6 +5458,7 @@ static void uwb_flex_tdoa_log_anchor_result(
                  (unsigned long)s_flex_tdoa_request_age_max_us,
                  (unsigned long)s_flex_tdoa_response_prepare_max_us,
                  (unsigned long)s_flex_tdoa_stale_request_count,
+                 (unsigned long)s_flex_tdoa_radio_epoch_refresh_count,
                  (unsigned long)s_rx_double_buffer_cia_not_ready_count);
         s_flex_tdoa_anchor_results_since_summary = 0;
         s_flex_tdoa_anchor_drops_since_summary = 0;
