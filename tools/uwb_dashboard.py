@@ -3024,6 +3024,28 @@ tr.status-stale td { color: #4f3b1d; }
         <div class="settings-grid">
           <div>
             <div class="section">
+              <h2>FlexTDOA Network</h2>
+              <div class="form-grid">
+                <label for="uwbFlexAnchors">Anchor IDs</label>
+                <input id="uwbFlexAnchors" value="2,3,4,5">
+                <label for="uwbFlexK">Responders K</label>
+                <input id="uwbFlexK" value="3" type="number" min="1" max="9" step="1">
+                <label for="uwbFlexSlots">Slot initiators</label>
+                <input id="uwbFlexSlots" value="2,3,4,5">
+                <label for="uwbFlexMasks">Responder masks</label>
+                <input id="uwbFlexMasks" value="14,13,11,7">
+                <label for="uwbFlexGeneration">Generation</label>
+                <input id="uwbFlexGeneration" value="-" readonly>
+              </div>
+              <div class="param-legend">
+                <div><b>N</b><span>The number of IDs in Anchor IDs. Firmware supports 3 to 10 anchors.</span></div>
+                <div><b>K</b><span>How many responders are selected in every request slot.</span></div>
+                <div><b>M</b><span>The number of comma separated Slot initiators.</span></div>
+                <div><b>Masks</b><span>One decimal or 0x hexadecimal bit mask per slot. Bits follow the Anchor IDs order; the initiator bit must be clear.</span></div>
+                <div><b>Propagation</b><span>Write one module and reboot it. A newer generation is rebroadcast over UWB and persisted by the other FlexTDOA nodes.</span></div>
+              </div>
+            </div>
+            <div class="section">
               <h2>Survey Timing</h2>
               <div class="form-grid">
                 <label for="uwbTargets">Targets</label>
@@ -6283,6 +6305,11 @@ function hydrateSettingsFromStatus(item) {
   setSettingIfFresh("runtimeGps", item.runtime_gps_enabled);
   setSettingIfFresh("runtimeTelemetryPort", item.runtime_wireless_telemetry_port || item.wireless_telemetry_port);
   setSettingIfFresh("uwbRadioChannel", item.runtime_radio_channel || item.uwb_radio_channel);
+  setSettingIfFresh("uwbFlexAnchors", (item.runtime_anchor_ids || []).filter(Boolean).join(","));
+  setSettingIfFresh("uwbFlexK", item.runtime_flex_tdoa_responder_count);
+  setSettingIfFresh("uwbFlexSlots", (item.runtime_flex_tdoa_slot_initiator_ids || []).join(","));
+  setSettingIfFresh("uwbFlexMasks", (item.runtime_flex_tdoa_slot_responder_masks || []).join(","));
+  setSettingIfFresh("uwbFlexGeneration", item.runtime_flex_tdoa_config_generation, true);
   setSettingIfFresh("uwbSurveyRxMs", item.runtime_anchor_survey_rx_slice_ms);
   setSettingIfFresh("uwbSurveyDelayMs", item.runtime_anchor_survey_command_delay_ms);
   setSettingIfFresh("uwbSurveySlotMs", item.runtime_anchor_survey_slot_ms);
@@ -7313,25 +7340,24 @@ function applyRangingProfilePositionSettings(profile) {
 
 function profileSummaryText(values, anchorCount = 4) {
   const paperBodyMs = profileFlexTdoaPaperBodyMs(anchorCount);
-  const cycleMs = anchorCount * values.slotMs + values.roundGapMs;
-  const slotMarginMs = values.slotMs - values.commandDelayMs - paperBodyMs;
+  const flexFrameMs = anchorCount * paperBodyMs;
+  const dsCycleMs = anchorCount * values.slotMs + values.roundGapMs;
   const warnings = [];
   if (values.timeoutMs >= values.slotMs) warnings.push("timeout >= slot");
   if (values.rxSliceMs > values.slotMs) warnings.push("RX slice > slot");
-  if (slotMarginMs < 5) warnings.push("low FlexTDOA margin");
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `${anchorCount} anchors: ${anchorCount} initiator slots · slot body ~${fmtFixed(paperBodyMs, 2)} ms · command ${fmtFixed(values.commandDelayMs, 0)} ms · ~${fmtFixed(cycleMs, 0)} ms/frame · FlexTDOA margin ${fmtFixed(slotMarginMs, 0)} ms${warnText}`;
+  return `${anchorCount} anchors: exact FlexTDOA ${fmtFixed(paperBodyMs, 2)} ms/slot, ${fmtFixed(flexFrameMs, 2)} ms/frame · DS-TWR compatibility ${fmtFixed(values.slotMs, 0)} ms/slot, ~${fmtFixed(dsCycleMs, 0)} ms/cycle${warnText}`;
 }
 
 function profileFlexTdoaPaperBodyMs(anchorCount = 4) {
   const responderCount = Math.max(1, anchorCount - 1);
   return (
-    250 + 2000 + 3000 + responderCount * 250 + responderCount * 600
+    250 + 2000 + 250 + responderCount * 250 + responderCount * 600
   ) / 1000;
 }
 
 function profileFlexTdoaSlotMarginMs(values, anchorCount = 4) {
-  return values.slotMs - values.commandDelayMs - profileFlexTdoaPaperBodyMs(anchorCount);
+  return values.slotMs - values.commandDelayMs;
 }
 
 function updateRangingProfileSummary(profileKey) {
@@ -7381,7 +7407,8 @@ function persistedSettingIds() {
     "accelTimebase", "accelSampleHz", "accelTargets",
     "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
     "positionMaxAgeSec",
-    "uwbTargets", "uwbRadioChannel", "uwbSurveyRxMs", "uwbSurveyDelayMs", "uwbSurveySlotMs",
+    "uwbTargets", "uwbRadioChannel", "uwbFlexAnchors", "uwbFlexK",
+    "uwbFlexSlots", "uwbFlexMasks", "uwbSurveyRxMs", "uwbSurveyDelayMs", "uwbSurveySlotMs",
     "uwbSurveyGapMs", "uwbSurveyLogEvery", "uwbRangingSlotMs",
     "uwbRangingGapMs", "uwbRangingRxMs", "uwbDtInitiator", "uwbDtResponder",
     "uwbDtIntervalMs", "uwbDtRxTimeoutMs", "uwbDtRespDelayMs",
@@ -7713,6 +7740,10 @@ function wireSettings() {
     postConfig({
       target_modules: document.getElementById("uwbTargets").value,
       params: {
+        anchors: document.getElementById("uwbFlexAnchors").value,
+        flex_k: document.getElementById("uwbFlexK").value,
+        flex_slots: document.getElementById("uwbFlexSlots").value,
+        flex_masks: document.getElementById("uwbFlexMasks").value,
         radio_channel: document.getElementById("uwbRadioChannel").value,
         survey_rx_ms: document.getElementById("uwbSurveyRxMs").value,
         survey_delay_ms: document.getElementById("uwbSurveyDelayMs").value,

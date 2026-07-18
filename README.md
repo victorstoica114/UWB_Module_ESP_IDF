@@ -385,6 +385,25 @@ request; a directly received request remains the authoritative phase reference
 for that slot. Each node schedules only its own next initiator slot, and later
 requests continually correct local clock drift.
 
+The topology is represented by the same `N/K/M` parameters used in the paper:
+
+| Field | Meaning | Firmware range |
+| --- | --- | --- |
+| `N` | Ordered anchor ID list. | `3..10` anchors |
+| `K` | Number of responders selected for each request. | `1..N-1` |
+| `M` | Number of initiator slots in the repeating frame. | `1..10` slots |
+| responder mask | Anchors allowed to respond in one slot; CI-CR rotates the selected `K` through this pool. | one `N`-bit mask per slot |
+
+These values are editable under `UWB Settings > FlexTDOA Network`. Applying a
+new topology increments a 32-bit configuration generation and stores it in NVS.
+During the three-second startup configuration phase, anchors, the tag, and a
+node removed from the new topology can all broadcast their versioned config.
+Nodes accept only a newer generation, persist it, and restart their local UWB
+state. While the network is running, reception of a newer config causes the
+same controlled rebuild. This is the distributed propagation and recovery
+path; normal slot synchronization still comes from `REQ/RESP`, not from a
+separate periodic synchronization packet.
+
 #### FlexTDOA Slot Timing
 
 The CI-CR slot period follows equation (20) from the paper:
@@ -406,29 +425,17 @@ For four anchors, `K = 3`, and the exact paper body is:
 250 + 2000 + 250 + 3*250 + 3*600 = 5050 us
 ```
 
-The message roles and equations are unchanged on ESP32-S3. Two timing fields
-are enlarged because the host must drain the DW3000 double buffer and arm a
-delayed TX under normal Wi-Fi/HTTP load:
+The ESP32-S3 implementation now uses those paper values directly. The selected
+responder transmits using DW3000 delayed TX from the request RX timestamp:
 
 ```text
-request_process  = 1500 us
-response_subslot = 350 us
+RESP[0] = REQ_RX + 2250 us
+RESP[1] = REQ_RX + 2500 us
+RESP[2] = REQ_RX + 2750 us
 
-ESP32-S3 K=3 slot = 250 + 2000 + 1500 + 3*350 + 3*600
-                  = 6600 us
-
-four-anchor frame = 4 * 6600 us = 26.4 ms
-frame rate        = 37.88 frames/s
-response rate     = 12 / 26.4 ms = 454.55 observations/s
-```
-
-These are platform margins, not new protocol phases. The selected responder
-still transmits using DW3000 delayed TX from the request RX timestamp:
-
-```text
-RESP[0] = REQ_RX + 1500 us
-RESP[1] = REQ_RX + 1850 us
-RESP[2] = REQ_RX + 2200 us
+four-anchor frame = 4 * 5050 us = 20.20 ms
+frame rate        = 49.50 frames/s
+response rate     = 12 / 20.20 ms = 594.06 responses/s
 ```
 
 The responder does not read `SYS_TIME` to turn that relative delay into an
@@ -466,10 +473,10 @@ For a slot where `A3` is the initiator:
 ```text
 A3 initiator                  A4/A5/A2 responders             passive tag
  t=0.00 ms  REQ ------------------------>|------------------------> RX REQ
- t=1.50 ms  <---------------- RESP[0] A4 |------------------------> RX RESP
- t=1.85 ms  <---------------- RESP[1] A5 |------------------------> RX RESP
- t=2.20 ms  <---------------- RESP[2] A2 |------------------------> RX RESP
- t=6.60 ms  next initiator request ------|------------------------> next slot
+ t=2.25 ms  <---------------- RESP[0] A4 |------------------------> RX RESP
+ t=2.50 ms  <---------------- RESP[1] A5 |------------------------> RX RESP
+ t=2.75 ms  <---------------- RESP[2] A2 |------------------------> RX RESP
+ t=5.05 ms  next initiator request ------|------------------------> next slot
 ```
 
 The ESP task wakes `5 ms` before its own next request and programs delayed TX.
@@ -502,15 +509,30 @@ estimator are deliberately kept outside this radio validation.
 | Paper requirement | Firmware state |
 | --- | --- |
 | Passive DL-TDOA tag | Implemented. The tag only receives `FLEX_TDOA_REQ/RESP`. |
-| One request and `K` responses per slot | Implemented. Hardware-validated response spacing is `350 us`; the paper uses `250 us`. |
+| One request and `K` responses per slot | Implemented with the paper's `250 us` response spacing. |
 | Request carries responder count/list/order | Implemented in `FLEX_TDOA_REQ`. |
 | Every localization packet carries 32-bit slot ID | Implemented in every request and response. This avoids the 256-slot wrap ambiguity of an 8-bit counter. |
 | CI-CR schedule | Implemented by rotating initiator and responder order every slot/round. |
 | CFO-based reply delay correction | Implemented from buffered `CIA_DIAG_0`, with the Qorvo sign convention and no clock Kalman filter. |
-| Anchor self-localization payload | Implemented. Raw SS-TWR+CFO anchor ranges and their 32-bit slot IDs are piggybacked in later responses. Solver behavior is outside this radio audit. |
+| Anchor self-localization payload | Implemented. Raw SS-TWR+CFO anchor ranges and their 32-bit slot IDs are piggybacked in later responses. |
 | Fully distributed slot synchronization | Implemented from request RX timestamps. A response can recover a node that missed the request, but a directly received request is authoritative for that slot. |
+| General `N/K/M` topology | Implemented for `3..10` anchors, configurable responder count, initiator slots, and per-slot responder masks. |
+| Configuration propagation | Implemented as a versioned UWB frame. A newer generation is persisted in NVS, rebroadcast during the startup phase, and rebuilds the local schedule after restart. |
+| Local solver | Implemented on the tag ESP32-S3. Anchor geometry and raw TDOA observations feed a 2D least-squares AlgMin service on core 0; UWB remains on core 1. |
 | Paper radio setup | Use CH5, 6.8 Mb/s, PRF 64 MHz, preamble 128 when matching the paper. |
 | Firmware-side measurement filters | None. The radio path emits every structurally valid raw anchor range and tag range difference. |
+
+The local solver is the planar specialization needed by the present hardware
+layout. The paper evaluates 3D AlgMin and AlgEKF as well. Therefore the radio
+protocol and AlgMin objective are aligned, but the current embedded solver is
+not a general 3D replacement for every solver variant in the paper.
+
+The paper's node uses an STM32F429ZIT6: Cortex-M4 with FPU at `168 MHz`, `2 MB`
+Flash, and `256 KB` SRAM. That MCU has excellent deterministic interrupt
+latency, but it is not more powerful overall than this dual-core ESP32-S3 at
+`240 MHz` with external PSRAM. The practical difference is workload isolation:
+Wi-Fi and HTTP share the ESP32-S3, so the timing-critical UWB path is pinned to
+core 1 and the local solver runs on core 0.
 
 #### FlexTDOA Speed Notes
 
@@ -521,16 +543,15 @@ compact payload/metadata reads, `CLR_IRQS/DB_TOGGLE` fast commands, cached
 `TX_FCTRL`, early request-buffer release, and DW3000 delayed TX.
 
 ```text
-paper slot, K=3        = 5.05 ms
-ESP32-S3 slot, K=3     = 6.60 ms
-four-anchor frame      = 26.40 ms
-theoretical frame rate = 37.88/s
-theoretical tag rate   = 454.55 observations/s
+paper and ESP32-S3 slot, K=3 = 5.05 ms
+four-anchor frame             = 20.20 ms
+theoretical frame rate        = 49.50/s
+theoretical response rate     = 594.06/s
 ```
 
-Hardware timing comparison on 2026-07-18 used the moved module layout. It is a
-radio/timing test only; no geometry, fit, or tag-position accuracy conclusion
-may be drawn from it.
+The following table is a historical optimization record from 2026-07-18. Its
+rows precede the final exact-paper timing and used the moved module layout. It
+must not be read as the current configuration or as a geometry/accuracy test.
 
 | request process | response subslot | tag valid/s | anchor results/s/module | responder-index balance | result |
 | ---: | ---: | ---: | ---: | --- | --- |
@@ -540,8 +561,8 @@ may be drawn from it.
 | `1500 us` | `350 us` | `443-450` | `113-114` | typically `37-39` per index | Initial selected run before removing synchronous UART work from the radio task. |
 | `1500 us` | `350 us` | `451-456`, avg `454.1` | avg `113.8-114.0` | normally `38,38,38` | Final relative-radio path over `41 s`: zero drops, delayed-TX misses, response failures, and TX-interval mismatches. |
 
-The final measured rate is within `0.1%` of the `454.55/s` theoretical tag
-rate. Across that `41 s` window, the tag rejected `14` of roughly `18,600`
+The selected historical `1500/350 us` rate was within `0.1%` of its
+`454.55/s` theoretical tag rate. Across that `41 s` window, the tag rejected `14` of roughly `18,600`
 observations (`0.08%`) and anchors marked `5` of roughly `18,700` results
 incoherent (`0.03%`); all telemetry drop counters remained zero. The one-second
 diagnostic summaries are submitted directly to the wireless log queue. They do
@@ -870,15 +891,16 @@ code:
 | `FlexTDOA` | `uwb_flex_tdoa` | tag only listens | paper-style request/response passive range difference | Current default. Matches the FlexTDOA paper slot model. |
 | `Legacy hybrid logs` | `uwb_flex_tdoa` legacy captures | tag only listens | guarded dual-leg `diff`, fused from `primary` and `alt` when they agree | Historical comparison only. Useful for replaying older captures. |
 
-For passive solvers, the dashboard solves the tag position on the PC with a
-local least-squares range-difference fit. In the current diagnostic mode it uses
-the latest fresh directed observations directly. It does not apply reverse-sum
-gates, residual outlier pruning, medians, dynamic weights, or Kalman prediction.
-This intentionally exposes the raw protocol behavior so firmware/radio changes
-can be evaluated without PC-side smoothing hiding the result. `DS-TWR ranges`
-can use the same measured anchor geometry for absolute tag-anchor ranges, but
-the blue distance circles only make sense for absolute ranges, not TDOA range
-differences.
+The passive FlexTDOA path now has two consumers of the same raw measurements.
+The dashboard keeps its PC least-squares range-difference fit for inspection,
+while the tag ESP32-S3 also runs the planar AlgMin solver locally and publishes
+the resulting position through binary telemetry. Both use the latest fresh
+directed observations directly. Neither applies reverse-sum gates, residual
+outlier pruning, medians, dynamic weights, or Kalman prediction. This exposes
+the raw protocol behavior so radio changes can be evaluated without smoothing
+hiding the result. `DS-TWR ranges` can use the same measured anchor geometry for
+absolute tag-anchor ranges, but the blue distance circles only make sense for
+absolute ranges, not TDOA range differences.
 
 Historical solver replay, 2026-07-15:
 

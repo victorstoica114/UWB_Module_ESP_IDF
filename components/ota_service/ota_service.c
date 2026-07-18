@@ -80,6 +80,9 @@ typedef struct {
     char pd_last_response_hex[(MAX77958_SERVICE_AP_DATA_BYTES * 2U) + 1U];
     char pd_source_pdos_json[128];
     char pd_sink_pdos_json[96];
+    char runtime_anchor_ids_json[48];
+    char runtime_flex_slots_json[48];
+    char runtime_flex_masks_json[72];
     char response[OTA_SERVICE_STATUS_RESPONSE_SIZE];
 } ota_status_context_t;
 
@@ -153,6 +156,32 @@ static void format_u32_array_json(const uint32_t *values, size_t count,
     if (offset + 2U <= buffer_size) {
         (void)snprintf(&buffer[offset], buffer_size - offset, "]");
     }
+}
+
+static void format_u8_array_json(const uint8_t *values, size_t count,
+                                 char *buffer, size_t buffer_size)
+{
+    uint32_t expanded[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+    const size_t limit = count < APP_RUNTIME_CONFIG_MAX_ANCHORS
+                             ? count
+                             : APP_RUNTIME_CONFIG_MAX_ANCHORS;
+    for (size_t i = 0; i < limit; ++i) {
+        expanded[i] = values[i];
+    }
+    format_u32_array_json(expanded, limit, buffer, buffer_size);
+}
+
+static void format_u16_array_json(const uint16_t *values, size_t count,
+                                  char *buffer, size_t buffer_size)
+{
+    uint32_t expanded[APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS] = {0};
+    const size_t limit = count < APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS
+                             ? count
+                             : APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS;
+    for (size_t i = 0; i < limit; ++i) {
+        expanded[i] = values[i];
+    }
+    format_u32_array_json(expanded, limit, buffer, buffer_size);
 }
 
 static void format_json_string(const char *value, char *buffer,
@@ -567,6 +596,15 @@ static bool runtime_config_reboot_recommended(
            before->anchor_count != after->anchor_count ||
            memcmp(before->anchor_ids, after->anchor_ids,
                   sizeof(before->anchor_ids)) != 0 ||
+           before->flex_tdoa_responder_count !=
+               after->flex_tdoa_responder_count ||
+           before->flex_tdoa_slot_count != after->flex_tdoa_slot_count ||
+           memcmp(before->flex_tdoa_slot_initiator_ids,
+                  after->flex_tdoa_slot_initiator_ids,
+                  sizeof(before->flex_tdoa_slot_initiator_ids)) != 0 ||
+           memcmp(before->flex_tdoa_slot_responder_masks,
+                  after->flex_tdoa_slot_responder_masks,
+                  sizeof(before->flex_tdoa_slot_responder_masks)) != 0 ||
            before->anchor_survey_coordinator_id !=
                after->anchor_survey_coordinator_id ||
            before->uwb_enabled != after->uwb_enabled ||
@@ -646,6 +684,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #define pd_last_response_hex (ctx->pd_last_response_hex)
 #define pd_source_pdos_json (ctx->pd_source_pdos_json)
 #define pd_sink_pdos_json (ctx->pd_sink_pdos_json)
+#define runtime_anchor_ids_json (ctx->runtime_anchor_ids_json)
+#define runtime_flex_slots_json (ctx->runtime_flex_slots_json)
+#define runtime_flex_masks_json (ctx->runtime_flex_masks_json)
 
     const esp_app_desc_t *app = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -676,6 +717,18 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     format_u32_array_json(pd_snapshot.sink_pdos,
                           pd_snapshot.sink_pdo_count,
                           pd_sink_pdos_json, sizeof(pd_sink_pdos_json));
+    format_u8_array_json(runtime_config->anchor_ids,
+                         runtime_config->anchor_count,
+                         runtime_anchor_ids_json,
+                         sizeof(runtime_anchor_ids_json));
+    format_u8_array_json(runtime_config->flex_tdoa_slot_initiator_ids,
+                         runtime_config->flex_tdoa_slot_count,
+                         runtime_flex_slots_json,
+                         sizeof(runtime_flex_slots_json));
+    format_u16_array_json(runtime_config->flex_tdoa_slot_responder_masks,
+                          runtime_config->flex_tdoa_slot_count,
+                          runtime_flex_masks_json,
+                          sizeof(runtime_flex_masks_json));
 
     char *response = ctx->response;
 
@@ -727,7 +780,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_mode_name\":\"%s\","
         "\"runtime_tag_id\":%u,"
         "\"runtime_anchor_count\":%u,"
-        "\"runtime_anchor_ids\":[%u,%u,%u,%u],"
+        "\"runtime_anchor_ids\":%s,"
+        "\"runtime_flex_tdoa_responder_count\":%u,"
+        "\"runtime_flex_tdoa_slot_count\":%u,"
+        "\"runtime_flex_tdoa_slot_initiator_ids\":%s,"
+        "\"runtime_flex_tdoa_slot_responder_masks\":%s,"
+        "\"runtime_flex_tdoa_config_generation\":%lu,"
         "\"runtime_anchor_survey_coordinator_id\":%u,"
         "\"runtime_anchor_survey_rx_slice_ms\":%lu,"
         "\"runtime_anchor_survey_command_delay_ms\":%lu,"
@@ -1140,10 +1198,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
             runtime_config->runtime_mode),
         (unsigned)runtime_config->tag_id,
         (unsigned)runtime_config->anchor_count,
-        (unsigned)runtime_config->anchor_ids[0],
-        (unsigned)runtime_config->anchor_ids[1],
-        (unsigned)runtime_config->anchor_ids[2],
-        (unsigned)runtime_config->anchor_ids[3],
+        runtime_anchor_ids_json,
+        (unsigned)runtime_config->flex_tdoa_responder_count,
+        (unsigned)runtime_config->flex_tdoa_slot_count,
+        runtime_flex_slots_json,
+        runtime_flex_masks_json,
+        (unsigned long)runtime_config->flex_tdoa_config_generation,
         (unsigned)runtime_config->anchor_survey_coordinator_id,
         (unsigned long)runtime_config->anchor_survey_rx_slice_ms,
         (unsigned long)runtime_config->anchor_survey_command_delay_ms,
@@ -1547,6 +1607,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #undef pd_last_response_hex
 #undef pd_source_pdos_json
 #undef pd_sink_pdos_json
+#undef runtime_anchor_ids_json
+#undef runtime_flex_slots_json
+#undef runtime_flex_masks_json
     return response_err;
 }
 
@@ -3109,6 +3172,21 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
     }
 
     const app_runtime_config_t *active_config = app_runtime_config_get();
+    char active_anchor_ids_json[48] = {0};
+    char active_flex_slots_json[48] = {0};
+    char active_flex_masks_json[72] = {0};
+    format_u8_array_json(active_config->anchor_ids,
+                         active_config->anchor_count,
+                         active_anchor_ids_json,
+                         sizeof(active_anchor_ids_json));
+    format_u8_array_json(active_config->flex_tdoa_slot_initiator_ids,
+                         active_config->flex_tdoa_slot_count,
+                         active_flex_slots_json,
+                         sizeof(active_flex_slots_json));
+    format_u16_array_json(active_config->flex_tdoa_slot_responder_masks,
+                          active_config->flex_tdoa_slot_count,
+                          active_flex_masks_json,
+                          sizeof(active_flex_masks_json));
     if (changed && before_config.gps_enabled != active_config->gps_enabled) {
         const esp_err_t gps_err = gps_service_apply_runtime_config();
         if (gps_err != ESP_OK) {
@@ -3134,17 +3212,17 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
     const bool reboot_recommended =
         runtime_config_reboot_recommended(&before_config, active_config);
     ESP_LOGW(TAG,
-             "Runtime config: changed=%s cleared=%s mode=%s(%u) tag=%u anchors=[%u,%u,%u,%u] count=%u coord=%u reboot_recommended=%s reboot_requested=%s",
+             "Runtime config: changed=%s cleared=%s mode=%s(%u) tag=%u anchors=%s count=%u K=%u M=%u generation=%lu coord=%u reboot_recommended=%s reboot_requested=%s",
              changed ? "true" : "false", cleared ? "true" : "false",
              app_runtime_config_runtime_mode_to_string(
                  active_config->runtime_mode),
              (unsigned)active_config->runtime_mode,
              (unsigned)active_config->tag_id,
-             (unsigned)active_config->anchor_ids[0],
-             (unsigned)active_config->anchor_ids[1],
-             (unsigned)active_config->anchor_ids[2],
-             (unsigned)active_config->anchor_ids[3],
+             active_anchor_ids_json,
              (unsigned)active_config->anchor_count,
+             (unsigned)active_config->flex_tdoa_responder_count,
+             (unsigned)active_config->flex_tdoa_slot_count,
+             (unsigned long)active_config->flex_tdoa_config_generation,
              (unsigned)active_config->anchor_survey_coordinator_id,
              reboot_recommended ? "true" : "false",
              reboot_requested ? "true" : "false");
@@ -3161,7 +3239,12 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         "\"runtime_mode_name\":\"%s\","
         "\"runtime_tag_id\":%u,"
         "\"runtime_anchor_count\":%u,"
-        "\"runtime_anchor_ids\":[%u,%u,%u,%u],"
+        "\"runtime_anchor_ids\":%s,"
+        "\"runtime_flex_tdoa_responder_count\":%u,"
+        "\"runtime_flex_tdoa_slot_count\":%u,"
+        "\"runtime_flex_tdoa_slot_initiator_ids\":%s,"
+        "\"runtime_flex_tdoa_slot_responder_masks\":%s,"
+        "\"runtime_flex_tdoa_config_generation\":%lu,"
         "\"runtime_anchor_survey_coordinator_id\":%u,"
         "\"runtime_ranging_slot_ms\":%lu,"
         "\"runtime_ranging_round_gap_ms\":%lu,"
@@ -3186,10 +3269,12 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
             active_config->runtime_mode),
         (unsigned)active_config->tag_id,
         (unsigned)active_config->anchor_count,
-        (unsigned)active_config->anchor_ids[0],
-        (unsigned)active_config->anchor_ids[1],
-        (unsigned)active_config->anchor_ids[2],
-        (unsigned)active_config->anchor_ids[3],
+        active_anchor_ids_json,
+        (unsigned)active_config->flex_tdoa_responder_count,
+        (unsigned)active_config->flex_tdoa_slot_count,
+        active_flex_slots_json,
+        active_flex_masks_json,
+        (unsigned long)active_config->flex_tdoa_config_generation,
         (unsigned)active_config->anchor_survey_coordinator_id,
         (unsigned long)active_config->ranging_slot_ms,
         (unsigned long)active_config->ranging_round_gap_ms,

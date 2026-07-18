@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
@@ -502,6 +503,12 @@ struct uwb_flex_tdoa_schedule {
     uint32_t missed_slots;
 };
 
+enum uwb_flex_tdoa_config_result {
+    UWB_FLEX_TDOA_CONFIG_INVALID,
+    UWB_FLEX_TDOA_CONFIG_CURRENT,
+    UWB_FLEX_TDOA_CONFIG_UPDATED,
+};
+
 static void uwb_distance_put_u32(uint8_t *payload, size_t offset,
                                  uint32_t value);
 static uint32_t uwb_distance_get_u32(const uint8_t *payload, size_t offset);
@@ -623,25 +630,25 @@ static esp_err_t uwb_flex_tdoa_send_config(void)
     return uwb_dw3000_send_payload(payload, UWB_FLEX_TDOA_CONFIG_LEN, NULL);
 }
 
-static bool uwb_flex_tdoa_apply_config_frame(
+static enum uwb_flex_tdoa_config_result uwb_flex_tdoa_apply_config_frame(
     const struct uwb_distance_frame *frame)
 {
     app_runtime_config_t received = {0};
     if (!uwb_flex_tdoa_parse_config(frame, &received)) {
-        return false;
+        return UWB_FLEX_TDOA_CONFIG_INVALID;
     }
 
     const app_runtime_config_t *current = app_runtime_config_get();
     if (received.flex_tdoa_config_generation <=
         current->flex_tdoa_config_generation) {
-        return true;
+        return UWB_FLEX_TDOA_CONFIG_CURRENT;
     }
     const esp_err_t err = app_runtime_config_save(&received);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "FlexTDOA radio config save failed generation=%lu: %s",
                  (unsigned long)received.flex_tdoa_config_generation,
                  esp_err_to_name(err));
-        return false;
+        return UWB_FLEX_TDOA_CONFIG_INVALID;
     }
     ESP_LOGI(TAG,
              "FlexTDOA radio config applied source=%u generation=%lu N=%u K=%u M=%u",
@@ -650,7 +657,26 @@ static bool uwb_flex_tdoa_apply_config_frame(
              (unsigned)received.anchor_count,
              (unsigned)received.flex_tdoa_responder_count,
              (unsigned)received.flex_tdoa_slot_count);
-    return true;
+    return UWB_FLEX_TDOA_CONFIG_UPDATED;
+}
+
+static bool uwb_flex_tdoa_handle_runtime_config(
+    const struct uwb_distance_frame *frame)
+{
+    if (frame == NULL ||
+        frame->type != UWB_DISTANCE_FRAME_FLEX_TDOA_CONFIG) {
+        return false;
+    }
+
+    const enum uwb_flex_tdoa_config_result result =
+        uwb_flex_tdoa_apply_config_frame(frame);
+    if (result == UWB_FLEX_TDOA_CONFIG_UPDATED) {
+        ESP_LOGW(TAG,
+                 "FlexTDOA schedule changed over UWB; restarting to rebuild local state");
+        vTaskDelay(pdMS_TO_TICKS(50));
+        esp_restart();
+    }
+    return result != UWB_FLEX_TDOA_CONFIG_INVALID;
 }
 
 static uint32_t uwb_dw3000_remaining_ms(TickType_t start_tick,
@@ -5241,6 +5267,9 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
         const esp_err_t err =
             uwb_distance_receive_next(&frame, config->anchor_survey_rx_slice_ms);
         if (err == ESP_OK) {
+            if (uwb_flex_tdoa_handle_runtime_config(&frame)) {
+                continue;
+            }
             size_t frame_count = 1;
             s_flex_tdoa_frame_train[0] = frame;
             if (frame.type == UWB_DISTANCE_FRAME_FLEX_TDOA_RESP) {
@@ -5894,15 +5923,19 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
         const esp_err_t err = uwb_distance_receive_next(
             &frame, config->anchor_survey_rx_slice_ms);
         size_t frame_count = 0;
+        bool config_frame = false;
         if (err == ESP_OK) {
-            frame_count = 1;
-            s_flex_tdoa_frame_train[0] = frame;
-            if (frame.type == UWB_DISTANCE_FRAME_FLEX_TDOA_RESP &&
-                uwb_flex_tdoa_response_matches_local_request(
-                    &frame, anchor_ids, anchor_count)) {
-                frame_count = uwb_flex_tdoa_collect_response_train(
-                    &frame, s_flex_tdoa_frame_train,
-                    s_flex_tdoa_local_request.responder_count);
+            config_frame = uwb_flex_tdoa_handle_runtime_config(&frame);
+            if (!config_frame) {
+                frame_count = 1;
+                s_flex_tdoa_frame_train[0] = frame;
+                if (frame.type == UWB_DISTANCE_FRAME_FLEX_TDOA_RESP &&
+                    uwb_flex_tdoa_response_matches_local_request(
+                        &frame, anchor_ids, anchor_count)) {
+                    frame_count = uwb_flex_tdoa_collect_response_train(
+                        &frame, s_flex_tdoa_frame_train,
+                        s_flex_tdoa_local_request.responder_count);
+                }
             }
         }
         (void)esp_timer_stop(s_flex_tdoa_schedule_timer);
@@ -5910,6 +5943,9 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
         s_flex_tdoa_schedule_alarm_fired = false;
 
         if (err == ESP_OK) {
+            if (config_frame) {
+                continue;
+            }
             if (schedule.synced &&
                 esp_timer_get_time() >=
                     schedule.next_request_host_us -
@@ -5949,10 +5985,20 @@ static void uwb_flex_tdoa_configuration_phase(void)
             }
         }
 
+        // The tag and a node removed by the new topology must still be able to
+        // introduce that topology. Configured anchors occupy [0, N), the tag
+        // uses N, and any other local ID uses the final recovery position.
+        size_t participant_count = config->anchor_count + 2U;
+        if (own_index < 0) {
+            own_index = config->tag_id == s_source_id
+                            ? (int)config->anchor_count
+                            : (int)config->anchor_count + 1;
+        }
+
         const int64_t cycle_us =
-            (int64_t)config->anchor_count *
+            (int64_t)participant_count *
             UWB_FLEX_TDOA_CONFIG_TX_SPACING_US;
-        if (own_index >= 0 && esp_timer_get_time() >= next_tx_us) {
+        if (esp_timer_get_time() >= next_tx_us) {
             const int64_t elapsed = esp_timer_get_time() - start_us;
             const int64_t cycle_start =
                 start_us + (elapsed / cycle_us) * cycle_us;
@@ -5974,9 +6020,12 @@ static void uwb_flex_tdoa_configuration_phase(void)
         struct uwb_distance_frame frame = {0};
         const esp_err_t err = uwb_distance_receive_next(&frame, 20U);
         if (err == ESP_OK &&
-            frame.type == UWB_DISTANCE_FRAME_FLEX_TDOA_CONFIG &&
-            uwb_flex_tdoa_apply_config_frame(&frame)) {
-            rx_count++;
+            frame.type == UWB_DISTANCE_FRAME_FLEX_TDOA_CONFIG) {
+            const enum uwb_flex_tdoa_config_result result =
+                uwb_flex_tdoa_apply_config_frame(&frame);
+            if (result != UWB_FLEX_TDOA_CONFIG_INVALID) {
+                rx_count++;
+            }
         } else if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
             ESP_LOGD(TAG, "FlexTDOA config RX: %s", esp_err_to_name(err));
         }
@@ -6043,7 +6092,13 @@ static void uwb_dw3000_flex_tdoa_loop(void)
              "FLEX_TDOA idle: source_id=%u is neither tag nor configured anchor",
              (unsigned)s_source_id);
     while (true) {
-        uwb_dw3000_delay_ms(1000);
+        struct uwb_distance_frame frame = {0};
+        const esp_err_t err = uwb_distance_receive_next(&frame, 1000U);
+        if (err == ESP_OK) {
+            (void)uwb_flex_tdoa_handle_runtime_config(&frame);
+        } else if (err != ESP_ERR_TIMEOUT) {
+            uwb_dw3000_delay_ms(20);
+        }
     }
 }
 

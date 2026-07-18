@@ -804,9 +804,26 @@ void app_runtime_config_format_anchors(char *buffer, size_t buffer_size,
         config = app_runtime_config_get();
     }
 
-    (void)snprintf(buffer, buffer_size, "[%u,%u,%u,%u]",
-                   (unsigned)config->anchor_ids[0],
-                   (unsigned)config->anchor_ids[1],
-                   (unsigned)config->anchor_ids[2],
-                   (unsigned)config->anchor_ids[3]);
+    size_t offset = 0;
+    int written = snprintf(buffer, buffer_size, "[");
+    if (written < 0 || (size_t)written >= buffer_size) {
+        buffer[0] = '\0';
+        return;
+    }
+    offset = (size_t)written;
+    for (size_t i = 0; i < config->anchor_count; ++i) {
+        written = snprintf(&buffer[offset], buffer_size - offset,
+                           "%s%u", i == 0 ? "" : ",",
+                           (unsigned)config->anchor_ids[i]);
+        if (written < 0 || (size_t)written >= buffer_size - offset) {
+            buffer[0] = '\0';
+            return;
+        }
+        offset += (size_t)written;
+    }
+    if (offset + 2U > buffer_size) {
+        buffer[0] = '\0';
+        return;
+    }
+    (void)snprintf(&buffer[offset], buffer_size - offset, "]");
 }
