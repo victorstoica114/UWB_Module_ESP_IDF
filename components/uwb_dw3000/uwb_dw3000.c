@@ -310,6 +310,7 @@ enum {
 #define UWB_FLEX_TDOA_BOOTSTRAP_LISTEN_US 2000000LL
 #define UWB_FLEX_TDOA_REQUEST_TX_LEAD_US 5000LL
 #define UWB_FLEX_TDOA_REQUEST_LATE_US 500LL
+#define UWB_FLEX_TDOA_RX_EPOCH_MAX_GAP_US 30000LL
 // This is an ESP32/DW3000 programming margin, not an over-the-air subslot.
 #define UWB_FLEX_TDOA_DELAYED_TX_MIN_LEAD_US 300.0
 
@@ -508,7 +509,8 @@ static esp_err_t uwb_dw3000_update_u32(uint8_t base, uint8_t sub,
                                        uint32_t set_mask);
 static esp_err_t uwb_dw3000_fast_command(uint8_t command);
 static esp_err_t uwb_dw3000_clear_status(void);
-static uint64_t uwb_flex_tdoa_extend_rx_timestamp32(uint32_t low32);
+static esp_err_t uwb_flex_tdoa_extend_rx_timestamp32(
+    uint32_t low32, uint64_t *timestamp);
 static bool uwb_flex_tdoa_fast_response_handle(
     const struct uwb_dw3000_rx_frame *rx_frame, bool *radio_stopped);
 static void uwb_flex_tdoa_log_anchor_result(
@@ -543,6 +545,7 @@ static uint32_t s_flex_tdoa_response_prepare_max_us;
 static uint32_t s_flex_tdoa_stale_request_count;
 static bool s_flex_tdoa_rx_timestamp_reference_valid;
 static uint64_t s_flex_tdoa_rx_timestamp_reference;
+static int64_t s_flex_tdoa_rx_timestamp_reference_host_us;
 static bool s_started;
 static bool s_rx_armed;
 static bool s_irq_enabled;
@@ -1390,8 +1393,7 @@ static esp_err_t uwb_dw3000_read_rx_timestamp(uint64_t *timestamp)
                                ((uint32_t)low[2] << 16U) |
                                ((uint32_t)low[3] << 24U);
         if (s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
-            *timestamp = uwb_flex_tdoa_extend_rx_timestamp32(low32);
-            return ESP_OK;
+            return uwb_flex_tdoa_extend_rx_timestamp32(low32, timestamp);
         }
 
         uint32_t system_time_word = 0;
@@ -1741,17 +1743,11 @@ static esp_err_t uwb_dw3000_configure_flex_rx_double_buffer(void)
                         "stop RX before double-buffer setup failed");
     s_rx_armed = false;
 
-    // Seed the 40-bit epoch once. Subsequent FlexTDOA frames extend their
-    // low 32 RX_TIME bits from the previous radio timestamp, so the runtime
-    // never needs a periodic SYS_TIME read.
-    uint32_t system_time_word = 0;
-    ESP_RETURN_ON_ERROR(
-        uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW,
-                          DW3000_SYS_TIME_SUB, &system_time_word),
-        TAG, "FlexTDOA initial radio-time seed failed");
-    s_flex_tdoa_rx_timestamp_reference =
-        ((uint64_t)system_time_word << 8U) & UWB_DW3000_TIMESTAMP_MASK;
-    s_flex_tdoa_rx_timestamp_reference_valid = true;
+    // Seed on the first received frame, not here: the distributed bootstrap
+    // listen interval is longer than the low-32 timestamp wrap.
+    s_flex_tdoa_rx_timestamp_reference_valid = false;
+    s_flex_tdoa_rx_timestamp_reference = 0;
+    s_flex_tdoa_rx_timestamp_reference_host_us = 0;
 
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_len(DW3000_REG_INDIRECT_CTRL,
@@ -2165,12 +2161,26 @@ static esp_err_t uwb_dw3000_read_rx_payload(
 // RX_TIME's low 32 bits. Extending every timestamp from the previous one is
 // therefore unambiguous and avoids the occasionally corrupt upper byte in the
 // double-buffer diagnostic set.
-static uint64_t uwb_flex_tdoa_extend_rx_timestamp32(uint32_t low32)
+static esp_err_t uwb_flex_tdoa_extend_rx_timestamp32(
+    uint32_t low32, uint64_t *timestamp)
 {
-    if (!s_flex_tdoa_rx_timestamp_reference_valid) {
-        s_flex_tdoa_rx_timestamp_reference = (uint64_t)low32;
+    if (timestamp == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+    if (!s_flex_tdoa_rx_timestamp_reference_valid ||
+        now_us - s_flex_tdoa_rx_timestamp_reference_host_us >
+            UWB_FLEX_TDOA_RX_EPOCH_MAX_GAP_US) {
+        uint32_t system_time_word = 0;
+        ESP_RETURN_ON_ERROR(
+            uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW,
+                              DW3000_SYS_TIME_SUB, &system_time_word),
+            TAG, "FlexTDOA radio-time recovery seed failed");
+        s_flex_tdoa_rx_timestamp_reference =
+            ((uint64_t)system_time_word << 8U) &
+            UWB_DW3000_TIMESTAMP_MASK;
         s_flex_tdoa_rx_timestamp_reference_valid = true;
-        return s_flex_tdoa_rx_timestamp_reference;
     }
 
     const int32_t delta =
@@ -2178,7 +2188,9 @@ static uint64_t uwb_flex_tdoa_extend_rx_timestamp32(uint32_t low32)
     s_flex_tdoa_rx_timestamp_reference =
         (s_flex_tdoa_rx_timestamp_reference + (int64_t)delta) &
         UWB_DW3000_TIMESTAMP_MASK;
-    return s_flex_tdoa_rx_timestamp_reference;
+    s_flex_tdoa_rx_timestamp_reference_host_us = now_us;
+    *timestamp = s_flex_tdoa_rx_timestamp_reference;
+    return ESP_OK;
 }
 
 // The minimum double-buffer diagnostic set is contiguous: RX_FINFO starts at
@@ -2229,8 +2241,10 @@ static esp_err_t uwb_dw3000_read_flex_buffered_frame(
                                    ((uint32_t)metadata[5] << 8U) |
                                    ((uint32_t)metadata[6] << 16U) |
                                    ((uint32_t)metadata[7] << 24U);
-    frame->rx_timestamp =
-        uwb_flex_tdoa_extend_rx_timestamp32(rx_time_low32);
+    ESP_RETURN_ON_ERROR(
+        uwb_flex_tdoa_extend_rx_timestamp32(rx_time_low32,
+                                            &frame->rx_timestamp),
+        TAG, "FlexTDOA buffered RX timestamp extension failed");
 
     const uint16_t raw =
         (uint16_t)(((uint16_t)metadata[12]) |
@@ -5129,8 +5143,13 @@ static esp_err_t uwb_flex_tdoa_send_response_preparsed(
     const uint32_t relative_delay_word =
         uwb_dw3000_delayed_time_word(response_delay_dtu) &
         UWB_DW3000_DELAYED_TIME_MASK;
-    const uint64_t relative_reply_dtu =
-        ((uint64_t)relative_delay_word << 8U) + s_antenna_delay;
+    const uint64_t relative_target_ts = uwb_dw3000_add_timestamp_delta(
+        request->rx_timestamp, (uint64_t)relative_delay_word << 8U);
+    const uint64_t relative_programmed_tx_ts =
+        uwb_dw3000_programmed_tx_timestamp(
+            uwb_dw3000_delayed_time_word(relative_target_ts));
+    const uint64_t relative_reply_dtu = uwb_distance_delta_ts(
+        relative_programmed_tx_ts, request->rx_timestamp);
     const uint64_t response_due = uwb_dw3000_add_timestamp_delta(
         request->rx_timestamp, response_delay_dtu);
     const uint32_t absolute_delay_word =
