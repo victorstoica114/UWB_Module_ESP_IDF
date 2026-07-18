@@ -281,7 +281,7 @@ enum {
 #define UWB_DISTANCE_FRAME_RAW_DISTANCE_MM_OFFSET 44U
 #define UWB_DISTANCE_FRAME_BROADCAST_ID 255U
 
-#define UWB_ANCHOR_SURVEY_MAX_ANCHORS 4U
+#define UWB_ANCHOR_SURVEY_MAX_ANCHORS APP_RUNTIME_CONFIG_MAX_ANCHORS
 #define UWB_ANCHOR_SURVEY_MAX_PAIRS \
     ((UWB_ANCHOR_SURVEY_MAX_ANCHORS * (UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U)) / 2U)
 #define UWB_FLEX_TDOA_MAX_OBSERVATIONS \
@@ -484,6 +484,13 @@ struct uwb_flex_tdoa_schedule {
     uint32_t sync_count;
     uint32_t missed_slots;
 };
+
+static uint8_t uwb_flex_tdoa_slot_initiator(uint32_t slot_id)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    return config->flex_tdoa_slot_initiator_ids[
+        slot_id % config->flex_tdoa_slot_count];
+}
 
 static uint32_t uwb_dw3000_remaining_ms(TickType_t start_tick,
                                         uint32_t timeout_ms);
@@ -4195,7 +4202,8 @@ static void uwb_dw3000_distance_test_loop(void)
 static size_t uwb_anchor_survey_anchor_ids(
     uint8_t ids[UWB_ANCHOR_SURVEY_MAX_ANCHORS])
 {
-    const size_t count = app_runtime_config_get_anchor_ids(ids);
+    const size_t count = app_runtime_config_get_anchor_ids(
+        ids, UWB_ANCHOR_SURVEY_MAX_ANCHORS);
     if (count > UWB_ANCHOR_SURVEY_MAX_ANCHORS) {
         return UWB_ANCHOR_SURVEY_MAX_ANCHORS;
     }
@@ -4656,8 +4664,13 @@ static size_t uwb_flex_tdoa_build_responder_list(
 {
     uint8_t ordered[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U] = {0};
     size_t responder_count = 0;
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const size_t slot_index = slot_id % config->flex_tdoa_slot_count;
+    const uint16_t allowed_mask =
+        config->flex_tdoa_slot_responder_masks[slot_index];
     for (size_t i = 0; i < anchor_count; ++i) {
-        if (anchor_ids[i] != initiator_id &&
+        if ((allowed_mask & (uint16_t)(1U << i)) != 0U &&
+            anchor_ids[i] != initiator_id &&
             responder_count < UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U) {
             ordered[responder_count++] = anchor_ids[i];
         }
@@ -4667,11 +4680,13 @@ static size_t uwb_flex_tdoa_build_responder_list(
         return 0;
     }
 
-    const size_t rotation = (size_t)slot_id % responder_count;
-    for (size_t i = 0; i < responder_count; ++i) {
+    const size_t rotation =
+        ((size_t)slot_id / config->flex_tdoa_slot_count) % responder_count;
+    const size_t selected_count = config->flex_tdoa_responder_count;
+    for (size_t i = 0; i < selected_count; ++i) {
         responders[i] = ordered[(i + rotation) % responder_count];
     }
-    return responder_count;
+    return selected_count;
 }
 
 static size_t uwb_flex_tdoa_responder_index(const uint8_t *responders,
@@ -5509,27 +5524,26 @@ static esp_err_t uwb_flex_tdoa_send_request(
 }
 
 static uint64_t uwb_flex_tdoa_slot_delta_us(
-    uint32_t from_slot_id, uint32_t to_slot_id, size_t anchor_count)
+    uint32_t from_slot_id, uint32_t to_slot_id, size_t responder_count)
 {
     const uint32_t slot_delta = to_slot_id - from_slot_id;
     const uint32_t slot_duration_us =
-        uwb_flex_tdoa_slot_duration_us(anchor_count - 1U);
+        uwb_flex_tdoa_slot_duration_us(responder_count);
     return (uint64_t)slot_delta * (uint64_t)slot_duration_us;
 }
 
 static uint32_t uwb_flex_tdoa_next_local_slot_id(
-    uint32_t reference_slot_id, size_t anchor_count, uint8_t own_slot_index)
+    uint32_t reference_slot_id, uint8_t source_id)
 {
-    const uint8_t reference_index =
-        (uint8_t)(reference_slot_id % (uint32_t)anchor_count);
-    uint32_t delta =
-        ((uint32_t)own_slot_index + (uint32_t)anchor_count -
-         (uint32_t)reference_index) %
-        (uint32_t)anchor_count;
-    if (delta == 0) {
-        delta = (uint32_t)anchor_count;
+    const app_runtime_config_t *config = app_runtime_config_get();
+    for (uint32_t delta = 1U;
+         delta <= (uint32_t)config->flex_tdoa_slot_count; ++delta) {
+        const uint32_t candidate = reference_slot_id + delta;
+        if (uwb_flex_tdoa_slot_initiator(candidate) == source_id) {
+            return candidate;
+        }
     }
-    return reference_slot_id + delta;
+    return UINT32_MAX;
 }
 
 static void uwb_flex_tdoa_schedule_from_phase(
@@ -5546,10 +5560,15 @@ static void uwb_flex_tdoa_schedule_from_phase(
         }
     }
 
-    const uint32_t next_slot_id = uwb_flex_tdoa_next_local_slot_id(
-        slot_id, anchor_count, schedule->own_slot_index);
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint32_t next_slot_id =
+        uwb_flex_tdoa_next_local_slot_id(slot_id, s_source_id);
+    if (next_slot_id == UINT32_MAX) {
+        schedule->synced = false;
+        return;
+    }
     const uint64_t delta_us = uwb_flex_tdoa_slot_delta_us(
-        slot_id, next_slot_id, anchor_count);
+        slot_id, next_slot_id, config->flex_tdoa_responder_count);
 
     schedule->synced = true;
     schedule->reference_from_request = from_request;
@@ -5619,13 +5638,13 @@ static void uwb_flex_tdoa_schedule_from_frame(
         return;
     }
 
-    const uint8_t expected_index =
-        (uint8_t)(slot_id % (uint32_t)anchor_count);
-    if (anchor_ids[expected_index] != initiator_id) {
+    const uint8_t expected_initiator =
+        uwb_flex_tdoa_slot_initiator(slot_id);
+    if (expected_initiator != initiator_id) {
         ESP_LOGD(TAG,
                  "FLEX_TDOA sync ignored slot=%lu source=%u expected=%u",
                  (unsigned long)slot_id, (unsigned)initiator_id,
-                 (unsigned)anchor_ids[expected_index]);
+                 (unsigned)expected_initiator);
         return;
     }
 
@@ -5705,8 +5724,8 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
 {
     const app_runtime_config_t *config = app_runtime_config_get();
     struct uwb_flex_tdoa_schedule schedule = {0};
-    for (size_t i = 0; i < anchor_count; ++i) {
-        if (anchor_ids[i] == s_source_id) {
+    for (size_t i = 0; i < config->flex_tdoa_slot_count; ++i) {
+        if (config->flex_tdoa_slot_initiator_ids[i] == s_source_id) {
             schedule.own_slot_index = (uint8_t)i;
             break;
         }
@@ -5725,11 +5744,12 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
              "FLEX_TDOA CI-CR anchor active: source_id=%u bootstrap=%u slot_index=%u anchors=%u K=%u slot=%lu us frame=%lu us",
              (unsigned)s_source_id, (unsigned)bootstrap_id,
              (unsigned)schedule.own_slot_index, (unsigned)anchor_count,
-             (unsigned)(anchor_count - 1U),
+             (unsigned)config->flex_tdoa_responder_count,
              (unsigned long)uwb_flex_tdoa_slot_duration_us(
-                 anchor_count - 1U),
-             (unsigned long)(anchor_count *
-                 uwb_flex_tdoa_slot_duration_us(anchor_count - 1U)));
+                 config->flex_tdoa_responder_count),
+             (unsigned long)(config->flex_tdoa_slot_count *
+                 uwb_flex_tdoa_slot_duration_us(
+                     config->flex_tdoa_responder_count)));
 
     while (true) {
         config = app_runtime_config_get();
@@ -5780,17 +5800,24 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
             continue;
         }
 
-        if (!schedule.synced && s_source_id == bootstrap_id &&
-            now_us >= bootstrap_deadline_us) {
+        if (!schedule.synced && now_us >= bootstrap_deadline_us +
+                (int64_t)schedule.own_slot_index *
+                    (int64_t)uwb_flex_tdoa_slot_duration_us(
+                        config->flex_tdoa_responder_count)) {
+            const uint32_t bootstrap_slot_id = schedule.own_slot_index;
             uint64_t actual_tx_ts = 0;
             const esp_err_t err = uwb_flex_tdoa_send_request(
-                anchor_ids, anchor_count, 0, 0, 0, &actual_tx_ts);
+                anchor_ids, anchor_count, bootstrap_slot_id,
+                (uint16_t)bootstrap_slot_id, 0, &actual_tx_ts);
             if (err == ESP_OK) {
                 int64_t actual_tx_host_us = esp_timer_get_time();
                 uwb_flex_tdoa_schedule_from_phase(
-                    &schedule, 0, actual_tx_ts, actual_tx_host_us, true,
-                    anchor_count);
-                ESP_LOGI(TAG, "FLEX_TDOA distributed schedule bootstrapped");
+                    &schedule, bootstrap_slot_id, actual_tx_ts,
+                    actual_tx_host_us, true, anchor_count);
+                ESP_LOGI(TAG,
+                         "FLEX_TDOA distributed schedule bootstrapped by anchor=%u slot=%lu",
+                         (unsigned)s_source_id,
+                         (unsigned long)bootstrap_slot_id);
             } else {
                 bootstrap_deadline_us =
                     esp_timer_get_time() + UWB_FLEX_TDOA_BOOTSTRAP_LISTEN_US;
@@ -5850,14 +5877,18 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
 static void uwb_dw3000_flex_tdoa_loop(void)
 {
     uint8_t anchor_ids[UWB_ANCHOR_SURVEY_MAX_ANCHORS] = {0};
-    const size_t anchor_count = uwb_anchor_survey_anchor_ids(anchor_ids);
     const app_runtime_config_t *config = app_runtime_config_get();
+    const size_t anchor_count = app_runtime_config_get_anchor_ids(
+        anchor_ids, UWB_ANCHOR_SURVEY_MAX_ANCHORS);
     const uint8_t tag_id = config->tag_id;
     const uint8_t coordinator_id = anchor_count > 0 ? anchor_ids[0] : 0;
 
     ESP_LOGI(TAG,
-             "FLEX_TDOA runtime start: source_id=%u tag_id=%u coordinator=%u anchors=[%u,%u,%u,%u]",
+             "FLEX_TDOA runtime start: source_id=%u tag_id=%u coordinator=%u N=%u K=%u M=%u anchors=[%u,%u,%u,%u]",
              (unsigned)s_source_id, (unsigned)tag_id, (unsigned)coordinator_id,
+             (unsigned)anchor_count,
+             (unsigned)config->flex_tdoa_responder_count,
+             (unsigned)config->flex_tdoa_slot_count,
              (unsigned)anchor_ids[0], (unsigned)anchor_ids[1],
              (unsigned)anchor_ids[2], (unsigned)anchor_ids[3]);
 

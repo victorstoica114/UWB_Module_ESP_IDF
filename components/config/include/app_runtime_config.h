@@ -11,14 +11,20 @@
 extern "C" {
 #endif
 
-#define APP_RUNTIME_CONFIG_MAX_ANCHORS 4U
+#define APP_RUNTIME_CONFIG_MAX_ANCHORS 10U
 #define APP_RUNTIME_CONFIG_CAL_THREE_COUNT 3U
+#define APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS 10U
 
 typedef struct {
     uint8_t runtime_mode;
     uint8_t tag_id;
     uint8_t anchor_count;
     uint8_t anchor_ids[APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    uint8_t flex_tdoa_responder_count;
+    uint8_t flex_tdoa_slot_count;
+    uint8_t flex_tdoa_slot_initiator_ids[APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS];
+    uint16_t flex_tdoa_slot_responder_masks[APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS];
+    uint32_t flex_tdoa_config_generation;
     uint8_t anchor_survey_coordinator_id;
     uint32_t anchor_survey_rx_slice_ms;
     uint32_t anchor_survey_command_delay_ms;
@@ -67,12 +73,13 @@ esp_err_t app_runtime_config_reload(void);
 esp_err_t app_runtime_config_save(const app_runtime_config_t *config);
 esp_err_t app_runtime_config_clear(void);
 void app_runtime_config_defaults(app_runtime_config_t *config);
+void app_runtime_config_reset_flex_tdoa(app_runtime_config_t *config);
 bool app_runtime_config_validate(const app_runtime_config_t *config);
 bool app_runtime_config_runtime_mode_valid(uint8_t mode);
 const char *app_runtime_config_runtime_mode_to_string(uint8_t mode);
 uint8_t app_runtime_config_runtime_mode_from_string(const char *text,
                                                     bool *ok);
-size_t app_runtime_config_get_anchor_ids(uint8_t ids[APP_RUNTIME_CONFIG_MAX_ANCHORS]);
+size_t app_runtime_config_get_anchor_ids(uint8_t *ids, size_t capacity);
 void app_runtime_config_format_anchors(char *buffer, size_t buffer_size,
                                        const app_runtime_config_t *config);
 

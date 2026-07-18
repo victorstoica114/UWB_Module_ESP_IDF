@@ -480,6 +480,44 @@ static bool ota_parse_u8_list(const char *text, uint8_t *values,
     return true;
 }
 
+static bool ota_parse_u16_list(const char *text, uint16_t *values,
+                               size_t max_count, uint8_t *count)
+{
+    if (text == NULL || text[0] == '\0' || values == NULL || count == NULL ||
+        max_count == 0U) {
+        return false;
+    }
+
+    const char *cursor = text;
+    uint8_t parsed_count = 0;
+    while (*cursor != '\0') {
+        while (*cursor == ' ') {
+            cursor++;
+        }
+        errno = 0;
+        char *end = NULL;
+        const unsigned long parsed = strtoul(cursor, &end, 0);
+        if (errno != 0 || end == cursor || parsed > UINT16_MAX ||
+            parsed_count >= max_count) {
+            return false;
+        }
+        values[parsed_count++] = (uint16_t)parsed;
+        cursor = end;
+        while (*cursor == ' ') {
+            cursor++;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+        if (*cursor != ',' && *cursor != ';') {
+            return false;
+        }
+        cursor++;
+    }
+    *count = parsed_count;
+    return parsed_count > 0U;
+}
+
 static bool ota_parse_calibration_method(const char *text, uint8_t *value)
 {
     uint8_t parsed = 0;
@@ -2790,10 +2828,53 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
             memset(config.anchor_ids, 0, sizeof(config.anchor_ids));
             memcpy(config.anchor_ids, ids, count);
             config.anchor_count = count;
+            app_runtime_config_reset_flex_tdoa(&config);
             changed = true;
         } else if (query_err != ESP_ERR_NOT_FOUND) {
             return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                        "Invalid anchors");
+        }
+
+        char flex_slots_text[80] = {0};
+        query_err = httpd_query_key_value(query, "flex_slots",
+                                          flex_slots_text,
+                                          sizeof(flex_slots_text));
+        if (query_err == ESP_OK) {
+            uint8_t count = 0;
+            memset(config.flex_tdoa_slot_initiator_ids, 0,
+                   sizeof(config.flex_tdoa_slot_initiator_ids));
+            if (!ota_parse_u8_list(
+                    flex_slots_text, config.flex_tdoa_slot_initiator_ids,
+                    APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS, &count)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid flex_slots");
+            }
+            config.flex_tdoa_slot_count = count;
+            changed = true;
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid flex_slots");
+        }
+
+        char flex_masks_text[120] = {0};
+        query_err = httpd_query_key_value(query, "flex_masks",
+                                          flex_masks_text,
+                                          sizeof(flex_masks_text));
+        if (query_err == ESP_OK) {
+            uint8_t count = 0;
+            memset(config.flex_tdoa_slot_responder_masks, 0,
+                   sizeof(config.flex_tdoa_slot_responder_masks));
+            if (!ota_parse_u16_list(
+                    flex_masks_text, config.flex_tdoa_slot_responder_masks,
+                    APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS, &count) ||
+                count != config.flex_tdoa_slot_count) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid flex_masks");
+            }
+            changed = true;
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid flex_masks");
         }
 
         char cal_three_text[64] = {0};
@@ -2905,6 +2986,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
 
         APPLY_U8_PARAM("tag", tag_id);
         APPLY_U8_PARAM("anchor_count", anchor_count);
+        APPLY_U8_PARAM("flex_k", flex_tdoa_responder_count);
         APPLY_U8_PARAM("coordinator", anchor_survey_coordinator_id);
         APPLY_U8_PARAM("coord", anchor_survey_coordinator_id);
         APPLY_U32_PARAM("survey_rx_ms", anchor_survey_rx_slice_ms);
@@ -2991,6 +3073,24 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
 #undef APPLY_BOOL_PARAM
 #undef APPLY_U32_PARAM
 #undef APPLY_U8_PARAM
+
+        if (config.flex_tdoa_responder_count !=
+                before_config.flex_tdoa_responder_count ||
+            config.flex_tdoa_slot_count != before_config.flex_tdoa_slot_count ||
+            memcmp(config.flex_tdoa_slot_initiator_ids,
+                   before_config.flex_tdoa_slot_initiator_ids,
+                   sizeof(config.flex_tdoa_slot_initiator_ids)) != 0 ||
+            memcmp(config.flex_tdoa_slot_responder_masks,
+                   before_config.flex_tdoa_slot_responder_masks,
+                   sizeof(config.flex_tdoa_slot_responder_masks)) != 0) {
+            if (config.flex_tdoa_config_generation ==
+                before_config.flex_tdoa_config_generation) {
+                config.flex_tdoa_config_generation =
+                    before_config.flex_tdoa_config_generation == UINT32_MAX
+                        ? 1U
+                        : before_config.flex_tdoa_config_generation + 1U;
+            }
+        }
 
         if (!app_runtime_config_validate(&config)) {
             return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
