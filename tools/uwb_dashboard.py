@@ -74,14 +74,28 @@ FLEX_TDOA_PRIMARY_RE = re.compile(
 FLEX_TDOA_ANCHOR_RE = re.compile(
     r"\bFLEX_TDOA anchor result\s+pair=(?P<initiator>\d+)-(?P<responder>\d+)\s+"
     r"seq=(?P<seq>\d+)\s+distance=(?P<distance>[-+]?\d+(?:\.\d+)?)\s+m\s+"
-    r"[-+]?\d+(?:\.\d+)?\s+cm\s+raw=(?P<raw>[-+]?\d+(?:\.\d+)?)\s+m"
+    r"(?:[-+]?\d+(?:\.\d+)?\s+cm\s+)?"
+    r"raw=(?P<raw>[-+]?\d+(?:\.\d+)?)\s+m"
 )
 CAL_SYNC_SKIP_RE = re.compile(r"\bUWB CAL slot skipped due to sync fail\b")
 TELEMETRY_BINARY_MAGIC = b"UWT1"
 TELEMETRY_BINARY_HEADER_LEN = 12
 TELEMETRY_STREAM_BNO085_ACCEL = 1
+TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION = 2
+TELEMETRY_STREAM_FLEX_ANCHOR_RANGE = 3
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
+TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
+TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 16
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
+TELEMETRY_FLEX_OBSERVATION_STRUCT = struct.Struct("<IIiiiHBBBB")
+TELEMETRY_FLEX_ANCHOR_RANGE_STRUCT = struct.Struct("<IiiHBB")
+TELEMETRY_STREAM_SAMPLE_SIZES = {
+    TELEMETRY_STREAM_BNO085_ACCEL: TELEMETRY_ACCEL_SAMPLE_LEN,
+    TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION:
+        TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN,
+    TELEMETRY_STREAM_FLEX_ANCHOR_RANGE:
+        TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN,
+}
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
 
 
@@ -365,10 +379,11 @@ def binary_telemetry_frame_len(buffer: bytes) -> int | None:
     sample_size = buffer[7]
     count = int.from_bytes(buffer[8:10], "little")
     payload_len = int.from_bytes(buffer[10:12], "little")
+    expected_sample_size = TELEMETRY_STREAM_SAMPLE_SIZES.get(stream_type)
     if (
         version != 1
-        or stream_type != TELEMETRY_STREAM_BNO085_ACCEL
-        or sample_size != TELEMETRY_ACCEL_SAMPLE_LEN
+        or expected_sample_size is None
+        or sample_size != expected_sample_size
         or payload_len != count * sample_size
         or payload_len > 4096
     ):
@@ -385,14 +400,14 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
         return []
     if not frame.startswith(TELEMETRY_BINARY_MAGIC):
         return []
-    if frame[5] != TELEMETRY_STREAM_BNO085_ACCEL:
-        return []
 
+    stream_type = int(frame[5])
     module_id = int(frame[6])
     sample_size = int(frame[7])
     count = int.from_bytes(frame[8:10], "little")
     payload_len = int.from_bytes(frame[10:12], "little")
-    if sample_size != TELEMETRY_ACCEL_SAMPLE_LEN:
+    expected_sample_size = TELEMETRY_STREAM_SAMPLE_SIZES.get(stream_type)
+    if expected_sample_size is None or sample_size != expected_sample_size:
         return []
     if payload_len != count * sample_size:
         return []
@@ -400,24 +415,78 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
     samples: list[dict[str, Any]] = []
     offset = TELEMETRY_BINARY_HEADER_LEN
     end = min(len(frame), offset + payload_len)
-    while offset + TELEMETRY_ACCEL_SAMPLE_LEN <= end:
-        uptime_ms, reports, x, y, z, accuracy = TELEMETRY_ACCEL_STRUCT.unpack_from(
-            frame, offset
-        )
-        samples.append(
-            {
-                "module_id": module_id,
-                "host": f"uwb-module-{module_id}",
-                "uptime_ms": int(uptime_ms),
-                "topic": "bno085.accel",
-                "x": x / 1000.0,
-                "y": y / 1000.0,
-                "z": z / 1000.0,
-                "accuracy": int(accuracy),
-                "reports": int(reports),
-            }
-        )
-        offset += TELEMETRY_ACCEL_SAMPLE_LEN
+    while offset + sample_size <= end:
+        common = {
+            "module_id": module_id,
+            "host": f"uwb-module-{module_id}",
+        }
+        if stream_type == TELEMETRY_STREAM_BNO085_ACCEL:
+            uptime_ms, reports, x, y, z, accuracy = (
+                TELEMETRY_ACCEL_STRUCT.unpack_from(frame, offset)
+            )
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "topic": "bno085.accel",
+                    "x": x / 1000.0,
+                    "y": y / 1000.0,
+                    "z": z / 1000.0,
+                    "accuracy": int(accuracy),
+                    "reports": int(reports),
+                }
+            )
+        elif stream_type == TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION:
+            (
+                uptime_ms,
+                slot_id,
+                diff_mm,
+                raw_diff_mm,
+                anchor_distance_mm,
+                sequence,
+                tag_id,
+                initiator_id,
+                responder_id,
+                responder_index,
+            ) = TELEMETRY_FLEX_OBSERVATION_STRUCT.unpack_from(frame, offset)
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "topic": "uwb.flex_tdoa.observation",
+                    "slot_id": int(slot_id),
+                    "diff_m": diff_mm / 1000.0,
+                    "raw_diff_m": raw_diff_mm / 1000.0,
+                    "anchor_distance_m": anchor_distance_mm / 1000.0,
+                    "seq": int(sequence),
+                    "tag_id": int(tag_id),
+                    "initiator_id": int(initiator_id),
+                    "responder_id": int(responder_id),
+                    "responder_index": int(responder_index),
+                }
+            )
+        elif stream_type == TELEMETRY_STREAM_FLEX_ANCHOR_RANGE:
+            (
+                uptime_ms,
+                distance_mm,
+                raw_distance_mm,
+                sequence,
+                initiator_id,
+                responder_id,
+            ) = TELEMETRY_FLEX_ANCHOR_RANGE_STRUCT.unpack_from(frame, offset)
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "topic": "uwb.flex_tdoa.anchor_range",
+                    "distance_m": distance_mm / 1000.0,
+                    "raw_distance_m": raw_distance_mm / 1000.0,
+                    "seq": int(sequence),
+                    "initiator_id": int(initiator_id),
+                    "responder_id": int(responder_id),
+                }
+            )
+        offset += sample_size
     return samples
 
 
@@ -488,7 +557,13 @@ class DashboardState:
             for sample in samples:
                 sample["received_at"] = now
                 sample["client"] = client
-                self.record_accel_sample_locked(sample)
+                topic = str(sample.get("topic") or "")
+                if topic == "bno085.accel":
+                    self.record_accel_sample_locked(sample)
+                elif topic == "uwb.flex_tdoa.observation":
+                    self.record_tdoa_sample_locked(sample)
+                elif topic == "uwb.flex_tdoa.anchor_range":
+                    self.record_tdoa_anchor_sample_locked(sample)
 
     def parse_line(self, line: str) -> dict[str, Any]:
         match = LOG_RE.match(line)
@@ -704,6 +779,68 @@ class DashboardState:
             source="tdoa_obs",
         )
 
+    def record_tdoa_sample_locked(self, item: dict[str, Any]) -> None:
+        try:
+            tag_id = int(item["tag_id"])
+            initiator_id = int(item["initiator_id"])
+            responder_id = int(item["responder_id"])
+            seq = int(item["seq"])
+            slot_id = int(item["slot_id"])
+            responder_index = int(item["responder_index"])
+            diff_m = float(item["diff_m"])
+            raw_diff_m = float(item["raw_diff_m"])
+            anchor_distance_m = float(item["anchor_distance_m"])
+        except (KeyError, TypeError, ValueError):
+            return
+
+        if (
+            tag_id <= 0
+            or initiator_id <= 0
+            or responder_id <= 0
+            or not math.isfinite(diff_m)
+            or not math.isfinite(raw_diff_m)
+            or not math.isfinite(anchor_distance_m)
+            or anchor_distance_m <= 0
+        ):
+            return
+
+        now = float(item.get("received_at") or time.time())
+        key = (tag_id, initiator_id, responder_id)
+        sample = {
+            "tag_id": tag_id,
+            "initiator_id": initiator_id,
+            "responder_id": responder_id,
+            "seq": seq,
+            "slot_id": slot_id,
+            "responder_index": responder_index,
+            "diff_m": diff_m,
+            "raw_diff_m": raw_diff_m,
+            "primary_diff_m": None,
+            "alt_diff_m": None,
+            "agreement_m": None,
+            "blend_weight": None,
+            "fused": False,
+            "suspect": False,
+            "anchor_distance_m": anchor_distance_m,
+            "received_at": now,
+            "log_id": None,
+            "source_module_id": item.get("module_id"),
+            "raw": "binary telemetry",
+        }
+        self.tdoa_observations[key] = sample
+        self.tdoa_history.setdefault(
+            key, deque(maxlen=self.max_tdoa_samples)
+        ).append(sample)
+        self.store_tdoa_anchor_distance_locked(
+            initiator_id=initiator_id,
+            responder_id=responder_id,
+            seq=seq,
+            distance_m=anchor_distance_m,
+            raw_distance_m=None,
+            item=item,
+            source="tdoa_obs",
+        )
+
     def record_tdoa_anchor_locked(self, item: dict[str, Any]) -> None:
         match = FLEX_TDOA_ANCHOR_RE.search(
             str(item.get("message") or item.get("raw") or "")
@@ -718,6 +855,26 @@ class DashboardState:
             distance_m = float(match.group("distance"))
             raw_distance_m = float(match.group("raw"))
         except ValueError:
+            return
+
+        self.store_tdoa_anchor_distance_locked(
+            initiator_id=initiator_id,
+            responder_id=responder_id,
+            seq=seq,
+            distance_m=distance_m,
+            raw_distance_m=raw_distance_m,
+            item=item,
+            source="anchor_result",
+        )
+
+    def record_tdoa_anchor_sample_locked(self, item: dict[str, Any]) -> None:
+        try:
+            initiator_id = int(item["initiator_id"])
+            responder_id = int(item["responder_id"])
+            seq = int(item["seq"])
+            distance_m = float(item["distance_m"])
+            raw_distance_m = float(item["raw_distance_m"])
+        except (KeyError, TypeError, ValueError):
             return
 
         self.store_tdoa_anchor_distance_locked(
