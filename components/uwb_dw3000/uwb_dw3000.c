@@ -24,6 +24,7 @@
 #include "app_identity.h"
 #include "app_runtime_config.h"
 #include "uwb_config.h"
+#include "wireless_log_service.h"
 #include "wireless_telemetry_service.h"
 
 static const char *TAG = "uwb_dw3000";
@@ -4865,7 +4866,7 @@ static void uwb_flex_tdoa_log_paper_observation(
     const TickType_t now = xTaskGetTickCount();
     if (s_flex_tdoa_observation_summary_tick == 0 ||
         now - s_flex_tdoa_observation_summary_tick >= pdMS_TO_TICKS(1000)) {
-        ESP_LOGI(TAG,
+        (void)wireless_log_service_submit('I', TAG,
                  "FLEX_TDOA tag summary samples=%lu drops=%lu invalid=%lu(age=%lu idx=%lu/%lu/%lu cfo=%lu order=%lu) latest=%u-%u "
                  "seq=%u diff=%.3f m clk=%ld/%.2fppm rdb_release_us=%lu cia_pending=%lu",
                  (unsigned long)s_flex_tdoa_observations_since_summary,
@@ -5409,7 +5410,7 @@ static void uwb_flex_tdoa_log_anchor_result(
     const TickType_t now = xTaskGetTickCount();
     if (s_flex_tdoa_anchor_summary_tick == 0 ||
         now - s_flex_tdoa_anchor_summary_tick >= pdMS_TO_TICKS(1000)) {
-        ESP_LOGI(TAG,
+        (void)wireless_log_service_submit('I', TAG,
                  "FLEX_TDOA anchor summary samples=%lu drops=%lu incoherent=%lu latest=%u-%u "
                  "seq=%u distance=%.3f m clk=%.2fppm idx=[%lu,%lu,%lu] rdb_release_us=%lu req_age_us=%lu resp_prepare_us=%lu stale_req=%lu cia_pending=%lu",
                  (unsigned long)s_flex_tdoa_anchor_results_since_summary,
