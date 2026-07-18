@@ -295,23 +295,20 @@ enum {
 #define UWB_FLEX_TDOA_RESP_INITIATOR_OFFSET 14U
 #define UWB_FLEX_TDOA_RESP_INDEX_OFFSET 15U
 #define UWB_FLEX_TDOA_RESP_REPLY_DTU_OFFSET 16U
-#define UWB_FLEX_TDOA_RESP_DISTANCE_MM_OFFSET 21U
+#define UWB_FLEX_TDOA_RESP_DISTANCE_MM_OFFSET 20U
+#define UWB_FLEX_TDOA_RESP_DISTANCE_SLOT_ID_OFFSET 24U
 #define UWB_FLEX_TDOA_RESP_LEN \
-    (UWB_FLEX_TDOA_RESP_DISTANCE_MM_OFFSET + sizeof(int32_t))
+    (UWB_FLEX_TDOA_RESP_DISTANCE_SLOT_ID_OFFSET + sizeof(uint32_t))
 #define UWB_FLEX_TDOA_PAPER_GUARD_US 250U
 #define UWB_FLEX_TDOA_PAPER_REQ_SUBSLOT_US 2000U
-#define UWB_FLEX_TDOA_REQ_PROCESS_GUARD_US 2000U
+#define UWB_FLEX_TDOA_PAPER_REQ_PROCESS_US 250U
 #define UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US 250U
-#define UWB_FLEX_TDOA_RESP_SUBSLOT_US 300U
 #define UWB_FLEX_TDOA_PAPER_RESP_PROCESS_US 600U
 #define UWB_FLEX_TDOA_BOOTSTRAP_LISTEN_US 2000000LL
-#define UWB_FLEX_TDOA_REQUEST_TX_LEAD_US 7000LL
-#define UWB_FLEX_TDOA_REQUEST_LATE_US 5000LL
-// Leave enough time for TX-buffer, DX_TIME, and DTX SPI operations after the
-// freshness check. A stale response is cheaper than cascading into the next
-// distributed slot.
-#define UWB_FLEX_TDOA_DELAYED_TX_MIN_LEAD_US 1000.0
-#define UWB_FLEX_TDOA_PHYSICAL_MARGIN_M 2.0
+#define UWB_FLEX_TDOA_REQUEST_TX_LEAD_US 1000LL
+#define UWB_FLEX_TDOA_REQUEST_LATE_US 500LL
+// This is an ESP32/DW3000 programming margin, not an over-the-air subslot.
+#define UWB_FLEX_TDOA_DELAYED_TX_MIN_LEAD_US 80.0
 
 enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_POLL = 1,
@@ -434,6 +431,7 @@ struct uwb_flex_tdoa_observation {
     uint64_t response_rx_tag_ts;
     uint64_t responder_reply_dtu;
     int32_t anchor_distance_mm;
+    uint32_t anchor_distance_slot_id;
     bool have_request;
     bool have_response;
     bool resp_clock_offset_valid;
@@ -449,6 +447,7 @@ struct uwb_flex_tdoa_anchor_distance {
     int32_t distance_mm;
     int32_t raw_distance_mm;
     uint16_t sequence;
+    uint32_t slot_id;
     TickType_t updated_tick;
 };
 
@@ -4345,13 +4344,13 @@ static void uwb_anchor_survey_passive_tag_loop(uint8_t coordinator_id)
 
 static struct uwb_flex_tdoa_observation *
 uwb_flex_tdoa_find_observation(
-    struct uwb_flex_tdoa_observation *observations, uint16_t sequence,
-    uint8_t initiator_id, uint8_t responder_id, bool create)
+    struct uwb_flex_tdoa_observation *observations, uint32_t slot_id,
+    uint16_t sequence, uint8_t initiator_id, uint8_t responder_id, bool create)
 {
     struct uwb_flex_tdoa_observation *oldest = NULL;
     for (size_t i = 0; i < UWB_FLEX_TDOA_MAX_OBSERVATIONS; ++i) {
         struct uwb_flex_tdoa_observation *observation = &observations[i];
-        if (observation->in_use && observation->sequence == sequence &&
+        if (observation->in_use && observation->slot_id == slot_id &&
             observation->initiator_id == initiator_id &&
             observation->responder_id == responder_id) {
             return observation;
@@ -4375,6 +4374,7 @@ uwb_flex_tdoa_find_observation(
 
     memset(oldest, 0, sizeof(*oldest));
     oldest->in_use = true;
+    oldest->slot_id = slot_id;
     oldest->sequence = sequence;
     oldest->initiator_id = initiator_id;
     oldest->responder_id = responder_id;
@@ -4441,7 +4441,7 @@ uwb_flex_tdoa_find_anchor_distance(uint8_t anchor_a_id, uint8_t anchor_b_id,
 
 static int32_t uwb_flex_tdoa_store_anchor_distance(
     uint8_t anchor_a_id, uint8_t anchor_b_id, uint16_t sequence,
-    int32_t distance_mm, int32_t raw_distance_mm)
+    uint32_t slot_id, int32_t distance_mm, int32_t raw_distance_mm)
 {
     if (distance_mm <= 0) {
         return 0;
@@ -4456,6 +4456,7 @@ static int32_t uwb_flex_tdoa_store_anchor_distance(
     slot->distance_mm = distance_mm;
     slot->raw_distance_mm = raw_distance_mm;
     slot->sequence = sequence;
+    slot->slot_id = slot_id;
     slot->updated_tick = xTaskGetTickCount();
     return slot->distance_mm;
 }
@@ -4468,20 +4469,29 @@ static int32_t uwb_flex_tdoa_cached_anchor_distance_mm(uint8_t anchor_a_id,
     return slot != NULL ? slot->distance_mm : 0;
 }
 
+static uint32_t uwb_flex_tdoa_cached_anchor_distance_slot_id(
+    uint8_t anchor_a_id, uint8_t anchor_b_id)
+{
+    const struct uwb_flex_tdoa_anchor_distance *slot =
+        uwb_flex_tdoa_find_anchor_distance(anchor_a_id, anchor_b_id, false);
+    return slot != NULL ? slot->slot_id : 0;
+}
+
 static uint32_t uwb_flex_tdoa_slot_duration_us(size_t responder_count)
 {
     return UWB_FLEX_TDOA_PAPER_GUARD_US +
            UWB_FLEX_TDOA_PAPER_REQ_SUBSLOT_US +
-           UWB_FLEX_TDOA_REQ_PROCESS_GUARD_US +
-           ((uint32_t)responder_count * UWB_FLEX_TDOA_RESP_SUBSLOT_US) +
+           UWB_FLEX_TDOA_PAPER_REQ_PROCESS_US +
+           ((uint32_t)responder_count *
+            UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US) +
            ((uint32_t)responder_count * UWB_FLEX_TDOA_PAPER_RESP_PROCESS_US);
 }
 
-// FlexTDOA CI-CR: the initiator changes by slot, and responder order rotates
-// by round/slot so the same pair is observed with multiple radio geometries.
+// FlexTDOA CI-CR: the initiator changes in round-robin order every slot, and
+// the response order rotates independently through all remaining anchors.
 static size_t uwb_flex_tdoa_build_responder_list(
     const uint8_t *anchor_ids, size_t anchor_count, uint8_t initiator_id,
-    uint32_t round, uint8_t slot_index,
+    uint32_t slot_id,
     uint8_t responders[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U])
 {
     uint8_t ordered[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U] = {0};
@@ -4497,7 +4507,7 @@ static size_t uwb_flex_tdoa_build_responder_list(
         return 0;
     }
 
-    const size_t rotation = (size_t)(round + slot_index) % responder_count;
+    const size_t rotation = (size_t)slot_id % responder_count;
     for (size_t i = 0; i < responder_count; ++i) {
         responders[i] = ordered[(i + rotation) % responder_count];
     }
@@ -4577,7 +4587,8 @@ static bool uwb_flex_tdoa_parse_request(
 
 static void uwb_flex_tdoa_build_response(
     const struct uwb_distance_frame *request, uint32_t slot_id,
-    uint8_t responder_index, uint64_t reply_dtu, int32_t anchor_distance_mm,
+    uint8_t responder_index, uint32_t reply_dtu, int32_t anchor_distance_mm,
+    uint32_t anchor_distance_slot_id,
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN])
 {
     uwb_distance_build_frame(UWB_DISTANCE_FRAME_FLEX_TDOA_RESP,
@@ -4586,21 +4597,25 @@ static void uwb_flex_tdoa_build_response(
     uwb_distance_put_u32(payload, UWB_FLEX_TDOA_RESP_SLOT_ID_OFFSET, slot_id);
     payload[UWB_FLEX_TDOA_RESP_INITIATOR_OFFSET] = request->source_id;
     payload[UWB_FLEX_TDOA_RESP_INDEX_OFFSET] = responder_index;
-    uwb_distance_put_ts40(payload, UWB_FLEX_TDOA_RESP_REPLY_DTU_OFFSET,
-                          reply_dtu);
+    uwb_distance_put_u32(payload, UWB_FLEX_TDOA_RESP_REPLY_DTU_OFFSET,
+                         reply_dtu);
     uwb_distance_put_i32(payload, UWB_FLEX_TDOA_RESP_DISTANCE_MM_OFFSET,
                          anchor_distance_mm);
+    uwb_distance_put_u32(payload,
+                         UWB_FLEX_TDOA_RESP_DISTANCE_SLOT_ID_OFFSET,
+                         anchor_distance_slot_id);
 }
 
 static bool uwb_flex_tdoa_parse_response(
     const struct uwb_distance_frame *frame, const uint8_t *anchor_ids,
     size_t anchor_count, uint32_t *slot_id, uint8_t *initiator_id,
     uint8_t *responder_id, uint8_t *responder_index, uint64_t *reply_dtu,
-    int32_t *anchor_distance_mm)
+    int32_t *anchor_distance_mm, uint32_t *anchor_distance_slot_id)
 {
     if (frame == NULL || slot_id == NULL || initiator_id == NULL ||
         responder_id == NULL || responder_index == NULL ||
         reply_dtu == NULL || anchor_distance_mm == NULL ||
+        anchor_distance_slot_id == NULL ||
         frame->type != UWB_DISTANCE_FRAME_FLEX_TDOA_RESP ||
         !uwb_distance_destination_matches(frame->destination_id) ||
         frame->payload_len < UWB_FLEX_TDOA_RESP_LEN) {
@@ -4612,12 +4627,13 @@ static bool uwb_flex_tdoa_parse_response(
     *initiator_id = frame->payload[UWB_FLEX_TDOA_RESP_INITIATOR_OFFSET];
     *responder_id = frame->source_id;
     *responder_index = frame->payload[UWB_FLEX_TDOA_RESP_INDEX_OFFSET];
-    *reply_dtu =
-        uwb_distance_get_ts40(frame->payload,
-                              UWB_FLEX_TDOA_RESP_REPLY_DTU_OFFSET);
+    *reply_dtu = uwb_distance_get_u32(
+        frame->payload, UWB_FLEX_TDOA_RESP_REPLY_DTU_OFFSET);
     *anchor_distance_mm =
         uwb_distance_get_i32(frame->payload,
                              UWB_FLEX_TDOA_RESP_DISTANCE_MM_OFFSET);
+    *anchor_distance_slot_id = uwb_distance_get_u32(
+        frame->payload, UWB_FLEX_TDOA_RESP_DISTANCE_SLOT_ID_OFFSET);
 
     return *reply_dtu != 0 &&
            uwb_flex_tdoa_anchor_pair_valid(anchor_ids, anchor_count,
@@ -4668,15 +4684,6 @@ static void uwb_flex_tdoa_log_paper_observation(
         rx_delta_tag_dtu - reply_corrected_dtu - anchor_tof_dtu;
     const double diff_m = uwb_distance_tof_to_meters(diff_dtu);
     const double raw_diff_m = uwb_distance_tof_to_meters(raw_diff_dtu);
-    if (fabs(diff_m) >
-        anchor_distance_m + UWB_FLEX_TDOA_PHYSICAL_MARGIN_M) {
-        // The range difference between two anchors cannot exceed their
-        // separation (triangle inequality). Reject timestamp incoherence,
-        // not radio noise; no averaging or position filter is applied.
-        s_flex_tdoa_observation_invalid_since_summary++;
-        memset(observation, 0, sizeof(*observation));
-        return;
-    }
     const bool queued =
         wireless_telemetry_service_submit_flex_tdoa_observation(
             tag_id, observation->initiator_id, observation->responder_id,
@@ -4748,21 +4755,16 @@ static void uwb_flex_tdoa_tag_process_frame(
         for (size_t i = 0; i < responder_count; ++i) {
             struct uwb_flex_tdoa_observation *observation =
                 uwb_flex_tdoa_find_observation(
-                    observations, frame->sequence, initiator_id, responders[i],
-                    true);
+                    observations, slot_id, frame->sequence, initiator_id,
+                    responders[i], true);
             if (observation == NULL) {
                 continue;
             }
             observation->request_rx_tag_ts = frame->rx_timestamp;
-            observation->slot_id = slot_id;
             observation->responder_index = (uint8_t)i;
-            observation->anchor_distance_mm =
-                uwb_flex_tdoa_cached_anchor_distance_mm(initiator_id,
-                                                        responders[i]);
             observation->have_request = true;
             observation->updated_tick = xTaskGetTickCount();
         }
-        (void)slot_id;
         break;
     }
 
@@ -4771,25 +4773,23 @@ static void uwb_flex_tdoa_tag_process_frame(
         uint8_t responder_index = 0;
         uint64_t reply_dtu = 0;
         int32_t anchor_distance_mm = 0;
+        uint32_t anchor_distance_slot_id = 0;
         if (!uwb_flex_tdoa_parse_response(
                 frame, anchor_ids, anchor_count, &slot_id, &initiator_id,
                 &responder_id, &responder_index, &reply_dtu,
-                &anchor_distance_mm)) {
+                &anchor_distance_mm, &anchor_distance_slot_id)) {
             return;
         }
         if (anchor_distance_mm > 0) {
             (void)uwb_flex_tdoa_store_anchor_distance(
                 initiator_id, responder_id, frame->sequence,
+                anchor_distance_slot_id,
                 anchor_distance_mm, anchor_distance_mm);
-        } else {
-            anchor_distance_mm =
-                uwb_flex_tdoa_cached_anchor_distance_mm(initiator_id,
-                                                        responder_id);
         }
         struct uwb_flex_tdoa_observation *observation =
             uwb_flex_tdoa_find_observation(
-                observations, frame->sequence, initiator_id, responder_id,
-                false);
+                observations, slot_id, frame->sequence, initiator_id,
+                responder_id, false);
         if (observation == NULL) {
             ESP_LOGD(TAG,
                      "FLEX_TDOA response without local request RX pair=%u-%u seq=%u",
@@ -4808,9 +4808,8 @@ static void uwb_flex_tdoa_tag_process_frame(
         observation->slot_id = slot_id;
         observation->responder_index = responder_index;
         observation->responder_reply_dtu = reply_dtu;
-        if (observation->anchor_distance_mm <= 0) {
-            observation->anchor_distance_mm = anchor_distance_mm;
-        }
+        observation->anchor_distance_mm = anchor_distance_mm;
+        observation->anchor_distance_slot_id = anchor_distance_slot_id;
         observation->have_response = true;
         observation->resp_clock_offset_valid = frame->clock_offset_valid;
         observation->resp_clock_offset_raw = frame->clock_offset_raw;
@@ -4868,11 +4867,12 @@ static bool uwb_flex_tdoa_response_matches_local_request(
     uint8_t responder_index = 0;
     uint64_t reply_dtu = 0;
     int32_t anchor_distance_mm = 0;
+    uint32_t anchor_distance_slot_id = 0;
     if (!s_flex_tdoa_local_request.active ||
         !uwb_flex_tdoa_parse_response(
             frame, anchor_ids, anchor_count, &slot_id, &initiator_id,
             &responder_id, &responder_index, &reply_dtu,
-            &anchor_distance_mm)) {
+            &anchor_distance_mm, &anchor_distance_slot_id)) {
         return false;
     }
 
@@ -4943,15 +4943,12 @@ static esp_err_t uwb_flex_tdoa_send_response_for_request(
         return ESP_OK;
     }
 
-    // The request RX timestamp is already at the end of the request's radio
-    // airtime. Therefore only the request-processing guard belongs after it;
-    // the paper's 2 ms request subslot remains part of the complete slot
-    // budget, but must not be counted a second time here. K * 600 us is the
-    // final initiator processing budget, not response spacing.
+    // Figure 2: after receiving REQ, responders wait for the 250 us request
+    // processing phase, then answer in ordered 250 us response subslots.
     const uint32_t response_delay_us =
-        UWB_FLEX_TDOA_REQ_PROCESS_GUARD_US +
+        UWB_FLEX_TDOA_PAPER_REQ_PROCESS_US +
         ((uint32_t)responder_index *
-         UWB_FLEX_TDOA_RESP_SUBSLOT_US);
+         UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US);
     uint32_t system_time_word = 0;
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW,
@@ -4980,13 +4977,20 @@ static esp_err_t uwb_flex_tdoa_send_response_for_request(
         uwb_dw3000_programmed_tx_timestamp(delayed_time_word);
     const uint64_t reply_dtu =
         uwb_distance_delta_ts(programmed_tx_ts, request->rx_timestamp);
+    if (reply_dtu > UINT32_MAX) {
+        return ESP_ERR_INVALID_SIZE;
+    }
     const int32_t anchor_distance_mm =
         uwb_flex_tdoa_cached_anchor_distance_mm(request->source_id,
                                                 s_source_id);
+    const uint32_t anchor_distance_slot_id =
+        uwb_flex_tdoa_cached_anchor_distance_slot_id(request->source_id,
+                                                     s_source_id);
 
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
     uwb_flex_tdoa_build_response(request, slot_id, (uint8_t)responder_index,
-                                 reply_dtu, anchor_distance_mm, payload);
+                                 (uint32_t)reply_dtu, anchor_distance_mm,
+                                 anchor_distance_slot_id, payload);
 
     uint64_t actual_tx_ts = 0;
     const esp_err_t err = uwb_dw3000_send_payload_delayed(
@@ -5020,10 +5024,12 @@ static void uwb_flex_tdoa_handle_response_measurement(
     uint8_t responder_index = 0;
     uint64_t reply_dtu = 0;
     int32_t reported_anchor_distance_mm = 0;
+    uint32_t reported_anchor_distance_slot_id = 0;
     if (!uwb_flex_tdoa_parse_response(
             frame, anchor_ids, anchor_count, &slot_id, &initiator_id,
             &responder_id, &responder_index, &reply_dtu,
-            &reported_anchor_distance_mm)) {
+            &reported_anchor_distance_mm,
+            &reported_anchor_distance_slot_id)) {
         return;
     }
 
@@ -5099,7 +5105,7 @@ static void uwb_flex_tdoa_handle_response_measurement(
     }
 
     const int32_t stored_distance_mm = uwb_flex_tdoa_store_anchor_distance(
-        initiator_id, responder_id, frame->sequence, distance_mm,
+        initiator_id, responder_id, frame->sequence, slot_id, distance_mm,
         raw_distance_mm);
     if (stored_distance_mm > 0) {
         if (responder_index <
@@ -5122,6 +5128,7 @@ static void uwb_flex_tdoa_handle_response_measurement(
     }
     (void)responder_index;
     (void)reported_anchor_distance_mm;
+    (void)reported_anchor_distance_slot_id;
 }
 
 static void uwb_flex_tdoa_log_anchor_result(
@@ -5169,13 +5176,13 @@ static void uwb_flex_tdoa_log_anchor_result(
 }
 
 static esp_err_t uwb_flex_tdoa_send_request(
-    const uint8_t *anchor_ids, size_t anchor_count, uint8_t slot_index,
-    uint32_t round, uint32_t slot_id, uint16_t sequence,
+    const uint8_t *anchor_ids, size_t anchor_count, uint32_t slot_id,
+    uint16_t sequence,
     uint64_t scheduled_tx_ts, uint64_t *actual_tx_ts)
 {
     uint8_t responders[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U] = {0};
     const size_t responder_count = uwb_flex_tdoa_build_responder_list(
-        anchor_ids, anchor_count, s_source_id, round, slot_index, responders);
+        anchor_ids, anchor_count, s_source_id, slot_id, responders);
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
     const size_t payload_len =
         uwb_flex_tdoa_build_request(responders, responder_count, slot_id,
@@ -5196,7 +5203,8 @@ static esp_err_t uwb_flex_tdoa_send_request(
     if (err != ESP_OK) {
         ESP_LOGW(TAG,
                  "FLEX_TDOA request TX failed slot=%u slot_id=%lu seq=%u responders=%u: %s",
-                 (unsigned)slot_index, (unsigned long)slot_id,
+                 (unsigned)(slot_id % (uint32_t)anchor_count),
+                 (unsigned long)slot_id,
                  (unsigned)sequence, (unsigned)responder_count,
                  esp_err_to_name(err));
         return err;
@@ -5218,7 +5226,8 @@ static esp_err_t uwb_flex_tdoa_send_request(
 
     ESP_LOGD(TAG,
              "FLEX_TDOA request slot=%u slot_id=%lu seq=%u initiator=%u responders=%u slot_body=%lu us scheduled=%u",
-             (unsigned)slot_index, (unsigned long)slot_id,
+             (unsigned)(slot_id % (uint32_t)anchor_count),
+             (unsigned long)slot_id,
              (unsigned)sequence, (unsigned)s_source_id,
              (unsigned)responder_count,
              (unsigned long)uwb_flex_tdoa_slot_duration_us(
@@ -5228,15 +5237,12 @@ static esp_err_t uwb_flex_tdoa_send_request(
 }
 
 static uint64_t uwb_flex_tdoa_slot_delta_us(
-    uint32_t from_slot_id, uint32_t to_slot_id, size_t anchor_count,
-    uint32_t slot_ms, uint32_t round_gap_ms)
+    uint32_t from_slot_id, uint32_t to_slot_id, size_t anchor_count)
 {
     const uint32_t slot_delta = to_slot_id - from_slot_id;
-    const uint32_t frame_delta =
-        (to_slot_id / (uint32_t)anchor_count) -
-        (from_slot_id / (uint32_t)anchor_count);
-    return ((uint64_t)slot_delta * (uint64_t)slot_ms * 1000ULL) +
-           ((uint64_t)frame_delta * (uint64_t)round_gap_ms * 1000ULL);
+    const uint32_t slot_duration_us =
+        uwb_flex_tdoa_slot_duration_us(anchor_count - 1U);
+    return (uint64_t)slot_delta * (uint64_t)slot_duration_us;
 }
 
 static uint32_t uwb_flex_tdoa_next_local_slot_id(
@@ -5257,8 +5263,7 @@ static uint32_t uwb_flex_tdoa_next_local_slot_id(
 static void uwb_flex_tdoa_schedule_from_phase(
     struct uwb_flex_tdoa_schedule *schedule, uint32_t slot_id,
     uint64_t request_phase_radio_ts, int64_t request_phase_host_us,
-    bool from_request, size_t anchor_count,
-    const app_runtime_config_t *config)
+    bool from_request, size_t anchor_count)
 {
     if (schedule->synced) {
         const int32_t order = (int32_t)(slot_id - schedule->reference_slot_id);
@@ -5272,8 +5277,7 @@ static void uwb_flex_tdoa_schedule_from_phase(
     const uint32_t next_slot_id = uwb_flex_tdoa_next_local_slot_id(
         slot_id, anchor_count, schedule->own_slot_index);
     const uint64_t delta_us = uwb_flex_tdoa_slot_delta_us(
-        slot_id, next_slot_id, anchor_count, config->anchor_survey_slot_ms,
-        config->anchor_survey_round_gap_ms);
+        slot_id, next_slot_id, anchor_count);
 
     schedule->synced = true;
     schedule->reference_from_request = from_request;
@@ -5289,7 +5293,7 @@ static void uwb_flex_tdoa_schedule_from_phase(
 static void uwb_flex_tdoa_schedule_from_frame(
     struct uwb_flex_tdoa_schedule *schedule,
     const struct uwb_distance_frame *frame, const uint8_t *anchor_ids,
-    size_t anchor_count, const app_runtime_config_t *config)
+    size_t anchor_count)
 {
     uint32_t slot_id = 0;
     uint8_t initiator_id = 0;
@@ -5313,10 +5317,11 @@ static void uwb_flex_tdoa_schedule_from_frame(
         uint8_t responder_index = 0;
         uint64_t reply_dtu = 0;
         int32_t anchor_distance_mm = 0;
+        uint32_t anchor_distance_slot_id = 0;
         if (!uwb_flex_tdoa_parse_response(
                 frame, anchor_ids, anchor_count, &slot_id, &initiator_id,
                 &responder_id, &responder_index, &reply_dtu,
-                &anchor_distance_mm)) {
+                &anchor_distance_mm, &anchor_distance_slot_id)) {
             return;
         }
         double local_reply_dtu = (double)reply_dtu;
@@ -5352,13 +5357,13 @@ static void uwb_flex_tdoa_schedule_from_frame(
 
     uwb_flex_tdoa_schedule_from_phase(
         schedule, slot_id, request_phase_radio_ts, request_phase_host_us,
-        from_request, anchor_count, config);
+        from_request, anchor_count);
 }
 
 static void uwb_flex_tdoa_process_frame(
     const struct uwb_distance_frame *frame,
     struct uwb_flex_tdoa_schedule *schedule, const uint8_t *anchor_ids,
-    size_t anchor_count, const app_runtime_config_t *config)
+    size_t anchor_count)
 {
     if (frame == NULL) {
         return;
@@ -5367,11 +5372,13 @@ static void uwb_flex_tdoa_process_frame(
     switch (frame->type) {
     case UWB_DISTANCE_FRAME_FLEX_TDOA_REQ:
         uwb_flex_tdoa_schedule_from_frame(schedule, frame, anchor_ids,
-                                          anchor_count, config);
+                                          anchor_count);
         (void)uwb_flex_tdoa_send_response_for_request(frame, anchor_ids,
                                                        anchor_count);
         break;
     case UWB_DISTANCE_FRAME_FLEX_TDOA_RESP:
+        uwb_flex_tdoa_schedule_from_frame(schedule, frame, anchor_ids,
+                                          anchor_count);
         uwb_flex_tdoa_handle_response_measurement(frame, anchor_ids,
                                                   anchor_count);
         break;
@@ -5439,13 +5446,14 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
     int64_t bootstrap_deadline_us =
         esp_timer_get_time() + UWB_FLEX_TDOA_BOOTSTRAP_LISTEN_US;
     ESP_LOGI(TAG,
-             "FLEX_TDOA distributed anchor active: source_id=%u bootstrap=%u slot_index=%u anchors=%u slot=%u ms frame_gap=%u ms slot_body_k3=%lu us",
+             "FLEX_TDOA CI-CR anchor active: source_id=%u bootstrap=%u slot_index=%u anchors=%u K=%u slot=%lu us frame=%lu us",
              (unsigned)s_source_id, (unsigned)bootstrap_id,
              (unsigned)schedule.own_slot_index, (unsigned)anchor_count,
-             (unsigned)config->anchor_survey_slot_ms,
-             (unsigned)config->anchor_survey_round_gap_ms,
+             (unsigned)(anchor_count - 1U),
              (unsigned long)uwb_flex_tdoa_slot_duration_us(
-                 anchor_count - 1U));
+                 anchor_count - 1U),
+             (unsigned long)(anchor_count *
+                 uwb_flex_tdoa_slot_duration_us(anchor_count - 1U)));
 
     while (true) {
         config = app_runtime_config_get();
@@ -5471,12 +5479,9 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
             }
 
             const uint32_t slot_id = schedule.next_slot_id;
-            const uint8_t slot_index =
-                (uint8_t)(slot_id % (uint32_t)anchor_count);
-            const uint32_t round = slot_id / (uint32_t)anchor_count;
             uint64_t actual_tx_ts = 0;
             const esp_err_t err = uwb_flex_tdoa_send_request(
-                anchor_ids, anchor_count, slot_index, round, slot_id,
+                anchor_ids, anchor_count, slot_id,
                 (uint16_t)(slot_id & 0xFFFFU), schedule.next_request_radio_ts,
                 &actual_tx_ts);
             if (err != ESP_OK) {
@@ -5494,7 +5499,7 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
 
             uwb_flex_tdoa_schedule_from_phase(
                 &schedule, slot_id, actual_tx_ts, esp_timer_get_time(), true,
-                anchor_count, config);
+                anchor_count);
             continue;
         }
 
@@ -5502,11 +5507,11 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
             now_us >= bootstrap_deadline_us) {
             uint64_t actual_tx_ts = 0;
             const esp_err_t err = uwb_flex_tdoa_send_request(
-                anchor_ids, anchor_count, 0, 0, 0, 0, 0, &actual_tx_ts);
+                anchor_ids, anchor_count, 0, 0, 0, &actual_tx_ts);
             if (err == ESP_OK) {
                 uwb_flex_tdoa_schedule_from_phase(
                     &schedule, 0, actual_tx_ts, esp_timer_get_time(), true,
-                    anchor_count, config);
+                    anchor_count);
                 ESP_LOGI(TAG, "FLEX_TDOA distributed schedule bootstrapped");
             } else {
                 bootstrap_deadline_us =
@@ -5552,7 +5557,7 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
             }
             for (size_t i = 0; i < frame_count; ++i) {
                 uwb_flex_tdoa_process_frame(
-                    &frames[i], &schedule, anchor_ids, anchor_count, config);
+                    &frames[i], &schedule, anchor_ids, anchor_count);
             }
         } else if (err == ESP_ERR_NOT_FINISHED && schedule_alarm) {
             continue;
@@ -5591,18 +5596,6 @@ static void uwb_dw3000_flex_tdoa_loop(void)
         ESP_LOGE(TAG,
                  "FLEX_TDOA invalid role configuration: tag_id=%u is also in anchor list",
                  (unsigned)tag_id);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    const uint32_t slot_body_us =
-        uwb_flex_tdoa_slot_duration_us(anchor_count - 1U);
-    if ((uint64_t)config->anchor_survey_slot_ms * 1000ULL < slot_body_us) {
-        s_status = UWB_DW3000_STATUS_FAILED;
-        ESP_LOGE(TAG,
-                 "FLEX_TDOA slot too short: configured=%lu us required=%lu us",
-                 (unsigned long)config->anchor_survey_slot_ms * 1000UL,
-                 (unsigned long)slot_body_us);
         vTaskDelete(NULL);
         return;
     }
