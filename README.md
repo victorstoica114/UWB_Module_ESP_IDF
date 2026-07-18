@@ -596,6 +596,21 @@ anchor model variance      sigma_Q^2 = 1 cm^2
 TWR measurement variance  sigma_R^2 = 10 cm^2
 ```
 
+The dashboard treats the resulting covariance and the geometric fit as two
+different quantities. A small EKF covariance does not prove that the nonlinear
+solver selected the correct geometric minimum. Before `Fix Anchor Geometry` is
+allowed, the RMS error between the EKF coordinates and the current complete
+TWR frame must be below three measurement standard deviations:
+
+```text
+fix limit = 3 * sqrt(10 cm^2) = 9.49 cm RMS
+```
+
+This is a solver validity check, not a filter applied to the raw FlexTDOA or
+TWR observations. A previously fixed geometry that exceeds the same limit is
+marked inconsistent and tag positioning is suspended until anchor
+self-localization is restarted.
+
 For the current planar setup, the paper's coordinate convention is adapted to
 2D: the first selected anchor is fixed at `(0,0)`, the second is on the positive
 Y axis, and the third has positive X. Anchor coordinates remain in the explicit

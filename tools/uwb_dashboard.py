@@ -3973,6 +3973,26 @@ function anchorGeometryResiduals(anchors, distanceItems) {
   return residuals;
 }
 
+function anchorGeometryFitQuality(anchorIds, residuals) {
+  const values = Object.values(residuals || {})
+    .map(Number)
+    .filter(Number.isFinite);
+  const expected = selectedAnchorPairs(anchorIds).length;
+  const rmsM = values.length
+    ? Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length)
+    : NaN;
+  const maxM = values.length ? Math.max(...values.map(Math.abs)) : NaN;
+  // The paper uses R = 10 cm^2. Three standard deviations is 9.49 cm.
+  const fixLimitM = 3 * Math.sqrt(10) * 0.01;
+  return {
+    complete: values.length === expected,
+    rmsM,
+    maxM,
+    fixLimitM,
+    acceptable: values.length === expected && Number.isFinite(rmsM) && rmsM <= fixLimitM,
+  };
+}
+
 function currentAnchorDistanceBatch(anchorIds, maxAge) {
   const ids = anchorIds.map(Number).filter(id => Number.isInteger(id) && id > 0);
   const liveItems = {};
@@ -4200,15 +4220,19 @@ function paperAnchorGeometry(anchorIds, maxAge) {
   const session = state.positionGeometry;
   if (session.fixed) {
     const anchors = cloneAnchorCoordinates(session.fixed.anchors);
+    const residuals = anchorGeometryResiduals(anchors, batch.distanceItems);
+    const fitQuality = anchorGeometryFitQuality(anchorIds, residuals);
+    const inconsistent = fitQuality.complete && !fitQuality.acceptable;
     return {
       anchors,
       distanceItems: batch.distanceItems,
       missingPairs: batch.missingPairs,
-      residuals: anchorGeometryResiduals(anchors, batch.distanceItems),
+      residuals,
+      fitQuality,
       complete: true,
-      positionReady: true,
+      positionReady: !inconsistent,
       canFix: false,
-      status: "fixed",
+      status: inconsistent ? "fixed_inconsistent" : "fixed",
       fixedAt: Number(session.fixed.fixedAt),
       updates: Number(session.fixed.updates || 0),
     };
@@ -4252,16 +4276,20 @@ function paperAnchorGeometry(anchorIds, maxAge) {
 
   const anchors = paperAnchorCoordinatesFromState(
     batch.ids, session.ekf.variables, session.ekf.state);
+  const residuals = anchorGeometryResiduals(anchors, batch.distanceItems);
+  const fitQuality = anchorGeometryFitQuality(anchorIds, residuals);
   const sigmaValues = session.ekf.covariance.map(
     (row, index) => Math.sqrt(Math.max(0, Number(row[index]))));
   return {
     anchors,
     distanceItems: batch.distanceItems,
     missingPairs: batch.missingPairs,
-    residuals: anchorGeometryResiduals(anchors, batch.distanceItems),
+    residuals,
+    fitQuality,
     complete: true,
     positionReady: false,
-    canFix: batch.coherent && batch.missingPairs.length === 0 && session.ekf.updates > 0,
+    canFix: batch.coherent && batch.missingPairs.length === 0 &&
+      session.ekf.updates > 0 && fitQuality.acceptable,
     status: "self_localizing",
     updates: session.ekf.updates,
     frameId: session.ekf.lastFrameId,
@@ -4874,11 +4902,20 @@ function renderPositionGeometryPanel(model) {
   const geometry = model.geometry || {};
   if (status) {
     if (geometry.status === "fixed") {
-      status.textContent = `Fixed paper geometry · ${fmtAge(Number(geometry.fixedAt || 0))} · ${geometry.updates || 0} EKF updates`;
+      const fitText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
+        ? ` · live fit RMS ${fmtPositionCm(geometry.fitQuality.rmsM, 1)}`
+        : "";
+      status.textContent = `Fixed paper geometry · ${fmtAge(Number(geometry.fixedAt || 0))} · ${geometry.updates || 0} EKF updates${fitText}`;
       status.className = "muted fresh";
+    } else if (geometry.status === "fixed_inconsistent") {
+      status.textContent = `Fixed geometry rejected · live fit RMS ${fmtPositionCm(geometry.fitQuality?.rmsM, 1)} · limit ${fmtPositionCm(geometry.fitQuality?.fixLimitM, 1)}`;
+      status.className = "muted stale";
     } else if (geometry.status === "self_localizing") {
-      status.textContent = `Paper TWR-EKF self-localization · ${geometry.updates || 0} updates · ${fmtFixed(geometry.elapsedSec || 0, 0)} s · max σ ${fmtPositionCm(geometry.maxSigmaM, 1)}`;
-      status.className = "muted";
+      const fitText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
+        ? ` · fit RMS ${fmtPositionCm(geometry.fitQuality.rmsM, 1)}`
+        : "";
+      status.textContent = `Paper TWR-EKF self-localization · ${geometry.updates || 0} updates · ${fmtFixed(geometry.elapsedSec || 0, 0)} s · max σ ${fmtPositionCm(geometry.maxSigmaM, 1)}${fitText}`;
+      status.className = geometry.fitQuality?.acceptable ? "muted" : "muted stale";
     } else {
       status.textContent = "Waiting for all fresh anchor-anchor ranges.";
       status.className = "muted stale";
@@ -4997,19 +5034,34 @@ function renderPositionReadout(model) {
       overlayButton.disabled = true;
       overlayButton.dataset.action = "wait";
     }
+  } else if (model.geometry?.status === "fixed_inconsistent") {
+    overlay.classList.add("active");
+    overlay.querySelector("h2").textContent = "Fixed anchor geometry is inconsistent";
+    overlay.querySelector("p").textContent = `The live TWR fit is ${fmtPositionCm(model.geometry.fitQuality?.rmsM, 1)} RMS, above the ${fmtPositionCm(model.geometry.fitQuality?.fixLimitM, 1)} safety limit. Restart anchor self-localization before positioning the tag.`;
+    if (overlayButton) {
+      overlayButton.textContent = "Restart Anchor Self-Localization";
+      overlayButton.disabled = false;
+      overlayButton.dataset.action = "restart_geometry";
+    }
   } else if (!model.geometry?.positionReady) {
     overlay.classList.add("active");
     const canFix = Boolean(model.geometry?.canFix);
+    const hasBadFit = model.geometry?.status === "self_localizing" &&
+      model.geometry?.fitQuality?.complete && !model.geometry?.fitQuality?.acceptable;
     overlay.querySelector("h2").textContent = canFix
       ? "Anchor geometry is ready"
-      : "Anchor self-localization in progress";
+      : hasBadFit ? "Anchor geometry is not consistent" : "Anchor self-localization in progress";
     overlay.querySelector("p").textContent = canFix
       ? "Review the measured geometry, then fix it to start live FlexTDOA positioning."
-      : "FlexTDOA positioning starts after the TWR-EKF has a complete anchor geometry.";
+      : hasBadFit
+        ? `The current fit is ${fmtPositionCm(model.geometry.fitQuality?.rmsM, 1)} RMS. Restart self-localization if it does not recover below ${fmtPositionCm(model.geometry.fitQuality?.fixLimitM, 1)}.`
+        : "FlexTDOA positioning starts after the TWR-EKF has a complete anchor geometry.";
     if (overlayButton) {
-      overlayButton.textContent = canFix ? "Fix Anchor Geometry" : "Waiting for Anchor Geometry";
-      overlayButton.disabled = !canFix;
-      overlayButton.dataset.action = canFix ? "fix" : "wait";
+      overlayButton.textContent = canFix
+        ? "Fix Anchor Geometry"
+        : hasBadFit ? "Restart Anchor Self-Localization" : "Waiting for Anchor Geometry";
+      overlayButton.disabled = !canFix && !hasBadFit;
+      overlayButton.dataset.action = canFix ? "fix" : hasBadFit ? "restart_geometry" : "wait";
     }
   } else {
     overlay.classList.remove("active");
@@ -7401,6 +7453,8 @@ function runPositionOverlayAction(event) {
   const action = event.currentTarget?.dataset?.action || "enable";
   if (action === "fix") {
     fixCurrentAnchorGeometry();
+  } else if (action === "restart_geometry") {
+    restartAnchorSelfLocalization();
   } else if (action === "enable") {
     enablePositionRanging();
   }
@@ -7421,8 +7475,17 @@ function fixCurrentAnchorGeometry() {
     setToast("positionToast", "Anchor EKF has no complete update yet", "bad");
     return;
   }
-  const anchors = paperAnchorCoordinatesFromState(
-    settings.anchorIds, session.ekf.variables, session.ekf.state);
+  const geometry = paperAnchorGeometry(
+    settings.anchorIds, positionGeometryMaxAge(settings));
+  if (!geometry.canFix) {
+    const rmsText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
+      ? `: ${fmtPositionCm(geometry.fitQuality.rmsM, 1)} RMS`
+      : "";
+    setToast("positionToast", `Anchor geometry fit is not acceptable${rmsText}`, "bad");
+    renderPosition();
+    return;
+  }
+  const anchors = cloneAnchorCoordinates(geometry.anchors);
   const fixed = {
     anchorIds: settings.anchorIds.map(Number),
     anchors: cloneAnchorCoordinates(anchors),
