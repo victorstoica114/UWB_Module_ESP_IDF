@@ -456,12 +456,12 @@ The dashboard exposes four operational timing/freshness profiles. They do not
 enable any Position-side filtering; they only change the timing parameters and
 the maximum age accepted for raw observations:
 
-| Dashboard profile | fresh age | outer slot | round gap | command delay | slot body K=3 | frame cycle |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Raw FlexTDOA, 3 s | `3.0 s` | `100 ms` | `10 ms` | `5 ms` | `7.80 ms` | `410 ms` |
-| Raw FlexTDOA, 1.5 s | `1.5 s` | `100 ms` | `10 ms` | `5 ms` | `7.80 ms` | `410 ms` |
-| Raw FlexTDOA, 1.2 s | `1.2 s` | `100 ms` | `10 ms` | `5 ms` | `7.80 ms` | `410 ms` |
-| Raw FlexTDOA, 15 ms slots | `0.5 s` | `15 ms` | `2 ms` | `2 ms` | `7.80 ms` | `62 ms` |
+| Dashboard profile | fresh age | outer slot | round gap | command delay | DS-TWR timeout | RESP / FINAL / REPORT | slot body K=3 | frame cycle |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Stable Profile | `3.0 s` | `100 ms` | `10 ms` | `5 ms` | `90 ms` | `20 / 20 / 10 ms` | `7.80 ms` | `410 ms` |
+| Balanced Profile | `1.5 s` | `100 ms` | `10 ms` | `5 ms` | `90 ms` | `20 / 20 / 10 ms` | `7.80 ms` | `410 ms` |
+| Reactive Profile | `1.2 s` | `100 ms` | `10 ms` | `5 ms` | `90 ms` | `20 / 20 / 10 ms` | `7.80 ms` | `410 ms` |
+| Fast Profile | `0.5 s` | `15 ms` | `2 ms` | `2 ms` | `12 ms` | `8 / 8 / 3 ms` | `7.80 ms` | `62 ms` |
 
 Historical slot-order scenarios:
 

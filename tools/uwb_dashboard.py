@@ -2607,8 +2607,8 @@ tr.status-stale td { color: #4f3b1d; }
           <p class="muted profile-note">Apply writes every timing parameter in the selected profile to ESP32 NVS through runtime config. The same profile updates FlexTDOA anchor slots, DS-TWR ranging slots, and selects the FlexTDOA position solver.</p>
           <div class="profile-grid">
             <div class="profile-card" data-profile="static3">
-              <h3>Raw FlexTDOA, 3 s</h3>
-              <p class="muted">Uses the validated 100 ms FlexTDOA timing and accepts raw observations up to 3 s old.</p>
+              <h3>Stable Profile</h3>
+              <p class="muted">FlexTDOA 100 ms / 10 ms timing with a long raw-observation freshness window.</p>
               <div class="form-grid compact">
                 <label for="profileStatic3SlotMs">Slot ms</label>
                 <input id="profileStatic3SlotMs" value="100" type="number" min="1" step="1">
@@ -2621,23 +2621,23 @@ tr.status-stale td { color: #4f3b1d; }
                 <label for="profileStatic3TimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileStatic3TimeoutMs" value="90" type="number" min="1" step="1">
                 <label for="profileStatic3RespDelayMs">RESP delay ms</label>
-                <input id="profileStatic3RespDelayMs" value="15" type="number" min="1" step="1">
+                <input id="profileStatic3RespDelayMs" value="20" type="number" min="1" step="1">
                 <label for="profileStatic3FinalDelayMs">FINAL delay ms</label>
-                <input id="profileStatic3FinalDelayMs" value="15" type="number" min="1" step="1">
+                <input id="profileStatic3FinalDelayMs" value="20" type="number" min="1" step="1">
                 <label for="profileStatic3ReportDelayMs">REPORT delay ms</label>
-                <input id="profileStatic3ReportDelayMs" value="5" type="number" min="1" step="1">
+                <input id="profileStatic3ReportDelayMs" value="10" type="number" min="1" step="1">
                 <label for="profileStatic3AutoRxDelayUus">Auto RX delay UUS</label>
                 <input id="profileStatic3AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
               <div class="profile-summary" id="profileStatic3Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="static3">Apply Raw 3s</button>
+                <button class="primary apply-ranging-profile" data-profile="static3">Apply Stable</button>
                 <button class="reset-ranging-profile" data-profile="static3">Reset Defaults</button>
               </div>
             </div>
             <div class="profile-card" data-profile="dynamic15">
-              <h3>Raw FlexTDOA, 1.5 s</h3>
-              <p class="muted">Keeps the robust 100 ms timing and accepts raw observations up to 1.5 s old.</p>
+              <h3>Balanced Profile</h3>
+              <p class="muted">Same 100 ms / 10 ms radio timing with a shorter observation freshness window.</p>
               <div class="form-grid compact">
                 <label for="profileDynamic15SlotMs">Slot ms</label>
                 <input id="profileDynamic15SlotMs" value="100" type="number" min="1" step="1">
@@ -2650,23 +2650,23 @@ tr.status-stale td { color: #4f3b1d; }
                 <label for="profileDynamic15TimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileDynamic15TimeoutMs" value="90" type="number" min="1" step="1">
                 <label for="profileDynamic15RespDelayMs">RESP delay ms</label>
-                <input id="profileDynamic15RespDelayMs" value="15" type="number" min="1" step="1">
+                <input id="profileDynamic15RespDelayMs" value="20" type="number" min="1" step="1">
                 <label for="profileDynamic15FinalDelayMs">FINAL delay ms</label>
-                <input id="profileDynamic15FinalDelayMs" value="15" type="number" min="1" step="1">
+                <input id="profileDynamic15FinalDelayMs" value="20" type="number" min="1" step="1">
                 <label for="profileDynamic15ReportDelayMs">REPORT delay ms</label>
-                <input id="profileDynamic15ReportDelayMs" value="5" type="number" min="1" step="1">
+                <input id="profileDynamic15ReportDelayMs" value="10" type="number" min="1" step="1">
                 <label for="profileDynamic15AutoRxDelayUus">Auto RX delay UUS</label>
                 <input id="profileDynamic15AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
               <div class="profile-summary" id="profileDynamic15Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="dynamic15">Apply Raw 1.5s</button>
+                <button class="primary apply-ranging-profile" data-profile="dynamic15">Apply Balanced</button>
                 <button class="reset-ranging-profile" data-profile="dynamic15">Reset Defaults</button>
               </div>
             </div>
             <div class="profile-card" data-profile="dynamic12">
-              <h3>Raw FlexTDOA, 1.2 s</h3>
-              <p class="muted">Same radio timing with a shorter raw-observation freshness window.</p>
+              <h3>Reactive Profile</h3>
+              <p class="muted">Same 100 ms / 10 ms radio timing with a short freshness window for a more reactive position.</p>
               <div class="form-grid compact">
                 <label for="profileDynamic12SlotMs">Slot ms</label>
                 <input id="profileDynamic12SlotMs" value="100" type="number" min="1" step="1">
@@ -2679,23 +2679,23 @@ tr.status-stale td { color: #4f3b1d; }
                 <label for="profileDynamic12TimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileDynamic12TimeoutMs" value="90" type="number" min="1" step="1">
                 <label for="profileDynamic12RespDelayMs">RESP delay ms</label>
-                <input id="profileDynamic12RespDelayMs" value="15" type="number" min="1" step="1">
+                <input id="profileDynamic12RespDelayMs" value="20" type="number" min="1" step="1">
                 <label for="profileDynamic12FinalDelayMs">FINAL delay ms</label>
-                <input id="profileDynamic12FinalDelayMs" value="15" type="number" min="1" step="1">
+                <input id="profileDynamic12FinalDelayMs" value="20" type="number" min="1" step="1">
                 <label for="profileDynamic12ReportDelayMs">REPORT delay ms</label>
-                <input id="profileDynamic12ReportDelayMs" value="5" type="number" min="1" step="1">
+                <input id="profileDynamic12ReportDelayMs" value="10" type="number" min="1" step="1">
                 <label for="profileDynamic12AutoRxDelayUus">Auto RX delay UUS</label>
                 <input id="profileDynamic12AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
               <div class="profile-summary" id="profileDynamic12Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="dynamic12">Apply Raw 1.2s</button>
+                <button class="primary apply-ranging-profile" data-profile="dynamic12">Apply Reactive</button>
                 <button class="reset-ranging-profile" data-profile="dynamic12">Reset Defaults</button>
               </div>
             </div>
             <div class="profile-card" data-profile="fastRaw">
-              <h3>Raw FlexTDOA, 15 ms slots</h3>
-              <p class="muted">Small-slot profile for high-rate position variation tests. Edit downward carefully if the lab link stays clean.</p>
+              <h3>Fast Profile</h3>
+              <p class="muted">FlexTDOA 15 ms / 2 ms timing for speed tests. This is aggressive and may hit the delayed-TX limit.</p>
               <div class="form-grid compact">
                 <label for="profileFastRawSlotMs">Slot ms</label>
                 <input id="profileFastRawSlotMs" value="15" type="number" min="1" step="1">
@@ -2718,7 +2718,7 @@ tr.status-stale td { color: #4f3b1d; }
               </div>
               <div class="profile-summary" id="profileFastRawSummary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="fastRaw">Apply Fast Raw</button>
+                <button class="primary apply-ranging-profile" data-profile="fastRaw">Apply Fast</button>
                 <button class="reset-ranging-profile" data-profile="fastRaw">Reset Defaults</button>
               </div>
             </div>
@@ -2992,6 +2992,7 @@ const state = {
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
 const maxSeriesPoints = 1600;
+const maxTerminalRenderLines = 1000;
 const plot = {left: 52, right: 704, top: 14, bottom: 166, width: 652, height: 152};
 const toastTimers = new Map();
 let calibrationPollTimer = null;
@@ -3010,49 +3011,49 @@ const rangingProfileFields = [
 const rangingProfileDefaults = {
   static3: {
     prefix: "profileStatic3",
-    label: "Raw FlexTDOA, 3 s",
+    label: "Stable Profile",
     positionMaxAgeSec: 3,
     slotMs: 100,
     roundGapMs: 10,
     rxSliceMs: 100,
     commandDelayMs: 5,
     timeoutMs: 90,
-    respDelayMs: 15,
-    finalDelayMs: 15,
-    reportDelayMs: 5,
+    respDelayMs: 20,
+    finalDelayMs: 20,
+    reportDelayMs: 10,
     autoRxDelayUus: 500,
   },
   dynamic15: {
     prefix: "profileDynamic15",
-    label: "Raw FlexTDOA, 1.5 s",
+    label: "Balanced Profile",
     positionMaxAgeSec: 1.5,
     slotMs: 100,
     roundGapMs: 10,
     rxSliceMs: 100,
     commandDelayMs: 5,
     timeoutMs: 90,
-    respDelayMs: 15,
-    finalDelayMs: 15,
-    reportDelayMs: 5,
+    respDelayMs: 20,
+    finalDelayMs: 20,
+    reportDelayMs: 10,
     autoRxDelayUus: 500,
   },
   dynamic12: {
     prefix: "profileDynamic12",
-    label: "Raw FlexTDOA, 1.2 s",
+    label: "Reactive Profile",
     positionMaxAgeSec: 1.2,
     slotMs: 100,
     roundGapMs: 10,
     rxSliceMs: 100,
     commandDelayMs: 5,
     timeoutMs: 90,
-    respDelayMs: 15,
-    finalDelayMs: 15,
-    reportDelayMs: 5,
+    respDelayMs: 20,
+    finalDelayMs: 20,
+    reportDelayMs: 10,
     autoRxDelayUus: 500,
   },
   fastRaw: {
     prefix: "profileFastRaw",
-    label: "Raw FlexTDOA, 15 ms slots",
+    label: "Fast Profile",
     positionMaxAgeSec: 0.5,
     slotMs: 15,
     roundGapMs: 2,
@@ -3065,6 +3066,7 @@ const rangingProfileDefaults = {
     autoRxDelayUus: 500,
   },
 };
+const rangingProfileDefaultsVersion = "2026-07-17-profile-labels-v2";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -3315,9 +3317,18 @@ function scrollTerminalToBottom(term) {
 
 function renderTerminal(term) {
   const shouldFollow = term.follow || term.body.scrollHeight <= term.body.clientHeight + 40;
-  const latest = [...state.logs].reverse().find(log => terminalMatchesModule(term, log));
+  let latest = null;
+  const items = [];
+  for (let i = state.logs.length - 1; i >= 0; i--) {
+    const log = state.logs[i];
+    if (!latest && terminalMatchesModule(term, log)) latest = log;
+    if (logAllowed(term, log)) {
+      items.push(log);
+      if (items.length >= maxTerminalRenderLines && latest) break;
+    }
+  }
+  items.reverse();
   term.meta.textContent = latest ? `last log ${fmtAge(latest.received_at)} · #${latest.id}` : "no logs yet";
-  const items = state.logs.filter(log => logAllowed(term, log)).slice(-1000);
   term.body.innerHTML = items.map(formatLog).join("");
   if (shouldFollow) {
     scrollTerminalToBottom(term);
@@ -4682,6 +4693,7 @@ function drawAccelCanvas(canvas, samples, scale, latest, windowSec) {
 }
 
 function scheduleAccelRender() {
+  if (state.activeTab !== "graphs") return;
   if (state.accelRenderPending) return;
   state.accelRenderPending = true;
   requestAnimationFrame(() => {
@@ -4730,7 +4742,7 @@ function setActiveTab(id) {
   localStorage.setItem("uwbDash.activeTab", id);
   document.querySelectorAll(".tab").forEach(tab => tab.classList.toggle("active", tab.dataset.tab === id));
   document.querySelectorAll(".page").forEach(page => page.classList.toggle("active", page.id === id));
-  requestAnimationFrame(renderAllTerminals);
+  requestAnimationFrame(renderVisibleTerminals);
   requestAnimationFrame(renderPosition);
   scheduleAccelRender();
 }
@@ -5676,8 +5688,25 @@ function renderUwbRadio(item) {
 }
 
 async function fetchSnapshot() {
-  const res = await fetch("/api/snapshot", {cache: "no-store"});
-  renderInfo(await res.json());
+  if (state.snapshotFetchPending) return;
+  state.snapshotFetchPending = true;
+  try {
+    const res = await fetch("/api/snapshot", {cache: "no-store"});
+    renderInfo(await res.json());
+  } finally {
+    state.snapshotFetchPending = false;
+  }
+}
+
+function snapshotPollDelayMs() {
+  return state.activeTab === "position" ? 250 : 1500;
+}
+
+function scheduleSnapshotPoll() {
+  setTimeout(async () => {
+    await fetchSnapshot();
+    scheduleSnapshotPoll();
+  }, snapshotPollDelayMs());
 }
 
 function parseCalibrationIds(inputId, expected) {
@@ -6673,7 +6702,7 @@ function updateRangingProfileSummary(profileKey) {
     ? `fresh ${fmtFixed(profile.positionMaxAgeSec, 1)} s`
     : "fresh custom";
   summary.textContent = valid
-    ? `Raw FlexTDOA · ${ageText} · ${profileSummaryText(values, 4)}`
+    ? `FlexTDOA · ${ageText} · ${profileSummaryText(values, 4)}`
     : "incomplete profile";
   summary.className = `profile-summary ${valid && profileFlexTdoaSlotMarginMs(values, 4) < 5 ? "warn" : ""}`.trim();
 }
@@ -6747,8 +6776,18 @@ function restoreSettings() {
       el.value = saved;
     }
   }
+  migrateRangingProfileDefaults();
   migrateCalibrationPairSetting();
   migratePositionSolverSetting();
+}
+
+function migrateRangingProfileDefaults() {
+  const key = "uwbDash.rangingProfileDefaultsVersion";
+  if (localStorage.getItem(key) === rangingProfileDefaultsVersion) return;
+  for (const profile of Object.keys(rangingProfileDefaults)) {
+    writeRangingProfile(profile, rangingProfileDefaults[profile]);
+  }
+  localStorage.setItem(key, rangingProfileDefaultsVersion);
 }
 
 function migrateCalibrationPairSetting() {
@@ -7148,7 +7187,7 @@ fetchAccel();
 fetchSnapshot();
 setInterval(fetchLogs, 250);
 setInterval(fetchAccel, 50);
-setInterval(fetchSnapshot, 1500);
+scheduleSnapshotPoll();
 </script>
 </body>
 </html>
