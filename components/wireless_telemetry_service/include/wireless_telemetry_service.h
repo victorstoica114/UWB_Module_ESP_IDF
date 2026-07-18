@@ -48,6 +48,10 @@ bool wireless_telemetry_service_submit_flex_tdoa_observation(
 bool wireless_telemetry_service_submit_flex_anchor_range(
     uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
     uint32_t slot_id, int32_t distance_mm, int32_t raw_distance_mm);
+bool wireless_telemetry_service_submit_flex_position(
+    uint8_t tag_id, uint32_t slot_id, int32_t x_mm, int32_t y_mm,
+    int32_t sigma_mm, int32_t rms_mm, uint16_t observation_count,
+    uint8_t anchor_count, uint32_t geometry_version);
 
 #ifdef __cplusplus
 }

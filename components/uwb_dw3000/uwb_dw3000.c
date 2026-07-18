@@ -19,6 +19,7 @@
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "flextdoa_solver_service.h"
 #include "sdkconfig.h"
 
 #include "app_identity.h"
@@ -5036,6 +5037,13 @@ static void uwb_flex_tdoa_log_paper_observation(
             observation->slot_id, uwb_distance_meters_to_mm(diff_m),
             uwb_distance_meters_to_mm(raw_diff_m),
             observation->anchor_distance_mm);
+    (void)flextdoa_solver_service_submit_anchor_range(
+        observation->initiator_id, observation->responder_id,
+        observation->anchor_distance_slot_id,
+        observation->anchor_distance_mm);
+    (void)flextdoa_solver_service_submit_observation(
+        tag_id, observation->initiator_id, observation->responder_id,
+        observation->slot_id, uwb_distance_meters_to_mm(diff_m));
     s_flex_tdoa_observations_since_summary++;
     if (!queued) {
         s_flex_tdoa_observation_drops_since_summary++;
@@ -5245,6 +5253,11 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
         observations[UWB_FLEX_TDOA_MAX_OBSERVATIONS] = {0};
     const app_runtime_config_t *config = app_runtime_config_get();
     const uint8_t tag_id = config->tag_id;
+    const esp_err_t solver_err = flextdoa_solver_service_start();
+    if (solver_err != ESP_OK) {
+        ESP_LOGW(TAG, "FlexTDOA local solver unavailable: %s",
+                 esp_err_to_name(solver_err));
+    }
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
              "FlexTDOA radio-passive tag active: source_id=%u tag_id=%u anchors=[%u,%u,%u,%u] rx_slice=%u ms",

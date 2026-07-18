@@ -83,18 +83,22 @@ TELEMETRY_BINARY_HEADER_LEN = 12
 TELEMETRY_STREAM_BNO085_ACCEL = 1
 TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION = 2
 TELEMETRY_STREAM_FLEX_ANCHOR_RANGE = 3
+TELEMETRY_STREAM_FLEX_POSITION = 4
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
 TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
+TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
 TELEMETRY_FLEX_OBSERVATION_STRUCT = struct.Struct("<IIiiiHBBBB")
 TELEMETRY_FLEX_ANCHOR_RANGE_STRUCT = struct.Struct("<IIiiHBB")
+TELEMETRY_FLEX_POSITION_STRUCT = struct.Struct("<IIiiiiIHBB")
 TELEMETRY_STREAM_SAMPLE_SIZES = {
     TELEMETRY_STREAM_BNO085_ACCEL: TELEMETRY_ACCEL_SAMPLE_LEN,
     TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION:
         TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN,
     TELEMETRY_STREAM_FLEX_ANCHOR_RANGE:
         TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN,
+    TELEMETRY_STREAM_FLEX_POSITION: TELEMETRY_FLEX_POSITION_SAMPLE_LEN,
 }
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
 
@@ -488,6 +492,35 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "responder_id": int(responder_id),
                 }
             )
+        elif stream_type == TELEMETRY_STREAM_FLEX_POSITION:
+            (
+                uptime_ms,
+                slot_id,
+                x_mm,
+                y_mm,
+                sigma_mm,
+                rms_mm,
+                geometry_version,
+                observation_count,
+                tag_id,
+                anchor_count,
+            ) = TELEMETRY_FLEX_POSITION_STRUCT.unpack_from(frame, offset)
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "topic": "uwb.flex_tdoa.position",
+                    "slot_id": int(slot_id),
+                    "x_m": x_mm / 1000.0,
+                    "y_m": y_mm / 1000.0,
+                    "sigma_m": sigma_mm / 1000.0,
+                    "rms_m": rms_mm / 1000.0,
+                    "geometry_version": int(geometry_version),
+                    "observation_count": int(observation_count),
+                    "tag_id": int(tag_id),
+                    "anchor_count": int(anchor_count),
+                }
+            )
         offset += sample_size
     return samples
 
@@ -508,6 +541,7 @@ class DashboardState:
         self.tdoa_history: dict[tuple[int, int, int], deque[dict[str, Any]]] = {}
         self.tdoa_anchor_distances: dict[tuple[int, int], dict[str, Any]] = {}
         self.tdoa_anchor_history: dict[tuple[int, int], deque[dict[str, Any]]] = {}
+        self.tdoa_local_positions: dict[int, dict[str, Any]] = {}
         self.max_tdoa_samples = 200
         self.next_log_id = 1
         self.next_accel_id = 1
@@ -566,6 +600,26 @@ class DashboardState:
                     self.record_tdoa_sample_locked(sample)
                 elif topic == "uwb.flex_tdoa.anchor_range":
                     self.record_tdoa_anchor_sample_locked(sample)
+                elif topic == "uwb.flex_tdoa.position":
+                    self.record_tdoa_position_sample_locked(sample)
+
+    def record_tdoa_position_sample_locked(self, item: dict[str, Any]) -> None:
+        try:
+            tag_id = int(item["tag_id"])
+            x_m = float(item["x_m"])
+            y_m = float(item["y_m"])
+            sigma_m = float(item["sigma_m"])
+            rms_m = float(item["rms_m"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if tag_id <= 0 or not all(
+            math.isfinite(value) for value in (x_m, y_m, sigma_m, rms_m)
+        ):
+            return
+        self.tdoa_local_positions[tag_id] = {
+            **item,
+            "received_at": float(item.get("received_at") or time.time()),
+        }
 
     def parse_line(self, line: str) -> dict[str, Any]:
         match = LOG_RE.match(line)
@@ -1161,6 +1215,13 @@ class DashboardState:
                 key=lambda sample: float(sample.get("received_at") or 0.0),
             )[-600:],
             "anchor_distances": anchor_distances,
+            "local_positions": {
+                str(tag_id): {
+                    **item,
+                    "age_sec": now - float(item.get("received_at") or 0.0),
+                }
+                for tag_id, item in self.tdoa_local_positions.items()
+            },
             "max_age_sec": max_age_sec,
         }
 
@@ -3211,7 +3272,7 @@ const state = {
   hydratedSettings: false,
   calibrationResult: null,
   ranging: {distances: {}, max_age_sec: 3},
-  tdoa: {observations: {}, anchor_distances: {}, max_age_sec: 3},
+  tdoa: {observations: {}, anchor_distances: {}, local_positions: {}, max_age_sec: 3},
   positionTrail: {},
   positionAnchorTrail: {},
   positionResults: {},
@@ -4656,6 +4717,20 @@ function computePositionModel() {
           fitObservations.length ? fitObservations : observations,
           tdoaResiduals(position, anchors, fitObservations.length ? fitObservations : observations)
         );
+        const localPosition = state.tdoa?.local_positions?.[String(tagId)];
+        if (localPosition && Number(localPosition.age_sec) <= settings.maxAge &&
+            Number.isFinite(Number(localPosition.x_m)) &&
+            Number.isFinite(Number(localPosition.y_m))) {
+          position = {
+            x: Number(localPosition.x_m),
+            y: Number(localPosition.y_m),
+          };
+          accuracy = {
+            ...(accuracy || {}),
+            sigma_major_m: Number(localPosition.sigma_m),
+            rms_m: Number(localPosition.rms_m),
+          };
+        }
         if (position) state.positionSeeds[seedKey] = {x: position.x, y: position.y};
       } else {
         for (const anchorId of settings.anchorIds) {
@@ -4679,6 +4754,10 @@ function computePositionModel() {
         residuals,
         accuracy,
         coherence,
+        solverSource: state.tdoa?.local_positions?.[String(tagId)] &&
+          Number(state.tdoa.local_positions[String(tagId)].age_sec) <= settings.maxAge
+            ? "ESP32 AlgMin"
+            : "PC AlgMin",
       };
       if (position) {
         const key = String(tagId);
@@ -4970,6 +5049,9 @@ function renderPositionSolverStatus(model) {
     `<span class="position-pill">fresh ${fmtFixed(settings.maxAge, 1)} s</span>`,
   ];
   const firstTag = Object.values(model.tags || {})[0];
+  if (firstTag?.solverSource) {
+    pills.push(`<span class="position-pill good">${esc(firstTag.solverSource)}</span>`);
+  }
   const coherence = firstTag?.coherence;
   if (coherence) {
     const slotText = coherence.slotId === null ? `seq ${coherence.seq ?? "-"}` : `slot ${coherence.slotId}`;
@@ -6107,7 +6189,7 @@ function renderPd(statuses) {
 function renderInfo(snapshot) {
   state.statuses = snapshot.statuses || [];
   state.ranging = snapshot.ranging || {distances: {}, max_age_sec: 3};
-  state.tdoa = snapshot.tdoa || {observations: {}, anchor_distances: {}, max_age_sec: 3};
+  state.tdoa = snapshot.tdoa || {observations: {}, anchor_distances: {}, local_positions: {}, max_age_sec: 3};
   mergeAccelHistory(snapshot.accel_history || {});
   document.getElementById("logPill").textContent = `${snapshot.log_count} logs`;
   const telemetryPill = document.getElementById("telemetryPill");

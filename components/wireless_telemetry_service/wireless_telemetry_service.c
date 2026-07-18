@@ -40,10 +40,12 @@ enum {
     WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN = 21,
     WIRELESS_TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26,
     WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20,
+    WIRELESS_TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32,
     WIRELESS_TELEMETRY_FRAME_VERSION = 1,
     WIRELESS_TELEMETRY_STREAM_BNO085_ACCEL = 1,
     WIRELESS_TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION = 2,
     WIRELESS_TELEMETRY_STREAM_FLEX_ANCHOR_RANGE = 3,
+    WIRELESS_TELEMETRY_STREAM_FLEX_POSITION = 4,
     WIRELESS_TELEMETRY_RECONNECT_MS = 2000,
     WIRELESS_TELEMETRY_WIFI_WAIT_MS = 500,
     WIRELESS_TELEMETRY_QUEUE_WAIT_MS = 20,
@@ -61,6 +63,7 @@ typedef enum {
     WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL,
     WIRELESS_TELEMETRY_ITEM_FLEX_TDOA_OBSERVATION,
     WIRELESS_TELEMETRY_ITEM_FLEX_ANCHOR_RANGE,
+    WIRELESS_TELEMETRY_ITEM_FLEX_POSITION,
 } wireless_telemetry_item_type_t;
 
 typedef struct {
@@ -93,6 +96,18 @@ typedef struct {
 } wireless_telemetry_flex_anchor_range_t;
 
 typedef struct {
+    uint32_t slot_id;
+    uint32_t geometry_version;
+    int32_t x_mm;
+    int32_t y_mm;
+    int32_t sigma_mm;
+    int32_t rms_mm;
+    uint16_t observation_count;
+    uint8_t tag_id;
+    uint8_t anchor_count;
+} wireless_telemetry_flex_position_t;
+
+typedef struct {
     wireless_telemetry_item_type_t type;
     uint32_t uptime_ms;
     union {
@@ -100,6 +115,7 @@ typedef struct {
         wireless_telemetry_accel_t accel;
         wireless_telemetry_flex_observation_t flex_observation;
         wireless_telemetry_flex_anchor_range_t flex_anchor_range;
+        wireless_telemetry_flex_position_t flex_position;
     } data;
 } wireless_telemetry_item_t;
 
@@ -447,6 +463,10 @@ static bool wireless_telemetry_binary_item_info(
         *stream_type = WIRELESS_TELEMETRY_STREAM_FLEX_ANCHOR_RANGE;
         *sample_len = WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN;
         return true;
+    case WIRELESS_TELEMETRY_ITEM_FLEX_POSITION:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_FLEX_POSITION;
+        *sample_len = WIRELESS_TELEMETRY_FLEX_POSITION_SAMPLE_LEN;
+        return true;
     default:
         return false;
     }
@@ -552,6 +572,24 @@ static bool wireless_telemetry_append_binary_sample(
             &sample[16], item->data.flex_anchor_range.sequence);
         sample[18] = item->data.flex_anchor_range.initiator_id;
         sample[19] = item->data.flex_anchor_range.responder_id;
+        break;
+    case WIRELESS_TELEMETRY_ITEM_FLEX_POSITION:
+        wireless_telemetry_write_u32_le(
+            &sample[4], item->data.flex_position.slot_id);
+        wireless_telemetry_write_i32_le(
+            &sample[8], item->data.flex_position.x_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[12], item->data.flex_position.y_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[16], item->data.flex_position.sigma_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[20], item->data.flex_position.rms_mm);
+        wireless_telemetry_write_u32_le(
+            &sample[24], item->data.flex_position.geometry_version);
+        wireless_telemetry_write_u16_le(
+            &sample[28], item->data.flex_position.observation_count);
+        sample[30] = item->data.flex_position.tag_id;
+        sample[31] = item->data.flex_position.anchor_count;
         break;
     default:
         return false;
@@ -1026,6 +1064,37 @@ bool wireless_telemetry_service_submit_flex_anchor_range(
                 .sequence = sequence,
                 .initiator_id = initiator_id,
                 .responder_id = responder_id,
+            },
+        },
+    };
+    return wireless_telemetry_enqueue(&item);
+}
+
+bool wireless_telemetry_service_submit_flex_position(
+    uint8_t tag_id, uint32_t slot_id, int32_t x_mm, int32_t y_mm,
+    int32_t sigma_mm, int32_t rms_mm, uint16_t observation_count,
+    uint8_t anchor_count, uint32_t geometry_version)
+{
+    if (!s_connected) {
+        return false;
+    }
+
+    const uint32_t uptime_ms =
+        (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    const wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_FLEX_POSITION,
+        .uptime_ms = uptime_ms,
+        .data = {
+            .flex_position = {
+                .slot_id = slot_id,
+                .geometry_version = geometry_version,
+                .x_mm = x_mm,
+                .y_mm = y_mm,
+                .sigma_mm = sigma_mm,
+                .rms_mm = rms_mm,
+                .observation_count = observation_count,
+                .tag_id = tag_id,
+                .anchor_count = anchor_count,
             },
         },
     };
