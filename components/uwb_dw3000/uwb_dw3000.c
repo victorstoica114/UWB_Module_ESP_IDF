@@ -2618,6 +2618,13 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                 uwb_dw3000_read_rx_payload(frame->payload, &frame->payload_len);
             const esp_err_t ts_err =
                 uwb_dw3000_read_rx_timestamp(&frame->rx_timestamp);
+            const bool flex_fast_rearm =
+                read_err == ESP_OK &&
+                s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA &&
+                uwb_dw3000_payload_is_distance_frame(frame->payload,
+                                                     frame->payload_len) &&
+                (frame->payload[5] == UWB_DISTANCE_FRAME_FLEX_TDOA_REQ ||
+                 frame->payload[5] == UWB_DISTANCE_FRAME_FLEX_TDOA_RESP);
             esp_err_t clock_err = ESP_OK;
             frame->clock_offset_valid = false;
             frame->clock_offset_raw = 0;
@@ -2658,6 +2665,17 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                 ESP_LOGD(TAG, "RX diagnostics read failed: %s",
                          esp_err_to_name(diag_err));
                 memset(&frame->diagnostics, 0, sizeof(frame->diagnostics));
+            }
+
+            // Keep the radio listening while the ESP32 parses and processes a
+            // FlexTDOA frame. A responder cancels this RX state immediately
+            // before programming its own delayed transmission.
+            if (flex_fast_rearm) {
+                const esp_err_t rearm_err = uwb_dw3000_arm_rx();
+                if (rearm_err != ESP_OK) {
+                    s_rx_error_count++;
+                    return rearm_err;
+                }
             }
 
             s_rx_count++;
