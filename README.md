@@ -431,6 +431,31 @@ RESP[1] = REQ_RX + 1850 us
 RESP[2] = REQ_RX + 2200 us
 ```
 
+The responder does not read `SYS_TIME` to turn that relative delay into an
+absolute radio timestamp. It writes the relative delay to `DX_TIME` and issues
+the native DW3000 `CMD_DTX_RS` fast command. The radio then schedules TX from
+the hardware timestamp of the request it just received. The reply interval
+carried in `FLEX_TDOA_RESP` is derived from the same quantized delayed-TX target,
+including TX antenna delay, so the tag subtracts the interval that the radio
+actually used rather than an ideal host-side delay.
+
+FlexTDOA RX timestamps also avoid a per-frame `SYS_TIME` reference. The DW3000
+double-buffer diagnostic set exposes the low 32 bits of `RX_TIME` reliably, and
+adjacent FlexTDOA packets are much closer than the approximately `67 ms` wrap
+period of those 32 bits. Firmware therefore extends each low word from the
+previous RX timestamp by signed continuity. A hardware diagnostic run found
+that the nominal fifth timestamp byte in the buffered metadata was occasionally
+incoherent (`21` mismatches in about `18,975` comparisons on M1), so trusting
+that byte directly would be less robust than continuity.
+
+One `SYS_TIME` read seeds the 40-bit epoch when the first FlexTDOA packet is
+received. A new seed is used only as a recovery action after more than `30 ms`
+without a received packet, where low-word continuity would become ambiguous.
+There is no periodic or per-frame `SYS_TIME` read in the continuous FlexTDOA
+path. Full `SYS_TIME` reads remain in generic DS-TWR timestamp reconstruction
+and delayed-TX failure diagnostics; they are not part of the normal FlexTDOA
+slot.
+
 The `2000 us` request subslot is part of the request-to-request slot period. It
 is not added again after `REQ_RX`, because the request is already on air when a
 responder timestamps it. The final `K * 600 us` term is the paper's aggregate
@@ -512,13 +537,16 @@ may be drawn from it.
 | `1000 us` | `250 us` | `407-446` | `128-131` | nearly balanced | About `70-105/s` tag timestamps were outside the slot. |
 | `1000 us` | `300 us` | `491-497` | `111-117` | middle index low | Tag improved, but initiators still lost middle-buffer timestamps. |
 | `1500 us` | `300 us` | `452-458` | `106-112` | middle index low | More TX margin did not repair the double-buffer boundary. |
-| `1500 us` | `350 us` | `443-450` | `113-114` | typically `37-39` per index | Selected. Stable windows had zero incoherent anchor timestamps and `0-1/s` invalid tag observations. |
+| `1500 us` | `350 us` | `443-450` | `113-114` | typically `37-39` per index | Initial selected run before removing synchronous UART work from the radio task. |
+| `1500 us` | `350 us` | `451-456`, avg `454.1` | avg `113.8-114.0` | normally `38,38,38` | Final relative-radio path over `41 s`: zero drops, delayed-TX misses, response failures, and TX-interval mismatches. |
 
-The measured selected rate is within about 1-3% of the `454.55/s` theoretical
-tag rate. Telemetry drops were zero in the validation windows. Rare host
-scheduler misses still trigger a radio resynchronization and are tracked as a
-remaining robustness item; CI-CR ordering recovers without a coordinator
-command.
+The final measured rate is within `0.1%` of the `454.55/s` theoretical tag
+rate. Across that `41 s` window, the tag rejected `14` of roughly `18,600`
+observations (`0.08%`) and anchors marked `5` of roughly `18,700` results
+incoherent (`0.03%`); all telemetry drop counters remained zero. The one-second
+diagnostic summaries are submitted directly to the wireless log queue. They do
+not pass through synchronous UART formatting in the timing-critical UWB task,
+which previously created a delayed-TX miss approximately once per second.
 
 Historical slot-order scenarios:
 
