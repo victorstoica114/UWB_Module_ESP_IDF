@@ -261,91 +261,169 @@ static bool flex_solver_update_geometry(struct flex_solver_state *state)
     return true;
 }
 
+static double flex_solver_position_cost(
+    const struct flex_solver_state *state, TickType_t now, double x, double y,
+    double *h00, double *h01, double *h11, double *g0, double *g1,
+    size_t *used_count)
+{
+    double local_h00 = 0.0, local_h01 = 0.0, local_h11 = 0.0;
+    double local_g0 = 0.0, local_g1 = 0.0, sse = 0.0;
+    size_t count = 0;
+    for (size_t initiator = 0; initiator < state->anchor_count; ++initiator) {
+        for (size_t responder = 0; responder < state->anchor_count;
+             ++responder) {
+            const struct flex_solver_measurement *measurement =
+                &state->observations[initiator][responder];
+            if (!measurement->valid || initiator == responder ||
+                now - measurement->updated_tick >
+                    pdMS_TO_TICKS(FLEX_SOLVER_POSITION_MAX_AGE_MS)) {
+                continue;
+            }
+            const double di = hypot(x - state->anchor_x[initiator],
+                                    y - state->anchor_y[initiator]);
+            const double dr = hypot(x - state->anchor_x[responder],
+                                    y - state->anchor_y[responder]);
+            if (di < 0.02 || dr < 0.02) {
+                continue;
+            }
+            const double residual =
+                measurement->value_m - (dr - di);
+            const double jx =
+                (x - state->anchor_x[responder]) / dr -
+                (x - state->anchor_x[initiator]) / di;
+            const double jy =
+                (y - state->anchor_y[responder]) / dr -
+                (y - state->anchor_y[initiator]) / di;
+            local_h00 += jx * jx;
+            local_h01 += jx * jy;
+            local_h11 += jy * jy;
+            local_g0 += jx * residual;
+            local_g1 += jy * residual;
+            sse += residual * residual;
+            count++;
+        }
+    }
+    if (h00 != NULL) *h00 = local_h00;
+    if (h01 != NULL) *h01 = local_h01;
+    if (h11 != NULL) *h11 = local_h11;
+    if (g0 != NULL) *g0 = local_g0;
+    if (g1 != NULL) *g1 = local_g1;
+    if (used_count != NULL) *used_count = count;
+    return sse;
+}
+
 static void flex_solver_update_position(struct flex_solver_state *state,
                                         uint8_t tag_id, uint32_t slot_id)
 {
     if (!state->geometry_ready) {
         return;
     }
-    double x = state->position_x;
-    double y = state->position_y;
-    if (!state->position_valid) {
-        x = 0.0;
-        y = 0.0;
-        for (size_t i = 0; i < state->anchor_count; ++i) {
-            x += state->anchor_x[i];
-            y += state->anchor_y[i];
-        }
-        x /= state->anchor_count;
-        y /= state->anchor_count;
+    const TickType_t now = xTaskGetTickCount();
+    double min_x = state->anchor_x[0], max_x = state->anchor_x[0];
+    double min_y = state->anchor_y[0], max_y = state->anchor_y[0];
+    double center_x = 0.0, center_y = 0.0;
+    for (size_t i = 0; i < state->anchor_count; ++i) {
+        min_x = fmin(min_x, state->anchor_x[i]);
+        max_x = fmax(max_x, state->anchor_x[i]);
+        min_y = fmin(min_y, state->anchor_y[i]);
+        max_y = fmax(max_y, state->anchor_y[i]);
+        center_x += state->anchor_x[i];
+        center_y += state->anchor_y[i];
+    }
+    center_x /= state->anchor_count;
+    center_y /= state->anchor_count;
+    const double geometry_span = fmax(0.5, hypot(max_x - min_x,
+                                                 max_y - min_y));
+    const double bound_margin = 2.0 * geometry_span;
+    const bool previous_plausible =
+        state->position_valid && isfinite(state->position_x) &&
+        isfinite(state->position_y) &&
+        state->position_x >= min_x - bound_margin &&
+        state->position_x <= max_x + bound_margin &&
+        state->position_y >= min_y - bound_margin &&
+        state->position_y <= max_y + bound_margin;
+    double x = previous_plausible ? state->position_x : center_x;
+    double y = previous_plausible ? state->position_y : center_y;
+
+    // AlgMin needs a good initial point. Prefer the anchor centroid whenever
+    // the previous estimate has a larger raw least-squares cost.
+    size_t initial_count = 0, center_count = 0;
+    double current_sse = flex_solver_position_cost(
+        state, now, x, y, NULL, NULL, NULL, NULL, NULL, &initial_count);
+    const double center_sse = flex_solver_position_cost(
+        state, now, center_x, center_y, NULL, NULL, NULL, NULL, NULL,
+        &center_count);
+    if (center_count >= 3U &&
+        (initial_count < 3U || center_sse < current_sse)) {
+        x = center_x;
+        y = center_y;
+        current_sse = center_sse;
+        initial_count = center_count;
+    }
+    if (initial_count < 3U) {
+        return;
     }
 
-    const TickType_t now = xTaskGetTickCount();
-    size_t used_count = 0;
-    double final_h00 = 0.0;
-    double final_h01 = 0.0;
-    double final_h11 = 0.0;
-    double final_sse = 0.0;
+    double damping = 1e-4;
     for (size_t iteration = 0; iteration < 6U; ++iteration) {
-        double h00 = 0.0, h01 = 0.0, h11 = 0.0;
-        double g0 = 0.0, g1 = 0.0, sse = 0.0;
+        double h00 = 0.0, h01 = 0.0, h11 = 0.0, g0 = 0.0, g1 = 0.0;
         size_t count = 0;
-        for (size_t initiator = 0; initiator < state->anchor_count;
-             ++initiator) {
-            for (size_t responder = 0; responder < state->anchor_count;
-                 ++responder) {
-                const struct flex_solver_measurement *measurement =
-                    &state->observations[initiator][responder];
-                if (!measurement->valid || initiator == responder ||
-                    now - measurement->updated_tick >
-                        pdMS_TO_TICKS(FLEX_SOLVER_POSITION_MAX_AGE_MS)) {
-                    continue;
-                }
-                const double di = hypot(x - state->anchor_x[initiator],
-                                        y - state->anchor_y[initiator]);
-                const double dr = hypot(x - state->anchor_x[responder],
-                                        y - state->anchor_y[responder]);
-                if (di < 0.02 || dr < 0.02) {
-                    continue;
-                }
-                const double predicted = dr - di;
-                const double residual = measurement->value_m - predicted;
-                const double jx =
-                    (x - state->anchor_x[responder]) / dr -
-                    (x - state->anchor_x[initiator]) / di;
-                const double jy =
-                    (y - state->anchor_y[responder]) / dr -
-                    (y - state->anchor_y[initiator]) / di;
-                h00 += jx * jx;
-                h01 += jx * jy;
-                h11 += jy * jy;
-                g0 += jx * residual;
-                g1 += jy * residual;
-                sse += residual * residual;
-                count++;
-            }
-        }
-        const double determinant = h00 * h11 - h01 * h01;
+        current_sse = flex_solver_position_cost(
+            state, now, x, y, &h00, &h01, &h11, &g0, &g1, &count);
+        const double damped_h00 = h00 + damping;
+        const double damped_h11 = h11 + damping;
+        const double determinant = damped_h00 * damped_h11 - h01 * h01;
         if (count < 3U || fabs(determinant) < 1e-9) {
             return;
         }
-        const double dx = (h11 * g0 - h01 * g1) / determinant;
-        const double dy = (-h01 * g0 + h00 * g1) / determinant;
-        x += dx;
-        y += dy;
-        used_count = count;
-        final_h00 = h00;
-        final_h01 = h01;
-        final_h11 = h11;
-        final_sse = sse;
-        if (hypot(dx, dy) < 0.0001) {
+        double dx = (damped_h11 * g0 - h01 * g1) / determinant;
+        double dy = (-h01 * g0 + damped_h00 * g1) / determinant;
+        const double step_length = hypot(dx, dy);
+        const double max_step = 0.25 * geometry_span;
+        if (step_length > max_step) {
+            dx *= max_step / step_length;
+            dy *= max_step / step_length;
+        }
+
+        bool accepted = false;
+        double accepted_scale = 1.0;
+        for (size_t attempt = 0; attempt < 6U; ++attempt) {
+            const double candidate_x = x + accepted_scale * dx;
+            const double candidate_y = y + accepted_scale * dy;
+            size_t candidate_count = 0;
+            const double candidate_sse = flex_solver_position_cost(
+                state, now, candidate_x, candidate_y, NULL, NULL, NULL, NULL,
+                NULL, &candidate_count);
+            if (candidate_count == count && candidate_sse <= current_sse) {
+                x = candidate_x;
+                y = candidate_y;
+                current_sse = candidate_sse;
+                accepted = true;
+                break;
+            }
+            accepted_scale *= 0.5;
+        }
+        if (!accepted) {
+            damping *= 10.0;
+            continue;
+        }
+        damping = fmax(1e-6, damping * 0.25);
+        if (hypot(accepted_scale * dx, accepted_scale * dy) < 0.0001) {
             break;
         }
     }
 
+    size_t used_count = 0;
+    double final_h00 = 0.0, final_h01 = 0.0, final_h11 = 0.0;
+    const double final_sse = flex_solver_position_cost(
+        state, now, x, y, &final_h00, &final_h01, &final_h11, NULL, NULL,
+        &used_count);
     const double determinant = final_h00 * final_h11 - final_h01 * final_h01;
     if (!isfinite(x) || !isfinite(y) || used_count < 3U ||
-        determinant <= 1e-9) {
+        determinant <= 1e-9 || x < min_x - bound_margin ||
+        x > max_x + bound_margin || y < min_y - bound_margin ||
+        y > max_y + bound_margin) {
+        state->position_valid = false;
         return;
     }
     const double variance = final_sse / fmax(1.0, (double)used_count - 2.0);
@@ -401,8 +479,11 @@ static void flex_solver_task(void *arg)
                 state.last_geometry_tick = now;
             }
         } else if (item.type == FLEX_SOLVER_ITEM_OBSERVATION) {
-            if (state.position_pending &&
-                item.slot_id != state.pending_position_slot_id) {
+            const uint32_t pending_frame =
+                state.pending_position_slot_id / config->flex_tdoa_slot_count;
+            const uint32_t item_frame =
+                item.slot_id / config->flex_tdoa_slot_count;
+            if (state.position_pending && item_frame != pending_frame) {
                 flex_solver_update_position(
                     &state, state.pending_tag_id,
                     state.pending_position_slot_id);

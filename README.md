@@ -342,8 +342,8 @@ multi-anchor ranging mode reuses the same DS-TWR implementation.
 `APP_RUNTIME_MODE_UWB_FLEX_TDOA` is the active pure CI-CR radio protocol with a
 radio-passive tag.
 The tag does not call any UWB TX function in this mode. It only receives anchor
-frames, records its own RX timestamps, and sends compact range-difference logs to
-the dashboard.
+frames, records its own RX timestamps, feeds the local AlgMin solver, and sends
+compact binary range-difference and position telemetry to the dashboard.
 
 The current firmware is aligned with the FlexTDOA paper at the radio slot level:
 one anchor is the initiator in a slot, it broadcasts one request, and `K`
@@ -479,10 +479,12 @@ A3 initiator                  A4/A5/A2 responders             passive tag
  t=5.05 ms  next initiator request ------|------------------------> next slot
 ```
 
-The ESP task wakes `5 ms` before its own next request and programs delayed TX.
-That preparation lead is local only and adds no airtime. A responder also
-requires at least `300 us` of remaining delayed-TX lead; stale work is rejected
-instead of leaking into the next slot.
+The ESP task wakes `1750 us` before its own next request and programs delayed
+TX. This preparation lead is local only and adds no airtime. A longer `5000 us`
+lead was rejected in hardware tests because it stopped reception almost at the
+start of the preceding `5050 us` slot. A responder also requires at least
+`300 us` of remaining delayed-TX lead; stale work is rejected instead of
+leaking into the next slot.
 
 The passive tag computes the paper TDOA observation:
 
@@ -518,7 +520,7 @@ estimator are deliberately kept outside this radio validation.
 | Fully distributed slot synchronization | Implemented from request RX timestamps. A response can recover a node that missed the request, but a directly received request is authoritative for that slot. |
 | General `N/K/M` topology | Implemented for `3..10` anchors, configurable responder count, initiator slots, and per-slot responder masks. |
 | Configuration propagation | Implemented as a versioned UWB frame. A newer generation is persisted in NVS, rebroadcast during the startup phase, and rebuilds the local schedule after restart. |
-| Local solver | Implemented on the tag ESP32-S3. Anchor geometry and raw TDOA observations feed a 2D least-squares AlgMin service on core 0; UWB remains on core 1. |
+| Local solver | Implemented on the tag ESP32-S3. Anchor geometry and raw TDOA observations feed a damped 2D least-squares AlgMin service on core 0; UWB remains on core 1. One position is solved for each complete frame. |
 | Paper radio setup | Use CH5, 6.8 Mb/s, PRF 64 MHz, preamble 128 when matching the paper. |
 | Firmware-side measurement filters | None. The radio path emits every structurally valid raw anchor range and tag range difference. |
 
@@ -533,6 +535,43 @@ latency, but it is not more powerful overall than this dual-core ESP32-S3 at
 `240 MHz` with external PSRAM. The practical difference is workload isolation:
 Wi-Fi and HTTP share the ESP32-S3, so the timing-critical UWB path is pinned to
 core 1 and the local solver runs on core 0.
+
+The local solver removes the PC/network round trip from the positioning path;
+it does not shorten radio airtime. With `M=4`, one solution can be published
+after every `20.20 ms` complete frame, or approximately `49.5` solutions/s.
+The dashboard prefers this `ESP32 AlgMin` result while it is fresh and falls
+back to its PC solver only when local position telemetry is unavailable.
+
+#### FlexTDOA K=3 Hardware Validation
+
+The complete implementation was exercised on five physical modules: four
+anchors and one radio-passive tag. The final image ran for more than three
+minutes with all nodes HTTP-online, no watchdog reset, no panic, and no queue
+drop. One isolated late slot was reported and the affected anchor recovered
+from subsequent radio traffic without restarting the network.
+
+| Metric | Measured | Theoretical / interpretation |
+| --- | ---: | --- |
+| Slot duration | `5.05 ms` | Exact equation (20) timing for `K=3`. |
+| Frame duration | `20.20 ms` | Four initiator slots. |
+| Anchor results | usually `141-148/s` per anchor | Maximum `148.5/s` from three responses in each own slot. |
+| Passive-tag observations | usually `470-525/s` | Maximum `594.1/s`; the remaining loss is in the very tight `250 us` receive train. |
+| RX double-buffer release | usually `198-216 us` maximum per one-second summary | Fits inside one response subslot, with limited margin. |
+| Local position | one result per complete frame | Approximately `49.5` AlgMin solutions/s. |
+| Tag CPU load | about `48%` on core 0 and `48%` on core 1 | Solver on core 0, UWB receive path on core 1. |
+| Anchor CPU load | about `5-8%` on core 0 and `23-24%` on core 1 | No local tag-position solve. |
+
+The DW3000 does not support `RXAUTR` together with receive double buffering.
+The fast path therefore issues `CMD_RX` immediately after a good frame, before
+copying the occupied buffer, and then releases that buffer with
+`CMD_CLR_IRQS`/`CMD_DB_TOGGLE`. Expected PHY errors are accumulated into the
+one-second summary instead of synchronously formatting UART warnings from the
+timing-critical UWB task.
+
+Recovery was also tested by rebooting only M4. Its boot counter advanced once,
+it restored generation `3` (`N=4`, `K=3`, `M=4`) from NVS, learned the current
+TDMA phase from live FlexTDOA traffic, and resumed increasing TX/RX counters.
+The other four nodes were not restarted.
 
 #### FlexTDOA Speed Notes
 
