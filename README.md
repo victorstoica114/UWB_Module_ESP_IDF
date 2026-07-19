@@ -414,6 +414,13 @@ same controlled rebuild. This is the distributed propagation and recovery
 path; normal slot synchronization still comes from `REQ/RESP`, not from a
 separate periodic synchronization packet.
 
+Fixed geometry uses its own generation and one UWB frame per anchor point.
+Startup broadcasts repeat every point about four times. A `10 ms` gap between
+the topology and geometry frames lets receivers process the first frame and
+rearm the DW3000 before the second arrives. A one-node reboot was verified to
+propagate both fixed geometry and its later clear operation to four already
+running peers.
+
 #### FlexTDOA Slot Timing
 
 The CI-CR slot period follows equation (20) from the paper:
