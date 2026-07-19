@@ -1931,6 +1931,27 @@ tr.status-stale td { color: #4f3b1d; }
   min-height: 34px;
   line-height: 1.35;
 }
+.ranging-protocol-context {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.ranging-protocol-context h2 { margin-bottom: 3px; }
+.ranging-protocol-badge {
+  flex: 0 0 auto;
+  border: 1px solid #78bb98;
+  background: #f2fbf6;
+  color: #116f3b;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.ranging-protocol-empty {
+  max-width: 760px;
+  color: var(--muted);
+  line-height: 1.5;
+}
 .profile-summary {
   color: var(--muted);
   font-size: 12px;
@@ -3174,7 +3195,14 @@ tr.status-stale td { color: #4f3b1d; }
     </section>
     <section id="rangingSettings" class="page">
       <div class="settings">
-        <div class="section">
+        <div class="section ranging-protocol-context">
+          <div>
+            <h2 id="rangingProtocolTitle">FlexTDOA Settings</h2>
+            <div id="rangingProtocolHint" class="muted">Protocol selected in Position Setup.</div>
+          </div>
+          <span id="rangingProtocolBadge" class="ranging-protocol-badge">FlexTDOA</span>
+        </div>
+        <div id="flexTdoaRangingPanel" class="section ranging-protocol-panel" data-ranging-protocol="flextdoa">
           <div class="flex-timing-head">
             <div>
               <h2>FlexTDOA Protocol Timing</h2>
@@ -3187,7 +3215,11 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div id="flexTdoaTimingDiagram" class="muted">Waiting for FlexTDOA runtime status...</div>
         </div>
-        <div class="section">
+        <div id="legacyHybridRangingPanel" class="section ranging-protocol-panel hidden" data-ranging-protocol="hybrid">
+          <h2>Legacy Hybrid Log Playback</h2>
+          <p class="ranging-protocol-empty">This solver interprets captures produced by the former dual-leg hybrid protocol. It has no active radio timing controls; use it only for comparisons with previously recorded data.</p>
+        </div>
+        <div id="rangingProfilesSection" class="section">
           <h2>Ranging Profiles</h2>
           <div class="form-grid">
             <label for="rangingProfileTargets">Targets</label>
@@ -3200,20 +3232,24 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p class="muted profile-note">FlexTDOA radio timing is fixed to the paper-aligned 5.05 ms CI-CR slot shown above. Profiles change observation freshness and the host RX slice; the remaining timing fields are persisted for DS-TWR and anchor-survey compatibility paths.</p>
+          <p id="rangingProfileNote" class="muted profile-note">FlexTDOA radio timing is fixed to the paper-aligned 5.05 ms CI-CR slot shown above. Profiles change only observation freshness and the host RX slice.</p>
           <div class="profile-grid">
             <div class="profile-card" data-profile="static3">
               <h3>Stable Profile</h3>
-              <p class="muted">Long 3.0 s FlexTDOA observation freshness; conservative compatibility timing.</p>
+              <p id="profileStatic3Description" class="muted">Long 3.0 s FlexTDOA observation freshness and a conservative host RX window.</p>
               <div class="form-grid compact">
-                <label for="profileStatic3SlotMs">DS-TWR/survey slot ms</label>
+                <label for="profileStatic3FreshAgeSec">Observation freshness s</label>
+                <input id="profileStatic3FreshAgeSec" value="3" type="number" min="0.1" step="0.1">
+                <label class="hidden" for="profileStatic3DsFreshAgeSec">Distance freshness s</label>
+                <input class="hidden" id="profileStatic3DsFreshAgeSec" value="3" type="number" min="0.1" step="0.1">
+                <label for="profileStatic3SlotMs">DS-TWR slot ms</label>
                 <input id="profileStatic3SlotMs" value="100" type="number" min="1" step="1">
-                <label for="profileStatic3RoundGapMs">DS-TWR/survey gap ms</label>
+                <label for="profileStatic3RoundGapMs">DS-TWR gap ms</label>
                 <input id="profileStatic3RoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileStatic3RxSliceMs">RX slice ms</label>
+                <label for="profileStatic3RxSliceMs">Host RX slice ms</label>
                 <input id="profileStatic3RxSliceMs" value="100" type="number" min="1" step="1">
-                <label for="profileStatic3CommandDelayMs">Survey command delay ms</label>
-                <input id="profileStatic3CommandDelayMs" value="5" type="number" min="1" step="1">
+                <label class="hidden" for="profileStatic3DsRxSliceMs">DS-TWR RX slice ms</label>
+                <input class="hidden" id="profileStatic3DsRxSliceMs" value="100" type="number" min="1" step="1">
                 <label for="profileStatic3TimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileStatic3TimeoutMs" value="90" type="number" min="1" step="1">
                 <label for="profileStatic3RespDelayMs">DS-TWR RESP delay ms</label>
@@ -3233,16 +3269,20 @@ tr.status-stale td { color: #4f3b1d; }
             </div>
             <div class="profile-card" data-profile="dynamic15">
               <h3>Balanced Profile</h3>
-              <p class="muted">Balanced 1.5 s FlexTDOA observation freshness; conservative compatibility timing.</p>
+              <p id="profileDynamic15Description" class="muted">Balanced 1.5 s FlexTDOA observation freshness and a conservative host RX window.</p>
               <div class="form-grid compact">
-                <label for="profileDynamic15SlotMs">DS-TWR/survey slot ms</label>
+                <label for="profileDynamic15FreshAgeSec">Observation freshness s</label>
+                <input id="profileDynamic15FreshAgeSec" value="1.5" type="number" min="0.1" step="0.1">
+                <label class="hidden" for="profileDynamic15DsFreshAgeSec">Distance freshness s</label>
+                <input class="hidden" id="profileDynamic15DsFreshAgeSec" value="1.5" type="number" min="0.1" step="0.1">
+                <label for="profileDynamic15SlotMs">DS-TWR slot ms</label>
                 <input id="profileDynamic15SlotMs" value="100" type="number" min="1" step="1">
-                <label for="profileDynamic15RoundGapMs">DS-TWR/survey gap ms</label>
+                <label for="profileDynamic15RoundGapMs">DS-TWR gap ms</label>
                 <input id="profileDynamic15RoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileDynamic15RxSliceMs">RX slice ms</label>
+                <label for="profileDynamic15RxSliceMs">Host RX slice ms</label>
                 <input id="profileDynamic15RxSliceMs" value="100" type="number" min="1" step="1">
-                <label for="profileDynamic15CommandDelayMs">Survey command delay ms</label>
-                <input id="profileDynamic15CommandDelayMs" value="5" type="number" min="1" step="1">
+                <label class="hidden" for="profileDynamic15DsRxSliceMs">DS-TWR RX slice ms</label>
+                <input class="hidden" id="profileDynamic15DsRxSliceMs" value="100" type="number" min="1" step="1">
                 <label for="profileDynamic15TimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileDynamic15TimeoutMs" value="90" type="number" min="1" step="1">
                 <label for="profileDynamic15RespDelayMs">DS-TWR RESP delay ms</label>
@@ -3262,16 +3302,20 @@ tr.status-stale td { color: #4f3b1d; }
             </div>
             <div class="profile-card" data-profile="dynamic12">
               <h3>Reactive Profile</h3>
-              <p class="muted">Reactive 1.2 s FlexTDOA observation freshness; conservative compatibility timing.</p>
+              <p id="profileDynamic12Description" class="muted">Reactive 1.2 s FlexTDOA observation freshness and a conservative host RX window.</p>
               <div class="form-grid compact">
-                <label for="profileDynamic12SlotMs">DS-TWR/survey slot ms</label>
+                <label for="profileDynamic12FreshAgeSec">Observation freshness s</label>
+                <input id="profileDynamic12FreshAgeSec" value="1.2" type="number" min="0.1" step="0.1">
+                <label class="hidden" for="profileDynamic12DsFreshAgeSec">Distance freshness s</label>
+                <input class="hidden" id="profileDynamic12DsFreshAgeSec" value="1.2" type="number" min="0.1" step="0.1">
+                <label for="profileDynamic12SlotMs">DS-TWR slot ms</label>
                 <input id="profileDynamic12SlotMs" value="100" type="number" min="1" step="1">
-                <label for="profileDynamic12RoundGapMs">DS-TWR/survey gap ms</label>
+                <label for="profileDynamic12RoundGapMs">DS-TWR gap ms</label>
                 <input id="profileDynamic12RoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileDynamic12RxSliceMs">RX slice ms</label>
+                <label for="profileDynamic12RxSliceMs">Host RX slice ms</label>
                 <input id="profileDynamic12RxSliceMs" value="100" type="number" min="1" step="1">
-                <label for="profileDynamic12CommandDelayMs">Survey command delay ms</label>
-                <input id="profileDynamic12CommandDelayMs" value="5" type="number" min="1" step="1">
+                <label class="hidden" for="profileDynamic12DsRxSliceMs">DS-TWR RX slice ms</label>
+                <input class="hidden" id="profileDynamic12DsRxSliceMs" value="100" type="number" min="1" step="1">
                 <label for="profileDynamic12TimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileDynamic12TimeoutMs" value="90" type="number" min="1" step="1">
                 <label for="profileDynamic12RespDelayMs">DS-TWR RESP delay ms</label>
@@ -3291,16 +3335,20 @@ tr.status-stale td { color: #4f3b1d; }
             </div>
             <div class="profile-card" data-profile="fastRaw">
               <h3>Fast Profile</h3>
-              <p class="muted">Short 0.5 s FlexTDOA observation freshness and 5 ms host RX slices; compact compatibility timing.</p>
+              <p id="profileFastRawDescription" class="muted">Short 0.5 s FlexTDOA observation freshness and 5 ms host RX slices.</p>
               <div class="form-grid compact">
-                <label for="profileFastRawSlotMs">DS-TWR/survey slot ms</label>
+                <label for="profileFastRawFreshAgeSec">Observation freshness s</label>
+                <input id="profileFastRawFreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+                <label class="hidden" for="profileFastRawDsFreshAgeSec">Distance freshness s</label>
+                <input class="hidden" id="profileFastRawDsFreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+                <label for="profileFastRawSlotMs">DS-TWR slot ms</label>
                 <input id="profileFastRawSlotMs" value="7" type="number" min="1" step="1">
-                <label for="profileFastRawRoundGapMs">DS-TWR/survey gap ms</label>
+                <label for="profileFastRawRoundGapMs">DS-TWR gap ms</label>
                 <input id="profileFastRawRoundGapMs" value="1" type="number" min="1" step="1">
-                <label for="profileFastRawRxSliceMs">RX slice ms</label>
+                <label for="profileFastRawRxSliceMs">Host RX slice ms</label>
                 <input id="profileFastRawRxSliceMs" value="5" type="number" min="1" step="1">
-                <label for="profileFastRawCommandDelayMs">Survey command delay ms</label>
-                <input id="profileFastRawCommandDelayMs" value="2" type="number" min="1" step="1">
+                <label class="hidden" for="profileFastRawDsRxSliceMs">DS-TWR RX slice ms</label>
+                <input class="hidden" id="profileFastRawDsRxSliceMs" value="5" type="number" min="1" step="1">
                 <label for="profileFastRawTimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileFastRawTimeoutMs" value="12" type="number" min="1" step="1">
                 <label for="profileFastRawRespDelayMs">DS-TWR RESP delay ms</label>
@@ -3619,10 +3667,12 @@ const toastTimers = new Map();
 let calibrationPollTimer = null;
 let calibrationJobId = null;
 const rangingProfileFields = [
+  {key: "positionMaxAgeSec", suffix: "FreshAgeSec"},
+  {key: "dsPositionMaxAgeSec", suffix: "DsFreshAgeSec"},
   {key: "slotMs", suffix: "SlotMs"},
   {key: "roundGapMs", suffix: "RoundGapMs"},
   {key: "rxSliceMs", suffix: "RxSliceMs"},
-  {key: "commandDelayMs", suffix: "CommandDelayMs"},
+  {key: "dsRxSliceMs", suffix: "DsRxSliceMs"},
   {key: "timeoutMs", suffix: "TimeoutMs"},
   {key: "respDelayMs", suffix: "RespDelayMs"},
   {key: "finalDelayMs", suffix: "FinalDelayMs"},
@@ -3634,10 +3684,11 @@ const rangingProfileDefaults = {
     prefix: "profileStatic3",
     label: "Stable Profile",
     positionMaxAgeSec: 3,
+    dsPositionMaxAgeSec: 3,
     slotMs: 100,
     roundGapMs: 10,
     rxSliceMs: 100,
-    commandDelayMs: 5,
+    dsRxSliceMs: 100,
     timeoutMs: 90,
     respDelayMs: 20,
     finalDelayMs: 20,
@@ -3648,10 +3699,11 @@ const rangingProfileDefaults = {
     prefix: "profileDynamic15",
     label: "Balanced Profile",
     positionMaxAgeSec: 1.5,
+    dsPositionMaxAgeSec: 1.5,
     slotMs: 100,
     roundGapMs: 10,
     rxSliceMs: 100,
-    commandDelayMs: 5,
+    dsRxSliceMs: 100,
     timeoutMs: 90,
     respDelayMs: 20,
     finalDelayMs: 20,
@@ -3662,10 +3714,11 @@ const rangingProfileDefaults = {
     prefix: "profileDynamic12",
     label: "Reactive Profile",
     positionMaxAgeSec: 1.2,
+    dsPositionMaxAgeSec: 1.2,
     slotMs: 100,
     roundGapMs: 10,
     rxSliceMs: 100,
-    commandDelayMs: 5,
+    dsRxSliceMs: 100,
     timeoutMs: 90,
     respDelayMs: 20,
     finalDelayMs: 20,
@@ -3676,16 +3729,25 @@ const rangingProfileDefaults = {
     prefix: "profileFastRaw",
     label: "Fast Profile",
     positionMaxAgeSec: 0.5,
+    dsPositionMaxAgeSec: 0.5,
     slotMs: 7,
     roundGapMs: 1,
     rxSliceMs: 5,
-    commandDelayMs: 2,
+    dsRxSliceMs: 5,
     timeoutMs: 12,
     respDelayMs: 8,
     finalDelayMs: 8,
     reportDelayMs: 3,
     autoRxDelayUus: 500,
   },
+};
+const rangingProtocolProfileFields = {
+  flextdoa: new Set(["positionMaxAgeSec", "rxSliceMs"]),
+  ranging: new Set([
+    "dsPositionMaxAgeSec", "slotMs", "roundGapMs", "dsRxSliceMs", "timeoutMs",
+    "respDelayMs", "finalDelayMs", "reportDelayMs", "autoRxDelayUus",
+  ]),
+  hybrid: new Set(),
 };
 const rangingProfileDefaultsVersion = "2026-07-18-flex-7ms-v4";
 const BQ_REG_NAMES = {
@@ -5711,6 +5773,7 @@ function setActiveTab(id) {
   document.querySelectorAll(".page").forEach(page => page.classList.toggle("active", page.id === id));
   requestAnimationFrame(renderVisibleTerminals);
   requestAnimationFrame(renderPosition);
+  if (id === "rangingSettings") requestAnimationFrame(updateRangingSettingsProtocol);
   scheduleAccelRender();
 }
 
@@ -7588,32 +7651,39 @@ function writeRangingProfile(profileKey, values, persist = true) {
   updateRangingProfileSummary(profileKey);
 }
 
-function rangingProfileRuntimeParams(values) {
-  return {
-    survey_slot_ms: String(values.slotMs),
-    survey_gap_ms: String(values.roundGapMs),
-    survey_rx_ms: String(values.rxSliceMs),
-    survey_delay_ms: String(values.commandDelayMs),
-    ranging_slot_ms: String(values.slotMs),
-    ranging_gap_ms: String(values.roundGapMs),
-    ranging_rx_ms: String(values.rxSliceMs),
-    dt_rx_timeout_ms: String(values.timeoutMs),
-    dt_resp_delay_ms: String(values.respDelayMs),
-    dt_final_delay_ms: String(values.finalDelayMs),
-    dt_report_delay_ms: String(values.reportDelayMs),
-    dt_auto_rx_delay_uus: String(values.autoRxDelayUus),
-  };
+function rangingSettingsSolver() {
+  return normalizePositionSolver(
+    document.getElementById("positionSolver")?.value || "flextdoa"
+  );
 }
 
-function mirrorRangingProfileToUwbFields(values) {
-  const fields = {
-    uwbSurveySlotMs: values.slotMs,
-    uwbSurveyGapMs: values.roundGapMs,
+function rangingProfileRuntimeParams(values, solver) {
+  if (solver === "flextdoa") {
+    // Pure FlexTDOA has fixed on-air timing. This is only the host RX call ceiling.
+    return {survey_rx_ms: String(values.rxSliceMs)};
+  }
+  if (solver === "ranging") {
+    return {
+      ranging_slot_ms: String(values.slotMs),
+      ranging_gap_ms: String(values.roundGapMs),
+      ranging_rx_ms: String(values.dsRxSliceMs),
+      dt_rx_timeout_ms: String(values.timeoutMs),
+      dt_resp_delay_ms: String(values.respDelayMs),
+      dt_final_delay_ms: String(values.finalDelayMs),
+      dt_report_delay_ms: String(values.reportDelayMs),
+      dt_auto_rx_delay_uus: String(values.autoRxDelayUus),
+    };
+  }
+  return {};
+}
+
+function mirrorRangingProfileToUwbFields(values, solver) {
+  const fields = solver === "flextdoa" ? {
     uwbSurveyRxMs: values.rxSliceMs,
-    uwbSurveyDelayMs: values.commandDelayMs,
+  } : {
     uwbRangingSlotMs: values.slotMs,
     uwbRangingGapMs: values.roundGapMs,
-    uwbRangingRxMs: values.rxSliceMs,
+    uwbRangingRxMs: values.dsRxSliceMs,
     uwbDtRxTimeoutMs: values.timeoutMs,
     uwbDtRespDelayMs: values.respDelayMs,
     uwbDtFinalDelayMs: values.finalDelayMs,
@@ -7628,10 +7698,11 @@ function mirrorRangingProfileToUwbFields(values) {
   }
 }
 
-function applyRangingProfilePositionSettings(profile) {
+function applyRangingProfilePositionSettings(values, solver) {
   const fields = {
-    positionSolver: "flextdoa",
-    positionMaxAgeSec: profile.positionMaxAgeSec,
+    positionMaxAgeSec: solver === "ranging"
+      ? values.dsPositionMaxAgeSec
+      : values.positionMaxAgeSec,
   };
   for (const [id, value] of Object.entries(fields)) {
     const el = document.getElementById(id);
@@ -7639,6 +7710,65 @@ function applyRangingProfilePositionSettings(profile) {
     el.value = String(value);
     localStorage.setItem(settingKey(id), el.value);
   }
+}
+
+function setRangingProfileFieldVisible(profileKey, field, visible) {
+  const id = rangingProfileElementId(profileKey, field.suffix);
+  const input = document.getElementById(id);
+  const label = document.querySelector(`label[for="${id}"]`);
+  input?.classList.toggle("hidden", !visible);
+  label?.classList.toggle("hidden", !visible);
+}
+
+function rangingProfileDescription(values, solver) {
+  if (solver === "flextdoa") {
+    return `${fmtFixed(values.positionMaxAgeSec, 1)} s observation freshness and ${fmtFixed(values.rxSliceMs, 0)} ms host RX slices; radio timing remains paper-aligned.`;
+  }
+  return `${fmtFixed(values.dsPositionMaxAgeSec, 1)} s distance freshness with a ${fmtFixed(values.slotMs, 0)} ms DS-TWR slot and ${fmtFixed(values.roundGapMs, 0)} ms cycle gap.`;
+}
+
+function updateRangingSettingsProtocol() {
+  const solver = rangingSettingsSolver();
+  const protocol = {
+    flextdoa: {
+      title: "FlexTDOA Settings",
+      label: "FlexTDOA",
+      hint: "Selected in Position Setup. Only controls used by pure FlexTDOA are shown.",
+      note: "FlexTDOA radio timing is fixed to the paper-aligned 5.05 ms CI-CR slot shown above. Profiles change only observation freshness and the host RX slice.",
+    },
+    ranging: {
+      title: "DS-TWR Settings",
+      label: "DS-TWR ranges",
+      hint: "Selected in Position Setup. These controls configure the complete POLL, RESP, FINAL, REPORT and REPORT2 exchange.",
+      note: "Profiles below change only DS-TWR scheduling, receive waits and delayed-TX timing. FlexTDOA and anchor-survey settings are left untouched.",
+    },
+    hybrid: {
+      title: "Legacy Hybrid Settings",
+      label: "Legacy hybrid logs",
+      hint: "Selected in Position Setup. This compatibility solver reads older captures and does not configure a current radio protocol.",
+      note: "",
+    },
+  }[solver];
+
+  document.getElementById("rangingProtocolTitle").textContent = protocol.title;
+  document.getElementById("rangingProtocolHint").textContent = protocol.hint;
+  document.getElementById("rangingProtocolBadge").textContent = protocol.label;
+  document.querySelectorAll(".ranging-protocol-panel").forEach(panel => {
+    panel.classList.toggle("hidden", panel.dataset.rangingProtocol !== solver);
+  });
+
+  const profilesSection = document.getElementById("rangingProfilesSection");
+  profilesSection.classList.toggle("hidden", solver === "hybrid");
+  document.getElementById("rangingProfileNote").textContent = protocol.note;
+
+  const visibleFields = rangingProtocolProfileFields[solver];
+  for (const profileKey of Object.keys(rangingProfileDefaults)) {
+    for (const field of rangingProfileFields) {
+      setRangingProfileFieldVisible(profileKey, field, visibleFields.has(field.key));
+    }
+  }
+  updateAllRangingProfileSummaries();
+  if (solver === "flextdoa") renderFlexTdoaTimingDiagram();
 }
 
 const flexTimingPaper = {
@@ -7733,6 +7863,7 @@ function renderFlexTdoaTimingDiagram() {
   const root = document.getElementById("flexTdoaTimingDiagram");
   const selector = document.getElementById("flexTimingSlotSelect");
   if (!root || !selector) return;
+  if (rangingSettingsSolver() !== "flextdoa") return;
 
   const config = flexTimingRuntimeConfig();
   if (config.anchorIds.length < 3 || config.initiators.length < 1) {
@@ -7765,28 +7896,6 @@ function renderFlexTdoaTimingDiagram() {
   const responseHz = M * K * frameHz;
   const rxSlice = flexTimingRuntimeConsensus(
     "runtime_anchor_survey_rx_slice_ms", "ms"
-  );
-  const rangingSlot = flexTimingRuntimeConsensus("runtime_ranging_slot_ms", "ms");
-  const rangingGap = flexTimingRuntimeConsensus("runtime_ranging_round_gap_ms", "ms");
-  const surveySlot = flexTimingRuntimeConsensus("runtime_anchor_survey_slot_ms", "ms");
-  const surveyGap = flexTimingRuntimeConsensus("runtime_anchor_survey_round_gap_ms", "ms");
-  const commandDelay = flexTimingRuntimeConsensus(
-    "runtime_anchor_survey_command_delay_ms", "ms"
-  );
-  const dsTimeout = flexTimingRuntimeConsensus(
-    "runtime_distance_test_rx_timeout_ms", "ms"
-  );
-  const dsResp = flexTimingRuntimeConsensus(
-    "runtime_distance_test_resp_delay_ms", "ms"
-  );
-  const dsFinal = flexTimingRuntimeConsensus(
-    "runtime_distance_test_final_delay_ms", "ms"
-  );
-  const dsReport = flexTimingRuntimeConsensus(
-    "runtime_distance_test_report_delay_ms", "ms"
-  );
-  const autoRx = flexTimingRuntimeConsensus(
-    "runtime_distance_test_auto_rx_delay_uus", "UUS"
   );
   const rxSliceUs = Number.isFinite(rxSlice.value) ? rxSlice.value * 1000 : 0;
   const rxSliceWidth = rxSliceUs > 0 ? Math.min(100, 100 * rxSliceUs / slotUs) : 0;
@@ -7974,36 +8083,24 @@ function renderFlexTdoaTimingDiagram() {
             <td>RX slice · ${esc(rxSlice.text)}</td>
             <td>Maximum duration of one software receive call, shown by the outlined bar above. It is not airtime; an anchor schedule alarm can end it early.</td>
           </tr>
-          <tr>
-            <td><span class="flex-scope">DS-TWR schedule</span></td>
-            <td>Slot ${esc(rangingSlot.text)} · round gap ${esc(rangingGap.text)}</td>
-            <td>Schedules the standard DS-TWR ranging cycle. It is outside the FlexTDOA CI-CR frame.</td>
-          </tr>
-          <tr>
-            <td><span class="flex-scope">Anchor survey</span></td>
-            <td>Slot ${esc(surveySlot.text)} · gap ${esc(surveyGap.text)} · command ${esc(commandDelay.text)}</td>
-            <td>Controls the survey coordinator and command lead. It does not move FlexTDOA REQ or RESP.</td>
-          </tr>
-          <tr>
-            <td><span class="flex-scope">DS-TWR exchange</span></td>
-            <td>Timeout ${esc(dsTimeout.text)} · RESP ${esc(dsResp.text)} · FINAL ${esc(dsFinal.text)} · REPORT ${esc(dsReport.text)} · Auto RX ${esc(autoRx.text)}</td>
-            <td>Controls DS-TWR delayed TX, receive waits and automatic RX. These messages do not exist in a pure FlexTDOA slot.</td>
-          </tr>
         </tbody>
       </table>
     </div>
     <div class="flex-timing-note">The cyclic view starts at REQ. Colored widths are protocol time budgets, not packet airtime: REQ and each RESP transmit at their subslot boundary. The final 250 us GAP is the firmware guard interval inside every slot; pure FlexTDOA has no separate frame-level round gap. P_RESP is the paper's aggregate K × 600 us processing budget. Response offsets are native DW3000 delayed-TX targets relative to REQ_RX.</div>`;
 }
 
-function profileSummaryText(values, anchorCount = 4) {
-  const paperBodyMs = profileFlexTdoaPaperBodyMs(anchorCount);
-  const flexFrameMs = anchorCount * paperBodyMs;
+function profileSummaryText(values, solver, anchorCount = 4) {
+  if (solver === "flextdoa") {
+    const paperBodyMs = profileFlexTdoaPaperBodyMs(anchorCount);
+    const flexFrameMs = anchorCount * paperBodyMs;
+    return `fresh ${fmtFixed(values.positionMaxAgeSec, 1)} s · fixed ${fmtFixed(paperBodyMs, 2)} ms radio slot · ${fmtFixed(flexFrameMs, 2)} ms frame · RX slice ${fmtFixed(values.rxSliceMs, 0)} ms`;
+  }
   const dsCycleMs = anchorCount * values.slotMs + values.roundGapMs;
   const warnings = [];
   if (values.timeoutMs >= values.slotMs) warnings.push("timeout >= slot");
-  if (values.rxSliceMs > values.slotMs) warnings.push("RX slice > slot");
+  if (values.dsRxSliceMs > values.slotMs) warnings.push("RX slice > slot");
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `${anchorCount} anchors: exact FlexTDOA ${fmtFixed(paperBodyMs, 2)} ms/slot, ${fmtFixed(flexFrameMs, 2)} ms/frame · DS-TWR compatibility ${fmtFixed(values.slotMs, 0)} ms/slot, ~${fmtFixed(dsCycleMs, 0)} ms/cycle${warnText}`;
+  return `fresh ${fmtFixed(values.dsPositionMaxAgeSec, 1)} s · ${fmtFixed(values.slotMs, 0)} ms slot · ${fmtFixed(values.roundGapMs, 0)} ms gap · RX slice ${fmtFixed(values.dsRxSliceMs, 0)} ms · ~${fmtFixed(dsCycleMs, 0)} ms cycle${warnText}`;
 }
 
 function profileFlexTdoaPaperBodyMs(anchorCount = 4) {
@@ -8013,24 +8110,26 @@ function profileFlexTdoaPaperBodyMs(anchorCount = 4) {
   ) / 1000;
 }
 
-function profileFlexTdoaSlotMarginMs(values, anchorCount = 4) {
-  return values.slotMs - values.commandDelayMs;
-}
-
 function updateRangingProfileSummary(profileKey) {
   const profile = rangingProfileDefaults[profileKey];
   if (!profile) return;
   const summary = document.getElementById(`${profile.prefix}Summary`);
   if (!summary) return;
+  const solver = rangingSettingsSolver();
   const values = readRangingProfile(profileKey);
-  const valid = Object.values(values).every(value => Number.isFinite(value));
-  const ageText = Number.isFinite(Number(profile.positionMaxAgeSec))
-    ? `fresh ${fmtFixed(profile.positionMaxAgeSec, 1)} s`
-    : "fresh custom";
+  const description = document.getElementById(`${profile.prefix}Description`);
+  if (description && solver !== "hybrid") {
+    description.textContent = rangingProfileDescription(values, solver);
+  }
+  const visibleFields = rangingProtocolProfileFields[solver];
+  const valid = [...visibleFields].every(key => Number.isFinite(values[key]));
   summary.textContent = valid
-    ? `FlexTDOA · ${ageText} · ${profileSummaryText(values, 4)}`
+    ? `${positionSolverLabel(solver)} · ${profileSummaryText(values, solver, 4)}`
     : "incomplete profile";
-  summary.className = `profile-summary ${valid && profileFlexTdoaSlotMarginMs(values, 4) < 5 ? "warn" : ""}`.trim();
+  const warn = solver === "ranging" && (
+    values.timeoutMs >= values.slotMs || values.dsRxSliceMs > values.slotMs
+  );
+  summary.className = `profile-summary ${valid && warn ? "warn" : ""}`.trim();
 }
 
 function updateAllRangingProfileSummaries() {
@@ -8040,19 +8139,22 @@ function updateAllRangingProfileSummaries() {
 async function applyRangingProfile(profileKey) {
   const profile = rangingProfileDefaults[profileKey];
   if (!profile) return;
+  const solver = rangingSettingsSolver();
+  if (solver === "hybrid") return;
   const values = readRangingProfile(profileKey);
-  if (!Object.values(values).every(value => Number.isFinite(value) && value > 0)) {
+  const visibleFields = rangingProtocolProfileFields[solver];
+  if (![...visibleFields].every(key => Number.isFinite(values[key]) && values[key] > 0)) {
     setToast("rangingProfileToast", "Profile has invalid values", "bad");
     return;
   }
-  setToast("rangingProfileToast", `applying ${profile.label}...`, "", null, false);
+  setToast("rangingProfileToast", `applying ${profile.label} to ${positionSolverLabel(solver)}...`, "", null, false);
   const data = await postConfig({
     target_modules: document.getElementById("rangingProfileTargets").value,
-    params: rangingProfileRuntimeParams(values),
+    params: rangingProfileRuntimeParams(values, solver),
   }, "rangingProfileToast");
   if (apiResponseOk(data)) {
-    mirrorRangingProfileToUwbFields(values);
-    applyRangingProfilePositionSettings(profile);
+    mirrorRangingProfileToUwbFields(values, solver);
+    applyRangingProfilePositionSettings(values, solver);
     setTimeout(fetchSnapshot, 500);
   }
 }
@@ -8329,9 +8431,11 @@ function wireSettings() {
     if (!el) return;
     el.addEventListener("input", () => {
       renderPosition();
+      if (id === "positionSolver") updateRangingSettingsProtocol();
     });
     el.addEventListener("change", () => {
       renderPosition();
+      if (id === "positionSolver") updateRangingSettingsProtocol();
     });
   });
   document.getElementById("positionResetTrail").addEventListener("click", () => {
@@ -8402,6 +8506,7 @@ function wireSettings() {
     setToast("rangingProfileToast", "all profile defaults restored locally; press Apply to write ESP NVS", "");
   });
   updateAllRangingProfileSummaries();
+  updateRangingSettingsProtocol();
   document.getElementById("applyCalibrationSettings").addEventListener("click", () => {
     postConfig({
       target_modules: document.getElementById("runtimeTargets").value,
