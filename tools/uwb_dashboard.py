@@ -2042,6 +2042,82 @@ tr.status-stale td { color: #4f3b1d; }
 }
 .flex-axis-mark.edge-start { transform: none; }
 .flex-axis-mark.edge-end { transform: translateX(-100%); }
+.flex-dimensions {
+  position: relative;
+  height: 63px;
+  margin-top: 1px;
+  color: #42536a;
+  font-size: 10px;
+}
+.flex-dimension {
+  position: absolute;
+  height: 23px;
+}
+.flex-dimension-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 7px;
+  border-top: 1px solid #52647a;
+}
+.flex-dimension-line::before,
+.flex-dimension-line::after {
+  content: "";
+  position: absolute;
+  top: -4px;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+}
+.flex-dimension-line::before {
+  left: 0;
+  border-left: 6px solid #52647a;
+}
+.flex-dimension-line::after {
+  right: 0;
+  border-right: 6px solid #52647a;
+}
+.flex-dimension-label {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  transform: translateX(-50%);
+  padding: 0 5px;
+  background: #fff;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.flex-dimension.gap .flex-dimension-line { border-color: #7a651c; }
+.flex-dimension.gap .flex-dimension-line::before { border-left-color: #7a651c; }
+.flex-dimension.gap .flex-dimension-line::after { border-right-color: #7a651c; }
+.flex-dimension.gap .flex-dimension-label {
+  left: auto;
+  right: 0;
+  transform: none;
+  color: #67540f;
+}
+.flex-frame-dimensions {
+  position: relative;
+  height: 45px;
+  margin-top: 1px;
+  color: #42536a;
+  font-size: 10px;
+}
+.flex-round-gap-zero {
+  position: absolute;
+  right: 0;
+  top: 24px;
+  height: 17px;
+  border-right: 3px double #52647a;
+}
+.flex-round-gap-zero span {
+  position: absolute;
+  right: 7px;
+  top: -1px;
+  white-space: nowrap;
+  font-weight: 700;
+}
 .flex-slot-track {
   display: grid;
   height: 76px;
@@ -7744,7 +7820,7 @@ function renderFlexTdoaTimingDiagram() {
       detail: `A${anchorId} delayed TX`,
     })),
     {key: "Process RESP", short: "P_RESP", duration: responseProcessTotalUs, cls: "response-process", detail: `${K} × 600 us`},
-    {key: "Guard", short: "G", duration: timing.guardUs, cls: "guard", detail: "before next REQ"},
+    {key: "Gap", short: "GAP", duration: timing.guardUs, cls: "guard", detail: "quiet guard before next REQ"},
   ];
   const segmentCells = segments.map(segment => {
     return `<div class="flex-slot-segment ${segment.cls}" title="${esc(`${segment.key}: ${segment.detail}, ${segment.duration} us`)}">
@@ -7815,12 +7891,29 @@ function renderFlexTdoaTimingDiagram() {
         </div>
         <div class="flex-frame-track" style="grid-template-columns:repeat(${M}, minmax(170px, 1fr))">${frameSlots}</div>
         <div class="flex-frame-axis">${frameAxis}</div>
+        <div class="flex-frame-dimensions">
+          <div class="flex-dimension" style="left:0%;width:100%;top:0">
+            <div class="flex-dimension-line"></div>
+            <span class="flex-dimension-label">Frame = ${M} × ${fmtFixed(slotUs / 1000, 3)} ms = ${fmtFixed(frameUs / 1000, 3)} ms</span>
+          </div>
+          <div class="flex-round-gap-zero"><span>Round gap = 0 ms · next frame starts immediately</span></div>
+        </div>
         <div class="flex-timing-label">
           <strong>Selected slot ${selectedSlotId} · A${esc(selectedInitiator)} initiates · ${K} response subslots</strong>
           <span>REQ-to-REQ time reference</span>
         </div>
         <div class="flex-slot-track" style="grid-template-columns:${segments.map(segment => `${segment.duration}fr`).join(" ")}">${segmentCells}</div>
         <div class="flex-slot-axis">${slotAxis}</div>
+        <div class="flex-dimensions">
+          <div class="flex-dimension" style="left:0%;width:100%;top:0">
+            <div class="flex-dimension-line"></div>
+            <span class="flex-dimension-label">Slot = ${fmtFixed(slotUs / 1000, 3)} ms</span>
+          </div>
+          <div class="flex-dimension gap" style="left:${100 * (slotUs - timing.guardUs) / slotUs}%;width:${100 * timing.guardUs / slotUs}%;top:31px">
+            <div class="flex-dimension-line"></div>
+            <span class="flex-dimension-label">GAP = ${timing.guardUs} us</span>
+          </div>
+        </div>
         <div class="flex-host-window">
           <strong>RX host window</strong>
           <div class="flex-host-track" title="Maximum receive-call duration; not radio airtime">
@@ -7883,7 +7976,7 @@ function renderFlexTdoaTimingDiagram() {
         </tbody>
       </table>
     </div>
-    <div class="flex-timing-note">The cyclic view starts at REQ. Colored widths are protocol time budgets, not packet airtime: REQ and each RESP transmit at their subslot boundary. The 250 us guard is drawn at the end because it is the quiet interval immediately before the next slot's REQ. P_RESP is the paper's aggregate K × 600 us processing budget. Response offsets are native DW3000 delayed-TX targets relative to REQ_RX.</div>`;
+    <div class="flex-timing-note">The cyclic view starts at REQ. Colored widths are protocol time budgets, not packet airtime: REQ and each RESP transmit at their subslot boundary. The final 250 us GAP is the firmware guard interval inside every slot; pure FlexTDOA has no separate frame-level round gap. P_RESP is the paper's aggregate K × 600 us processing budget. Response offsets are native DW3000 delayed-TX targets relative to REQ_RX.</div>`;
 }
 
 function profileSummaryText(values, anchorCount = 4) {
