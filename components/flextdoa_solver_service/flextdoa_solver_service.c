@@ -81,7 +81,9 @@ static int flex_solver_anchor_index(const struct flex_solver_state *state,
 
 static int flex_solver_variable_index(size_t anchor, bool y_axis)
 {
-    if (anchor == 0U || (anchor == 1U && y_axis)) {
+    // Match the paper/dashboard frame: anchor 0 is the origin and anchor 1
+    // lies on +Y. Only anchor 1's Y coordinate remains a variable.
+    if (anchor == 0U || (anchor == 1U && !y_axis)) {
         return -1;
     }
     if (anchor == 1U) {
@@ -145,8 +147,8 @@ static bool flex_solver_initialize_geometry(struct flex_solver_state *state)
     }
     state->anchor_x[0] = 0.0;
     state->anchor_y[0] = 0.0;
-    state->anchor_x[1] = baseline;
-    state->anchor_y[1] = 0.0;
+    state->anchor_x[1] = 0.0;
+    state->anchor_y[1] = baseline;
 
     for (size_t anchor = 2; anchor < state->anchor_count; ++anchor) {
         if (!state->ranges[0][anchor].valid ||
@@ -155,13 +157,13 @@ static bool flex_solver_initialize_geometry(struct flex_solver_state *state)
         }
         const double d0 = state->ranges[0][anchor].value_m;
         const double d1 = state->ranges[1][anchor].value_m;
-        const double x = (d0 * d0 + baseline * baseline - d1 * d1) /
+        const double y = (d0 * d0 + baseline * baseline - d1 * d1) /
                          (2.0 * baseline);
-        const double y_square = d0 * d0 - x * x;
-        if (y_square < -0.02) {
+        const double x_square = d0 * d0 - y * y;
+        if (x_square < -0.02) {
             return false;
         }
-        const double y = sqrt(fmax(0.0, y_square));
+        const double x = sqrt(fmax(0.0, x_square));
         state->anchor_x[anchor] = x;
         state->anchor_y[anchor] = y;
         if (anchor > 2U) {
@@ -171,15 +173,15 @@ static bool flex_solver_initialize_geometry(struct flex_solver_state *state)
                 if (!state->ranges[known][anchor].valid) {
                     continue;
                 }
-                const double dx = x - state->anchor_x[known];
-                const double positive = hypot(dx, y - state->anchor_y[known]);
-                const double negative = hypot(dx, -y - state->anchor_y[known]);
+                const double dy = y - state->anchor_y[known];
+                const double positive = hypot(x - state->anchor_x[known], dy);
+                const double negative = hypot(-x - state->anchor_x[known], dy);
                 const double measured = state->ranges[known][anchor].value_m;
                 positive_error += fabs(positive - measured);
                 negative_error += fabs(negative - measured);
             }
             if (negative_error < positive_error) {
-                state->anchor_y[anchor] = -y;
+                state->anchor_x[anchor] = -x;
             }
         }
     }

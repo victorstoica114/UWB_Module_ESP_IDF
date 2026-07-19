@@ -520,7 +520,7 @@ estimator are deliberately kept outside this radio validation.
 | Fully distributed slot synchronization | Implemented from request RX timestamps. A response can recover a node that missed the request, but a directly received request is authoritative for that slot. |
 | General `N/K/M` topology | Implemented for `3..10` anchors, configurable responder count, initiator slots, and per-slot responder masks. |
 | Configuration propagation | Implemented as a versioned UWB frame. A newer generation is persisted in NVS, rebroadcast during the startup phase, and rebuilds the local schedule after restart. |
-| Local solver | Implemented on the tag ESP32-S3. Anchor geometry and raw TDOA observations feed a damped 2D least-squares AlgMin service on core 0; UWB remains on core 1. One position is solved for each complete frame. |
+| Local solver | Implemented on the tag ESP32-S3. Anchor geometry and raw TDOA observations feed a damped 2D least-squares AlgMin service on core 0; UWB remains on core 1. One position is solved for each complete frame, in the same A0-at-origin/A1-on-`+Y` coordinate frame used by the dashboard. |
 | Paper radio setup | Use CH5, 6.8 Mb/s, PRF 64 MHz, preamble 128 when matching the paper. |
 | Firmware-side measurement filters | None. The radio path emits every structurally valid raw anchor range and tag range difference. |
 
