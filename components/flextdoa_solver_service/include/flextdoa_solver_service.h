@@ -11,6 +11,7 @@ extern "C" {
 #endif
 
 esp_err_t flextdoa_solver_service_start(void);
+bool flextdoa_solver_service_reload_geometry(void);
 bool flextdoa_solver_service_submit_anchor_range(
     uint8_t anchor_a_id, uint8_t anchor_b_id, uint32_t slot_id,
     int32_t distance_mm);

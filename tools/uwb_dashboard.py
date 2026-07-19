@@ -5023,7 +5023,10 @@ function renderPositionGeometryPanel(model) {
     }
   }
   if (fixButton) {
-    fixButton.disabled = !geometry.canFix || geometry.status === "fixed";
+    fixButton.disabled = !geometry.canFix && geometry.status !== "fixed";
+    fixButton.textContent = geometry.status === "fixed"
+      ? "Persist Anchor Geometry"
+      : "Fix Anchor Geometry";
   }
   const pairRows = selectedAnchorPairs(model.settings.anchorIds).map(([a, b]) => {
     const key = anchorPairKey(a, b);
@@ -7560,24 +7563,34 @@ function runPositionOverlayAction(event) {
   }
 }
 
-function restartAnchorSelfLocalization() {
-  const settings = positionSettings();
-  resetPaperAnchorSelfLocalization(settings.anchorIds, true);
-  state.positionTrail = {};
-  setToast("positionToast", "Paper TWR-EKF anchor self-localization restarted", "good");
-  renderPosition();
+async function restartAnchorSelfLocalization() {
+    const settings = positionSettings();
+    const result = await postConfig({
+      target_modules: "all",
+      params: {flex_geometry_clear: "1"},
+    }, "positionToast");
+    if (!apiResponseOk(result)) return;
+    resetPaperAnchorSelfLocalization(settings.anchorIds, true);
+    state.positionTrail = {};
+    setToast("positionToast", "Paper TWR-EKF anchor self-localization restarted on all modules", "good");
+    renderPosition();
 }
 
-function fixCurrentAnchorGeometry() {
+async function fixCurrentAnchorGeometry() {
   const settings = positionSettings();
   const session = state.positionGeometry;
-  if (session.key !== positionGeometryKey(settings.anchorIds) || !session.ekf || session.ekf.updates < 1) {
+  if (session.key !== positionGeometryKey(settings.anchorIds)) {
+    setToast("positionToast", "Anchor geometry does not match the selected IDs", "bad");
+    return;
+  }
+  const existingFixed = session.fixed;
+  if (!existingFixed && (!session.ekf || session.ekf.updates < 1)) {
     setToast("positionToast", "Anchor EKF has no complete update yet", "bad");
     return;
   }
   const geometry = paperAnchorGeometry(
     settings.anchorIds, positionGeometryMaxAge(settings));
-  if (!geometry.canFix) {
+  if (!existingFixed && !geometry.canFix) {
     const rmsText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
       ? `: ${fmtPositionCm(geometry.fitQuality.rmsM, 1)} RMS`
       : "";
@@ -7585,18 +7598,28 @@ function fixCurrentAnchorGeometry() {
     renderPosition();
     return;
   }
-  const anchors = cloneAnchorCoordinates(geometry.anchors);
-  const fixed = {
+  const anchors = cloneAnchorCoordinates(
+    existingFixed?.anchors || geometry.anchors);
+  const fixed = existingFixed || {
     anchorIds: settings.anchorIds.map(Number),
     anchors: cloneAnchorCoordinates(anchors),
     fixedAt: Date.now() / 1000,
     updates: session.ekf.updates,
   };
+  const geometryText = settings.anchorIds.map(id => {
+    const point = anchors[id];
+    return `${id}:${Math.round(point.x * 1000)}:${Math.round(point.y * 1000)}`;
+  }).join(",");
+  const result = await postConfig({
+    target_modules: "all",
+    params: {flex_geometry: geometryText},
+  }, "positionToast");
+  if (!apiResponseOk(result)) return;
   session.fixed = fixed;
   localStorage.setItem(positionGeometryStorageKey(settings.anchorIds), JSON.stringify(fixed));
   state.positionSeeds = {};
   state.positionTrail = {};
-  setToast("positionToast", "Anchor geometry fixed for FlexTDOA positioning", "good");
+  setToast("positionToast", "Anchor geometry fixed and persisted on all modules", "good");
   renderPosition();
 }
 
@@ -9022,7 +9045,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
         return targets
 
     def send_runtime_config(self, target: str, params: dict[str, str]) -> dict[str, Any]:
-        query = urllib.parse.urlencode(params, safe=",")
+        query = urllib.parse.urlencode(params, safe=",:")
         request = urllib.request.Request(
             f"{runtime_url(target)}?{query}",
             data=b"",

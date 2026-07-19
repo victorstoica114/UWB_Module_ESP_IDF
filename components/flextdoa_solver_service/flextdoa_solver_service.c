@@ -25,6 +25,7 @@ enum {
 enum flex_solver_item_type {
     FLEX_SOLVER_ITEM_RANGE,
     FLEX_SOLVER_ITEM_OBSERVATION,
+    FLEX_SOLVER_ITEM_RELOAD_GEOMETRY,
 };
 
 struct flex_solver_item {
@@ -54,6 +55,8 @@ struct flex_solver_state {
     double anchor_x[APP_RUNTIME_CONFIG_MAX_ANCHORS];
     double anchor_y[APP_RUNTIME_CONFIG_MAX_ANCHORS];
     bool geometry_ready;
+    bool geometry_fixed;
+    uint32_t geometry_generation;
     uint32_t geometry_version;
     TickType_t last_geometry_tick;
     bool position_valid;
@@ -67,6 +70,32 @@ struct flex_solver_state {
 static QueueHandle_t s_queue;
 static bool s_started;
 static uint32_t s_dropped;
+
+static void flex_solver_apply_runtime_geometry(struct flex_solver_state *state)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    state->anchor_count = config->anchor_count;
+    memcpy(state->anchor_ids, config->anchor_ids, sizeof(state->anchor_ids));
+    state->geometry_fixed = config->flex_tdoa_geometry_fixed;
+    state->geometry_generation = config->flex_tdoa_geometry_generation;
+    state->geometry_ready = state->geometry_fixed;
+    state->position_valid = false;
+    state->position_pending = false;
+    if (!state->geometry_fixed) {
+        memset(state->anchor_x, 0, sizeof(state->anchor_x));
+        memset(state->anchor_y, 0, sizeof(state->anchor_y));
+        return;
+    }
+    for (size_t i = 0; i < state->anchor_count; ++i) {
+        state->anchor_x[i] = config->flex_tdoa_anchor_x_mm[i] / 1000.0;
+        state->anchor_y[i] = config->flex_tdoa_anchor_y_mm[i] / 1000.0;
+    }
+    state->geometry_version = state->geometry_generation;
+    ESP_LOGI(TAG,
+             "FlexTDOA fixed geometry loaded generation=%lu anchors=%u",
+             (unsigned long)state->geometry_generation,
+             (unsigned)state->anchor_count);
+}
 
 static int flex_solver_anchor_index(const struct flex_solver_state *state,
                                     uint8_t id)
@@ -450,6 +479,7 @@ static void flex_solver_task(void *arg)
         .anchor_count = config->anchor_count,
     };
     memcpy(state.anchor_ids, config->anchor_ids, sizeof(state.anchor_ids));
+    flex_solver_apply_runtime_geometry(&state);
     ESP_LOGI(TAG, "FlexTDOA local solver active: anchors=%u core=%d",
              (unsigned)state.anchor_count, xPortGetCoreID());
 
@@ -457,6 +487,10 @@ static void flex_solver_task(void *arg)
     while (true) {
         struct flex_solver_item item = {0};
         if (xQueueReceive(s_queue, &item, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (item.type == FLEX_SOLVER_ITEM_RELOAD_GEOMETRY) {
+            flex_solver_apply_runtime_geometry(&state);
             continue;
         }
         const int first = flex_solver_anchor_index(&state, item.first_id);
@@ -474,9 +508,10 @@ static void flex_solver_task(void *arg)
             };
             state.ranges[first][second] = measurement;
             state.ranges[second][first] = measurement;
-            if (state.last_geometry_tick == 0 ||
+            if (!state.geometry_fixed &&
+                (state.last_geometry_tick == 0 ||
                 now - state.last_geometry_tick >=
-                    pdMS_TO_TICKS(FLEX_SOLVER_GEOMETRY_MIN_PERIOD_MS)) {
+                    pdMS_TO_TICKS(FLEX_SOLVER_GEOMETRY_MIN_PERIOD_MS))) {
                 (void)flex_solver_update_geometry(&state);
                 state.last_geometry_tick = now;
             }
@@ -552,6 +587,14 @@ bool flextdoa_solver_service_submit_anchor_range(
         .second_id = anchor_b_id,
         .slot_id = slot_id,
         .value_mm = distance_mm,
+    };
+    return flex_solver_submit(&item);
+}
+
+bool flextdoa_solver_service_reload_geometry(void)
+{
+    const struct flex_solver_item item = {
+        .type = FLEX_SOLVER_ITEM_RELOAD_GEOMETRY,
     };
     return flex_solver_submit(&item);
 }

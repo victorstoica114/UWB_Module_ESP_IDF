@@ -367,15 +367,25 @@ round 1
   slot 3: A5 requests, responders A3,A4,A2
 ```
 
-The responder list rotates as `(round + slot_index) % K`, which implements the
-paper's CI-CR scheme: changing initiator and changing responder order.
+The responder list rotates from the absolute 32-bit slot ID, `slot_id % K`.
+Consequently both the initiator and the first responder change at every slot,
+including between adjacent slots in the same frame. This implements the
+paper's CI-CR scheme without holding one response order for an entire frame.
 
 The active FlexTDOA frame set is:
 
 | Frame | Direction | Purpose |
 | --- | --- | --- |
-| `FLEX_TDOA_REQ` | initiator -> broadcast | Paper request. Carries a 32-bit slot ID, responder count, and responder order. |
-| `FLEX_TDOA_RESP` | responder -> broadcast | Paper response. Carries the same slot ID, initiator ID, responder index, responder reply delay, and the latest cached initiator-responder distance. |
+| `FLEX_TDOA_REQ` | initiator -> broadcast | Paper request. Carries the 32-bit slot ID, responder count/order, zero processing delay, and one previous TWR result from this initiator. |
+| `FLEX_TDOA_RESP` | responder -> broadcast | Paper response. Carries the same slot ID, measured reply delay, and one previous TWR result from this responder. Initiator and responder index are reconstructed from CI-CR plus the source ID. |
+
+Both packet types use the common Figure 3 tail: processing time, previous TWR
+responder ID, previous TWR distance, and previous measurement slot. The local
+transport header already carries message type, source ID, and sequence, while
+the destination list remains variable-length. Every anchor cycles through its
+own directed TWR cache so a repeatedly refreshed pair cannot starve the other
+pairs. The parser temporarily accepts the older local request/response layout
+to keep a parallel OTA rollout operational.
 
 There is no separate coordinator command in the active protocol. After two
 seconds of radio silence, the first configured anchor bootstraps slot `0`.
@@ -497,8 +507,9 @@ diff_dtu = (RESP_RX_tag - REQ_RX_tag)
 `responder_reply_dtu_corrected` uses the instantaneous DW3000
 carrier-integrator clock ratio from that response. `anchor_anchor_tof_dtu`
 comes from the cached
-anchor-anchor distance piggybacked in the response, with the latest local cache
-used until the pair has a fresh value.
+anchor-anchor distance learned from the Figure 3 piggyback stream. The latest
+directed measurement of either orientation is used until the pair has a newer
+value.
 
 No median, moving average, or position filter is applied to the passive tag's
 FlexTDOA observations in firmware. Firmware only rejects structurally invalid
@@ -516,11 +527,11 @@ estimator are deliberately kept outside this radio validation.
 | Every localization packet carries 32-bit slot ID | Implemented in every request and response. This avoids the 256-slot wrap ambiguity of an 8-bit counter. |
 | CI-CR schedule | Implemented by rotating initiator and responder order every slot/round. |
 | CFO-based reply delay correction | Implemented from buffered `CIA_DIAG_0`, with the Qorvo sign convention and no clock Kalman filter. |
-| Anchor self-localization payload | Implemented. Raw SS-TWR+CFO anchor ranges and their 32-bit slot IDs are piggybacked in later responses. |
+| Anchor self-localization payload | Implemented. Each request and response carries one previous directed SS-TWR+CFO result using the Figure 3 fields. |
 | Fully distributed slot synchronization | Implemented from request RX timestamps. A response can recover a node that missed the request, but a directly received request is authoritative for that slot. |
 | General `N/K/M` topology | Implemented for `3..10` anchors, configurable responder count, initiator slots, and per-slot responder masks. |
-| Configuration propagation | Implemented as a versioned UWB frame. A newer generation is persisted in NVS, rebroadcast during the startup phase, and rebuilds the local schedule after restart. |
-| Local solver | Implemented on the tag ESP32-S3. Anchor geometry and raw TDOA observations feed a damped 2D least-squares AlgMin service on core 0; UWB remains on core 1. One position is solved for each complete frame, in the same A0-at-origin/A1-on-`+Y` coordinate frame used by the dashboard. |
+| Configuration propagation | Implemented as versioned UWB frames. Topology and fixed geometry have independent generations; newer values are persisted in NVS and rebroadcast during startup. |
+| Local solver | Implemented on the tag ESP32-S3. Before fixation it reconstructs geometry from TWR; afterwards it loads the exact dashboard geometry from NVS and stops updating anchor coordinates. Raw TDOA observations feed a damped 2D least-squares AlgMin service on core 0; UWB remains on core 1. |
 | Paper radio setup | Use CH5, 6.8 Mb/s, PRF 64 MHz, preamble 128 when matching the paper. |
 | Firmware-side measurement filters | None. The radio path emits every structurally valid raw anchor range and tag range difference. |
 
@@ -684,10 +695,12 @@ For the current planar setup, the paper's coordinate convention is adapted to
 2D: the first selected anchor is fixed at `(0,0)`, the second is on the positive
 Y axis, and the third has positive X. Anchor coordinates remain in the explicit
 `self-localizing` phase until the operator chooses `Fix Anchor Geometry`. They
-are then kept fixed, as in the paper, and persisted locally for subsequent
-positioning. `Restart Anchor Self-Localization` discards them after an anchor is
-physically moved. There is no median window, stability threshold, or automatic
-freeze in this path.
+are then sent to all modules, persisted in each ESP32 NVS, rebroadcast as
+versioned one-anchor UWB geometry frames, and loaded by the tag's local solver.
+The solver stops modifying anchor coordinates while this fixed generation is
+active. `Restart Anchor Self-Localization` clears the persisted generation on
+all modules after an anchor is physically moved. There is no median window,
+stability threshold, or automatic freeze in this path.
 
 Each new least-squares tag solve is seeded from the previous valid tag position,
 as described for AlgMin in the paper. This selects the same physical solution

@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "flextdoa_solver_service.h"
 #include "app_identity.h"
 #include "app_runtime_config.h"
 #include "bno085_service.h"
@@ -547,6 +548,63 @@ static bool ota_parse_u16_list(const char *text, uint16_t *values,
     return parsed_count > 0U;
 }
 
+static bool ota_parse_flex_geometry(
+    const char *text, const app_runtime_config_t *config,
+    int32_t x_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS],
+    int32_t y_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS])
+{
+    if (text == NULL || config == NULL || x_mm == NULL || y_mm == NULL) {
+        return false;
+    }
+    bool seen[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+    const char *cursor = text;
+    size_t parsed_count = 0;
+    while (*cursor != '\0') {
+        errno = 0;
+        char *end = NULL;
+        const unsigned long id = strtoul(cursor, &end, 10);
+        if (errno != 0 || end == cursor || id > UINT8_MAX || *end != ':') {
+            return false;
+        }
+        cursor = end + 1;
+        errno = 0;
+        const long x = strtol(cursor, &end, 10);
+        if (errno != 0 || end == cursor || x < INT32_MIN || x > INT32_MAX ||
+            *end != ':') {
+            return false;
+        }
+        cursor = end + 1;
+        errno = 0;
+        const long y = strtol(cursor, &end, 10);
+        if (errno != 0 || end == cursor || y < INT32_MIN || y > INT32_MAX) {
+            return false;
+        }
+        size_t index = SIZE_MAX;
+        for (size_t i = 0; i < config->anchor_count; ++i) {
+            if (config->anchor_ids[i] == (uint8_t)id) {
+                index = i;
+                break;
+            }
+        }
+        if (index == SIZE_MAX || seen[index]) {
+            return false;
+        }
+        seen[index] = true;
+        x_mm[index] = (int32_t)x;
+        y_mm[index] = (int32_t)y;
+        parsed_count++;
+        cursor = end;
+        if (*cursor == '\0') {
+            break;
+        }
+        if (*cursor != ',') {
+            return false;
+        }
+        cursor++;
+    }
+    return parsed_count == config->anchor_count;
+}
+
 static bool ota_parse_calibration_method(const char *text, uint8_t *value)
 {
     uint8_t parsed = 0;
@@ -786,6 +844,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_flex_tdoa_slot_initiator_ids\":%s,"
         "\"runtime_flex_tdoa_slot_responder_masks\":%s,"
         "\"runtime_flex_tdoa_config_generation\":%lu,"
+        "\"runtime_flex_tdoa_geometry_fixed\":%s,"
+        "\"runtime_flex_tdoa_geometry_generation\":%lu,"
         "\"runtime_anchor_survey_coordinator_id\":%u,"
         "\"runtime_anchor_survey_rx_slice_ms\":%lu,"
         "\"runtime_anchor_survey_command_delay_ms\":%lu,"
@@ -1204,6 +1264,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         runtime_flex_slots_json,
         runtime_flex_masks_json,
         (unsigned long)runtime_config->flex_tdoa_config_generation,
+        runtime_config->flex_tdoa_geometry_fixed ? "true" : "false",
+        (unsigned long)runtime_config->flex_tdoa_geometry_generation,
         (unsigned)runtime_config->anchor_survey_coordinator_id,
         (unsigned long)runtime_config->anchor_survey_rx_slice_ms,
         (unsigned long)runtime_config->anchor_survey_command_delay_ms,
@@ -2940,6 +3002,46 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
                                        "Invalid flex_masks");
         }
 
+        const bool flex_geometry_clear =
+            ota_query_option_enabled(query, "flex_geometry_clear");
+        char flex_geometry_text[512] = {0};
+        query_err = httpd_query_key_value(
+            query, "flex_geometry", flex_geometry_text,
+            sizeof(flex_geometry_text));
+        if (query_err == ESP_OK) {
+            int32_t x_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+            int32_t y_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+            if (!ota_parse_flex_geometry(flex_geometry_text, &config,
+                                         x_mm, y_mm)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid flex_geometry");
+            }
+            memcpy(config.flex_tdoa_anchor_x_mm, x_mm,
+                   sizeof(config.flex_tdoa_anchor_x_mm));
+            memcpy(config.flex_tdoa_anchor_y_mm, y_mm,
+                   sizeof(config.flex_tdoa_anchor_y_mm));
+            config.flex_tdoa_geometry_fixed = true;
+            config.flex_tdoa_geometry_generation =
+                before_config.flex_tdoa_geometry_generation == UINT32_MAX
+                    ? 1U
+                    : before_config.flex_tdoa_geometry_generation + 1U;
+            changed = true;
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid flex_geometry");
+        } else if (flex_geometry_clear) {
+            config.flex_tdoa_geometry_fixed = false;
+            memset(config.flex_tdoa_anchor_x_mm, 0,
+                   sizeof(config.flex_tdoa_anchor_x_mm));
+            memset(config.flex_tdoa_anchor_y_mm, 0,
+                   sizeof(config.flex_tdoa_anchor_y_mm));
+            config.flex_tdoa_geometry_generation =
+                before_config.flex_tdoa_geometry_generation == UINT32_MAX
+                    ? 1U
+                    : before_config.flex_tdoa_geometry_generation + 1U;
+            changed = true;
+        }
+
         char cal_three_text[64] = {0};
         query_err = httpd_query_key_value(query, "cal_three",
                                           cal_three_text,
@@ -3162,6 +3264,11 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
 
         if (changed) {
             err = app_runtime_config_save(&config);
+            if (err == ESP_OK &&
+                config.flex_tdoa_geometry_generation !=
+                    before_config.flex_tdoa_geometry_generation) {
+                (void)flextdoa_solver_service_reload_geometry();
+            }
         }
     }
 
@@ -3245,6 +3352,8 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         "\"runtime_flex_tdoa_slot_initiator_ids\":%s,"
         "\"runtime_flex_tdoa_slot_responder_masks\":%s,"
         "\"runtime_flex_tdoa_config_generation\":%lu,"
+        "\"runtime_flex_tdoa_geometry_fixed\":%s,"
+        "\"runtime_flex_tdoa_geometry_generation\":%lu,"
         "\"runtime_anchor_survey_coordinator_id\":%u,"
         "\"runtime_ranging_slot_ms\":%lu,"
         "\"runtime_ranging_round_gap_ms\":%lu,"
@@ -3275,6 +3384,8 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         active_flex_slots_json,
         active_flex_masks_json,
         (unsigned long)active_config->flex_tdoa_config_generation,
+        active_config->flex_tdoa_geometry_fixed ? "true" : "false",
+        (unsigned long)active_config->flex_tdoa_geometry_generation,
         (unsigned)active_config->anchor_survey_coordinator_id,
         (unsigned long)active_config->ranging_slot_ms,
         (unsigned long)active_config->ranging_round_gap_ms,

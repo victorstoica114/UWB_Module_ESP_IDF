@@ -27,6 +27,10 @@ static const char *TAG = "app_runtime_config";
 #define KEY_FLEX_SLOTS "flex_slots"
 #define KEY_FLEX_MASKS "flex_masks"
 #define KEY_FLEX_GEN "flex_gen"
+#define KEY_FLEX_GFIX "flex_gfix"
+#define KEY_FLEX_GGEN "flex_ggen"
+#define KEY_FLEX_GX "flex_gx"
+#define KEY_FLEX_GY "flex_gy"
 #define KEY_COORD "coord"
 #define KEY_AS_RX "as_rx"
 #define KEY_AS_CMD "as_cmd"
@@ -156,6 +160,29 @@ static bool flex_tdoa_config_valid(const app_runtime_config_t *config)
             (mask & (uint16_t)(1U << initiator_index)) != 0U ||
             __builtin_popcount((unsigned)mask) <
                 config->flex_tdoa_responder_count) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool flex_tdoa_geometry_valid(const app_runtime_config_t *config)
+{
+    if (!config->flex_tdoa_geometry_fixed) {
+        return true;
+    }
+    if (config->flex_tdoa_geometry_generation == 0U ||
+        config->anchor_count < 3U ||
+        config->flex_tdoa_anchor_x_mm[0] != 0 ||
+        config->flex_tdoa_anchor_y_mm[0] != 0 ||
+        config->flex_tdoa_anchor_x_mm[1] != 0) {
+        return false;
+    }
+    for (size_t i = 0; i < config->anchor_count; ++i) {
+        if (config->flex_tdoa_anchor_x_mm[i] < -100000000 ||
+            config->flex_tdoa_anchor_x_mm[i] > 100000000 ||
+            config->flex_tdoa_anchor_y_mm[i] < -100000000 ||
+            config->flex_tdoa_anchor_y_mm[i] > 100000000) {
             return false;
         }
     }
@@ -356,6 +383,15 @@ void app_runtime_config_reset_flex_tdoa(app_runtime_config_t *config)
     }
     config->flex_tdoa_config_generation =
         previous_generation == UINT32_MAX ? 1U : previous_generation + 1U;
+    config->flex_tdoa_geometry_fixed = false;
+    memset(config->flex_tdoa_anchor_x_mm, 0,
+           sizeof(config->flex_tdoa_anchor_x_mm));
+    memset(config->flex_tdoa_anchor_y_mm, 0,
+           sizeof(config->flex_tdoa_anchor_y_mm));
+    config->flex_tdoa_geometry_generation =
+        config->flex_tdoa_geometry_generation == UINT32_MAX
+            ? 1U
+            : config->flex_tdoa_geometry_generation + 1U;
 }
 
 bool app_runtime_config_validate(const app_runtime_config_t *config)
@@ -364,6 +400,7 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         !app_runtime_config_runtime_mode_valid(config->runtime_mode) ||
         !id_valid(config->tag_id) || !anchor_ids_valid(config) ||
         !flex_tdoa_config_valid(config) ||
+        !flex_tdoa_geometry_valid(config) ||
         !id_valid(config->anchor_survey_coordinator_id) ||
         !ms_valid(config->anchor_survey_rx_slice_ms) ||
         !ms_valid(config->anchor_survey_command_delay_ms) ||
@@ -496,6 +533,16 @@ static void read_config_from_nvs(app_runtime_config_t *config)
                              sizeof(config->flex_tdoa_slot_responder_masks));
     found |= read_u32(handle, KEY_FLEX_GEN,
                       &config->flex_tdoa_config_generation);
+    found |= read_bool(handle, KEY_FLEX_GFIX,
+                       &config->flex_tdoa_geometry_fixed);
+    found |= read_u32(handle, KEY_FLEX_GGEN,
+                      &config->flex_tdoa_geometry_generation);
+    found |= read_blob_exact(handle, KEY_FLEX_GX,
+                             config->flex_tdoa_anchor_x_mm,
+                             sizeof(config->flex_tdoa_anchor_x_mm));
+    found |= read_blob_exact(handle, KEY_FLEX_GY,
+                             config->flex_tdoa_anchor_y_mm,
+                             sizeof(config->flex_tdoa_anchor_y_mm));
     found |= read_u8(handle, KEY_COORD, &config->anchor_survey_coordinator_id);
     found |= read_u32(handle, KEY_AS_RX, &config->anchor_survey_rx_slice_ms);
     found |= read_u32(handle, KEY_AS_CMD,
@@ -667,6 +714,16 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
                                sizeof(config->flex_tdoa_slot_responder_masks)));
     WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_GEN,
                             config->flex_tdoa_config_generation));
+    WRITE_OR_GOTO(write_bool(handle, KEY_FLEX_GFIX,
+                             config->flex_tdoa_geometry_fixed));
+    WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_GGEN,
+                            config->flex_tdoa_geometry_generation));
+    WRITE_OR_GOTO(nvs_set_blob(handle, KEY_FLEX_GX,
+                               config->flex_tdoa_anchor_x_mm,
+                               sizeof(config->flex_tdoa_anchor_x_mm)));
+    WRITE_OR_GOTO(nvs_set_blob(handle, KEY_FLEX_GY,
+                               config->flex_tdoa_anchor_y_mm,
+                               sizeof(config->flex_tdoa_anchor_y_mm)));
     WRITE_OR_GOTO(write_u8(handle, KEY_COORD,
                            config->anchor_survey_coordinator_id));
     WRITE_OR_GOTO(write_u32(handle, KEY_AS_RX,

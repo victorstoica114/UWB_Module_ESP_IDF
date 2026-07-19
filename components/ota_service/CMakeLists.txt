@@ -5,6 +5,7 @@ idf_component_register(SRCS "ota_service.c"
                                      charger_service config
                                      esp_app_format esp_http_server
                                      esp_partition esp_system freertos gps_service
+                                     flextdoa_solver_service
                                      i2c_bus_service log
                                      max77958_service
                                      resource_monitor_service
