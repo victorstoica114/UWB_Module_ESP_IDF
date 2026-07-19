@@ -2199,6 +2199,16 @@ tr.status-stale td { color: #4f3b1d; }
   background: #e4edff;
   border-right: 2px solid #2e67d1;
 }
+.flex-host-measure {
+  position: relative;
+  height: 25px;
+  margin-top: 3px;
+}
+.flex-host-measure .flex-dimension-line { top: 7px; }
+.flex-host-measure .flex-dimension-label {
+  font-size: 10px;
+  color: #2455ae;
+}
 .flex-parameter-map { margin-top: 13px; }
 .flex-parameter-table { width: 100%; font-size: 11px; }
 .flex-parameter-table th,
@@ -3196,23 +3206,23 @@ tr.status-stale td { color: #4f3b1d; }
               <h3>Stable Profile</h3>
               <p class="muted">Long 3.0 s FlexTDOA observation freshness; conservative compatibility timing.</p>
               <div class="form-grid compact">
-                <label for="profileStatic3SlotMs">Slot ms</label>
+                <label for="profileStatic3SlotMs">DS-TWR/survey slot ms</label>
                 <input id="profileStatic3SlotMs" value="100" type="number" min="1" step="1">
-                <label for="profileStatic3RoundGapMs">Round gap ms</label>
+                <label for="profileStatic3RoundGapMs">DS-TWR/survey gap ms</label>
                 <input id="profileStatic3RoundGapMs" value="10" type="number" min="1" step="1">
                 <label for="profileStatic3RxSliceMs">RX slice ms</label>
                 <input id="profileStatic3RxSliceMs" value="100" type="number" min="1" step="1">
-                <label for="profileStatic3CommandDelayMs">Command delay ms</label>
+                <label for="profileStatic3CommandDelayMs">Survey command delay ms</label>
                 <input id="profileStatic3CommandDelayMs" value="5" type="number" min="1" step="1">
                 <label for="profileStatic3TimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileStatic3TimeoutMs" value="90" type="number" min="1" step="1">
-                <label for="profileStatic3RespDelayMs">RESP delay ms</label>
+                <label for="profileStatic3RespDelayMs">DS-TWR RESP delay ms</label>
                 <input id="profileStatic3RespDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileStatic3FinalDelayMs">FINAL delay ms</label>
+                <label for="profileStatic3FinalDelayMs">DS-TWR FINAL delay ms</label>
                 <input id="profileStatic3FinalDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileStatic3ReportDelayMs">REPORT delay ms</label>
+                <label for="profileStatic3ReportDelayMs">DS-TWR REPORT delay ms</label>
                 <input id="profileStatic3ReportDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileStatic3AutoRxDelayUus">Auto RX delay UUS</label>
+                <label for="profileStatic3AutoRxDelayUus">DS-TWR Auto RX delay UUS</label>
                 <input id="profileStatic3AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
               <div class="profile-summary" id="profileStatic3Summary"></div>
@@ -3225,23 +3235,23 @@ tr.status-stale td { color: #4f3b1d; }
               <h3>Balanced Profile</h3>
               <p class="muted">Balanced 1.5 s FlexTDOA observation freshness; conservative compatibility timing.</p>
               <div class="form-grid compact">
-                <label for="profileDynamic15SlotMs">Slot ms</label>
+                <label for="profileDynamic15SlotMs">DS-TWR/survey slot ms</label>
                 <input id="profileDynamic15SlotMs" value="100" type="number" min="1" step="1">
-                <label for="profileDynamic15RoundGapMs">Round gap ms</label>
+                <label for="profileDynamic15RoundGapMs">DS-TWR/survey gap ms</label>
                 <input id="profileDynamic15RoundGapMs" value="10" type="number" min="1" step="1">
                 <label for="profileDynamic15RxSliceMs">RX slice ms</label>
                 <input id="profileDynamic15RxSliceMs" value="100" type="number" min="1" step="1">
-                <label for="profileDynamic15CommandDelayMs">Command delay ms</label>
+                <label for="profileDynamic15CommandDelayMs">Survey command delay ms</label>
                 <input id="profileDynamic15CommandDelayMs" value="5" type="number" min="1" step="1">
                 <label for="profileDynamic15TimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileDynamic15TimeoutMs" value="90" type="number" min="1" step="1">
-                <label for="profileDynamic15RespDelayMs">RESP delay ms</label>
+                <label for="profileDynamic15RespDelayMs">DS-TWR RESP delay ms</label>
                 <input id="profileDynamic15RespDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileDynamic15FinalDelayMs">FINAL delay ms</label>
+                <label for="profileDynamic15FinalDelayMs">DS-TWR FINAL delay ms</label>
                 <input id="profileDynamic15FinalDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileDynamic15ReportDelayMs">REPORT delay ms</label>
+                <label for="profileDynamic15ReportDelayMs">DS-TWR REPORT delay ms</label>
                 <input id="profileDynamic15ReportDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileDynamic15AutoRxDelayUus">Auto RX delay UUS</label>
+                <label for="profileDynamic15AutoRxDelayUus">DS-TWR Auto RX delay UUS</label>
                 <input id="profileDynamic15AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
               <div class="profile-summary" id="profileDynamic15Summary"></div>
@@ -3254,23 +3264,23 @@ tr.status-stale td { color: #4f3b1d; }
               <h3>Reactive Profile</h3>
               <p class="muted">Reactive 1.2 s FlexTDOA observation freshness; conservative compatibility timing.</p>
               <div class="form-grid compact">
-                <label for="profileDynamic12SlotMs">Slot ms</label>
+                <label for="profileDynamic12SlotMs">DS-TWR/survey slot ms</label>
                 <input id="profileDynamic12SlotMs" value="100" type="number" min="1" step="1">
-                <label for="profileDynamic12RoundGapMs">Round gap ms</label>
+                <label for="profileDynamic12RoundGapMs">DS-TWR/survey gap ms</label>
                 <input id="profileDynamic12RoundGapMs" value="10" type="number" min="1" step="1">
                 <label for="profileDynamic12RxSliceMs">RX slice ms</label>
                 <input id="profileDynamic12RxSliceMs" value="100" type="number" min="1" step="1">
-                <label for="profileDynamic12CommandDelayMs">Command delay ms</label>
+                <label for="profileDynamic12CommandDelayMs">Survey command delay ms</label>
                 <input id="profileDynamic12CommandDelayMs" value="5" type="number" min="1" step="1">
                 <label for="profileDynamic12TimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileDynamic12TimeoutMs" value="90" type="number" min="1" step="1">
-                <label for="profileDynamic12RespDelayMs">RESP delay ms</label>
+                <label for="profileDynamic12RespDelayMs">DS-TWR RESP delay ms</label>
                 <input id="profileDynamic12RespDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileDynamic12FinalDelayMs">FINAL delay ms</label>
+                <label for="profileDynamic12FinalDelayMs">DS-TWR FINAL delay ms</label>
                 <input id="profileDynamic12FinalDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileDynamic12ReportDelayMs">REPORT delay ms</label>
+                <label for="profileDynamic12ReportDelayMs">DS-TWR REPORT delay ms</label>
                 <input id="profileDynamic12ReportDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileDynamic12AutoRxDelayUus">Auto RX delay UUS</label>
+                <label for="profileDynamic12AutoRxDelayUus">DS-TWR Auto RX delay UUS</label>
                 <input id="profileDynamic12AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
               <div class="profile-summary" id="profileDynamic12Summary"></div>
@@ -3283,23 +3293,23 @@ tr.status-stale td { color: #4f3b1d; }
               <h3>Fast Profile</h3>
               <p class="muted">Short 0.5 s FlexTDOA observation freshness and 5 ms host RX slices; compact compatibility timing.</p>
               <div class="form-grid compact">
-                <label for="profileFastRawSlotMs">Slot ms</label>
+                <label for="profileFastRawSlotMs">DS-TWR/survey slot ms</label>
                 <input id="profileFastRawSlotMs" value="7" type="number" min="1" step="1">
-                <label for="profileFastRawRoundGapMs">Round gap ms</label>
+                <label for="profileFastRawRoundGapMs">DS-TWR/survey gap ms</label>
                 <input id="profileFastRawRoundGapMs" value="1" type="number" min="1" step="1">
                 <label for="profileFastRawRxSliceMs">RX slice ms</label>
                 <input id="profileFastRawRxSliceMs" value="5" type="number" min="1" step="1">
-                <label for="profileFastRawCommandDelayMs">Command delay ms</label>
+                <label for="profileFastRawCommandDelayMs">Survey command delay ms</label>
                 <input id="profileFastRawCommandDelayMs" value="2" type="number" min="1" step="1">
                 <label for="profileFastRawTimeoutMs">DS-TWR timeout ms</label>
                 <input id="profileFastRawTimeoutMs" value="12" type="number" min="1" step="1">
-                <label for="profileFastRawRespDelayMs">RESP delay ms</label>
+                <label for="profileFastRawRespDelayMs">DS-TWR RESP delay ms</label>
                 <input id="profileFastRawRespDelayMs" value="8" type="number" min="1" step="1">
-                <label for="profileFastRawFinalDelayMs">FINAL delay ms</label>
+                <label for="profileFastRawFinalDelayMs">DS-TWR FINAL delay ms</label>
                 <input id="profileFastRawFinalDelayMs" value="8" type="number" min="1" step="1">
-                <label for="profileFastRawReportDelayMs">REPORT delay ms</label>
+                <label for="profileFastRawReportDelayMs">DS-TWR REPORT delay ms</label>
                 <input id="profileFastRawReportDelayMs" value="3" type="number" min="1" step="1">
-                <label for="profileFastRawAutoRxDelayUus">Auto RX delay UUS</label>
+                <label for="profileFastRawAutoRxDelayUus">DS-TWR Auto RX delay UUS</label>
                 <input id="profileFastRawAutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
               <div class="profile-summary" id="profileFastRawSummary"></div>
@@ -7896,7 +7906,7 @@ function renderFlexTdoaTimingDiagram() {
             <div class="flex-dimension-line"></div>
             <span class="flex-dimension-label">Frame = ${M} × ${fmtFixed(slotUs / 1000, 3)} ms = ${fmtFixed(frameUs / 1000, 3)} ms</span>
           </div>
-          <div class="flex-round-gap-zero"><span>Round gap = 0 ms · next frame starts immediately</span></div>
+          <div class="flex-round-gap-zero"><span>FlexTDOA frame gap = 0 ms · next frame starts immediately</span></div>
         </div>
         <div class="flex-timing-label">
           <strong>Selected slot ${selectedSlotId} · A${esc(selectedInitiator)} initiates · ${K} response subslots</strong>
@@ -7907,17 +7917,23 @@ function renderFlexTdoaTimingDiagram() {
         <div class="flex-dimensions">
           <div class="flex-dimension" style="left:0%;width:100%;top:0">
             <div class="flex-dimension-line"></div>
-            <span class="flex-dimension-label">Slot = ${fmtFixed(slotUs / 1000, 3)} ms</span>
+            <span class="flex-dimension-label">FlexTDOA slot = ${fmtFixed(slotUs / 1000, 3)} ms</span>
           </div>
           <div class="flex-dimension gap" style="left:${100 * (slotUs - timing.guardUs) / slotUs}%;width:${100 * timing.guardUs / slotUs}%;top:31px">
             <div class="flex-dimension-line"></div>
-            <span class="flex-dimension-label">GAP = ${timing.guardUs} us</span>
+            <span class="flex-dimension-label">In-slot GAP = ${timing.guardUs} us</span>
           </div>
         </div>
         <div class="flex-host-window">
           <strong>RX host window</strong>
-          <div class="flex-host-track" title="Maximum receive-call duration; not radio airtime">
-            <div class="flex-host-fill" style="width:${rxSliceWidth}%"></div>
+          <div>
+            <div class="flex-host-track" title="Maximum receive-call duration; not radio airtime">
+              <div class="flex-host-fill" style="width:${rxSliceWidth}%"></div>
+            </div>
+            <div class="flex-host-measure" style="width:${rxSliceWidth || 100}%">
+              <div class="flex-dimension-line"></div>
+              <span class="flex-dimension-label">RX slice = ${esc(rxSlice.text)}</span>
+            </div>
           </div>
           <span>${esc(rxSlice.text)}${rxSliceSlots > 0 ? ` · ${fmtFixed(rxSliceSlots, 2)} slot${rxSliceSlots === 1 ? "" : "s"} max` : ""}</span>
         </div>
