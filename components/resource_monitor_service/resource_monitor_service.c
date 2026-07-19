@@ -1,6 +1,5 @@
 #include "resource_monitor_service.h"
 
-#include <stdio.h>
 #include <string.h>
 
 #include "driver/temperature_sensor.h"
@@ -10,8 +9,6 @@
 #include "esp_partition.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/freertos_debug.h"
-#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 #include "soc/soc_caps.h"
@@ -22,7 +19,6 @@ enum {
     RESOURCE_MONITOR_TASK_STACK_WORDS = 3072,
     RESOURCE_MONITOR_TASK_PRIORITY = 1,
     RESOURCE_MONITOR_SAMPLE_MS = 1000,
-    RESOURCE_MONITOR_MAX_TRACKED_TASKS = 128,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -43,20 +39,6 @@ static size_t s_flash_reserved_bytes;
 static size_t s_flash_free_bytes;
 static uint32_t s_flash_partition_count;
 static esp_err_t s_flash_error = ESP_ERR_INVALID_STATE;
-
-typedef struct {
-    TaskHandle_t handle;
-    char name[RESOURCE_MONITOR_TASK_NAME_LEN];
-    int32_t core_id;
-    uint64_t runtime_counter;
-} task_runtime_record_t;
-
-static task_runtime_record_t *s_current_tasks;
-static task_runtime_record_t *s_previous_tasks;
-static UBaseType_t s_task_sample_capacity;
-static UBaseType_t s_previous_task_count;
-static int64_t s_previous_task_time_us;
-static bool s_previous_tasks_valid;
 
 static uint32_t age_ms_from_time_us(int64_t timestamp_us)
 {
@@ -218,208 +200,19 @@ static void update_cpu_load(resource_monitor_snapshot_t *snapshot)
 #endif
 }
 
-static void copy_task_name(char *dest, size_t dest_size, const char *src)
+static void clear_task_load(resource_monitor_snapshot_t *snapshot)
 {
-    if (dest == NULL || dest_size == 0) {
-        return;
-    }
-    if (src == NULL) {
-        src = "?";
-    }
-    size_t i = 0;
-    for (; i + 1 < dest_size && src[i] != '\0'; ++i) {
-        dest[i] = src[i];
-    }
-    dest[i] = '\0';
-}
-
-static esp_err_t init_task_sampling_buffers(void)
-{
-    if (s_current_tasks != NULL && s_previous_tasks != NULL) {
-        return ESP_OK;
-    }
-
-    const size_t bytes =
-        RESOURCE_MONITOR_MAX_TRACKED_TASKS * sizeof(task_runtime_record_t);
-    s_current_tasks = heap_caps_calloc(
-        RESOURCE_MONITOR_MAX_TRACKED_TASKS, sizeof(task_runtime_record_t),
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    s_previous_tasks = heap_caps_calloc(
-        RESOURCE_MONITOR_MAX_TRACKED_TASKS, sizeof(task_runtime_record_t),
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_current_tasks == NULL || s_previous_tasks == NULL) {
-        if (s_current_tasks != NULL) {
-            heap_caps_free(s_current_tasks);
-            s_current_tasks = NULL;
-        }
-        if (s_previous_tasks != NULL) {
-            heap_caps_free(s_previous_tasks);
-            s_previous_tasks = NULL;
-        }
-        s_task_sample_capacity = 0;
-        ESP_LOGW(TAG, "Task load buffers unavailable in PSRAM (%u bytes)",
-                 (unsigned)(bytes * 2U));
-        return ESP_ERR_NO_MEM;
-    }
-
-    s_task_sample_capacity = RESOURCE_MONITOR_MAX_TRACKED_TASKS;
-    ESP_LOGI(TAG, "Task load buffers allocated in PSRAM: %u bytes",
-             (unsigned)(bytes * 2U));
-    return ESP_OK;
-}
-
-static const task_runtime_record_t *find_previous_task(TaskHandle_t handle)
-{
-    for (UBaseType_t i = 0; i < s_previous_task_count; ++i) {
-        if (s_previous_tasks[i].handle == handle) {
-            return &s_previous_tasks[i];
-        }
-    }
-    return NULL;
-}
-
-static void store_previous_tasks(const task_runtime_record_t *tasks, UBaseType_t count,
-                                 int64_t timestamp_us)
-{
-    const UBaseType_t limit =
-        count > RESOURCE_MONITOR_MAX_TRACKED_TASKS
-            ? RESOURCE_MONITOR_MAX_TRACKED_TASKS
-            : count;
-    for (UBaseType_t i = 0; i < limit; ++i) {
-        s_previous_tasks[i] = tasks[i];
-    }
-    s_previous_task_count = limit;
-    s_previous_task_time_us = timestamp_us;
-    s_previous_tasks_valid = true;
-}
-
-static bool is_idle_task_name(const char *name)
-{
-    return name != NULL &&
-           (strncmp(name, "IDLE", 4) == 0 || strncmp(name, "idle", 4) == 0);
-}
-
-static void insert_top_task(resource_monitor_snapshot_t *snapshot,
-                            const task_runtime_record_t *task,
-                            uint64_t delta_us,
-                            float load_percent)
-{
-    if (delta_us == 0 || is_idle_task_name(task->name)) {
-        return;
-    }
-
-    size_t insert_at = 0;
-    while (insert_at < snapshot->top_task_count &&
-           delta_us <= snapshot->top_tasks[insert_at].runtime_delta_us) {
-        ++insert_at;
-    }
-    if (insert_at >= RESOURCE_MONITOR_TOP_TASK_COUNT) {
-        return;
-    }
-
-    if (snapshot->top_task_count < RESOURCE_MONITOR_TOP_TASK_COUNT) {
-        ++snapshot->top_task_count;
-    }
-    for (size_t i = snapshot->top_task_count - 1; i > insert_at; --i) {
-        snapshot->top_tasks[i] = snapshot->top_tasks[i - 1];
-    }
-
-    resource_monitor_task_load_t *entry = &snapshot->top_tasks[insert_at];
-    copy_task_name(entry->name, sizeof(entry->name), task->name);
-    entry->runtime_delta_us = delta_us;
-    entry->load_percent =
-        load_percent < 0.0f ? 0.0f
-                            : (load_percent > 100.0f ? 100.0f : load_percent);
-    entry->core_id = task->core_id;
-}
-
-static UBaseType_t collect_task_samples(task_runtime_record_t *tasks,
-                                        UBaseType_t capacity)
-{
-    UBaseType_t count = 0;
-
-#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS && CONFIG_FREERTOS_USE_TRACE_FACILITY
-    TaskIterator_t iterator = {0};
-
-    vTaskSuspendAll();
-    while (xTaskGetNext(&iterator) != -1) {
-        const TaskHandle_t handle = iterator.pxTaskHandle;
-        if (handle == NULL) {
-            continue;
-        }
-        if (count >= capacity) {
-            break;
-        }
-
-        task_runtime_record_t *sample = &tasks[count++];
-        TaskStatus_t status = {0};
-        vTaskGetInfo(handle, &status, pdFALSE, eReady);
-        sample->handle = handle;
-        sample->runtime_counter = (uint64_t)status.ulRunTimeCounter;
-#if configTASKLIST_INCLUDE_COREID == 1
-        sample->core_id = status.xCoreID;
-#else
-        sample->core_id = -1;
-#endif
-        copy_task_name(sample->name, sizeof(sample->name), status.pcTaskName);
-    }
-    (void)xTaskResumeAll();
-#else
-    (void)tasks;
-    (void)capacity;
-#endif
-
-    return count;
-}
-
-static void update_task_load(resource_monitor_snapshot_t *snapshot)
-{
+    /*
+     * Enumerating every FreeRTOS task requires suspending the scheduler while
+     * walking internal task lists. Under a 500 Hz BNO085 workload that blocked
+     * an idle task long enough to trigger the task watchdog. Per-core load is
+     * collected from the lock-free idle counters above; keep the unsafe task
+     * breakdown disabled instead of compromising real-time sensor traffic.
+     */
     snapshot->task_load_valid = false;
     snapshot->task_list_overflow = false;
     snapshot->top_task_count = 0;
     memset(snapshot->top_tasks, 0, sizeof(snapshot->top_tasks));
-
-#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS && CONFIG_FREERTOS_USE_TRACE_FACILITY
-    if (s_current_tasks == NULL || s_previous_tasks == NULL ||
-        s_task_sample_capacity == 0) {
-        snapshot->task_list_overflow = true;
-        return;
-    }
-
-    const UBaseType_t count = collect_task_samples(
-        s_current_tasks, s_task_sample_capacity);
-    const int64_t now_us = esp_timer_get_time();
-    if (count == 0) {
-        return;
-    }
-
-    if (s_previous_tasks_valid && now_us > s_previous_task_time_us) {
-        const uint64_t elapsed_us =
-            (uint64_t)(now_us - s_previous_task_time_us);
-        for (UBaseType_t i = 0; i < count; ++i) {
-            const task_runtime_record_t *previous =
-                find_previous_task(s_current_tasks[i].handle);
-            if (previous == NULL) {
-                continue;
-            }
-            const uint64_t current =
-                s_current_tasks[i].runtime_counter;
-            if (current < previous->runtime_counter) {
-                continue;
-            }
-            const uint64_t delta_us = current - previous->runtime_counter;
-            const float load_percent =
-                elapsed_us > 0
-                    ? (100.0f * (float)delta_us) / (float)elapsed_us
-                    : 0.0f;
-            insert_top_task(snapshot, &s_current_tasks[i], delta_us,
-                            load_percent);
-        }
-        snapshot->task_load_valid = true;
-    }
-
-    store_previous_tasks(s_current_tasks, count, now_us);
-#endif
 }
 
 static esp_err_t init_temperature_sensor(void)
@@ -467,7 +260,7 @@ static void resource_monitor_task(void *arg)
         update_heap_stats(&local);
         update_flash_stats(&local);
         update_cpu_load(&local);
-        update_task_load(&local);
+        clear_task_load(&local);
         update_temperature(&local);
         local.last_update_age_ms = 0;
         publish_snapshot(&local);
@@ -482,14 +275,6 @@ esp_err_t resource_monitor_service_start(void)
     }
 
     (void)init_temperature_sensor();
-    (void)init_task_sampling_buffers();
-
-    /*
-     * Keep this stack internal. The task iterator in xTaskGetNext() walks
-     * FreeRTOS list internals and validates pointers; with the iterator and
-     * call frames on PSRAM-backed stack, M1 reproduced a CPU0 task watchdog
-     * lockup inside collect_task_samples().
-     */
     const BaseType_t created = xTaskCreatePinnedToCore(
         resource_monitor_task, "resource_mon",
         RESOURCE_MONITOR_TASK_STACK_WORDS, NULL,
