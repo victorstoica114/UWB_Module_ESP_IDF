@@ -1424,6 +1424,33 @@ was `0.83-0.93 Hz` for BQ and `0.63-0.79 Hz` for MAX; recent status remained
 available while the accelerometer path retained zero read, parse, and telemetry
 losses.
 
+Post-merge validation repeated the same workload with the resource monitor and
+the rest of `main` active. The final `efd5fc6` run lasted `180.6 s`:
+
+| Module | BNO085 reports / rate | BNO errors | BQ refresh rate / errors | MAX refresh rate / errors | Direct-HS fallbacks | Telemetry drops / reboot |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| M1 | `91,378` / `506.0 Hz` | `0 / 0` | `0.94 Hz / 0` | `0.81 Hz / 0` | `0` | `0 / no` |
+| M2 | `91,502` / `506.7 Hz` | `0 / 0` | `0.92 Hz / 0` | `0.80 Hz / 0` | `0` | `0 / no` |
+| M3 | `92,999` / `514.9 Hz` | `0 / 0` | `0.91 Hz / 0` | `0.78 Hz / 0` | `1` | `0 / no` |
+| M4 | `91,355` / `505.8 Hz` | `0 / 0` | `0.93 Hz / 0` | `0.81 Hz / 0` | `0` | `0 / no` |
+| M5 | `91,742` / `508.0 Hz` | `0 / 0` | `0.93 Hz / 0` | `0.80 Hz / 0` | `1` | `0 / no` |
+
+With BNO still at 500 Hz, every BQ25792 accepted an IINDPM change from
+`480 mA` to `490 mA`, confirmed it by readback, and restored `480 mA`.
+Confirmation took `0.22-0.33 s`; the slowest restore was `0.86 s`. Every
+MAX77958 also completed a sink-PDO AP read with `ESP_OK`, including eight
+direct-HS writes per module and no new HS or operation errors.
+
+The first merged run exposed a separate resource-monitor defect rather than an
+I2C failure. Generic per-task CPU sampling suspended the FreeRTOS scheduler to
+walk internal task lists once per second; under the 500 Hz BNO workload it
+eventually starved an idle task and triggered the task watchdog. The iterator
+also returned duplicate `bno085` entries, so its breakdown was not trustworthy.
+That global task enumeration is now disabled. RAM, PSRAM, flash, temperature,
+and per-core CPU meters remain active because they use bounded queries and the
+FreeRTOS idle runtime counters. `/status` reports `resource_task_load_valid=false`
+instead of risking real-time sensor traffic for a diagnostic task list.
+
 `/status` exposes `i2c_realtime_period_us`,
 `i2c_realtime_time_to_next_us`, `i2c_background_window_us`, and the
 realtime/background lock counters.
