@@ -1947,7 +1947,6 @@ tr.status-stale td { color: #4f3b1d; }
   margin-bottom: 12px;
 }
 .flex-timing-head h2 { margin-bottom: 2px; }
-.flex-timing-controls { display: flex; flex-direction: column; gap: 7px; }
 .flex-timing-select {
   display: grid;
   grid-template-columns: auto minmax(170px, 240px);
@@ -2124,107 +2123,23 @@ tr.status-stale td { color: #4f3b1d; }
   background: #e4edff;
   border-right: 2px solid #2e67d1;
 }
-.compat-timing {
-  margin-top: 15px;
-  padding-top: 2px;
-  border-top: 1px solid var(--line);
-}
-.compat-track {
-  position: relative;
-  display: grid;
-  height: 62px;
-  border: 1px solid #8d9caf;
-  background: #fff;
-  overflow: visible;
-}
-.compat-segment {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  border-right: 1px solid rgba(41, 54, 73, 0.34);
-  overflow: hidden;
-  text-align: center;
-}
-.compat-segment b { font-size: 12px; white-space: nowrap; }
-.compat-segment span { margin-top: 3px; font-size: 10px; white-space: nowrap; }
-.compat-segment.resp-delay { color: #fff; background: #315fba; }
-.compat-segment.final-delay { color: #402f08; background: #edc65e; }
-.compat-segment.report-delay { color: #fff; background: #16894b; }
-.compat-segment.report2-delay { color: #fff; background: #147b72; }
-.compat-segment.idle { color: var(--muted); background: #f4f6f9; }
-.compat-slot-boundary {
-  position: absolute;
-  top: -7px;
-  bottom: -7px;
-  width: 2px;
-  background: #c73535;
-  z-index: 2;
-}
-.compat-slot-boundary span {
-  position: absolute;
-  left: 5px;
-  top: 3px;
-  padding: 1px 4px;
-  color: #a32121;
-  background: rgba(255,255,255,0.92);
+.flex-parameter-map { margin-top: 13px; }
+.flex-parameter-table { width: 100%; font-size: 11px; }
+.flex-parameter-table th,
+.flex-parameter-table td { padding: 6px 8px; vertical-align: top; }
+.flex-parameter-table td:nth-child(1) { width: 120px; font-weight: 700; }
+.flex-parameter-table td:nth-child(2) { width: 230px; }
+.flex-scope {
+  display: inline-block;
+  padding: 1px 5px;
+  border: 1px solid #b8c4d3;
+  color: #42536a;
+  background: #f7f9fc;
   font-size: 10px;
-  white-space: nowrap;
+  font-weight: 700;
 }
-.compat-axis {
-  position: relative;
-  height: 31px;
-  color: var(--muted);
-  font-size: 10px;
-}
-.compat-schedule-track {
-  display: grid;
-  height: 49px;
-  border: 1px solid #8d9caf;
-  background: #fff;
-}
-.compat-schedule-slot,
-.compat-schedule-gap {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-width: 0;
-  border-right: 1px solid #8d9caf;
-  overflow: hidden;
-}
-.compat-schedule-slot { background: #edf4ff; }
-.compat-schedule-gap { background: #eef1f5; border-right: 0; }
-.compat-schedule-slot b,
-.compat-schedule-gap b { font-size: 11px; white-space: nowrap; }
-.compat-schedule-slot span,
-.compat-schedule-gap span { margin-top: 2px; color: var(--muted); font-size: 9px; white-space: nowrap; }
-.compat-aux-row {
-  display: grid;
-  grid-template-columns: 150px minmax(360px, 1fr) 310px;
-  align-items: center;
-  gap: 10px;
-  margin: 8px 0;
-  font-size: 11px;
-}
-.compat-aux-row strong { font-size: 12px; }
-.compat-aux-row > span { color: var(--muted); text-align: right; }
-.compat-aux-track {
-  display: grid;
-  height: 25px;
-  border: 1px dashed #6f7e91;
-  background: #fff;
-  overflow: hidden;
-}
-.compat-aux-segment { min-width: 0; border-right: 1px solid #7f8da0; }
-.compat-aux-segment.auto-rx { background: #e0ebff; }
-.compat-aux-segment.timeout { background: #f7e5e5; }
-.compat-aux-segment.command { background: #f8e7ad; }
-.compat-aux-segment.exchange { background: #e2f2e9; }
-.compat-aux-segment.idle { border-right: 0; background: #f6f7f9; }
-.compat-warning { color: var(--red) !important; font-weight: 700; }
-.compat-note { margin-top: 7px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.flex-scope.host { border-color: #8aa9e8; color: #2455ae; background: #f1f6ff; }
+.flex-scope.fixed { border-color: #78bb98; color: #116f3b; background: #f2fbf6; }
 .field-note {
   min-height: 31px;
   display: flex;
@@ -2602,7 +2517,6 @@ tr.status-stale td { color: #4f3b1d; }
   .flex-timing-metric:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
   .flex-timing-detail-grid { grid-template-columns: 1fr; }
   .flex-host-window { grid-template-columns: 120px minmax(300px, 1fr) 220px; }
-  .compat-aux-row { grid-template-columns: 120px minmax(300px, 1fr) 260px; }
   .page { height: auto; }
   .terminal { height: 520px; }
   .chart-stack { grid-template-rows: none; }
@@ -3180,21 +3094,9 @@ tr.status-stale td { color: #4f3b1d; }
               <h2>FlexTDOA Protocol Timing</h2>
               <div class="muted">Live CI-CR frame structure and paper-aligned DW3000 delayed-TX timing.</div>
             </div>
-            <div class="flex-timing-controls">
-              <div class="flex-timing-select">
-                <label for="flexTimingSlotSelect">Inspect slot</label>
-                <select id="flexTimingSlotSelect"></select>
-              </div>
-              <div class="flex-timing-select">
-                <label for="flexTimingParameterSource">Timing source</label>
-                <select id="flexTimingParameterSource">
-                  <option value="live">live module runtime</option>
-                  <option value="static3">Stable Profile inputs</option>
-                  <option value="dynamic15">Balanced Profile inputs</option>
-                  <option value="dynamic12">Reactive Profile inputs</option>
-                  <option value="fastRaw">Fast Profile inputs</option>
-                </select>
-              </div>
+            <div class="flex-timing-select">
+              <label for="flexTimingSlotSelect">Inspect slot</label>
+              <select id="flexTimingSlotSelect"></select>
             </div>
           </div>
           <div id="flexTdoaTimingDiagram" class="muted">Waiting for FlexTDOA runtime status...</div>
@@ -3240,7 +3142,6 @@ tr.status-stale td { color: #4f3b1d; }
               <div class="profile-summary" id="profileStatic3Summary"></div>
               <div class="form-actions">
                 <button class="primary apply-ranging-profile" data-profile="static3">Apply Stable</button>
-                <button class="preview-ranging-profile" data-profile="static3">Show Timing</button>
                 <button class="reset-ranging-profile" data-profile="static3">Reset Defaults</button>
               </div>
             </div>
@@ -3270,7 +3171,6 @@ tr.status-stale td { color: #4f3b1d; }
               <div class="profile-summary" id="profileDynamic15Summary"></div>
               <div class="form-actions">
                 <button class="primary apply-ranging-profile" data-profile="dynamic15">Apply Balanced</button>
-                <button class="preview-ranging-profile" data-profile="dynamic15">Show Timing</button>
                 <button class="reset-ranging-profile" data-profile="dynamic15">Reset Defaults</button>
               </div>
             </div>
@@ -3300,7 +3200,6 @@ tr.status-stale td { color: #4f3b1d; }
               <div class="profile-summary" id="profileDynamic12Summary"></div>
               <div class="form-actions">
                 <button class="primary apply-ranging-profile" data-profile="dynamic12">Apply Reactive</button>
-                <button class="preview-ranging-profile" data-profile="dynamic12">Show Timing</button>
                 <button class="reset-ranging-profile" data-profile="dynamic12">Reset Defaults</button>
               </div>
             </div>
@@ -3330,7 +3229,6 @@ tr.status-stale td { color: #4f3b1d; }
               <div class="profile-summary" id="profileFastRawSummary"></div>
               <div class="form-actions">
                 <button class="primary apply-ranging-profile" data-profile="fastRaw">Apply Fast</button>
-                <button class="preview-ranging-profile" data-profile="fastRaw">Show Timing</button>
                 <button class="reset-ranging-profile" data-profile="fastRaw">Reset Defaults</button>
               </div>
             </div>
@@ -3625,7 +3523,6 @@ const state = {
   positionGeometry: {key: "", fixed: null, ekf: null},
   positionSeeds: {},
   flexTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.flexTimingSlotSelect") || 0),
-  flexTimingParameterSource: localStorage.getItem("uwbDash.setting.flexTimingParameterSource") || "live",
 };
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
@@ -7746,53 +7643,10 @@ function flexTimingRuntimeConsensus(field, unit = "") {
   return {value: unique[0], text: `${unique[0]}${unit ? ` ${unit}` : ""}`};
 }
 
-function flexTimingKnownValue(value, unit) {
-  const numeric = Number(value);
-  return Number.isFinite(numeric)
-    ? {value: numeric, text: `${numeric}${unit ? ` ${unit}` : ""}`}
-    : {value: null, text: "unavailable"};
-}
-
-function flexTimingParameterValues(sourceKey) {
-  const profile = rangingProfileDefaults[sourceKey];
-  if (profile) {
-    const values = readRangingProfile(sourceKey);
-    return {
-      sourceLabel: `${profile.label} inputs`,
-      rxSlice: flexTimingKnownValue(values.rxSliceMs, "ms"),
-      rangingSlot: flexTimingKnownValue(values.slotMs, "ms"),
-      rangingGap: flexTimingKnownValue(values.roundGapMs, "ms"),
-      surveySlot: flexTimingKnownValue(values.slotMs, "ms"),
-      surveyGap: flexTimingKnownValue(values.roundGapMs, "ms"),
-      commandDelay: flexTimingKnownValue(values.commandDelayMs, "ms"),
-      dsTimeout: flexTimingKnownValue(values.timeoutMs, "ms"),
-      dsResp: flexTimingKnownValue(values.respDelayMs, "ms"),
-      dsFinal: flexTimingKnownValue(values.finalDelayMs, "ms"),
-      dsReport: flexTimingKnownValue(values.reportDelayMs, "ms"),
-      autoRx: flexTimingKnownValue(values.autoRxDelayUus, "UUS"),
-    };
-  }
-  return {
-    sourceLabel: "live module runtime",
-    rxSlice: flexTimingRuntimeConsensus("runtime_anchor_survey_rx_slice_ms", "ms"),
-    rangingSlot: flexTimingRuntimeConsensus("runtime_ranging_slot_ms", "ms"),
-    rangingGap: flexTimingRuntimeConsensus("runtime_ranging_round_gap_ms", "ms"),
-    surveySlot: flexTimingRuntimeConsensus("runtime_anchor_survey_slot_ms", "ms"),
-    surveyGap: flexTimingRuntimeConsensus("runtime_anchor_survey_round_gap_ms", "ms"),
-    commandDelay: flexTimingRuntimeConsensus("runtime_anchor_survey_command_delay_ms", "ms"),
-    dsTimeout: flexTimingRuntimeConsensus("runtime_distance_test_rx_timeout_ms", "ms"),
-    dsResp: flexTimingRuntimeConsensus("runtime_distance_test_resp_delay_ms", "ms"),
-    dsFinal: flexTimingRuntimeConsensus("runtime_distance_test_final_delay_ms", "ms"),
-    dsReport: flexTimingRuntimeConsensus("runtime_distance_test_report_delay_ms", "ms"),
-    autoRx: flexTimingRuntimeConsensus("runtime_distance_test_auto_rx_delay_uus", "UUS"),
-  };
-}
-
 function renderFlexTdoaTimingDiagram() {
   const root = document.getElementById("flexTdoaTimingDiagram");
   const selector = document.getElementById("flexTimingSlotSelect");
-  const sourceSelector = document.getElementById("flexTimingParameterSource");
-  if (!root || !selector || !sourceSelector) return;
+  if (!root || !selector) return;
 
   const config = flexTimingRuntimeConfig();
   if (config.anchorIds.length < 3 || config.initiators.length < 1) {
@@ -7809,10 +7663,6 @@ function renderFlexTdoaTimingDiagram() {
     Number(state.flexTimingSlotIndex || 0)
   ));
   state.flexTimingSlotIndex = selectedIndex;
-  if (!sourceSelector.querySelector(`option[value="${state.flexTimingParameterSource}"]`)) {
-    state.flexTimingParameterSource = "live";
-  }
-  sourceSelector.value = state.flexTimingParameterSource;
   selector.innerHTML = config.initiators.map((initiatorId, index) =>
     `<option value="${index}">frame[${index}] · A${esc(initiatorId)}</option>`
   ).join("");
@@ -7827,35 +7677,34 @@ function renderFlexTdoaTimingDiagram() {
   const frameUs = M * slotUs;
   const frameHz = 1000000 / frameUs;
   const responseHz = M * K * frameHz;
-  const timingParameters = flexTimingParameterValues(
-    state.flexTimingParameterSource
+  const rxSlice = flexTimingRuntimeConsensus(
+    "runtime_anchor_survey_rx_slice_ms", "ms"
   );
-  const {
-    rxSlice, rangingSlot, rangingGap, surveySlot, surveyGap,
-    commandDelay, dsTimeout, dsResp, dsFinal, dsReport, autoRx,
-  } = timingParameters;
+  const rangingSlot = flexTimingRuntimeConsensus("runtime_ranging_slot_ms", "ms");
+  const rangingGap = flexTimingRuntimeConsensus("runtime_ranging_round_gap_ms", "ms");
+  const surveySlot = flexTimingRuntimeConsensus("runtime_anchor_survey_slot_ms", "ms");
+  const surveyGap = flexTimingRuntimeConsensus("runtime_anchor_survey_round_gap_ms", "ms");
+  const commandDelay = flexTimingRuntimeConsensus(
+    "runtime_anchor_survey_command_delay_ms", "ms"
+  );
+  const dsTimeout = flexTimingRuntimeConsensus(
+    "runtime_distance_test_rx_timeout_ms", "ms"
+  );
+  const dsResp = flexTimingRuntimeConsensus(
+    "runtime_distance_test_resp_delay_ms", "ms"
+  );
+  const dsFinal = flexTimingRuntimeConsensus(
+    "runtime_distance_test_final_delay_ms", "ms"
+  );
+  const dsReport = flexTimingRuntimeConsensus(
+    "runtime_distance_test_report_delay_ms", "ms"
+  );
+  const autoRx = flexTimingRuntimeConsensus(
+    "runtime_distance_test_auto_rx_delay_uus", "UUS"
+  );
   const rxSliceUs = Number.isFinite(rxSlice.value) ? rxSlice.value * 1000 : 0;
   const rxSliceWidth = rxSliceUs > 0 ? Math.min(100, 100 * rxSliceUs / slotUs) : 0;
   const rxSliceSlots = rxSliceUs > 0 ? rxSliceUs / slotUs : 0;
-  const dsRespMs = Math.max(0, Number(dsResp.value) || 0);
-  const dsFinalMs = Math.max(0, Number(dsFinal.value) || 0);
-  const dsReportMs = Math.max(0, Number(dsReport.value) || 0);
-  const dsExchangeMs = dsRespMs + dsFinalMs + 2 * dsReportMs;
-  const dsSlotMs = Math.max(0, Number(rangingSlot.value) || 0);
-  const dsGapMs = Math.max(0, Number(rangingGap.value) || 0);
-  const surveySlotMs = Math.max(0, Number(surveySlot.value) || 0);
-  const surveyGapMs = Math.max(0, Number(surveyGap.value) || 0);
-  const commandDelayMs = Math.max(0, Number(commandDelay.value) || 0);
-  const timeoutMs = Math.max(0, Number(dsTimeout.value) || 0);
-  const autoRxMs = Math.max(0, Number(autoRx.value) || 0) * 1.0256 / 1000;
-  const compatScaleMs = Math.max(
-    1,
-    dsExchangeMs,
-    dsSlotMs,
-    autoRxMs + timeoutMs,
-    commandDelayMs + dsExchangeMs
-  );
-  const dsOverrunsSlot = dsSlotMs > 0 && dsExchangeMs > dsSlotMs;
   const selectedSlotId = frameStartSlot + selectedIndex;
   const selectedInitiator = config.initiators[selectedIndex];
   const selectedResponders = flexTimingResponders(
@@ -7948,68 +7797,6 @@ function renderFlexTdoaTimingDiagram() {
     </div>`;
   }).join("");
 
-  const compatibilitySegments = [
-    {label: "POLL → RESP", event: "RESP", duration: dsRespMs, cls: "resp-delay"},
-    {label: "RESP → FINAL", event: "FINAL", duration: dsFinalMs, cls: "final-delay"},
-    {label: "FINAL → REPORT", event: "REPORT", duration: dsReportMs, cls: "report-delay"},
-    {label: "REPORT → REPORT2", event: "REPORT2", duration: dsReportMs, cls: "report2-delay"},
-  ].filter(segment => segment.duration > 0);
-  const compatibilityIdleMs = Math.max(0, compatScaleMs - dsExchangeMs);
-  const compatibilityTrackSegments = [
-    ...compatibilitySegments,
-    ...(compatibilityIdleMs > 0
-      ? [{label: "scale remainder", event: "", duration: compatibilityIdleMs, cls: "idle"}]
-      : []),
-  ];
-  const compatibilityTrack = compatibilityTrackSegments.map(segment =>
-    segment.cls === "idle"
-      ? `<div class="compat-segment idle" title="Axis reserve for the survey command lead"></div>`
-      : `<div class="compat-segment ${segment.cls}">
-          <b>${esc(segment.label)}</b><span>${fmtFixed(segment.duration, 3)} ms</span>
-        </div>`
-  ).join("");
-  let compatibilityElapsedMs = 0;
-  const compatibilityAxisMarks = [
-    flexTimingAxisMark(0, "POLL 0.000 ms", "edge-start"),
-    ...compatibilitySegments.map((segment, index) => {
-      compatibilityElapsedMs += segment.duration;
-      return flexTimingAxisMark(
-        100 * compatibilityElapsedMs / compatScaleMs,
-        `${segment.event} ${fmtFixed(compatibilityElapsedMs, 3)} ms`,
-        compatibilityElapsedMs === compatScaleMs ? "edge-end" : "",
-        index % 2 === 0
-      );
-    }),
-    ...(compatScaleMs > dsExchangeMs
-      ? [flexTimingAxisMark(100, `${fmtFixed(compatScaleMs, 3)} ms`, "edge-end")]
-      : []),
-  ].join("");
-  const slotBoundaryLeft = dsSlotMs > 0
-    ? Math.min(100, 100 * dsSlotMs / compatScaleMs)
-    : 0;
-  const scheduleSlots = Array.from({length: M}, (_, index) => `
-    <div class="compat-schedule-slot"><b>slot ${index}</b><span>${fmtFixed(dsSlotMs, 3)} ms</span></div>`).join("");
-  const scheduleColumns = [
-    ...Array.from({length: M}, () => `${Math.max(dsSlotMs, 0.001)}fr`),
-    ...(dsGapMs > 0 ? [`${dsGapMs}fr`] : []),
-  ].join(" ");
-  const scheduleGap = dsGapMs > 0
-    ? `<div class="compat-schedule-gap"><b>gap</b><span>${fmtFixed(dsGapMs, 3)} ms</span></div>`
-    : "";
-  const rxIdleMs = Math.max(0, compatScaleMs - autoRxMs - timeoutMs);
-  const rxColumns = [
-    `${Math.max(autoRxMs, 0.001)}fr`,
-    `${Math.max(timeoutMs, 0.001)}fr`,
-    ...(rxIdleMs > 0 ? [`${rxIdleMs}fr`] : []),
-  ].join(" ");
-  const commandExchangeMs = Math.min(dsExchangeMs, Math.max(0, compatScaleMs - commandDelayMs));
-  const commandIdleMs = Math.max(0, compatScaleMs - commandDelayMs - commandExchangeMs);
-  const commandColumns = [
-    `${Math.max(commandDelayMs, 0.001)}fr`,
-    `${Math.max(commandExchangeMs, 0.001)}fr`,
-    ...(commandIdleMs > 0 ? [`${commandIdleMs}fr`] : []),
-  ].join(" ");
-
   root.className = "";
   root.innerHTML = `
     <div class="flex-timing-metrics">
@@ -8060,59 +7847,41 @@ function renderFlexTdoaTimingDiagram() {
         </div>
       </div>
     </div>
-    <div class="compat-timing">
+    <div class="flex-parameter-map">
       <div class="flex-timing-label">
-        <strong>Profile-controlled timing · ${esc(timingParameters.sourceLabel)}</strong>
-        <span>Separate DS-TWR/survey reference; these lanes do not resize the FlexTDOA bar above.</span>
+        <strong>Live runtime parameter map</strong>
+        <span>Values read from all fresh modules; “mixed” is reported explicitly.</span>
       </div>
-      <div class="flex-timing-scroll">
-        <div class="flex-timing-canvas">
-          <div class="flex-timing-label">
-            <strong>DS-TWR message delays</strong>
-            <span>nominal chain ${fmtFixed(dsExchangeMs, 3)} ms</span>
-          </div>
-          <div class="compat-track" style="grid-template-columns:${compatibilityTrackSegments.map(segment => `${Math.max(segment.duration, 0.001)}fr`).join(" ")}">
-            ${compatibilityTrack}
-            ${dsSlotMs > 0 ? `<div class="compat-slot-boundary" style="left:${slotBoundaryLeft}%"><span>slot ${fmtFixed(dsSlotMs, 3)} ms</span></div>` : ""}
-          </div>
-          <div class="compat-axis">${compatibilityAxisMarks}</div>
-
-          <div class="flex-timing-label">
-            <strong>DS-TWR round scheduler</strong>
-            <span>${M} × ${fmtFixed(dsSlotMs, 3)} ms + ${fmtFixed(dsGapMs, 3)} ms gap = ${fmtFixed(M * dsSlotMs + dsGapMs, 3)} ms nominal</span>
-          </div>
-          <div class="compat-schedule-track" style="grid-template-columns:${scheduleColumns}">
-            ${scheduleSlots}${scheduleGap}
-          </div>
-
-          <div class="compat-aux-row">
-            <strong>RX after TX</strong>
-            <div class="compat-aux-track" style="grid-template-columns:${rxColumns}">
-              <div class="compat-aux-segment auto-rx" title="Auto RX delay"></div>
-              <div class="compat-aux-segment timeout" title="DS-TWR receive timeout"></div>
-              ${rxIdleMs > 0 ? `<div class="compat-aux-segment idle"></div>` : ""}
-            </div>
-            <span>Auto RX ${esc(autoRx.text)} ≈ ${fmtFixed(autoRxMs, 3)} ms · timeout ${esc(dsTimeout.text)}</span>
-          </div>
-
-          <div class="compat-aux-row">
-            <strong>Survey command</strong>
-            <div class="compat-aux-track" style="grid-template-columns:${commandColumns}">
-              <div class="compat-aux-segment command" title="Command delay"></div>
-              <div class="compat-aux-segment exchange" title="DS-TWR exchange starts after command delay"></div>
-              ${commandIdleMs > 0 ? `<div class="compat-aux-segment idle"></div>` : ""}
-            </div>
-            <span>command ${esc(commandDelay.text)} · survey slot/gap ${esc(surveySlot.text)} / ${esc(surveyGap.text)}</span>
-          </div>
-
-          <div class="compat-note ${dsOverrunsSlot ? "compat-warning" : ""}">
-            ${dsOverrunsSlot
-              ? `The nominal ${fmtFixed(dsExchangeMs, 3)} ms message chain crosses the ${fmtFixed(dsSlotMs, 3)} ms scheduler boundary. Firmware completes the blocking exchange, so the effective slot can overrun.`
-              : `The nominal message chain fits inside the ${fmtFixed(dsSlotMs, 3)} ms scheduler slot.`}
-            REPORT delay appears twice because the responder waits the same configured interval before REPORT2.
-          </div>
-        </div>
-      </div>
+      <table class="flex-parameter-table">
+        <thead><tr><th>Scope</th><th>Parameter and live value</th><th>Where it acts</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="flex-scope fixed">FlexTDOA radio</span></td>
+            <td>Paper CI-CR constants · ${fmtFixed(slotUs / 1000, 3)} ms/slot</td>
+            <td>Defines the colored REQ, P_REQ, RESP, P_RESP and guard widths. No Ranging Profile field changes this on-air timeline.</td>
+          </tr>
+          <tr>
+            <td><span class="flex-scope host">FlexTDOA host</span></td>
+            <td>RX slice · ${esc(rxSlice.text)}</td>
+            <td>Maximum duration of one software receive call, shown by the outlined bar above. It is not airtime; an anchor schedule alarm can end it early.</td>
+          </tr>
+          <tr>
+            <td><span class="flex-scope">DS-TWR schedule</span></td>
+            <td>Slot ${esc(rangingSlot.text)} · round gap ${esc(rangingGap.text)}</td>
+            <td>Schedules the standard DS-TWR ranging cycle. It is outside the FlexTDOA CI-CR frame.</td>
+          </tr>
+          <tr>
+            <td><span class="flex-scope">Anchor survey</span></td>
+            <td>Slot ${esc(surveySlot.text)} · gap ${esc(surveyGap.text)} · command ${esc(commandDelay.text)}</td>
+            <td>Controls the survey coordinator and command lead. It does not move FlexTDOA REQ or RESP.</td>
+          </tr>
+          <tr>
+            <td><span class="flex-scope">DS-TWR exchange</span></td>
+            <td>Timeout ${esc(dsTimeout.text)} · RESP ${esc(dsResp.text)} · FINAL ${esc(dsFinal.text)} · REPORT ${esc(dsReport.text)} · Auto RX ${esc(autoRx.text)}</td>
+            <td>Controls DS-TWR delayed TX, receive waits and automatic RX. These messages do not exist in a pure FlexTDOA slot.</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
     <div class="flex-timing-note">The cyclic view starts at REQ. Colored widths are protocol time budgets, not packet airtime: REQ and each RESP transmit at their subslot boundary. The 250 us guard is drawn at the end because it is the quiet interval immediately before the next slot's REQ. P_RESP is the paper's aggregate K × 600 us processing budget. Response offsets are native DW3000 delayed-TX targets relative to REQ_RX.</div>`;
 }
@@ -8427,18 +8196,6 @@ function wireSettings() {
       renderFlexTdoaTimingDiagram();
     });
   }
-  const flexTimingParameterSource = document.getElementById("flexTimingParameterSource");
-  if (flexTimingParameterSource) {
-    flexTimingParameterSource.value = state.flexTimingParameterSource;
-    flexTimingParameterSource.addEventListener("change", () => {
-      state.flexTimingParameterSource = flexTimingParameterSource.value || "live";
-      localStorage.setItem(
-        settingKey("flexTimingParameterSource"),
-        state.flexTimingParameterSource
-      );
-      renderFlexTdoaTimingDiagram();
-    });
-  }
   const chargerShowRawTools = document.getElementById("chargerShowRawTools");
   if (chargerShowRawTools) {
     chargerShowRawTools.addEventListener("change", updateChargerRawVisibility);
@@ -8513,43 +8270,19 @@ function wireSettings() {
     el.addEventListener("input", () => {
       const profile = el.closest(".profile-card")?.dataset.profile;
       if (profile) updateRangingProfileSummary(profile);
-      if (profile === state.flexTimingParameterSource) {
-        renderFlexTdoaTimingDiagram();
-      }
     });
     el.addEventListener("change", () => {
       const profile = el.closest(".profile-card")?.dataset.profile;
       if (profile) updateRangingProfileSummary(profile);
-      if (profile === state.flexTimingParameterSource) {
-        renderFlexTdoaTimingDiagram();
-      }
     });
   });
   document.querySelectorAll(".apply-ranging-profile").forEach(button => {
     button.addEventListener("click", () => applyRangingProfile(button.dataset.profile));
   });
-  document.querySelectorAll(".preview-ranging-profile").forEach(button => {
-    button.addEventListener("click", () => {
-      state.flexTimingParameterSource = button.dataset.profile || "live";
-      localStorage.setItem(
-        settingKey("flexTimingParameterSource"),
-        state.flexTimingParameterSource
-      );
-      if (flexTimingParameterSource) {
-        flexTimingParameterSource.value = state.flexTimingParameterSource;
-      }
-      renderFlexTdoaTimingDiagram();
-      document.getElementById("flexTdoaTimingDiagram")?.closest(".section")
-        ?.scrollIntoView({behavior: "smooth", block: "start"});
-    });
-  });
   document.querySelectorAll(".reset-ranging-profile").forEach(button => {
     button.addEventListener("click", () => {
       const profile = button.dataset.profile;
       writeRangingProfile(profile, rangingProfileDefaults[profile]);
-      if (profile === state.flexTimingParameterSource) {
-        renderFlexTdoaTimingDiagram();
-      }
       setToast("rangingProfileToast", "profile defaults restored locally; press Apply to write ESP NVS", "");
     });
   });
@@ -8557,7 +8290,6 @@ function wireSettings() {
     for (const profile of Object.keys(rangingProfileDefaults)) {
       writeRangingProfile(profile, rangingProfileDefaults[profile]);
     }
-    renderFlexTdoaTimingDiagram();
     setToast("rangingProfileToast", "all profile defaults restored locally; press Apply to write ESP NVS", "");
   });
   updateAllRangingProfileSummaries();
