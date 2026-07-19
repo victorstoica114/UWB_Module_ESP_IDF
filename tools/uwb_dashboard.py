@@ -4305,7 +4305,6 @@ function paperAnchorGeometry(anchorIds, maxAge) {
     const anchors = cloneAnchorCoordinates(session.fixed.anchors);
     const residuals = anchorGeometryResiduals(anchors, batch.distanceItems);
     const fitQuality = anchorGeometryFitQuality(anchorIds, residuals);
-    const inconsistent = fitQuality.complete && !fitQuality.acceptable;
     return {
       anchors,
       distanceItems: batch.distanceItems,
@@ -4313,9 +4312,10 @@ function paperAnchorGeometry(anchorIds, maxAge) {
       residuals,
       fitQuality,
       complete: true,
-      positionReady: !inconsistent,
+      positionReady: true,
       canFix: false,
-      status: inconsistent ? "fixed_inconsistent" : "fixed",
+      status: "fixed",
+      liveInconsistent: fitQuality.complete && !fitQuality.acceptable,
       fixedAt: Number(session.fixed.fixedAt),
       updates: Number(session.fixed.updates || 0),
     };
@@ -5006,11 +5006,11 @@ function renderPositionGeometryPanel(model) {
       const fitText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
         ? ` · live fit RMS ${fmtPositionCm(geometry.fitQuality.rmsM, 1)}`
         : "";
-      status.textContent = `Fixed paper geometry · ${fmtAge(Number(geometry.fixedAt || 0))} · ${geometry.updates || 0} EKF updates${fitText}`;
-      status.className = "muted fresh";
-    } else if (geometry.status === "fixed_inconsistent") {
-      status.textContent = `Fixed geometry rejected · live fit RMS ${fmtPositionCm(geometry.fitQuality?.rmsM, 1)} · limit ${fmtPositionCm(geometry.fitQuality?.fixLimitM, 1)}`;
-      status.className = "muted stale";
+      const warningText = geometry.liveInconsistent
+        ? ` · diagnostic warning above ${fmtPositionCm(geometry.fitQuality?.fixLimitM, 1)}`
+        : "";
+      status.textContent = `Fixed paper geometry · ${fmtAge(Number(geometry.fixedAt || 0))} · ${geometry.updates || 0} EKF updates${fitText}${warningText}`;
+      status.className = geometry.liveInconsistent ? "muted stale" : "muted fresh";
     } else if (geometry.status === "self_localizing") {
       const fitText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
         ? ` · fit RMS ${fmtPositionCm(geometry.fitQuality.rmsM, 1)}`
@@ -5137,15 +5137,6 @@ function renderPositionReadout(model) {
       overlayButton.textContent = "Waiting for Anchor Ranges";
       overlayButton.disabled = true;
       overlayButton.dataset.action = "wait";
-    }
-  } else if (model.geometry?.status === "fixed_inconsistent") {
-    overlay.classList.add("active");
-    overlay.querySelector("h2").textContent = "Fixed anchor geometry is inconsistent";
-    overlay.querySelector("p").textContent = `The live TWR fit is ${fmtPositionCm(model.geometry.fitQuality?.rmsM, 1)} RMS, above the ${fmtPositionCm(model.geometry.fitQuality?.fixLimitM, 1)} safety limit. Restart anchor self-localization before positioning the tag.`;
-    if (overlayButton) {
-      overlayButton.textContent = "Restart Anchor Self-Localization";
-      overlayButton.disabled = false;
-      overlayButton.dataset.action = "restart_geometry";
     }
   } else if (!model.geometry?.positionReady) {
     overlay.classList.add("active");

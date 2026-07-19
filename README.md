@@ -673,10 +673,12 @@ TWR frame must be below three measurement standard deviations:
 fix limit = 3 * sqrt(10 cm^2) = 9.49 cm RMS
 ```
 
-This is a solver validity check, not a filter applied to the raw FlexTDOA or
-TWR observations. A previously fixed geometry that exceeds the same limit is
-marked inconsistent and tag positioning is suspended until anchor
-self-localization is restarted.
+This is a solver validity check before the geometry is fixed, not a filter
+applied to the raw FlexTDOA or TWR observations. After the operator fixes the
+geometry, a live RMS above the same limit remains visible as a diagnostic
+warning but does not suspend tag positioning. This avoids hiding the tag due
+to one noisy anchor-anchor frame during hardware tests. Use `Restart Anchor
+Self-Localization` explicitly after an anchor is physically moved.
 
 For the current planar setup, the paper's coordinate convention is adapted to
 2D: the first selected anchor is fixed at `(0,0)`, the second is on the positive
