@@ -327,6 +327,7 @@ enum {
 #define UWB_FLEX_TDOA_GEOMETRY_LEN 26U
 #define UWB_FLEX_TDOA_CONFIG_PHASE_US 3000000LL
 #define UWB_FLEX_TDOA_CONFIG_TX_SPACING_US 100000LL
+#define UWB_FLEX_TDOA_CONFIG_FRAME_GAP_MS 10U
 #define UWB_FLEX_TDOA_PAPER_GUARD_US 250U
 #define UWB_FLEX_TDOA_PAPER_REQ_SUBSLOT_US 2000U
 #define UWB_FLEX_TDOA_PAPER_REQ_PROCESS_US 250U
@@ -6326,6 +6327,10 @@ static void uwb_flex_tdoa_configuration_phase(void)
                         active->anchor_count > 0U
                             ? tx_count % active->anchor_count
                             : 0U;
+                    // The receiver must process the topology frame and rearm
+                    // the DW3000 before the following geometry frame arrives.
+                    uwb_dw3000_delay_ms(
+                        UWB_FLEX_TDOA_CONFIG_FRAME_GAP_MS);
                     (void)uwb_flex_tdoa_send_geometry(geometry_index);
                     tx_count++;
                 }
