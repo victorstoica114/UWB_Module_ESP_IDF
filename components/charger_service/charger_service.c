@@ -12,6 +12,7 @@
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -151,6 +152,10 @@ static volatile bool s_full_refresh_requested;
 static charger_service_snapshot_t s_snapshot;
 static uint32_t s_last_write_ms;
 static bool s_applying_saved_policy;
+static int s_i2c_scl_measure_error = ESP_ERR_NOT_SUPPORTED;
+static uint32_t s_i2c_scl_edges;
+static uint32_t s_i2c_scl_elapsed_us;
+static uint32_t s_i2c_scl_measured_hz;
 
 static uint32_t ticks_to_ms(void)
 {
@@ -899,6 +904,42 @@ static size_t charger_adaptive_read_chunk_len(size_t remaining)
     return chunk_len;
 }
 
+static void charger_record_scl_measure(
+    const i2c_bus_service_scl_measure_result_t *result)
+{
+    if (result == NULL) {
+        return;
+    }
+    s_i2c_scl_measure_error = result->error;
+    s_i2c_scl_edges = result->edges;
+    s_i2c_scl_elapsed_us = result->elapsed_us;
+    s_i2c_scl_measured_hz = result->measured_hz;
+}
+
+static esp_err_t charger_measure_scl_start(
+    i2c_bus_service_scl_measure_t *measure)
+{
+    if (!APP_BQ25792_I2C_MEASURE_SCL_ENABLED) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    return i2c_bus_service_scl_measure_start(BOARD_CONFIG_BQ25792_SCL_GPIO,
+                                             measure);
+}
+
+static void charger_measure_scl_stop(
+    i2c_bus_service_scl_measure_t *measure, uint32_t elapsed_us,
+    esp_err_t start_err)
+{
+    i2c_bus_service_scl_measure_result_t result = {
+        .error = start_err,
+    };
+    if (measure != NULL && measure->unit != NULL) {
+        result.error = i2c_bus_service_scl_measure_stop(
+            measure, elapsed_us, &result);
+    }
+    charger_record_scl_measure(&result);
+}
+
 static esp_err_t charger_read_bytes(uint8_t start_reg, uint8_t *data,
                                     size_t data_len)
 {
@@ -914,9 +955,16 @@ static esp_err_t charger_read_bytes(uint8_t start_reg, uint8_t *data,
                 charger_i2c_read_estimate_us(data_len))) {
             err = ESP_ERR_TIMEOUT;
         } else {
+            i2c_bus_service_scl_measure_t measure = {0};
+            const esp_err_t measure_err = charger_measure_scl_start(&measure);
+            const int64_t start_us = esp_timer_get_time();
             err = i2c_master_transmit_receive(
                 s_i2c_dev, &start_reg, sizeof(start_reg), data, data_len,
                 CHARGER_I2C_TIMEOUT_MS);
+            const int64_t elapsed_raw = esp_timer_get_time() - start_us;
+            charger_measure_scl_stop(
+                &measure, elapsed_raw > 0 ? (uint32_t)elapsed_raw : 0U,
+                measure_err);
             i2c_bus_service_unlock();
         }
         if (err == ESP_OK || attempt == APP_BQ25792_I2C_READ_RETRIES) {
@@ -942,8 +990,15 @@ static esp_err_t charger_write_byte(uint8_t reg, uint8_t value)
                 charger_i2c_write_estimate_us(sizeof(data)))) {
             err = ESP_ERR_TIMEOUT;
         } else {
+            i2c_bus_service_scl_measure_t measure = {0};
+            const esp_err_t measure_err = charger_measure_scl_start(&measure);
+            const int64_t start_us = esp_timer_get_time();
             err = i2c_master_transmit(s_i2c_dev, data, sizeof(data),
                                       CHARGER_I2C_TIMEOUT_MS);
+            const int64_t elapsed_raw = esp_timer_get_time() - start_us;
+            charger_measure_scl_stop(
+                &measure, elapsed_raw > 0 ? (uint32_t)elapsed_raw : 0U,
+                measure_err);
             i2c_bus_service_unlock();
         }
         if (err == ESP_OK || attempt == APP_BQ25792_I2C_WRITE_RETRIES) {
@@ -1029,6 +1084,11 @@ static void update_snapshot_from_raw(const uint8_t raw[CHARGER_SERVICE_REGISTER_
         s_snapshot.config_write_supported = true;
         s_snapshot.config_writes_enabled = true;
         s_snapshot.last_error = read_err;
+        s_snapshot.i2c_clock_hz = APP_BQ25792_I2C_CLOCK_HZ;
+        s_snapshot.i2c_scl_measure_error = s_i2c_scl_measure_error;
+        s_snapshot.i2c_scl_edges = s_i2c_scl_edges;
+        s_snapshot.i2c_scl_elapsed_us = s_i2c_scl_elapsed_us;
+        s_snapshot.i2c_scl_measured_hz = s_i2c_scl_measured_hz;
         update_snapshot_gpio_fields(&s_snapshot, now_ms);
         s_snapshot.last_write_age_ms = elapsed_since(now_ms, s_last_write_ms);
         if (read_err == ESP_OK) {
@@ -1480,6 +1540,8 @@ esp_err_t charger_service_start(void)
         s_snapshot.config_writes_enabled = true;
         s_snapshot.last_update_age_ms = UINT32_MAX;
         s_snapshot.last_write_age_ms = UINT32_MAX;
+        s_snapshot.i2c_clock_hz = APP_BQ25792_I2C_CLOCK_HZ;
+        s_snapshot.i2c_scl_measure_error = ESP_ERR_NOT_SUPPORTED;
         s_snapshot.int_gpio_level = CHARGER_GPIO_INVALID_LEVEL;
         s_snapshot.int_last_irq_age_ms = UINT32_MAX;
         s_snapshot.pg_gpio_level = CHARGER_GPIO_INVALID_LEVEL;
@@ -1522,6 +1584,8 @@ void charger_service_get_snapshot(charger_service_snapshot_t *snapshot)
         snapshot->pg_gpio_level = CHARGER_GPIO_INVALID_LEVEL;
         snapshot->qon_gpio_level = CHARGER_GPIO_INVALID_LEVEL;
         snapshot->last_error = ESP_ERR_TIMEOUT;
+        snapshot->i2c_clock_hz = APP_BQ25792_I2C_CLOCK_HZ;
+        snapshot->i2c_scl_measure_error = ESP_ERR_TIMEOUT;
     }
 }
 

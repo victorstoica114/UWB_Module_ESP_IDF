@@ -1323,21 +1323,31 @@ The one-time startup probe keeps a longer timeout (`200 ms`) because some
 devices need more slack before they acknowledge reliably; it is not used for the
 regular status-transfer path. Normal BQ/MAX reads retry twice before reporting an
 error. BQ register writes are retried because they are single-register,
-idempotent updates. MAX77958 single-register writes are retried too, but longer
-AP command writes are intentionally single-shot: if the I2C transaction does not
-fit while BNO is running at a high rate, the operation fails visibly instead of
-being repeated blindly.
+idempotent updates. MAX77958 single-register writes are retried too. Longer
+MAX77958 AP command writes are attempted through the direct high-speed path in
+bounded chunks and then fall back to the standard 1 MHz transaction if the HS
+path fails, so a configuration command still has one clean recovery route.
 
 The current board uses mixed I2C speeds on the same physical bus. BNO085 stays
 at `400 kHz`, because the BNO08X datasheet only specifies standard/fast mode up
-to 400 kHz. BQ25792 and MAX77958 are configured at `1 MHz`. ESP-IDF keeps
-`scl_speed_hz` in each `i2c_device_config_t`, so the firmware does not
-reinitialize the bus between devices; each transaction uses the timing for the
-addressed device handle. MAX77958 explicitly supports 1 MHz Fast-Mode Plus
-without the special high-speed-mode sequence. BQ25792 has one descriptive I2C
-section that mentions fast mode, but its electrical table specifies
-`fSCL = 1000 kHz`; the 1 MHz setting was therefore validated empirically on the
-module.
+to 400 kHz. BQ25792 is configured at `1 MHz`. MAX77958 keeps a normal 1 MHz
+ESP-IDF device handle for fallback and startup, then enables `HS_EXT_EN` and
+uses a local direct-HS helper at about `2 MHz` for validated MAX register
+traffic. ESP-IDF keeps `scl_speed_hz` in each `i2c_device_config_t`, so the
+firmware does not reinitialize the bus between ordinary device transactions;
+the MAX direct-HS helper temporarily programs the I2C peripheral only while it
+holds the shared background lock. BQ25792 has one descriptive I2C section that
+mentions fast mode, but its electrical table specifies `fSCL = 1000 kHz`; the
+1 MHz setting was therefore validated empirically on the module.
+
+The MAX77958 high-speed path is a measured ESP32-S3 board result, not a claim
+that ESP-IDF exposes a turnkey high-speed switch for this target. The firmware
+enters an HS-master-style transfer by sending the I2C HS master code (`0x08`) at
+the entry clock, then reprogramming the peripheral timing for the direct
+transaction. On M1 with 1k pull-ups, the validated timing profile is
+`low/high/wait = 10/0/0`, which produced clean MAX77958 direct-HS traffic at
+about `2 MHz`. That gives us a practical HS master mode for this board while
+keeping the normal ESP-IDF 1 MHz handle as a safe fallback path.
 
 At the maximum BNO085 accelerometer rate, the sample period is `2 ms`. A normal
 accelerometer input report is small: the firmware reads the 4-byte SHTP header
@@ -1354,8 +1364,10 @@ Worst-case planning at BNO085 500 Hz:
 | BNO header + normal accel packet at 400 kHz | about `0.8 ms` |
 | BQ25792 16-byte read chunk at 1 MHz | about `0.27 ms` |
 | BQ25792 single-register write at 1 MHz | about `0.13 ms` |
-| MAX77958 33-byte read chunk at 1 MHz | about `0.42 ms` |
-| MAX77958 34-byte AP-command write at 1 MHz | about `0.42 ms` |
+| MAX77958 single-byte direct HS read at about 2 MHz | about `0.04-0.05 ms` measured on M1 |
+| MAX77958 AP-command write, direct HS `30 + 3` bytes | about `0.20 ms` wire time plus two HS entries |
+| MAX77958 33-byte AP response read at 1 MHz | about `0.42 ms` |
+| MAX77958 fallback 34-byte AP-command write at 1 MHz | about `0.42 ms` |
 
 With a `2 ms` BNO period and `500 us` guard, a normal BNO packet leaves roughly
 `700 us` for background work. That fits one MAX77958 full AP-data chunk or one
@@ -1365,9 +1377,79 @@ currently shows `10k` I2C pull-ups, but the live module tested cleanly at 1 MHz;
 if a board revision is unstable, verify the actual pull-up values and reduce
 them for Fast-Mode Plus before blaming firmware scheduling.
 
+Validated M1 coexistence test:
+
+| Condition | Result |
+| --- | --- |
+| Firmware / board | `3646a76` on ESP32-S3 M1, 1k I2C pull-ups |
+| Duration | `180.96 s` |
+| BNO085 accelerometer | `500 Hz` requested, `91,614` reports, `506.3 samples/s` observed |
+| BNO085 errors | `0` read errors, `0` parse errors |
+| BQ25792 load | `180` full refreshes, about `1 Hz`, `0` errors |
+| MAX77958 load | `180` refreshes, about `1 Hz`, `0` public read errors, `0` operation errors |
+| MAX77958 direct-HS recovery | `2` direct-HS attempts fell back cleanly; the higher-level MAX operation still completed |
+| Control-path errors | `0` HTTP refresh errors, `0` `/status` errors |
+
+That run proves the shared bus can carry the BNO085 at its maximum accelerometer
+rate while still fitting charger and USB-C/PD refreshes at about 1 Hz. The
+internal BQ25792 and MAX77958 monitor defaults are therefore set to
+`APP_BQ25792_READ_INTERVAL_MS = 1000` and
+`APP_MAX77958_READ_INTERVAL_MS = 1000`.
+
+Validated five-module coexistence test after fitting `1k` I2C pull-ups to every
+module:
+
+| Module | BNO085 reports / rate | BNO read / parse errors | BQ refresh rate / errors | MAX refresh rate / errors | Direct-HS fallbacks | Telemetry drops / reboot |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| M1 | `90,764` / `507.2 Hz` | `0 / 0` | `0.89 Hz / 0` | `0.72 Hz / 0` | `0` | `0 / no` |
+| M2 | `91,458` / `511.1 Hz` | `0 / 0` | `0.93 Hz / 0` | `0.79 Hz / 0` | `0` | `0 / no` |
+| M3 | `92,391` / `516.3 Hz` | `0 / 0` | `0.83 Hz / 0` | `0.63 Hz / 0` | `1` | `0 / no` |
+| M4 | `90,767` / `507.2 Hz` | `0 / 0` | `0.91 Hz / 0` | `0.73 Hz / 0` | `0` | `0 / no` |
+| M5 | `91,501` / `511.4 Hz` | `0 / 0` | `0.88 Hz / 0` | `0.72 Hz / 0` | `1` | `0 / no` |
+
+The run used firmware `4ffed0e` for `178.94 s`, with BNO085 at `400 kHz`,
+BQ25792 at `1 MHz`, MAX77958 direct HS at about `2 MHz`, and wireless binary
+telemetry connected. The two direct-HS failures represent about `0.01%` of the
+corresponding M3/M5 direct reads; both fell back cleanly, while MAX public-read
+and operation error counters remained at zero. BQ25792 writes were also tested
+concurrently by changing IINDPM from `480 mA` to `490 mA`, confirming the
+readback, and restoring `480 mA` on every module. MAX77958 AP commands completed
+on every module with no operation errors while BNO085 continued producing
+reports.
+
+The BQ/MAX monitor timeout is configured as `1 s` after each completed refresh,
+so the effective completion rate is lower than exactly `1 Hz` when background
+transactions repeatedly yield to the 500 Hz BNO reservation. In this test it
+was `0.83-0.93 Hz` for BQ and `0.63-0.79 Hz` for MAX; recent status remained
+available while the accelerometer path retained zero read, parse, and telemetry
+losses.
+
 `/status` exposes `i2c_realtime_period_us`,
 `i2c_realtime_time_to_next_us`, `i2c_background_window_us`, and the
 realtime/background lock counters.
+
+The firmware also has optional SCL pulse-count diagnostics for BNO085, BQ25792,
+and the MAX77958 direct-HS path. They are disabled by default:
+
+```c
+#define APP_BNO085_I2C_MEASURE_SCL_ENABLED 0
+#define APP_BQ25792_I2C_MEASURE_SCL_ENABLED 0
+#define APP_MAX77958_I2C_HS_DIRECT_MEASURE_SCL_ENABLED 0
+```
+
+When enabled, the code uses the ESP32-S3 PCNT peripheral to count SCL rising
+edges during selected transactions and exposes the result in `/status`. This is
+useful for automated sanity checks and for confirming that the expected device
+is actively clocked. It is not a replacement for an oscilloscope when measuring
+absolute SCL frequency: the measured interval includes some software/driver
+overhead around the I2C transaction, so very short transfers under-report the
+actual wire frequency. For precise rise/fall time and duty-cycle checks, use
+the oscilloscope; for continuous firmware health, use the PCNT counters.
+
+The practical rule is: keep BNO085 as the realtime owner of the bus, keep BQ/MAX
+refresh rates human-scale, and route charger/PD reads through the background
+window model. The current validated human-scale refresh target is 1 Hz for both
+BQ25792 and MAX77958 while BNO085 runs at 500 Hz.
 
 High-rate accelerometer telemetry is intentionally handled like a small sensor
 stream, not like human log text. The BNO085 task does not enqueue accelerometer
@@ -1402,9 +1484,9 @@ current implementation is a passive GNSS diagnostic suitable for testing
 modules with antennas, currently modules 3 and 5 near the window.
 
 The BQ25792 Li-Po charger monitor runs on the shared I2C bus
-(`GPIO9/GPIO10`, address `0x6B`) at 400 kHz. A complete register-window dump
+(`GPIO9/GPIO10`, address `0x6B`) at 1 MHz. A complete register-window dump
 `0x00..0x48` runs at startup, on explicit refresh/configuration changes, and
-then every `APP_BQ25792_READ_INTERVAL_MS` (`10s` by default). The full dump is
+then every `APP_BQ25792_READ_INTERVAL_MS` (`1s` by default). The full dump is
 intentionally split into adaptive register chunks capped by
 `APP_BQ25792_REGISTER_READ_CHUNK_BYTES` (`16` by default) with a short gap between
 chunks so the charger monitor stays lower priority than the BNO085
@@ -1550,7 +1632,7 @@ resets top-off timing.
 ## MAX77958 USB-C PD Controller
 
 The MAX77958 USB-C/PD controller is monitored on the shared I2C bus
-(`GPIO9/GPIO10`, address `0x25`) at 400 kHz. Firmware treats it like a
+(`GPIO9/GPIO10`, address `0x25`). Firmware treats it like a
 low-priority background device, the same way the charger monitor is treated:
 MAX77958 reads and AP-command writes use the shared I2C background lock, so the
 BNO085 realtime accelerometer path can win bus arbitration when it is active.
@@ -1561,8 +1643,26 @@ The regular raw-map refresh is split into adaptive
 `APP_MAX77958_REGISTER_READ_CHUNK_BYTES` chunks (`33` bytes by default), so PD
 status reads can use large transfers when the accelerometer rate is low, but
 shrink to smaller transfers when the BNO085 realtime window is tight.
-The monitor runs every `APP_MAX77958_READ_INTERVAL_MS` (`10s` by default), plus
+The monitor runs every `APP_MAX77958_READ_INTERVAL_MS` (`1s` by default), plus
 on explicit dashboard refresh or after configuration operations.
+
+MAX77958 has an optional high-speed path for boards with strong enough I2C
+pull-ups. The clean implementation does not fork ESP-IDF: it keeps the standard
+1 MHz MAX device handle as fallback, sets `HS_EXT_EN` in `I2C_CNFG`, and uses
+small local direct helpers for MAX register reads and writes. On M1, after
+changing the I2C pull-ups to `1k`, the validated direct profile is
+`low/high/wait = 10/0/0`, with HS master code `0x08` plus STOP before each
+direct transaction and about `2 MHz` observed on SCL. Direct writes are limited
+to `30` data bytes per transaction because the ESP32-S3 I2C FIFO is `32` bytes
+and must also hold the I2C address byte and starting register. AP commands are
+therefore written as `0x21..0x3E` followed by `0x3F..0x41`; MAX77958 latches the
+command when `AP_DATAOUT32` (`0x41`) is written. Runtime AP writes do not do
+read-back verification, because that path was validated during M1 bring-up and
+the normal firmware should keep the shared I2C bus free for the BNO085.
+Direct-HS reads default to single-byte transactions because that is the read
+form validated on M1 with zero direct errors; longer read bursts remain
+configurable through `APP_MAX77958_I2C_HS_DIRECT_READ_CHUNK_BYTES` for future
+oscilloscope-guided testing.
 
 `/status` exposes both decoded fields and a raw register map:
 `pd_raw_hex`, device/FW IDs, interrupt/status/mask registers, VBUS ADC range,
@@ -1571,6 +1671,10 @@ switch state, source PDOs advertised by the connected supply, sink PDOs
 configured in the MAX77958, PPS defaults, and the last AP-command result. Raw
 AP command response bytes are also exposed as `pd_last_response_hex` for
 datasheet-level debugging.
+It also exposes HS diagnostics:
+`pd_i2c_hs_ext_active`, `pd_i2c_hs_direct_read_count`,
+`pd_i2c_hs_direct_error_count`, and
+`pd_i2c_hs_direct_last_elapsed_us`.
 
 The authenticated live endpoint is `/config/max77958`. Useful operations are:
 
