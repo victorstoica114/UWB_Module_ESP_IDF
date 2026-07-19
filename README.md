@@ -1286,6 +1286,34 @@ internal BQ25792 and MAX77958 monitor defaults are therefore set to
 `APP_BQ25792_READ_INTERVAL_MS = 1000` and
 `APP_MAX77958_READ_INTERVAL_MS = 1000`.
 
+Validated five-module coexistence test after fitting `1k` I2C pull-ups to every
+module:
+
+| Module | BNO085 reports / rate | BNO read / parse errors | BQ refresh rate / errors | MAX refresh rate / errors | Direct-HS fallbacks | Telemetry drops / reboot |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| M1 | `90,764` / `507.2 Hz` | `0 / 0` | `0.89 Hz / 0` | `0.72 Hz / 0` | `0` | `0 / no` |
+| M2 | `91,458` / `511.1 Hz` | `0 / 0` | `0.93 Hz / 0` | `0.79 Hz / 0` | `0` | `0 / no` |
+| M3 | `92,391` / `516.3 Hz` | `0 / 0` | `0.83 Hz / 0` | `0.63 Hz / 0` | `1` | `0 / no` |
+| M4 | `90,767` / `507.2 Hz` | `0 / 0` | `0.91 Hz / 0` | `0.73 Hz / 0` | `0` | `0 / no` |
+| M5 | `91,501` / `511.4 Hz` | `0 / 0` | `0.88 Hz / 0` | `0.72 Hz / 0` | `1` | `0 / no` |
+
+The run used firmware `4ffed0e` for `178.94 s`, with BNO085 at `400 kHz`,
+BQ25792 at `1 MHz`, MAX77958 direct HS at about `2 MHz`, and wireless binary
+telemetry connected. The two direct-HS failures represent about `0.01%` of the
+corresponding M3/M5 direct reads; both fell back cleanly, while MAX public-read
+and operation error counters remained at zero. BQ25792 writes were also tested
+concurrently by changing IINDPM from `480 mA` to `490 mA`, confirming the
+readback, and restoring `480 mA` on every module. MAX77958 AP commands completed
+on every module with no operation errors while BNO085 continued producing
+reports.
+
+The BQ/MAX monitor timeout is configured as `1 s` after each completed refresh,
+so the effective completion rate is lower than exactly `1 Hz` when background
+transactions repeatedly yield to the 500 Hz BNO reservation. In this test it
+was `0.83-0.93 Hz` for BQ and `0.63-0.79 Hz` for MAX; recent status remained
+available while the accelerometer path retained zero read, parse, and telemetry
+losses.
+
 `/status` exposes `i2c_realtime_period_us`,
 `i2c_realtime_time_to_next_us`, `i2c_background_window_us`, and the
 realtime/background lock counters.
