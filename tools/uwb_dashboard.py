@@ -1939,6 +1939,167 @@ tr.status-stale td { color: #4f3b1d; }
   padding-top: 9px;
   border-top: 1px solid var(--line);
 }
+.flex-timing-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.flex-timing-head h2 { margin-bottom: 2px; }
+.flex-timing-select {
+  display: grid;
+  grid-template-columns: auto minmax(170px, 240px);
+  align-items: center;
+  gap: 8px;
+}
+.flex-timing-select label { color: var(--muted); font-size: 12px; }
+.flex-timing-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(100px, 1fr));
+  border: 1px solid var(--line);
+  background: #fbfcfe;
+  margin-bottom: 14px;
+}
+.flex-timing-metric {
+  min-width: 0;
+  padding: 9px 11px;
+  border-right: 1px solid var(--line);
+}
+.flex-timing-metric:last-child { border-right: 0; }
+.flex-timing-metric span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 3px;
+}
+.flex-timing-metric strong { font-size: 14px; }
+.flex-timing-scroll { overflow-x: auto; padding-bottom: 5px; }
+.flex-timing-canvas { min-width: 920px; }
+.flex-timing-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 11px 0 6px;
+}
+.flex-timing-label strong { font-size: 13px; }
+.flex-timing-label span { color: var(--muted); font-size: 11px; }
+.flex-frame-track {
+  display: grid;
+  border: 1px solid #8d9caf;
+  background: #fff;
+}
+.flex-frame-slot {
+  min-width: 0;
+  min-height: 76px;
+  padding: 9px 10px;
+  border-right: 1px solid #8d9caf;
+  background: #f7f9fc;
+}
+.flex-frame-slot:last-child { border-right: 0; }
+.flex-frame-slot.selected {
+  background: #edf4ff;
+  box-shadow: inset 0 -3px 0 #2e67d1;
+}
+.flex-frame-slot.live { box-shadow: inset 0 3px 0 #16894b; }
+.flex-frame-slot.selected.live {
+  box-shadow: inset 0 3px 0 #16894b, inset 0 -3px 0 #2e67d1;
+}
+.flex-frame-slot b { display: block; font-size: 12px; }
+.flex-frame-slot strong { display: block; font-size: 14px; margin-top: 2px; }
+.flex-frame-slot span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.flex-frame-axis,
+.flex-slot-axis {
+  position: relative;
+  height: 25px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.flex-slot-axis { height: 38px; }
+.flex-axis-mark.stagger { top: 13px; }
+.flex-axis-mark {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+.flex-axis-mark::before {
+  content: "";
+  display: block;
+  width: 1px;
+  height: 5px;
+  margin: 0 auto 2px;
+  background: #8d9caf;
+}
+.flex-axis-mark.edge-start { transform: none; }
+.flex-axis-mark.edge-end { transform: translateX(-100%); }
+.flex-slot-track {
+  display: grid;
+  height: 76px;
+  border: 1px solid #8d9caf;
+  background: #fff;
+}
+.flex-slot-segment {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 5px 3px;
+  border-right: 1px solid rgba(41, 54, 73, 0.34);
+  text-align: center;
+  overflow: hidden;
+}
+.flex-slot-segment:last-child { border-right: 0; }
+.flex-slot-segment b { font-size: 11px; white-space: nowrap; }
+.flex-slot-segment span { font-size: 9px; margin-top: 3px; white-space: nowrap; }
+.flex-slot-segment.req { color: #fff; background: #2e67d1; }
+.flex-slot-segment.req-process { color: #443307; background: #f1cf72; }
+.flex-slot-segment.response { color: #fff; background: #16894b; }
+.flex-slot-segment.response.alt { background: #147b72; }
+.flex-slot-segment.response-process { color: #263548; background: #dce4ed; }
+.flex-slot-segment.guard { color: #263548; background: #eef1f5; }
+.flex-timing-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(520px, 1.25fr) minmax(300px, 0.75fr);
+  gap: 14px;
+  margin-top: 12px;
+  align-items: start;
+}
+.flex-timing-table { width: 100%; font-size: 11px; }
+.flex-timing-table th,
+.flex-timing-table td { padding: 5px 7px; }
+.flex-timing-table td:first-child { font-weight: 700; }
+.flex-packet-flow {
+  border-left: 3px solid #2e67d1;
+  padding: 2px 0 2px 11px;
+}
+.flex-packet-row { margin-bottom: 9px; }
+.flex-packet-row:last-child { margin-bottom: 0; }
+.flex-packet-row b { display: block; font-size: 12px; }
+.flex-packet-row code {
+  display: block;
+  margin-top: 3px;
+  color: #42536a;
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: normal;
+}
+.flex-timing-note {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
 .field-note {
   min-height: 31px;
   display: flex;
@@ -2309,6 +2470,12 @@ tr.status-stale td { color: #4f3b1d; }
 @media (max-width: 940px) {
   .terminal-grid, .settings-grid, .charger-grid, .pd-grid, .graphs-layout, .position-layout { grid-template-columns: 1fr; }
   .profile-grid { grid-template-columns: 1fr; }
+  .flex-timing-head { align-items: stretch; flex-direction: column; }
+  .flex-timing-select { grid-template-columns: 100px minmax(0, 1fr); }
+  .flex-timing-metrics { grid-template-columns: repeat(3, 1fr); }
+  .flex-timing-metric:nth-child(3) { border-right: 0; }
+  .flex-timing-metric:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
+  .flex-timing-detail-grid { grid-template-columns: 1fr; }
   .page { height: auto; }
   .terminal { height: 520px; }
   .chart-stack { grid-template-rows: none; }
@@ -2881,6 +3048,19 @@ tr.status-stale td { color: #4f3b1d; }
     <section id="rangingSettings" class="page">
       <div class="settings">
         <div class="section">
+          <div class="flex-timing-head">
+            <div>
+              <h2>FlexTDOA Protocol Timing</h2>
+              <div class="muted">Live CI-CR frame structure and paper-aligned DW3000 delayed-TX timing.</div>
+            </div>
+            <div class="flex-timing-select">
+              <label for="flexTimingSlotSelect">Inspect slot</label>
+              <select id="flexTimingSlotSelect"></select>
+            </div>
+          </div>
+          <div id="flexTdoaTimingDiagram" class="muted">Waiting for FlexTDOA runtime status...</div>
+        </div>
+        <div class="section">
           <h2>Ranging Profiles</h2>
           <div class="form-grid">
             <label for="rangingProfileTargets">Targets</label>
@@ -3301,6 +3481,7 @@ const state = {
   positionWasActive: false,
   positionGeometry: {key: "", fixed: null, ekf: null},
   positionSeeds: {},
+  flexTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.flexTimingSlotSelect") || 0),
 };
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
@@ -6262,6 +6443,7 @@ function renderInfo(snapshot) {
   renderCharger(state.statuses);
   renderPd(state.statuses);
   renderPosition();
+  renderFlexTdoaTimingDiagram();
   scheduleAccelRender();
   hydrateSettingsFromStatus(freshStatus);
   hydrateChargerSettings();
@@ -7332,6 +7514,253 @@ function applyRangingProfilePositionSettings(profile) {
   }
 }
 
+const flexTimingPaper = {
+  guardUs: 250,
+  requestUs: 2000,
+  requestProcessUs: 250,
+  responseUs: 250,
+  responseProcessUs: 600,
+};
+
+function flexTimingRuntimeConfig() {
+  const candidates = state.statuses.filter(item =>
+    Array.isArray(item.runtime_anchor_ids) && item.runtime_anchor_ids.length >= 3
+  );
+  const status = candidates.find(item =>
+    statusIsFresh(item) && item.runtime_mode_name === "uwb_flex_tdoa"
+  ) || candidates.find(statusIsFresh) || candidates[0] || {};
+  const anchorIds = (status.runtime_anchor_ids || [2, 3, 4, 5])
+    .map(Number)
+    .filter(Number.isFinite);
+  const initiators = (status.runtime_flex_tdoa_slot_initiator_ids || anchorIds)
+    .map(Number)
+    .filter(Number.isFinite);
+  const slotCount = Math.max(1, Math.min(
+    Number(status.runtime_flex_tdoa_slot_count || initiators.length || anchorIds.length),
+    initiators.length || anchorIds.length
+  ));
+  const responderCount = Math.max(1, Math.min(
+    Number(status.runtime_flex_tdoa_responder_count || anchorIds.length - 1),
+    Math.max(1, anchorIds.length - 1)
+  ));
+  const masks = (status.runtime_flex_tdoa_slot_responder_masks || [])
+    .map(Number);
+  return {
+    status,
+    anchorIds,
+    initiators: initiators.slice(0, slotCount),
+    masks,
+    slotCount,
+    responderCount,
+    live: Boolean(statusIsFresh(status)),
+  };
+}
+
+function flexTimingLatestSlotId() {
+  const values = [];
+  for (const item of Object.values(state.tdoa.local_positions || {})) {
+    if (Number.isFinite(Number(item.slot_id))) values.push(Number(item.slot_id));
+  }
+  for (const item of Object.values(state.tdoa.observations || {})) {
+    if (Number.isFinite(Number(item.slot_id))) values.push(Number(item.slot_id));
+  }
+  return values.length ? Math.max(...values) : 0;
+}
+
+function flexTimingResponders(config, initiatorId, absoluteSlotId, slotIndex) {
+  const mask = Number(config.masks[slotIndex]);
+  let allowed = config.anchorIds.filter((anchorId, anchorIndex) =>
+    anchorId !== initiatorId &&
+    (!Number.isFinite(mask) || (mask & (1 << anchorIndex)) !== 0)
+  );
+  if (!allowed.length) {
+    allowed = config.anchorIds.filter(anchorId => anchorId !== initiatorId);
+  }
+  if (!allowed.length) return [];
+  const rotation = ((absoluteSlotId % allowed.length) + allowed.length) % allowed.length;
+  const ordered = [];
+  for (let index = 0; index < config.responderCount; index += 1) {
+    ordered.push(allowed[(index + rotation) % allowed.length]);
+  }
+  return ordered;
+}
+
+function flexTimingAxisMark(position, label, edge = "", stagger = false) {
+  return `<span class="flex-axis-mark ${edge} ${stagger ? "stagger" : ""}" style="left:${position}%">${esc(label)}</span>`;
+}
+
+function renderFlexTdoaTimingDiagram() {
+  const root = document.getElementById("flexTdoaTimingDiagram");
+  const selector = document.getElementById("flexTimingSlotSelect");
+  if (!root || !selector) return;
+
+  const config = flexTimingRuntimeConfig();
+  if (config.anchorIds.length < 3 || config.initiators.length < 1) {
+    root.className = "muted";
+    root.textContent = "FlexTDOA topology is unavailable.";
+    return;
+  }
+
+  const latestSlotId = flexTimingLatestSlotId();
+  const frameStartSlot = latestSlotId - (latestSlotId % config.slotCount);
+  const liveSlotIndex = latestSlotId % config.slotCount;
+  const selectedIndex = Math.max(0, Math.min(
+    config.slotCount - 1,
+    Number(state.flexTimingSlotIndex || 0)
+  ));
+  state.flexTimingSlotIndex = selectedIndex;
+  selector.innerHTML = config.initiators.map((initiatorId, index) =>
+    `<option value="${index}">frame[${index}] · A${esc(initiatorId)}</option>`
+  ).join("");
+  selector.value = String(selectedIndex);
+
+  const K = config.responderCount;
+  const M = config.slotCount;
+  const timing = flexTimingPaper;
+  const responseProcessTotalUs = K * timing.responseProcessUs;
+  const slotUs = timing.guardUs + timing.requestUs + timing.requestProcessUs +
+    K * timing.responseUs + responseProcessTotalUs;
+  const frameUs = M * slotUs;
+  const frameHz = 1000000 / frameUs;
+  const responseHz = M * K * frameHz;
+  const selectedSlotId = frameStartSlot + selectedIndex;
+  const selectedInitiator = config.initiators[selectedIndex];
+  const selectedResponders = flexTimingResponders(
+    config, selectedInitiator, selectedSlotId, selectedIndex
+  );
+
+  const frameSlots = config.initiators.map((initiatorId, index) => {
+    const absoluteSlotId = frameStartSlot + index;
+    const responders = flexTimingResponders(config, initiatorId, absoluteSlotId, index);
+    const classes = [
+      "flex-frame-slot",
+      index === selectedIndex ? "selected" : "",
+      config.live && index === liveSlotIndex ? "live" : "",
+    ].filter(Boolean).join(" ");
+    return `<div class="${classes}">
+      <b>slot ${esc(absoluteSlotId)} · frame[${index}]</b>
+      <strong>A${esc(initiatorId)} initiator</strong>
+      <span title="${esc(responders.map(id => `A${id}`).join(" → "))}">RESP ${esc(responders.map(id => `A${id}`).join(" → "))}</span>
+    </div>`;
+  }).join("");
+  const frameAxis = Array.from({length: M + 1}, (_, index) =>
+    flexTimingAxisMark(
+      100 * index / M,
+      `${fmtFixed(index * slotUs / 1000, 2)} ms`,
+      index === 0 ? "edge-start" : (index === M ? "edge-end" : "")
+    )
+  ).join("");
+
+  const segments = [
+    {key: "REQ subslot", short: "REQ", duration: timing.requestUs, cls: "req", detail: `A${selectedInitiator} TX at slot boundary; remainder reserved`},
+    {key: "Process REQ", short: "P_REQ", duration: timing.requestProcessUs, cls: "req-process", detail: "decode + arm delayed TX"},
+    ...selectedResponders.map((anchorId, index) => ({
+      key: `RESP[${index}]`,
+      short: `R${index}`,
+      duration: timing.responseUs,
+      cls: `response ${index % 2 ? "alt" : ""}`,
+      detail: `A${anchorId} delayed TX`,
+    })),
+    {key: "Process RESP", short: "P_RESP", duration: responseProcessTotalUs, cls: "response-process", detail: `${K} × 600 us`},
+    {key: "Guard", short: "G", duration: timing.guardUs, cls: "guard", detail: "before next REQ"},
+  ];
+  const segmentCells = segments.map(segment => {
+    return `<div class="flex-slot-segment ${segment.cls}" title="${esc(`${segment.key}: ${segment.detail}, ${segment.duration} us`)}">
+      <b>${esc(segment.short)}</b><span>${esc(segment.duration)} us</span>
+    </div>`;
+  }).join("");
+
+  const boundaries = [0];
+  let elapsedUs = 0;
+  for (const segment of segments) {
+    elapsedUs += segment.duration;
+    boundaries.push(elapsedUs);
+  }
+  const slotAxis = boundaries.map((value, index) =>
+    flexTimingAxisMark(
+      100 * value / slotUs,
+      value >= 1000 ? `${fmtFixed(value / 1000, value % 1000 ? 2 : 1)} ms` : `${value} us`,
+      index === 0 ? "edge-start" : (index === boundaries.length - 1 ? "edge-end" : ""),
+      index > 1 && index < boundaries.length - 2 && index % 2 === 1
+    )
+  ).join("");
+
+  elapsedUs = 0;
+  const detailRows = segments.map((segment, index) => {
+    const startUs = elapsedUs;
+    const endUs = startUs + segment.duration;
+    elapsedUs = endUs;
+    let action = segment.detail;
+    if (segment.key.startsWith("RESP[")) {
+      const responseIndex = Number(segment.key.match(/\d+/)?.[0] || 0);
+      const responderId = selectedResponders[responseIndex];
+      const delayedUs = timing.requestUs + timing.requestProcessUs +
+        responseIndex * timing.responseUs;
+      action = `A${responderId} delayed TX at REQ_RX + ${fmtFixed(delayedUs / 1000, 2)} ms`;
+    }
+    return `<tr>
+      <td>${esc(segment.key)}</td>
+      <td>${fmtFixed(startUs / 1000, 2)}</td>
+      <td>${fmtFixed(endUs / 1000, 2)}</td>
+      <td>${esc(segment.duration)} us</td>
+      <td>${esc(action)}</td>
+    </tr>`;
+  }).join("");
+
+  const responseFlow = selectedResponders.map((anchorId, index) => {
+    const delayedUs = timing.requestUs + timing.requestProcessUs + index * timing.responseUs;
+    return `<div class="flex-packet-row">
+      <b>RESP[${index}] · A${esc(anchorId)} → broadcast · +${fmtFixed(delayedUs / 1000, 2)} ms</b>
+      <code>header(type, source, seq) | slot32 | destination_count=0 | processing_dtu=reply | previous_twr(responder, distance_mm, slot16)</code>
+    </div>`;
+  }).join("");
+
+  root.className = "";
+  root.innerHTML = `
+    <div class="flex-timing-metrics">
+      <div class="flex-timing-metric"><span>Topology</span><strong>N=${config.anchorIds.length} · K=${K} · M=${M}</strong></div>
+      <div class="flex-timing-metric"><span>Slot period</span><strong>${fmtFixed(slotUs / 1000, 3)} ms</strong></div>
+      <div class="flex-timing-metric"><span>Frame period</span><strong>${fmtFixed(frameUs / 1000, 3)} ms</strong></div>
+      <div class="flex-timing-metric"><span>Frame rate</span><strong>${fmtFixed(frameHz, 2)} Hz</strong></div>
+      <div class="flex-timing-metric"><span>TDOA / frame</span><strong>${M * K}</strong></div>
+      <div class="flex-timing-metric"><span>Response rate</span><strong>${fmtFixed(responseHz, 1)} /s</strong></div>
+    </div>
+    <div class="flex-timing-scroll">
+      <div class="flex-timing-canvas">
+        <div class="flex-timing-label">
+          <strong>Frame · ${M} initiator slots</strong>
+          <span>${config.live ? `live frame containing slot ${latestSlotId}` : "configured topology"}</span>
+        </div>
+        <div class="flex-frame-track" style="grid-template-columns:repeat(${M}, minmax(170px, 1fr))">${frameSlots}</div>
+        <div class="flex-frame-axis">${frameAxis}</div>
+        <div class="flex-timing-label">
+          <strong>Selected slot ${selectedSlotId} · A${esc(selectedInitiator)} initiates · ${K} response subslots</strong>
+          <span>REQ-to-REQ time reference</span>
+        </div>
+        <div class="flex-slot-track" style="grid-template-columns:${segments.map(segment => `${segment.duration}fr`).join(" ")}">${segmentCells}</div>
+        <div class="flex-slot-axis">${slotAxis}</div>
+      </div>
+    </div>
+    <div class="flex-timing-detail-grid">
+      <table class="flex-timing-table">
+        <thead><tr><th>Interval</th><th>Start ms</th><th>End ms</th><th>Budget</th><th>Radio action</th></tr></thead>
+        <tbody>${detailRows}</tbody>
+      </table>
+      <div class="flex-packet-flow">
+        <div class="flex-packet-row">
+          <b>REQ · A${esc(selectedInitiator)} → ${esc(selectedResponders.map(id => `A${id}`).join(", "))}</b>
+          <code>header(type, source, seq) | slot32 | destination_count=${K} | responders[${K}] | processing_dtu=0 | previous_twr(responder, distance_mm, slot16)</code>
+        </div>
+        ${responseFlow}
+        <div class="flex-packet-row">
+          <b>Passive tag</b>
+          <code>RX timestamps REQ and every RESP; emits no UWB packet.</code>
+        </div>
+      </div>
+    </div>
+    <div class="flex-timing-note">The cyclic view starts at REQ. Colored widths are protocol time budgets, not packet airtime: REQ and each RESP transmit at their subslot boundary. The 250 us guard is drawn at the end because it is the quiet interval immediately before the next slot's REQ. P_RESP is the paper's aggregate K × 600 us processing budget. Response offsets are native DW3000 delayed-TX targets relative to REQ_RX.</div>`;
+}
+
 function profileSummaryText(values, anchorCount = 4) {
   const paperBodyMs = profileFlexTdoaPaperBodyMs(anchorCount);
   const flexFrameMs = anchorCount * paperBodyMs;
@@ -7631,6 +8060,17 @@ function wireSettings() {
   wirePdDirtyTracking();
   updateChargerRawVisibility();
   updatePdRawVisibility();
+  const flexTimingSlotSelect = document.getElementById("flexTimingSlotSelect");
+  if (flexTimingSlotSelect) {
+    flexTimingSlotSelect.addEventListener("change", () => {
+      state.flexTimingSlotIndex = Number(flexTimingSlotSelect.value || 0);
+      localStorage.setItem(
+        settingKey("flexTimingSlotSelect"),
+        String(state.flexTimingSlotIndex)
+      );
+      renderFlexTdoaTimingDiagram();
+    });
+  }
   const chargerShowRawTools = document.getElementById("chargerShowRawTools");
   if (chargerShowRawTools) {
     chargerShowRawTools.addEventListener("change", updateChargerRawVisibility);
