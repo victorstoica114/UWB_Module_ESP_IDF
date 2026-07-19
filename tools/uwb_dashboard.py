@@ -2060,8 +2060,8 @@ tr.status-stale td { color: #4f3b1d; }
   overflow: hidden;
 }
 .flex-slot-segment:last-child { border-right: 0; }
-.flex-slot-segment b { font-size: 11px; white-space: nowrap; }
-.flex-slot-segment span { font-size: 9px; margin-top: 3px; white-space: nowrap; }
+.flex-slot-segment b { font-size: 13px; white-space: nowrap; }
+.flex-slot-segment span { font-size: 11px; margin-top: 3px; white-space: nowrap; }
 .flex-slot-segment.req { color: #fff; background: #2e67d1; }
 .flex-slot-segment.req-process { color: #443307; background: #f1cf72; }
 .flex-slot-segment.response { color: #fff; background: #16894b; }
@@ -2100,6 +2100,46 @@ tr.status-stale td { color: #4f3b1d; }
   font-size: 11px;
   line-height: 1.4;
 }
+.flex-host-window {
+  display: grid;
+  grid-template-columns: 150px minmax(360px, 1fr) 260px;
+  align-items: center;
+  gap: 10px;
+  margin: 3px 0 13px;
+  font-size: 11px;
+}
+.flex-host-window strong { font-size: 12px; }
+.flex-host-window > span { color: var(--muted); text-align: right; }
+.flex-host-track {
+  position: relative;
+  height: 18px;
+  border: 1px dashed #6f7e91;
+  background: #fff;
+  overflow: hidden;
+}
+.flex-host-fill {
+  height: 100%;
+  min-width: 2px;
+  background: #e4edff;
+  border-right: 2px solid #2e67d1;
+}
+.flex-parameter-map { margin-top: 13px; }
+.flex-parameter-table { width: 100%; font-size: 11px; }
+.flex-parameter-table th,
+.flex-parameter-table td { padding: 6px 8px; vertical-align: top; }
+.flex-parameter-table td:nth-child(1) { width: 120px; font-weight: 700; }
+.flex-parameter-table td:nth-child(2) { width: 230px; }
+.flex-scope {
+  display: inline-block;
+  padding: 1px 5px;
+  border: 1px solid #b8c4d3;
+  color: #42536a;
+  background: #f7f9fc;
+  font-size: 10px;
+  font-weight: 700;
+}
+.flex-scope.host { border-color: #8aa9e8; color: #2455ae; background: #f1f6ff; }
+.flex-scope.fixed { border-color: #78bb98; color: #116f3b; background: #f2fbf6; }
 .field-note {
   min-height: 31px;
   display: flex;
@@ -2476,6 +2516,7 @@ tr.status-stale td { color: #4f3b1d; }
   .flex-timing-metric:nth-child(3) { border-right: 0; }
   .flex-timing-metric:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
   .flex-timing-detail-grid { grid-template-columns: 1fr; }
+  .flex-host-window { grid-template-columns: 120px minmax(300px, 1fr) 220px; }
   .page { height: auto; }
   .terminal { height: 520px; }
   .chart-stack { grid-template-rows: none; }
@@ -3073,11 +3114,11 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p class="muted profile-note">Apply writes every timing parameter in the selected profile to ESP32 NVS through runtime config. The same profile updates FlexTDOA anchor slots, DS-TWR ranging slots, and selects the FlexTDOA position solver.</p>
+          <p class="muted profile-note">FlexTDOA radio timing is fixed to the paper-aligned 5.05 ms CI-CR slot shown above. Profiles change observation freshness and the host RX slice; the remaining timing fields are persisted for DS-TWR and anchor-survey compatibility paths.</p>
           <div class="profile-grid">
             <div class="profile-card" data-profile="static3">
               <h3>Stable Profile</h3>
-              <p class="muted">FlexTDOA 100 ms / 10 ms timing with a long raw-observation freshness window.</p>
+              <p class="muted">Long 3.0 s FlexTDOA observation freshness; conservative compatibility timing.</p>
               <div class="form-grid compact">
                 <label for="profileStatic3SlotMs">Slot ms</label>
                 <input id="profileStatic3SlotMs" value="100" type="number" min="1" step="1">
@@ -3106,7 +3147,7 @@ tr.status-stale td { color: #4f3b1d; }
             </div>
             <div class="profile-card" data-profile="dynamic15">
               <h3>Balanced Profile</h3>
-              <p class="muted">Same 100 ms / 10 ms radio timing with a shorter observation freshness window.</p>
+              <p class="muted">Balanced 1.5 s FlexTDOA observation freshness; conservative compatibility timing.</p>
               <div class="form-grid compact">
                 <label for="profileDynamic15SlotMs">Slot ms</label>
                 <input id="profileDynamic15SlotMs" value="100" type="number" min="1" step="1">
@@ -3135,7 +3176,7 @@ tr.status-stale td { color: #4f3b1d; }
             </div>
             <div class="profile-card" data-profile="dynamic12">
               <h3>Reactive Profile</h3>
-              <p class="muted">Same 100 ms / 10 ms radio timing with a short freshness window for a more reactive position.</p>
+              <p class="muted">Reactive 1.2 s FlexTDOA observation freshness; conservative compatibility timing.</p>
               <div class="form-grid compact">
                 <label for="profileDynamic12SlotMs">Slot ms</label>
                 <input id="profileDynamic12SlotMs" value="100" type="number" min="1" step="1">
@@ -3164,7 +3205,7 @@ tr.status-stale td { color: #4f3b1d; }
             </div>
             <div class="profile-card" data-profile="fastRaw">
               <h3>Fast Profile</h3>
-              <p class="muted">Validated FlexTDOA 7 ms / 1 ms timing. Command delay is retained only for DS-TWR-compatible modes.</p>
+              <p class="muted">Short 0.5 s FlexTDOA observation freshness and 5 ms host RX slices; compact compatibility timing.</p>
               <div class="form-grid compact">
                 <label for="profileFastRawSlotMs">Slot ms</label>
                 <input id="profileFastRawSlotMs" value="7" type="number" min="1" step="1">
@@ -7589,6 +7630,19 @@ function flexTimingAxisMark(position, label, edge = "", stagger = false) {
   return `<span class="flex-axis-mark ${edge} ${stagger ? "stagger" : ""}" style="left:${position}%">${esc(label)}</span>`;
 }
 
+function flexTimingRuntimeConsensus(field, unit = "") {
+  const values = state.statuses
+    .filter(statusIsFresh)
+    .map(item => Number(item[field]))
+    .filter(Number.isFinite);
+  if (!values.length) return {value: null, text: "unavailable"};
+  const unique = [...new Set(values)];
+  if (unique.length > 1) {
+    return {value: null, text: `mixed (${unique.join(", ")})${unit ? ` ${unit}` : ""}`};
+  }
+  return {value: unique[0], text: `${unique[0]}${unit ? ` ${unit}` : ""}`};
+}
+
 function renderFlexTdoaTimingDiagram() {
   const root = document.getElementById("flexTdoaTimingDiagram");
   const selector = document.getElementById("flexTimingSlotSelect");
@@ -7623,6 +7677,34 @@ function renderFlexTdoaTimingDiagram() {
   const frameUs = M * slotUs;
   const frameHz = 1000000 / frameUs;
   const responseHz = M * K * frameHz;
+  const rxSlice = flexTimingRuntimeConsensus(
+    "runtime_anchor_survey_rx_slice_ms", "ms"
+  );
+  const rangingSlot = flexTimingRuntimeConsensus("runtime_ranging_slot_ms", "ms");
+  const rangingGap = flexTimingRuntimeConsensus("runtime_ranging_round_gap_ms", "ms");
+  const surveySlot = flexTimingRuntimeConsensus("runtime_anchor_survey_slot_ms", "ms");
+  const surveyGap = flexTimingRuntimeConsensus("runtime_anchor_survey_round_gap_ms", "ms");
+  const commandDelay = flexTimingRuntimeConsensus(
+    "runtime_anchor_survey_command_delay_ms", "ms"
+  );
+  const dsTimeout = flexTimingRuntimeConsensus(
+    "runtime_distance_test_rx_timeout_ms", "ms"
+  );
+  const dsResp = flexTimingRuntimeConsensus(
+    "runtime_distance_test_resp_delay_ms", "ms"
+  );
+  const dsFinal = flexTimingRuntimeConsensus(
+    "runtime_distance_test_final_delay_ms", "ms"
+  );
+  const dsReport = flexTimingRuntimeConsensus(
+    "runtime_distance_test_report_delay_ms", "ms"
+  );
+  const autoRx = flexTimingRuntimeConsensus(
+    "runtime_distance_test_auto_rx_delay_uus", "UUS"
+  );
+  const rxSliceUs = Number.isFinite(rxSlice.value) ? rxSlice.value * 1000 : 0;
+  const rxSliceWidth = rxSliceUs > 0 ? Math.min(100, 100 * rxSliceUs / slotUs) : 0;
+  const rxSliceSlots = rxSliceUs > 0 ? rxSliceUs / slotUs : 0;
   const selectedSlotId = frameStartSlot + selectedIndex;
   const selectedInitiator = config.initiators[selectedIndex];
   const selectedResponders = flexTimingResponders(
@@ -7739,6 +7821,13 @@ function renderFlexTdoaTimingDiagram() {
         </div>
         <div class="flex-slot-track" style="grid-template-columns:${segments.map(segment => `${segment.duration}fr`).join(" ")}">${segmentCells}</div>
         <div class="flex-slot-axis">${slotAxis}</div>
+        <div class="flex-host-window">
+          <strong>RX host window</strong>
+          <div class="flex-host-track" title="Maximum receive-call duration; not radio airtime">
+            <div class="flex-host-fill" style="width:${rxSliceWidth}%"></div>
+          </div>
+          <span>${esc(rxSlice.text)}${rxSliceSlots > 0 ? ` · ${fmtFixed(rxSliceSlots, 2)} slot${rxSliceSlots === 1 ? "" : "s"} max` : ""}</span>
+        </div>
       </div>
     </div>
     <div class="flex-timing-detail-grid">
@@ -7757,6 +7846,42 @@ function renderFlexTdoaTimingDiagram() {
           <code>RX timestamps REQ and every RESP; emits no UWB packet.</code>
         </div>
       </div>
+    </div>
+    <div class="flex-parameter-map">
+      <div class="flex-timing-label">
+        <strong>Live runtime parameter map</strong>
+        <span>Values read from all fresh modules; “mixed” is reported explicitly.</span>
+      </div>
+      <table class="flex-parameter-table">
+        <thead><tr><th>Scope</th><th>Parameter and live value</th><th>Where it acts</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="flex-scope fixed">FlexTDOA radio</span></td>
+            <td>Paper CI-CR constants · ${fmtFixed(slotUs / 1000, 3)} ms/slot</td>
+            <td>Defines the colored REQ, P_REQ, RESP, P_RESP and guard widths. No Ranging Profile field changes this on-air timeline.</td>
+          </tr>
+          <tr>
+            <td><span class="flex-scope host">FlexTDOA host</span></td>
+            <td>RX slice · ${esc(rxSlice.text)}</td>
+            <td>Maximum duration of one software receive call, shown by the outlined bar above. It is not airtime; an anchor schedule alarm can end it early.</td>
+          </tr>
+          <tr>
+            <td><span class="flex-scope">DS-TWR schedule</span></td>
+            <td>Slot ${esc(rangingSlot.text)} · round gap ${esc(rangingGap.text)}</td>
+            <td>Schedules the standard DS-TWR ranging cycle. It is outside the FlexTDOA CI-CR frame.</td>
+          </tr>
+          <tr>
+            <td><span class="flex-scope">Anchor survey</span></td>
+            <td>Slot ${esc(surveySlot.text)} · gap ${esc(surveyGap.text)} · command ${esc(commandDelay.text)}</td>
+            <td>Controls the survey coordinator and command lead. It does not move FlexTDOA REQ or RESP.</td>
+          </tr>
+          <tr>
+            <td><span class="flex-scope">DS-TWR exchange</span></td>
+            <td>Timeout ${esc(dsTimeout.text)} · RESP ${esc(dsResp.text)} · FINAL ${esc(dsFinal.text)} · REPORT ${esc(dsReport.text)} · Auto RX ${esc(autoRx.text)}</td>
+            <td>Controls DS-TWR delayed TX, receive waits and automatic RX. These messages do not exist in a pure FlexTDOA slot.</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
     <div class="flex-timing-note">The cyclic view starts at REQ. Colored widths are protocol time budgets, not packet airtime: REQ and each RESP transmit at their subslot boundary. The 250 us guard is drawn at the end because it is the quiet interval immediately before the next slot's REQ. P_RESP is the paper's aggregate K × 600 us processing budget. Response offsets are native DW3000 delayed-TX targets relative to REQ_RX.</div>`;
 }
