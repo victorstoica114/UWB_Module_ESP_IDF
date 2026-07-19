@@ -1947,11 +1947,6 @@ tr.status-stale td { color: #4f3b1d; }
   margin-bottom: 12px;
 }
 .flex-timing-head h2 { margin-bottom: 2px; }
-.flex-timing-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
 .flex-timing-select {
   display: grid;
   grid-template-columns: auto minmax(170px, 240px);
@@ -2203,93 +2198,6 @@ tr.status-stale td { color: #4f3b1d; }
   min-width: 2px;
   background: #e4edff;
   border-right: 2px solid #2e67d1;
-}
-.timing-rulers {
-  margin-top: 17px;
-  padding-top: 2px;
-  border-top: 1px solid var(--line);
-}
-.timing-ruler-groups {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(420px, 1fr));
-  gap: 22px;
-  align-items: start;
-}
-.timing-ruler-group h3 {
-  margin: 0 0 4px;
-  font-size: 13px;
-}
-.timing-ruler-group-note {
-  min-height: 30px;
-  margin-bottom: 8px;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.35;
-}
-.timing-ruler-row {
-  display: grid;
-  grid-template-columns: 118px minmax(0, 1fr);
-  gap: 11px;
-  padding: 9px 0 10px;
-  border-top: 1px solid var(--line);
-}
-.timing-ruler-meta strong {
-  display: block;
-  font-size: 12px;
-}
-.timing-ruler-meta span {
-  display: block;
-  margin-top: 3px;
-  color: #2455ae;
-  font-size: 12px;
-  font-weight: 700;
-}
-.timing-ruler-events {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.2;
-}
-.timing-ruler-events span:last-child { text-align: right; }
-.timing-ruler-track {
-  position: relative;
-  height: 10px;
-  margin-top: 4px;
-  border-left: 1px solid #52647a;
-  border-right: 1px solid #52647a;
-  background: #edf4ff;
-}
-.timing-ruler-track::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 4px;
-  border-top: 1px solid #9eb5dd;
-}
-.timing-ruler-measure {
-  position: relative;
-  height: 24px;
-  margin-top: 2px;
-}
-.timing-ruler-measure .flex-dimension-line { top: 7px; }
-.timing-ruler-measure .flex-dimension-label {
-  font-size: 11px;
-  color: #42536a;
-}
-.timing-ruler-row.radio .timing-ruler-track { background: #edf8f1; }
-.timing-ruler-row.radio .timing-ruler-track::before { border-color: #96c8aa; }
-.timing-ruler-row.wait .timing-ruler-track { background: #fff4f2; }
-.timing-ruler-row.wait .timing-ruler-track::before { border-color: #d9aaa3; }
-.timing-ruler-row.hardware .timing-ruler-track { background: #f4f0ff; }
-.timing-ruler-row.hardware .timing-ruler-track::before { border-color: #b8a8df; }
-.timing-ruler-footnote {
-  margin-top: 8px;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.4;
 }
 .flex-parameter-map { margin-top: 13px; }
 .flex-parameter-table { width: 100%; font-size: 11px; }
@@ -2684,7 +2592,6 @@ tr.status-stale td { color: #4f3b1d; }
   .flex-timing-metric:nth-child(3) { border-right: 0; }
   .flex-timing-metric:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
   .flex-timing-detail-grid { grid-template-columns: 1fr; }
-  .timing-ruler-groups { grid-template-columns: 1fr; }
   .flex-host-window { grid-template-columns: 120px minmax(300px, 1fr) 220px; }
   .page { height: auto; }
   .terminal { height: 520px; }
@@ -3263,21 +3170,9 @@ tr.status-stale td { color: #4f3b1d; }
               <h2>FlexTDOA Protocol Timing</h2>
               <div class="muted">Live CI-CR frame structure and paper-aligned DW3000 delayed-TX timing.</div>
             </div>
-            <div class="flex-timing-controls">
-              <div class="flex-timing-select">
-                <label for="flexTimingSlotSelect">Inspect slot</label>
-                <select id="flexTimingSlotSelect"></select>
-              </div>
-              <div class="flex-timing-select">
-                <label for="flexTimingParameterSource">Parameter source</label>
-                <select id="flexTimingParameterSource">
-                  <option value="live">live module runtime</option>
-                  <option value="static3">Stable Profile inputs</option>
-                  <option value="dynamic15">Balanced Profile inputs</option>
-                  <option value="dynamic12">Reactive Profile inputs</option>
-                  <option value="fastRaw">Fast Profile inputs</option>
-                </select>
-              </div>
+            <div class="flex-timing-select">
+              <label for="flexTimingSlotSelect">Inspect slot</label>
+              <select id="flexTimingSlotSelect"></select>
             </div>
           </div>
           <div id="flexTdoaTimingDiagram" class="muted">Waiting for FlexTDOA runtime status...</div>
@@ -3704,7 +3599,6 @@ const state = {
   positionGeometry: {key: "", fixed: null, ekf: null},
   positionSeeds: {},
   flexTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.flexTimingSlotSelect") || 0),
-  flexTimingParameterSource: localStorage.getItem("uwbDash.setting.flexTimingParameterSource") || "live",
 };
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
@@ -7825,67 +7719,10 @@ function flexTimingRuntimeConsensus(field, unit = "") {
   return {value: unique[0], text: `${unique[0]}${unit ? ` ${unit}` : ""}`};
 }
 
-function flexTimingKnownValue(value, unit = "") {
-  const numeric = Number(value);
-  return Number.isFinite(numeric)
-    ? {value: numeric, text: `${numeric}${unit ? ` ${unit}` : ""}`}
-    : {value: null, text: "unavailable"};
-}
-
-function flexTimingParameterValues(sourceKey) {
-  const profile = rangingProfileDefaults[sourceKey];
-  if (profile) {
-    const values = readRangingProfile(sourceKey);
-    return {
-      sourceLabel: `${profile.label} inputs`,
-      rxSlice: flexTimingKnownValue(values.rxSliceMs, "ms"),
-      rangingSlot: flexTimingKnownValue(values.slotMs, "ms"),
-      rangingGap: flexTimingKnownValue(values.roundGapMs, "ms"),
-      surveySlot: flexTimingKnownValue(values.slotMs, "ms"),
-      surveyGap: flexTimingKnownValue(values.roundGapMs, "ms"),
-      commandDelay: flexTimingKnownValue(values.commandDelayMs, "ms"),
-      dsTimeout: flexTimingKnownValue(values.timeoutMs, "ms"),
-      dsResp: flexTimingKnownValue(values.respDelayMs, "ms"),
-      dsFinal: flexTimingKnownValue(values.finalDelayMs, "ms"),
-      dsReport: flexTimingKnownValue(values.reportDelayMs, "ms"),
-      autoRx: flexTimingKnownValue(values.autoRxDelayUus, "UUS"),
-    };
-  }
-  return {
-    sourceLabel: "live module runtime",
-    rxSlice: flexTimingRuntimeConsensus("runtime_anchor_survey_rx_slice_ms", "ms"),
-    rangingSlot: flexTimingRuntimeConsensus("runtime_ranging_slot_ms", "ms"),
-    rangingGap: flexTimingRuntimeConsensus("runtime_ranging_round_gap_ms", "ms"),
-    surveySlot: flexTimingRuntimeConsensus("runtime_anchor_survey_slot_ms", "ms"),
-    surveyGap: flexTimingRuntimeConsensus("runtime_anchor_survey_round_gap_ms", "ms"),
-    commandDelay: flexTimingRuntimeConsensus("runtime_anchor_survey_command_delay_ms", "ms"),
-    dsTimeout: flexTimingRuntimeConsensus("runtime_distance_test_rx_timeout_ms", "ms"),
-    dsResp: flexTimingRuntimeConsensus("runtime_distance_test_resp_delay_ms", "ms"),
-    dsFinal: flexTimingRuntimeConsensus("runtime_distance_test_final_delay_ms", "ms"),
-    dsReport: flexTimingRuntimeConsensus("runtime_distance_test_report_delay_ms", "ms"),
-    autoRx: flexTimingRuntimeConsensus("runtime_distance_test_auto_rx_delay_uus", "UUS"),
-  };
-}
-
-function flexTimingRuler(name, valueText, startEvent, endEvent, tone = "", title = "") {
-  return `<div class="timing-ruler-row ${tone}"${title ? ` title="${esc(title)}"` : ""}>
-    <div class="timing-ruler-meta"><strong>${esc(name)}</strong><span>${esc(valueText)}</span></div>
-    <div>
-      <div class="timing-ruler-events"><span>${esc(startEvent)}</span><span>${esc(endEvent)}</span></div>
-      <div class="timing-ruler-track"></div>
-      <div class="timing-ruler-measure">
-        <div class="flex-dimension-line"></div>
-        <span class="flex-dimension-label">${esc(name)} = ${esc(valueText)}</span>
-      </div>
-    </div>
-  </div>`;
-}
-
 function renderFlexTdoaTimingDiagram() {
   const root = document.getElementById("flexTdoaTimingDiagram");
   const selector = document.getElementById("flexTimingSlotSelect");
-  const sourceSelector = document.getElementById("flexTimingParameterSource");
-  if (!root || !selector || !sourceSelector) return;
+  if (!root || !selector) return;
 
   const config = flexTimingRuntimeConfig();
   if (config.anchorIds.length < 3 || config.initiators.length < 1) {
@@ -7902,10 +7739,6 @@ function renderFlexTdoaTimingDiagram() {
     Number(state.flexTimingSlotIndex || 0)
   ));
   state.flexTimingSlotIndex = selectedIndex;
-  if (!sourceSelector.querySelector(`option[value="${state.flexTimingParameterSource}"]`)) {
-    state.flexTimingParameterSource = "live";
-  }
-  sourceSelector.value = state.flexTimingParameterSource;
   selector.innerHTML = config.initiators.map((initiatorId, index) =>
     `<option value="${index}">frame[${index}] · A${esc(initiatorId)}</option>`
   ).join("");
@@ -7920,22 +7753,34 @@ function renderFlexTdoaTimingDiagram() {
   const frameUs = M * slotUs;
   const frameHz = 1000000 / frameUs;
   const responseHz = M * K * frameHz;
-  const timingParameters = flexTimingParameterValues(
-    state.flexTimingParameterSource
+  const rxSlice = flexTimingRuntimeConsensus(
+    "runtime_anchor_survey_rx_slice_ms", "ms"
   );
-  const {
-    rxSlice, rangingSlot, rangingGap, surveySlot, surveyGap,
-    commandDelay, dsTimeout, dsResp, dsFinal, dsReport, autoRx,
-  } = timingParameters;
+  const rangingSlot = flexTimingRuntimeConsensus("runtime_ranging_slot_ms", "ms");
+  const rangingGap = flexTimingRuntimeConsensus("runtime_ranging_round_gap_ms", "ms");
+  const surveySlot = flexTimingRuntimeConsensus("runtime_anchor_survey_slot_ms", "ms");
+  const surveyGap = flexTimingRuntimeConsensus("runtime_anchor_survey_round_gap_ms", "ms");
+  const commandDelay = flexTimingRuntimeConsensus(
+    "runtime_anchor_survey_command_delay_ms", "ms"
+  );
+  const dsTimeout = flexTimingRuntimeConsensus(
+    "runtime_distance_test_rx_timeout_ms", "ms"
+  );
+  const dsResp = flexTimingRuntimeConsensus(
+    "runtime_distance_test_resp_delay_ms", "ms"
+  );
+  const dsFinal = flexTimingRuntimeConsensus(
+    "runtime_distance_test_final_delay_ms", "ms"
+  );
+  const dsReport = flexTimingRuntimeConsensus(
+    "runtime_distance_test_report_delay_ms", "ms"
+  );
+  const autoRx = flexTimingRuntimeConsensus(
+    "runtime_distance_test_auto_rx_delay_uus", "UUS"
+  );
   const rxSliceUs = Number.isFinite(rxSlice.value) ? rxSlice.value * 1000 : 0;
   const rxSliceWidth = rxSliceUs > 0 ? Math.min(100, 100 * rxSliceUs / slotUs) : 0;
   const rxSliceSlots = rxSliceUs > 0 ? rxSliceUs / slotUs : 0;
-  const autoRxMs = Number.isFinite(autoRx.value)
-    ? autoRx.value * 1.025641 / 1000
-    : null;
-  const autoRxText = autoRxMs === null
-    ? autoRx.text
-    : `${autoRx.text} ≈ ${fmtFixed(autoRxMs, 3)} ms`;
   const selectedSlotId = frameStartSlot + selectedIndex;
   const selectedInitiator = config.initiators[selectedIndex];
   const selectedResponders = flexTimingResponders(
@@ -8028,56 +7873,6 @@ function renderFlexTdoaTimingDiagram() {
     </div>`;
   }).join("");
 
-  const schedulerRulers = [
-    flexTimingRuler(
-      "Slot ms", rangingSlot.text,
-      "directed-pair slot starts", "next slot starts", "",
-      "DS-TWR and survey scheduler slot; it does not resize a pure FlexTDOA slot"
-    ),
-    flexTimingRuler(
-      "Round gap ms", rangingGap.text,
-      "all scheduled slots complete", "next cycle starts", "",
-      "DS-TWR and survey cycle gap; pure FlexTDOA uses the separate zero-gap frame dimension above"
-    ),
-    flexTimingRuler(
-      "RX slice ms", rxSlice.text,
-      "software receive call starts", "receive-call deadline", "wait",
-      "Maximum blocking receive-call duration; a radio event or schedule alarm may return earlier"
-    ),
-    flexTimingRuler(
-      "Command delay ms", commandDelay.text,
-      "SURVEY_CMD received", "initiator sends POLL", "radio",
-      "Coordinator lead time used by anchor survey before the selected initiator starts DS-TWR"
-    ),
-  ].join("");
-  const dsTwrRulers = [
-    flexTimingRuler(
-      "DS-TWR timeout ms", dsTimeout.text,
-      "receiver enabled", "wait fails", "wait",
-      "Maximum wait for the expected DS-TWR packet"
-    ),
-    flexTimingRuler(
-      "RESP delay ms", dsResp.text,
-      "anchor timestamps POLL RX", "anchor transmits RESP", "radio",
-      "DW3000 delayed-TX offset on the responder clock"
-    ),
-    flexTimingRuler(
-      "FINAL delay ms", dsFinal.text,
-      "initiator timestamps RESP RX", "initiator transmits FINAL", "radio",
-      "DW3000 delayed-TX offset on the initiator clock"
-    ),
-    flexTimingRuler(
-      "REPORT delay ms", dsReport.text,
-      "FINAL TX or REPORT RX", "REPORT TX or REPORT2 TX", "radio",
-      "The same configured delay is used before REPORT on the initiator and before REPORT2 on the responder"
-    ),
-    flexTimingRuler(
-      "Auto RX delay UUS", autoRxText,
-      "TX completes", "DW3000 RX opens", "hardware",
-      "Native DW3000 wait-for-response delay; 1 UUS equals approximately 1.025641 microseconds"
-    ),
-  ].join("");
-
   root.className = "";
   root.innerHTML = `
     <div class="flex-timing-metrics">
@@ -8128,25 +7923,6 @@ function renderFlexTdoaTimingDiagram() {
         </div>
       </div>
     </div>
-    <div class="timing-rulers">
-      <div class="flex-timing-label">
-        <strong>Profile parameter dimensions · ${esc(timingParameters.sourceLabel)}</strong>
-        <span>Each arrow runs between the two events that define that setting.</span>
-      </div>
-      <div class="timing-ruler-groups">
-        <div class="timing-ruler-group">
-          <h3>Scheduler and host timing</h3>
-          <div class="timing-ruler-group-note">Compatibility controls used by DS-TWR and anchor survey. They remain outside the pure FlexTDOA CI-CR radio frame above.</div>
-          ${schedulerRulers}
-        </div>
-        <div class="timing-ruler-group">
-          <h3>DS-TWR exchange timing</h3>
-          <div class="timing-ruler-group-note">Independent local-clock intervals. They are not drawn as one FlexTDOA frame because POLL, FINAL and REPORT do not exist in FlexTDOA.</div>
-          ${dsTwrRulers}
-        </div>
-      </div>
-      <div class="timing-ruler-footnote">REPORT delay has two references because firmware uses the same value for FINAL TX → REPORT TX and REPORT RX → REPORT2 TX. Auto RX is a native DW3000 hardware interval expressed in UUS.</div>
-    </div>
     <div class="flex-timing-detail-grid">
       <table class="flex-timing-table">
         <thead><tr><th>Interval</th><th>Start ms</th><th>End ms</th><th>Budget</th><th>Radio action</th></tr></thead>
@@ -8166,11 +7942,11 @@ function renderFlexTdoaTimingDiagram() {
     </div>
     <div class="flex-parameter-map">
       <div class="flex-timing-label">
-        <strong>Parameter map · ${esc(timingParameters.sourceLabel)}</strong>
-        <span>Live mode reads all fresh modules and reports mixed values explicitly.</span>
+        <strong>Live runtime parameter map</strong>
+        <span>Values read from all fresh modules; “mixed” is reported explicitly.</span>
       </div>
       <table class="flex-parameter-table">
-        <thead><tr><th>Scope</th><th>Parameter and value</th><th>Where it acts</th></tr></thead>
+        <thead><tr><th>Scope</th><th>Parameter and live value</th><th>Where it acts</th></tr></thead>
         <tbody>
           <tr>
             <td><span class="flex-scope fixed">FlexTDOA radio</span></td>
@@ -8261,12 +8037,6 @@ async function applyRangingProfile(profileKey) {
   if (apiResponseOk(data)) {
     mirrorRangingProfileToUwbFields(values);
     applyRangingProfilePositionSettings(profile);
-    state.flexTimingParameterSource = profileKey;
-    localStorage.setItem(
-      settingKey("flexTimingParameterSource"),
-      state.flexTimingParameterSource
-    );
-    renderFlexTdoaTimingDiagram();
     setTimeout(fetchSnapshot, 500);
   }
 }
@@ -8519,17 +8289,6 @@ function wireSettings() {
       renderFlexTdoaTimingDiagram();
     });
   }
-  const flexTimingParameterSource = document.getElementById("flexTimingParameterSource");
-  if (flexTimingParameterSource) {
-    flexTimingParameterSource.addEventListener("change", () => {
-      state.flexTimingParameterSource = flexTimingParameterSource.value || "live";
-      localStorage.setItem(
-        settingKey("flexTimingParameterSource"),
-        state.flexTimingParameterSource
-      );
-      renderFlexTdoaTimingDiagram();
-    });
-  }
   const chargerShowRawTools = document.getElementById("chargerShowRawTools");
   if (chargerShowRawTools) {
     chargerShowRawTools.addEventListener("change", updateChargerRawVisibility);
@@ -8604,16 +8363,10 @@ function wireSettings() {
     el.addEventListener("input", () => {
       const profile = el.closest(".profile-card")?.dataset.profile;
       if (profile) updateRangingProfileSummary(profile);
-      if (profile && profile === state.flexTimingParameterSource) {
-        renderFlexTdoaTimingDiagram();
-      }
     });
     el.addEventListener("change", () => {
       const profile = el.closest(".profile-card")?.dataset.profile;
       if (profile) updateRangingProfileSummary(profile);
-      if (profile && profile === state.flexTimingParameterSource) {
-        renderFlexTdoaTimingDiagram();
-      }
     });
   });
   document.querySelectorAll(".apply-ranging-profile").forEach(button => {
@@ -8623,7 +8376,6 @@ function wireSettings() {
     button.addEventListener("click", () => {
       const profile = button.dataset.profile;
       writeRangingProfile(profile, rangingProfileDefaults[profile]);
-      if (profile === state.flexTimingParameterSource) renderFlexTdoaTimingDiagram();
       setToast("rangingProfileToast", "profile defaults restored locally; press Apply to write ESP NVS", "");
     });
   });
