@@ -636,7 +636,10 @@ class DashboardState:
         def collect() -> list[dict[str, Any]]:
             if not self.tdoa_position_events:
                 return []
-            if after <= 0:
+            newest_id = int(
+                self.tdoa_position_events[-1].get("position_event_id") or 0
+            )
+            if after <= 0 or after > newest_id:
                 return [dict(self.tdoa_position_events[-1])]
 
             pending: list[dict[str, Any]] = []
@@ -2806,6 +2809,8 @@ tr.status-stale td { color: #4f3b1d; }
               </select>
               <label for="accelSampleHz">Samples/s</label>
               <input id="accelSampleHz" value="20" type="number" min="1" max="500" step="1" inputmode="numeric">
+              <label for="accelEnabled">Sensor</label>
+              <div class="checkbox-row"><input id="accelEnabled" type="checkbox"><span id="accelEnabledLabel">BNO085 disabled</span></div>
               <label for="accelTargets">Targets</label>
               <select id="accelTargets">
                 <option value="all">all modules</option>
@@ -4600,6 +4605,32 @@ function statusForModule(moduleId) {
   return state.statuses.find(item => Number(item.module_id) === Number(moduleId));
 }
 
+function selectedAccelModuleIds() {
+  const target = String(document.getElementById("accelTargets")?.value || "all");
+  return target === "all" ? [1, 2, 3, 4, 5] : [Number(target)];
+}
+
+function updateAccelEnabledControl() {
+  const checkbox = document.getElementById("accelEnabled");
+  const label = document.getElementById("accelEnabledLabel");
+  if (!checkbox || !label) return;
+  const statuses = selectedAccelModuleIds()
+    .map(statusForModule)
+    .filter(Boolean);
+  if (!statuses.length) {
+    checkbox.indeterminate = false;
+    checkbox.checked = false;
+    label.textContent = "BNO085 status unavailable";
+    return;
+  }
+  const enabled = statuses.filter(item => Boolean(item.runtime_bno085_accel_enabled)).length;
+  checkbox.indeterminate = enabled > 0 && enabled < statuses.length;
+  checkbox.checked = enabled === statuses.length;
+  label.textContent = checkbox.indeterminate
+    ? `BNO085 mixed (${enabled}/${statuses.length} enabled)`
+    : `BNO085 ${checkbox.checked ? "enabled" : "disabled"}`;
+}
+
 function moduleHttpOnline(item) {
   return Boolean(item?.http_status_online);
 }
@@ -6208,7 +6239,10 @@ function renderAccelGraphs() {
     const ageEl = document.getElementById(`chartAge${moduleId}`);
     if (ageEl) {
       const rateText = rate?.rxHz ? ` · ${Math.round(rate.rxHz)} rx/s` : "";
-      ageEl.textContent = latest ? `last ${fmtAge(latest.received_at)}${rateText}` : "waiting";
+      const enabled = Boolean(statusForModule(moduleId)?.runtime_bno085_accel_enabled);
+      ageEl.textContent = enabled
+        ? (latest ? `last ${fmtAge(latest.received_at)}${rateText}` : "waiting")
+        : (latest ? `disabled · last ${fmtAge(latest.received_at)}` : "disabled");
     }
     if (!latest) {
       continue;
@@ -6240,6 +6274,10 @@ function setActiveTab(id) {
 async function fetchLogs() {
   const res = await fetch(`/api/logs?after=${state.lastId}&limit=4000`, {cache: "no-store"});
   const data = await res.json();
+  if (!data.logs.length && Number(data.next_id) <= state.lastId) {
+    state.lastId = 0;
+    return;
+  }
   if (data.logs.length) {
     state.logs.push(...data.logs);
     if (state.logs.length > 8000) state.logs.splice(0, state.logs.length - 8000);
@@ -6258,6 +6296,10 @@ async function fetchAccel() {
   try {
     const res = await fetch(`/api/accel?after=${state.lastAccelId}&limit=12000`, {cache: "no-store"});
     const data = await res.json();
+    if (!data.samples.length && Number(data.next_id) <= state.lastAccelId) {
+      state.lastAccelId = 0;
+      return;
+    }
     if (data.samples.length) {
       for (const sample of data.samples) mergeAccelSample(sample);
       state.lastAccelId = Math.max(state.lastAccelId, ...data.samples.map(item => item.sample_id || 0));
@@ -7105,6 +7147,7 @@ function renderInfo(snapshot) {
   renderPosition();
   renderFlexTdoaTimingDiagram();
   scheduleAccelRender();
+  updateAccelEnabledControl();
   hydrateSettingsFromStatus(freshStatus);
   hydrateChargerSettings();
   hydratePdSettings();
@@ -9160,12 +9203,24 @@ function wireSettings() {
   });
   document.getElementById("applyAccelSample").addEventListener("click", () => {
     const sampleHz = document.getElementById("accelSampleHz").value;
+    const enabled = document.getElementById("accelEnabled");
+    if (enabled.indeterminate) {
+      setToast("accelToast", "Choose enabled or disabled for the mixed target set", "bad");
+      return;
+    }
     postConfig({
       target_modules: document.getElementById("accelTargets").value,
       params: {
+        bno085: enabled.checked ? "1" : "0",
         bno085_sample_hz: sampleHz,
       }
     }, "accelToast");
+  });
+  document.getElementById("accelTargets").addEventListener("change", updateAccelEnabledControl);
+  document.getElementById("accelEnabled").addEventListener("change", event => {
+    event.currentTarget.indeterminate = false;
+    document.getElementById("accelEnabledLabel").textContent =
+      `BNO085 ${event.currentTarget.checked ? "enabled" : "disabled"}`;
   });
   document.getElementById("applyUwbSettings").addEventListener("click", () => {
     postConfig({
