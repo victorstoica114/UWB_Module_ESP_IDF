@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
@@ -1334,10 +1335,10 @@ class DashboardState:
                     age_sec is not None
                     and age_sec <= self.status_online_max_age_sec
                     and bool(item.get("wifi_connected"))
-                    and not error
                 )
                 item["http_status_age_sec"] = age_sec
                 item["http_status_online"] = online
+                item["http_status_degraded"] = bool(error) and online
                 if error:
                     item["http_status_error"] = error
                 statuses.append(item)
@@ -1633,10 +1634,14 @@ class StatusPoller(threading.Thread):
         self.stop_event = threading.Event()
 
     def run(self) -> None:
-        while not self.stop_event.is_set():
-            for target in self.targets:
-                self.poll_target(target)
-            self.stop_event.wait(self.interval)
+        with ThreadPoolExecutor(
+            max_workers=max(1, len(self.targets)), thread_name_prefix="status"
+        ) as executor:
+            while not self.stop_event.is_set():
+                futures = [executor.submit(self.poll_target, target) for target in self.targets]
+                for future in futures:
+                    future.result()
+                self.stop_event.wait(self.interval)
 
     def poll_target(self, target: str) -> None:
         try:
@@ -6228,6 +6233,7 @@ function setActiveTab(id) {
   requestAnimationFrame(renderVisibleTerminals);
   requestAnimationFrame(renderPosition);
   if (id === "rangingSettings") requestAnimationFrame(updateRangingSettingsProtocol);
+  if (id === "graphs") fetchAccel();
   scheduleAccelRender();
 }
 
@@ -6246,6 +6252,7 @@ async function fetchLogs() {
 }
 
 async function fetchAccel() {
+  if (state.activeTab !== "graphs") return;
   if (state.accelFetchPending) return;
   state.accelFetchPending = true;
   try {
@@ -10470,7 +10477,6 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 and status.get("target")
                 and bool(status.get("wifi_connected"))
                 and now - float(status.get("status_updated_at") or 0.0) <= max_age_sec
-                and str(status.get("target") or "") not in self.state.status_errors
             }
 
         if not module_ids:

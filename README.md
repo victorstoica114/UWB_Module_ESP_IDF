@@ -660,6 +660,21 @@ delivery interval, and the full M1 telemetry queue also confirm that this is a
 limit test with little scheduling reserve. The `14.80 ms Frame` profile remains
 the robust default until the shorter timing receives a longer clean run.
 
+HTTP status polling is performed concurrently for all modules. A single failed
+poll marks the last status as degraded but does not immediately hide a live
+position; the module becomes offline only after its last successful status has
+aged out. High-rate accelerometer samples are fetched and decoded by the
+browser only while the `Graphs` tab is visible, while the server continues to
+receive and buffer them.
+
+A coexistence check with the `14.80 ms Frame` profile and all five BNO085
+sensors at `500 Hz` saturated M1's telemetry queue and added `1,522` drops in
+one minute. After disabling the accelerometers without rebooting, the queue
+drained and the drop counter remained unchanged for the following `30 s`.
+Maximum-rate FlexTDOA measurements should therefore keep BNO085 disabled;
+running both at maximum rate remains a separate telemetry coexistence stress
+case.
+
 #### FlexTDOA 5.05 ms Baseline Hardware Validation
 
 Before compacting the request and guard budgets, the complete implementation
