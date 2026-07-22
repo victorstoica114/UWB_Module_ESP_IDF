@@ -996,6 +996,7 @@ static uint64_t s_flex_tdoa_req_to_dtx_sum_us[
 static uint32_t s_flex_tdoa_req_to_dtx_max_us[
     UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
 static uint32_t s_flex_tdoa_dtx_arm_max_us;
+static uint32_t s_flex_tdoa_request_arm_max_us;
 static int64_t s_last_delayed_command_host_us;
 static uint32_t s_last_delayed_arm_us;
 
@@ -5987,7 +5988,7 @@ static void uwb_flex_tdoa_log_anchor_result(
         (void)wireless_log_service_submit('I', TAG,
                  "FLEX_TDOA anchor n=%lu drop=%lu incoh=%lu idx=%lu/%lu/%lu "
                  "txresp=%lu/%lu/%lu/%lu rxerr=%lu/0x%08lx rdb=%lu cia=%lu "
-                 "path_us=%lu/%lu,%lu/%lu,%lu/%lu arm_max=%lu",
+                 "path_us=%lu/%lu,%lu/%lu,%lu/%lu arm_max=%lu req_arm_max=%lu",
                  (unsigned long)s_flex_tdoa_anchor_results_since_summary,
                  (unsigned long)s_flex_tdoa_anchor_drops_since_summary,
                  (unsigned long)s_flex_tdoa_anchor_incoherent_since_summary,
@@ -6008,7 +6009,8 @@ static void uwb_flex_tdoa_log_anchor_result(
                  (unsigned long)s_flex_tdoa_req_to_dtx_max_us[1],
                  (unsigned long)path_avg_2,
                  (unsigned long)s_flex_tdoa_req_to_dtx_max_us[2],
-                 (unsigned long)s_flex_tdoa_dtx_arm_max_us);
+                 (unsigned long)s_flex_tdoa_dtx_arm_max_us,
+                 (unsigned long)s_flex_tdoa_request_arm_max_us);
         s_flex_tdoa_anchor_results_since_summary = 0;
         s_flex_tdoa_anchor_drops_since_summary = 0;
         s_flex_tdoa_anchor_incoherent_since_summary = 0;
@@ -6027,6 +6029,7 @@ static void uwb_flex_tdoa_log_anchor_result(
         memset(s_flex_tdoa_req_to_dtx_max_us, 0,
                sizeof(s_flex_tdoa_req_to_dtx_max_us));
         s_flex_tdoa_dtx_arm_max_us = 0;
+        s_flex_tdoa_request_arm_max_us = 0;
         s_flex_tdoa_anchor_summary_tick = now;
     }
     (void)clock_offset_valid;
@@ -6344,7 +6347,7 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
     int64_t bootstrap_deadline_us =
         esp_timer_get_time() + UWB_FLEX_TDOA_BOOTSTRAP_LISTEN_US;
     ESP_LOGI(TAG,
-             "FLEX_TDOA CI-CR anchor active: source_id=%u bootstrap=%u slot_index=%u anchors=%u K=%u slot=%lu us frame=%lu us",
+             "FLEX_TDOA CI-CR anchor active: source_id=%u bootstrap=%u slot_index=%u anchors=%u K=%u slot=%lu us frame=%lu us req_lead=%lu us",
              (unsigned)s_source_id, (unsigned)bootstrap_id,
              (unsigned)schedule.own_slot_index, (unsigned)anchor_count,
              (unsigned)config->flex_tdoa_responder_count,
@@ -6352,7 +6355,8 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
                  config->flex_tdoa_responder_count),
              (unsigned long)(config->flex_tdoa_slot_count *
                  uwb_flex_tdoa_slot_duration_us(
-                     config->flex_tdoa_responder_count)));
+                     config->flex_tdoa_responder_count)),
+             (unsigned long)UWB_FLEX_TDOA_REQUEST_TX_LEAD_US);
 
     while (true) {
         config = app_runtime_config_get();
@@ -6383,6 +6387,9 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
                 anchor_ids, anchor_count, slot_id,
                 (uint16_t)(slot_id & 0xFFFFU), schedule.next_request_radio_ts,
                 &actual_tx_ts);
+            if (s_last_delayed_arm_us > s_flex_tdoa_request_arm_max_us) {
+                s_flex_tdoa_request_arm_max_us = s_last_delayed_arm_us;
+            }
             if (err != ESP_OK) {
                 schedule.synced = false;
                 schedule.missed_slots++;

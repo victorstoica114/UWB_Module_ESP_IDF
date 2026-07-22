@@ -1931,6 +1931,18 @@ tr.status-stale td { color: #4f3b1d; }
   min-height: 34px;
   line-height: 1.35;
 }
+.profile-validation {
+  display: inline-block;
+  margin: 0 0 10px;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  background: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.profile-validation.good { border-color: #78bb98; background: #f2fbf6; color: #116f3b; }
+.profile-validation.warn { border-color: #d8b55f; background: #fffaf0; color: #805b00; }
+.profile-validation.bad { border-color: #e2a4a4; background: #fff5f5; color: #a32626; }
 .ranging-protocol-context {
   display: flex;
   align-items: center;
@@ -3233,6 +3245,7 @@ tr.status-stale td { color: #4f3b1d; }
             <div class="profile-card flex-profile-card" data-flex-profile="frame19200">
               <h3>19.20 ms Frame</h3>
               <p class="muted">Hardware-validated baseline for four anchors and three responders.</p>
+              <div class="profile-validation good">validated conservative baseline</div>
               <div class="form-grid compact">
                 <label for="flexProfile19200GuardUs">Guard us</label>
                 <input id="flexProfile19200GuardUs" value="500" type="number" min="1" max="65535" step="10">
@@ -3257,7 +3270,8 @@ tr.status-stale td { color: #4f3b1d; }
             </div>
             <div class="profile-card flex-profile-card" data-flex-profile="frame14800">
               <h3>14.80 ms Frame</h3>
-              <p class="muted">First compact experiment: 3.70 ms slot at N=4, K=3.</p>
+              <p class="muted">Fastest clean steady-state profile measured on all five modules.</p>
+              <div class="profile-validation good">recommended · 0 TX failures / 60 s</div>
               <div class="form-grid compact">
                 <label for="flexProfile14800GuardUs">Guard us</label>
                 <input id="flexProfile14800GuardUs" value="250" type="number" min="1" max="65535" step="10">
@@ -3278,6 +3292,110 @@ tr.status-stale td { color: #4f3b1d; }
               <div class="form-actions">
                 <button class="primary apply-flex-profile" data-flex-profile="frame14800">Apply 14.80 ms</button>
                 <button class="reset-flex-profile" data-flex-profile="frame14800">Reset Defaults</button>
+              </div>
+            </div>
+            <div class="profile-card flex-profile-card" data-flex-profile="frame14200">
+              <h3>14.20 ms Frame</h3>
+              <p class="muted">First timing boundary below the recommended profile.</p>
+              <div class="profile-validation warn">borderline · 1 delayed-TX failure / 30 s</div>
+              <div class="form-grid compact">
+                <label for="flexProfile14200GuardUs">Guard us</label>
+                <input id="flexProfile14200GuardUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14200ReqUs">REQ us</label>
+                <input id="flexProfile14200ReqUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14200ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile14200ReqProcessUs" value="1250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14200RespUs">RESP subslot us</label>
+                <input id="flexProfile14200RespUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14200RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile14200RespProcessUs" value="350" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14200RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile14200RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile14200FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile14200FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+              </div>
+              <div class="profile-summary" id="flexProfile14200Summary"></div>
+              <div class="form-actions">
+                <button class="primary apply-flex-profile" data-flex-profile="frame14200">Apply 14.20 ms</button>
+                <button class="reset-flex-profile" data-flex-profile="frame14200">Reset Defaults</button>
+              </div>
+            </div>
+            <div class="profile-card flex-profile-card" data-flex-profile="frame13600">
+              <h3>13.60 ms Frame</h3>
+              <p class="muted">Higher response rate with insufficient delayed-TX margin.</p>
+              <div class="profile-validation warn">borderline · 1 delayed-TX failure / 30 s</div>
+              <div class="form-grid compact">
+                <label for="flexProfile13600GuardUs">Guard us</label>
+                <input id="flexProfile13600GuardUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile13600ReqUs">REQ us</label>
+                <input id="flexProfile13600ReqUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile13600ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile13600ReqProcessUs" value="1250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile13600RespUs">RESP subslot us</label>
+                <input id="flexProfile13600RespUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile13600RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile13600RespProcessUs" value="300" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile13600RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile13600RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile13600FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile13600FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+              </div>
+              <div class="profile-summary" id="flexProfile13600Summary"></div>
+              <div class="form-actions">
+                <button class="primary apply-flex-profile" data-flex-profile="frame13600">Apply 13.60 ms</button>
+                <button class="reset-flex-profile" data-flex-profile="frame13600">Reset Defaults</button>
+              </div>
+            </div>
+            <div class="profile-card flex-profile-card" data-flex-profile="frame12600">
+              <h3>12.60 ms Frame</h3>
+              <p class="muted">Limit-search profile that repeatedly missed delayed TX.</p>
+              <div class="profile-validation bad">failed · 2 delayed-TX failures / 30 s</div>
+              <div class="form-grid compact">
+                <label for="flexProfile12600GuardUs">Guard us</label>
+                <input id="flexProfile12600GuardUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12600ReqUs">REQ us</label>
+                <input id="flexProfile12600ReqUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12600ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile12600ReqProcessUs" value="1000" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12600RespUs">RESP subslot us</label>
+                <input id="flexProfile12600RespUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12600RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile12600RespProcessUs" value="300" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12600RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile12600RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile12600FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile12600FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+              </div>
+              <div class="profile-summary" id="flexProfile12600Summary"></div>
+              <div class="form-actions">
+                <button class="primary apply-flex-profile" data-flex-profile="frame12600">Apply 12.60 ms</button>
+                <button class="reset-flex-profile" data-flex-profile="frame12600">Reset Defaults</button>
+              </div>
+            </div>
+            <div class="profile-card flex-profile-card" data-flex-profile="frame12000">
+              <h3>12.00 ms Frame</h3>
+              <p class="muted">One-kilohertz response-rate experiment beyond the robust limit.</p>
+              <div class="profile-validation bad">failed · 3 TX failures / 30 s</div>
+              <div class="form-grid compact">
+                <label for="flexProfile12000GuardUs">Guard us</label>
+                <input id="flexProfile12000GuardUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12000ReqUs">REQ us</label>
+                <input id="flexProfile12000ReqUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12000ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile12000ReqProcessUs" value="1000" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12000RespUs">RESP subslot us</label>
+                <input id="flexProfile12000RespUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12000RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile12000RespProcessUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12000RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile12000RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile12000FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile12000FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+              </div>
+              <div class="profile-summary" id="flexProfile12000Summary"></div>
+              <div class="form-actions">
+                <button class="primary apply-flex-profile" data-flex-profile="frame12000">Apply 12.00 ms</button>
+                <button class="reset-flex-profile" data-flex-profile="frame12000">Reset Defaults</button>
               </div>
             </div>
           </div>
@@ -3844,6 +3962,50 @@ const flexProfileDefaults = {
     rxSliceMs: 5,
     positionMaxAgeSec: 0.5,
   },
+  frame14200: {
+    prefix: "flexProfile14200",
+    label: "14.20 ms Frame",
+    guardUs: 250,
+    requestUs: 250,
+    requestProcessUs: 1250,
+    responseUs: 250,
+    responseProcessUs: 350,
+    rxSliceMs: 5,
+    positionMaxAgeSec: 0.5,
+  },
+  frame13600: {
+    prefix: "flexProfile13600",
+    label: "13.60 ms Frame",
+    guardUs: 250,
+    requestUs: 250,
+    requestProcessUs: 1250,
+    responseUs: 250,
+    responseProcessUs: 300,
+    rxSliceMs: 5,
+    positionMaxAgeSec: 0.5,
+  },
+  frame12600: {
+    prefix: "flexProfile12600",
+    label: "12.60 ms Frame",
+    guardUs: 250,
+    requestUs: 250,
+    requestProcessUs: 1000,
+    responseUs: 250,
+    responseProcessUs: 300,
+    rxSliceMs: 5,
+    positionMaxAgeSec: 0.5,
+  },
+  frame12000: {
+    prefix: "flexProfile12000",
+    label: "12.00 ms Frame",
+    guardUs: 250,
+    requestUs: 250,
+    requestProcessUs: 1000,
+    responseUs: 250,
+    responseProcessUs: 250,
+    rxSliceMs: 5,
+    positionMaxAgeSec: 0.5,
+  },
 };
 const rangingProtocolProfileFields = {
   flextdoa: new Set(["positionMaxAgeSec", "rxSliceMs"]),
@@ -3854,7 +4016,7 @@ const rangingProtocolProfileFields = {
   hybrid: new Set(),
 };
 const rangingProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v5";
-const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v1";
+const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",

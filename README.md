@@ -438,17 +438,24 @@ response_subslot
 response_process = K * response_process_per_responder
 ```
 
-For four anchors, `K = 3`, the available profiles are:
+For four anchors, `K = 3`, the dashboard keeps the validated profiles and the
+complete timing-limit search:
 
 | Profile | Guard | REQ | Process REQ | 3 x RESP | 3 x Process RESP | Slot | Frame | Frame rate |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `19.20 ms Frame` | `500 us` | `250 us` | `1500 us` | `750 us` | `1800 us` | `4.800 ms` | `19.200 ms` | `52.08 Hz` |
 | `14.80 ms Frame` | `250 us` | `250 us` | `1250 us` | `750 us` | `1200 us` | `3.700 ms` | `14.800 ms` | `67.57 Hz` |
+| `14.20 ms Frame` | `250 us` | `250 us` | `1250 us` | `750 us` | `1050 us` | `3.550 ms` | `14.200 ms` | `70.42 Hz` |
+| `13.60 ms Frame` | `250 us` | `250 us` | `1250 us` | `750 us` | `900 us` | `3.400 ms` | `13.600 ms` | `73.53 Hz` |
+| `12.60 ms Frame` | `250 us` | `250 us` | `1000 us` | `750 us` | `900 us` | `3.150 ms` | `12.600 ms` | `79.37 Hz` |
+| `12.00 ms Frame` | `250 us` | `250 us` | `1000 us` | `750 us` | `750 us` | `3.000 ms` | `12.000 ms` | `83.33 Hz` |
 
 The `19.20 ms Frame` profile is the conservative hardware-validated baseline.
-The `14.80 ms Frame` profile is the first compact timing experiment. The
-dashboard exposes every term directly and computes slot length, frame length,
-frame rate, and response rate before applying a profile.
+The `14.80 ms Frame` profile is the fastest clean steady-state profile observed
+on all five modules. Shorter profiles remain available as explicitly marked
+experiments, but are not recommended defaults. The dashboard exposes every
+term directly and computes slot length, frame length, frame rate, and response
+rate before applying a profile.
 
 For the conservative profile, one slot is:
 
@@ -635,10 +642,37 @@ window taken after boot stabilization produced:
 | Incoherent anchor observations | `0` |
 | Measured REQ processing path maximum | below `460 us` |
 
-This is a successful first compact-profile trial, not yet a replacement for
-the longer `150 s` validation of the conservative profile. Longer runs and
-dynamic tag tests should be added under the same frame-length profile name so
-timing results remain directly comparable.
+This is a successful compact-profile trial, not yet a replacement for the
+longer `150 s` validation of the conservative profile. Longer runs and dynamic
+tag tests should be added under the same frame-length profile name so timing
+results remain directly comparable.
+
+#### FlexTDOA Timing-Limit Search
+
+The profiles below were exercised consecutively on all five physical modules
+on 2026-07-22. Each short profile was observed for `30 s`; the restored
+`14.80 ms` profile received a separate clean `60 s` steady-state window after
+the simultaneous reboot and network resynchronization had settled.
+
+| Frame | Slot | Frame rate | Response rate | Hardware result |
+| ---: | ---: | ---: | ---: | --- |
+| `14.80 ms` | `3.70 ms` | `67.57 Hz` | `810.8/s` | Recommended: `0` TX errors in the clean `60 s` window. |
+| `14.20 ms` | `3.55 ms` | `70.42 Hz` | `845.1/s` | Borderline: `1` delayed-TX reject and resynchronization in `30 s`. |
+| `13.60 ms` | `3.40 ms` | `73.53 Hz` | `882.4/s` | Borderline: `1` delayed-TX reject and resynchronization in `30 s`. |
+| `12.60 ms` | `3.15 ms` | `79.37 Hz` | `952.4/s` | Failed: `2` delayed-TX rejects and resynchronizations in `30 s`. |
+| `12.00 ms` | `3.00 ms` | `83.33 Hz` | `1000.0/s` | Failed: `3` TX failures in `30 s`. |
+
+The instrumentation separates delayed-TX register programming from the full
+radio path. Request arming normally peaked at approximately `90-153 us`, while
+the observed response hot path remained below approximately `480 us`. Those
+averages and ordinary maxima do not define the safe timing margin: the failed
+profiles expose rare millisecond-scale task and radio-state stalls.
+
+An ESP timer ISR dispatch experiment reduced some late request scheduling, but
+it could wake the same UWB task while that task was waiting for a response TX
+event and introduced occasional response-path failures. It was rejected. The
+firmware was restored to the original task-dispatched timer and fixed
+`1750 us` request preparation lead before the final clean `14.80 ms` run.
 
 #### FlexTDOA Speed Notes
 
