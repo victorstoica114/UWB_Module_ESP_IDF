@@ -5,6 +5,7 @@
 
 #include "app_runtime_config.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -20,6 +21,9 @@ enum {
     FLEX_SOLVER_GEOMETRY_MIN_PERIOD_MS = 100,
     FLEX_SOLVER_MAX_ITEMS_PER_BATCH = 64,
     FLEX_SOLVER_MAX_VARIABLES = 2 * APP_RUNTIME_CONFIG_MAX_ANCHORS - 3,
+    FLEX_SOLVER_MAX_POSITION_OBSERVATIONS =
+        APP_RUNTIME_CONFIG_MAX_ANCHORS *
+        (APP_RUNTIME_CONFIG_MAX_ANCHORS - 1),
 };
 
 enum flex_solver_item_type {
@@ -67,9 +71,25 @@ struct flex_solver_state {
     uint32_t pending_position_slot_id;
 };
 
+struct flex_solver_position_observation {
+    float value_m;
+    float initiator_x;
+    float initiator_y;
+    float responder_x;
+    float responder_y;
+};
+
+struct flex_solver_position_batch {
+    struct flex_solver_position_observation
+        items[FLEX_SOLVER_MAX_POSITION_OBSERVATIONS];
+    size_t count;
+};
+
 static QueueHandle_t s_queue;
 static bool s_started;
 static uint32_t s_dropped;
+static uint32_t s_last_position_iterations;
+static uint32_t s_last_position_evaluations;
 
 static void flex_solver_apply_runtime_geometry(struct flex_solver_state *state)
 {
@@ -292,47 +312,68 @@ static bool flex_solver_update_geometry(struct flex_solver_state *state)
     return true;
 }
 
-static double flex_solver_position_cost(
-    const struct flex_solver_state *state, TickType_t now, double x, double y,
-    double *h00, double *h01, double *h11, double *g0, double *g1,
-    size_t *used_count)
+static void flex_solver_build_position_batch(
+    const struct flex_solver_state *state, TickType_t now,
+    struct flex_solver_position_batch *batch)
 {
-    double local_h00 = 0.0, local_h01 = 0.0, local_h11 = 0.0;
-    double local_g0 = 0.0, local_g1 = 0.0, sse = 0.0;
-    size_t count = 0;
+    batch->count = 0;
+    const TickType_t max_age_ticks =
+        pdMS_TO_TICKS(FLEX_SOLVER_POSITION_MAX_AGE_MS);
     for (size_t initiator = 0; initiator < state->anchor_count; ++initiator) {
         for (size_t responder = 0; responder < state->anchor_count;
              ++responder) {
             const struct flex_solver_measurement *measurement =
                 &state->observations[initiator][responder];
             if (!measurement->valid || initiator == responder ||
-                now - measurement->updated_tick >
-                    pdMS_TO_TICKS(FLEX_SOLVER_POSITION_MAX_AGE_MS)) {
+                now - measurement->updated_tick > max_age_ticks ||
+                batch->count >= FLEX_SOLVER_MAX_POSITION_OBSERVATIONS) {
                 continue;
             }
-            const double di = hypot(x - state->anchor_x[initiator],
-                                    y - state->anchor_y[initiator]);
-            const double dr = hypot(x - state->anchor_x[responder],
-                                    y - state->anchor_y[responder]);
-            if (di < 0.02 || dr < 0.02) {
-                continue;
-            }
-            const double residual =
-                measurement->value_m - (dr - di);
-            const double jx =
-                (x - state->anchor_x[responder]) / dr -
-                (x - state->anchor_x[initiator]) / di;
-            const double jy =
-                (y - state->anchor_y[responder]) / dr -
-                (y - state->anchor_y[initiator]) / di;
-            local_h00 += jx * jx;
-            local_h01 += jx * jy;
-            local_h11 += jy * jy;
-            local_g0 += jx * residual;
-            local_g1 += jy * residual;
-            sse += residual * residual;
-            count++;
+            batch->items[batch->count++] =
+                (struct flex_solver_position_observation){
+                    .value_m = (float)measurement->value_m,
+                    .initiator_x = (float)state->anchor_x[initiator],
+                    .initiator_y = (float)state->anchor_y[initiator],
+                    .responder_x = (float)state->anchor_x[responder],
+                    .responder_y = (float)state->anchor_y[responder],
+                };
         }
+    }
+}
+
+static float flex_solver_position_cost(
+    const struct flex_solver_position_batch *batch, float x, float y,
+    float *h00, float *h01, float *h11, float *g0, float *g1,
+    size_t *used_count)
+{
+    s_last_position_evaluations++;
+    float local_h00 = 0.0f, local_h01 = 0.0f, local_h11 = 0.0f;
+    float local_g0 = 0.0f, local_g1 = 0.0f, sse = 0.0f;
+    size_t count = 0;
+    for (size_t i = 0; i < batch->count; ++i) {
+        const struct flex_solver_position_observation *observation =
+            &batch->items[i];
+        const float initiator_dx = x - observation->initiator_x;
+        const float initiator_dy = y - observation->initiator_y;
+        const float responder_dx = x - observation->responder_x;
+        const float responder_dy = y - observation->responder_y;
+        const float di = sqrtf(
+            initiator_dx * initiator_dx + initiator_dy * initiator_dy);
+        const float dr = sqrtf(
+            responder_dx * responder_dx + responder_dy * responder_dy);
+        if (di < 0.02 || dr < 0.02) {
+            continue;
+        }
+        const float residual = observation->value_m - (dr - di);
+        const float jx = responder_dx / dr - initiator_dx / di;
+        const float jy = responder_dy / dr - initiator_dy / di;
+        local_h00 += jx * jx;
+        local_h01 += jx * jy;
+        local_h11 += jy * jy;
+        local_g0 += jx * residual;
+        local_g1 += jy * residual;
+        sse += residual * residual;
+        count++;
     }
     if (h00 != NULL) *h00 = local_h00;
     if (h01 != NULL) *h01 = local_h01;
@@ -349,23 +390,37 @@ static void flex_solver_update_position(struct flex_solver_state *state,
     if (!state->geometry_ready) {
         return;
     }
+    s_last_position_iterations = 0;
+    s_last_position_evaluations = 0;
     const TickType_t now = xTaskGetTickCount();
-    double min_x = state->anchor_x[0], max_x = state->anchor_x[0];
-    double min_y = state->anchor_y[0], max_y = state->anchor_y[0];
-    double center_x = 0.0, center_y = 0.0;
+    struct flex_solver_position_batch batch;
+    flex_solver_build_position_batch(state, now, &batch);
+    if (batch.count < 3U) {
+        return;
+    }
+
+    float min_x = (float)state->anchor_x[0];
+    float max_x = (float)state->anchor_x[0];
+    float min_y = (float)state->anchor_y[0];
+    float max_y = (float)state->anchor_y[0];
+    float center_x = 0.0f, center_y = 0.0f;
     for (size_t i = 0; i < state->anchor_count; ++i) {
-        min_x = fmin(min_x, state->anchor_x[i]);
-        max_x = fmax(max_x, state->anchor_x[i]);
-        min_y = fmin(min_y, state->anchor_y[i]);
-        max_y = fmax(max_y, state->anchor_y[i]);
-        center_x += state->anchor_x[i];
-        center_y += state->anchor_y[i];
+        const float anchor_x = (float)state->anchor_x[i];
+        const float anchor_y = (float)state->anchor_y[i];
+        min_x = fminf(min_x, anchor_x);
+        max_x = fmaxf(max_x, anchor_x);
+        min_y = fminf(min_y, anchor_y);
+        max_y = fmaxf(max_y, anchor_y);
+        center_x += anchor_x;
+        center_y += anchor_y;
     }
     center_x /= state->anchor_count;
     center_y /= state->anchor_count;
-    const double geometry_span = fmax(0.5, hypot(max_x - min_x,
-                                                 max_y - min_y));
-    const double bound_margin = 2.0 * geometry_span;
+    const float span_x = max_x - min_x;
+    const float span_y = max_y - min_y;
+    const float geometry_span =
+        fmaxf(0.5f, sqrtf(span_x * span_x + span_y * span_y));
+    const float bound_margin = 2.0f * geometry_span;
     const bool previous_plausible =
         state->position_valid && isfinite(state->position_x) &&
         isfinite(state->position_y) &&
@@ -373,16 +428,16 @@ static void flex_solver_update_position(struct flex_solver_state *state,
         state->position_x <= max_x + bound_margin &&
         state->position_y >= min_y - bound_margin &&
         state->position_y <= max_y + bound_margin;
-    double x = previous_plausible ? state->position_x : center_x;
-    double y = previous_plausible ? state->position_y : center_y;
+    float x = previous_plausible ? (float)state->position_x : center_x;
+    float y = previous_plausible ? (float)state->position_y : center_y;
 
     // AlgMin needs a good initial point. Prefer the anchor centroid whenever
     // the previous estimate has a larger raw least-squares cost.
     size_t initial_count = 0, center_count = 0;
-    double current_sse = flex_solver_position_cost(
-        state, now, x, y, NULL, NULL, NULL, NULL, NULL, &initial_count);
-    const double center_sse = flex_solver_position_cost(
-        state, now, center_x, center_y, NULL, NULL, NULL, NULL, NULL,
+    float current_sse = flex_solver_position_cost(
+        &batch, x, y, NULL, NULL, NULL, NULL, NULL, &initial_count);
+    const float center_sse = flex_solver_position_cost(
+        &batch, center_x, center_y, NULL, NULL, NULL, NULL, NULL,
         &center_count);
     if (center_count >= 3U &&
         (initial_count < 3U || center_sse < current_sse)) {
@@ -395,35 +450,37 @@ static void flex_solver_update_position(struct flex_solver_state *state,
         return;
     }
 
-    double damping = 1e-4;
+    float damping = 1e-4f;
     for (size_t iteration = 0; iteration < 6U; ++iteration) {
-        double h00 = 0.0, h01 = 0.0, h11 = 0.0, g0 = 0.0, g1 = 0.0;
+        s_last_position_iterations++;
+        float h00 = 0.0f, h01 = 0.0f, h11 = 0.0f;
+        float g0 = 0.0f, g1 = 0.0f;
         size_t count = 0;
         current_sse = flex_solver_position_cost(
-            state, now, x, y, &h00, &h01, &h11, &g0, &g1, &count);
-        const double damped_h00 = h00 + damping;
-        const double damped_h11 = h11 + damping;
-        const double determinant = damped_h00 * damped_h11 - h01 * h01;
-        if (count < 3U || fabs(determinant) < 1e-9) {
+            &batch, x, y, &h00, &h01, &h11, &g0, &g1, &count);
+        const float damped_h00 = h00 + damping;
+        const float damped_h11 = h11 + damping;
+        const float determinant = damped_h00 * damped_h11 - h01 * h01;
+        if (count < 3U || fabsf(determinant) < 1e-9f) {
             return;
         }
-        double dx = (damped_h11 * g0 - h01 * g1) / determinant;
-        double dy = (-h01 * g0 + damped_h00 * g1) / determinant;
-        const double step_length = hypot(dx, dy);
-        const double max_step = 0.25 * geometry_span;
+        float dx = (damped_h11 * g0 - h01 * g1) / determinant;
+        float dy = (-h01 * g0 + damped_h00 * g1) / determinant;
+        const float step_length = sqrtf(dx * dx + dy * dy);
+        const float max_step = 0.25f * geometry_span;
         if (step_length > max_step) {
             dx *= max_step / step_length;
             dy *= max_step / step_length;
         }
 
         bool accepted = false;
-        double accepted_scale = 1.0;
+        float accepted_scale = 1.0f;
         for (size_t attempt = 0; attempt < 6U; ++attempt) {
-            const double candidate_x = x + accepted_scale * dx;
-            const double candidate_y = y + accepted_scale * dy;
+            const float candidate_x = x + accepted_scale * dx;
+            const float candidate_y = y + accepted_scale * dy;
             size_t candidate_count = 0;
-            const double candidate_sse = flex_solver_position_cost(
-                state, now, candidate_x, candidate_y, NULL, NULL, NULL, NULL,
+            const float candidate_sse = flex_solver_position_cost(
+                &batch, candidate_x, candidate_y, NULL, NULL, NULL, NULL,
                 NULL, &candidate_count);
             if (candidate_count == count && candidate_sse <= current_sse) {
                 x = candidate_x;
@@ -432,24 +489,28 @@ static void flex_solver_update_position(struct flex_solver_state *state,
                 accepted = true;
                 break;
             }
-            accepted_scale *= 0.5;
+            accepted_scale *= 0.5f;
         }
         if (!accepted) {
-            damping *= 10.0;
+            damping *= 10.0f;
             continue;
         }
-        damping = fmax(1e-6, damping * 0.25);
-        if (hypot(accepted_scale * dx, accepted_scale * dy) < 0.0001) {
+        damping = fmaxf(1e-6f, damping * 0.25f);
+        const float accepted_dx = accepted_scale * dx;
+        const float accepted_dy = accepted_scale * dy;
+        if (sqrtf(accepted_dx * accepted_dx + accepted_dy * accepted_dy) <
+            0.0001f) {
             break;
         }
     }
 
     size_t used_count = 0;
-    double final_h00 = 0.0, final_h01 = 0.0, final_h11 = 0.0;
-    const double final_sse = flex_solver_position_cost(
-        state, now, x, y, &final_h00, &final_h01, &final_h11, NULL, NULL,
+    float final_h00 = 0.0f, final_h01 = 0.0f, final_h11 = 0.0f;
+    const float final_sse = flex_solver_position_cost(
+        &batch, x, y, &final_h00, &final_h01, &final_h11, NULL, NULL,
         &used_count);
-    const double determinant = final_h00 * final_h11 - final_h01 * final_h01;
+    const float determinant =
+        final_h00 * final_h11 - final_h01 * final_h01;
     if (!isfinite(x) || !isfinite(y) || used_count < 3U ||
         determinant <= 1e-9 || x < min_x - bound_margin ||
         x > max_x + bound_margin || y < min_y - bound_margin ||
@@ -457,17 +518,18 @@ static void flex_solver_update_position(struct flex_solver_state *state,
         state->position_valid = false;
         return;
     }
-    const double variance = final_sse / fmax(1.0, (double)used_count - 2.0);
-    const double sigma = sqrt(fmax(
-        0.0, variance * (final_h00 + final_h11) / determinant / 2.0));
-    const double rms = sqrt(final_sse / used_count);
+    const float variance =
+        final_sse / fmaxf(1.0f, (float)used_count - 2.0f);
+    const float sigma = sqrtf(fmaxf(
+        0.0f, variance * (final_h00 + final_h11) / determinant / 2.0f));
+    const float rms = sqrtf(final_sse / used_count);
     state->position_x = x;
     state->position_y = y;
     state->position_valid = true;
     (void)wireless_telemetry_service_submit_flex_position(
-        tag_id, slot_id, (int32_t)lround(x * 1000.0),
-        (int32_t)lround(y * 1000.0), (int32_t)lround(sigma * 1000.0),
-        (int32_t)lround(rms * 1000.0), (uint16_t)used_count,
+        tag_id, slot_id, (int32_t)lroundf(x * 1000.0f),
+        (int32_t)lroundf(y * 1000.0f), (int32_t)lroundf(sigma * 1000.0f),
+        (int32_t)lroundf(rms * 1000.0f), (uint16_t)used_count,
         state->anchor_count, state->geometry_version);
 }
 
@@ -484,6 +546,17 @@ static void flex_solver_task(void *arg)
              (unsigned)state.anchor_count, xPortGetCoreID());
 
     size_t batch_count = 0;
+    TickType_t solve_summary_tick = xTaskGetTickCount();
+    uint64_t solve_total_us = 0;
+    uint64_t solve_iteration_total = 0;
+    uint64_t solve_evaluation_total = 0;
+    uint64_t geometry_total_us = 0;
+    uint32_t solve_max_us = 0;
+    uint32_t solve_iteration_max = 0;
+    uint32_t solve_evaluation_max = 0;
+    uint32_t geometry_max_us = 0;
+    uint32_t solve_count = 0;
+    uint32_t geometry_count = 0;
     while (true) {
         struct flex_solver_item item = {0};
         if (xQueueReceive(s_queue, &item, portMAX_DELAY) != pdTRUE) {
@@ -512,7 +585,14 @@ static void flex_solver_task(void *arg)
                 (state.last_geometry_tick == 0 ||
                 now - state.last_geometry_tick >=
                     pdMS_TO_TICKS(FLEX_SOLVER_GEOMETRY_MIN_PERIOD_MS))) {
+                const int64_t geometry_start_us = esp_timer_get_time();
                 (void)flex_solver_update_geometry(&state);
+                const uint32_t geometry_us = (uint32_t)(
+                    esp_timer_get_time() - geometry_start_us);
+                geometry_total_us += geometry_us;
+                geometry_max_us = geometry_us > geometry_max_us
+                    ? geometry_us : geometry_max_us;
+                geometry_count++;
                 state.last_geometry_tick = now;
             }
         } else if (item.type == FLEX_SOLVER_ITEM_OBSERVATION) {
@@ -521,9 +601,53 @@ static void flex_solver_task(void *arg)
             const uint32_t item_frame =
                 item.slot_id / config->flex_tdoa_slot_count;
             if (state.position_pending && item_frame != pending_frame) {
+                const int64_t solve_start_us = esp_timer_get_time();
                 flex_solver_update_position(
                     &state, state.pending_tag_id,
                     state.pending_position_slot_id);
+                const uint32_t solve_us = (uint32_t)(
+                    esp_timer_get_time() - solve_start_us);
+                solve_total_us += solve_us;
+                solve_max_us = solve_us > solve_max_us ? solve_us : solve_max_us;
+                solve_iteration_total += s_last_position_iterations;
+                solve_iteration_max =
+                    s_last_position_iterations > solve_iteration_max
+                    ? s_last_position_iterations : solve_iteration_max;
+                solve_evaluation_total += s_last_position_evaluations;
+                solve_evaluation_max =
+                    s_last_position_evaluations > solve_evaluation_max
+                    ? s_last_position_evaluations : solve_evaluation_max;
+                solve_count++;
+                if (now - solve_summary_tick >= pdMS_TO_TICKS(1000)) {
+                    ESP_LOGI(TAG,
+                             "perf solves=%lu avg_us=%llu max_us=%lu iter=%llu/%lu eval=%llu/%lu geom=%lu/%llu/%lu queue=%u dropped=%lu",
+                             (unsigned long)solve_count,
+                             (unsigned long long)(solve_total_us / solve_count),
+                             (unsigned long)solve_max_us,
+                             (unsigned long long)(
+                                 solve_iteration_total / solve_count),
+                             (unsigned long)solve_iteration_max,
+                             (unsigned long long)(
+                                 solve_evaluation_total / solve_count),
+                             (unsigned long)solve_evaluation_max,
+                             (unsigned long)geometry_count,
+                             (unsigned long long)(geometry_count > 0
+                                 ? geometry_total_us / geometry_count : 0),
+                             (unsigned long)geometry_max_us,
+                             (unsigned)uxQueueMessagesWaiting(s_queue),
+                             (unsigned long)s_dropped);
+                    solve_total_us = 0;
+                    solve_iteration_total = 0;
+                    solve_evaluation_total = 0;
+                    geometry_total_us = 0;
+                    solve_max_us = 0;
+                    solve_iteration_max = 0;
+                    solve_evaluation_max = 0;
+                    geometry_max_us = 0;
+                    solve_count = 0;
+                    geometry_count = 0;
+                    solve_summary_tick = now;
+                }
             }
             state.observations[first][second] =
                 (struct flex_solver_measurement){

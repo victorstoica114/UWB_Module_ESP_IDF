@@ -585,6 +585,49 @@ after every `19.20 ms` complete frame, or approximately `52.1` solutions/s.
 The dashboard prefers this `ESP32 AlgMin` result while it is fresh and falls
 back to its PC solver only when local position telemetry is unavailable.
 
+#### FlexTDOA Embedded Solver Optimization
+
+The iterative position solve follows the first-order Taylor linearization and
+least-squares refinement described in the local
+`datasheets/GPS-Compendium_Book_(GPS-X-02007).pdf`, sections 6.2.2-6.2.4.
+The previous valid position is the normal warm start; the anchor centroid is
+retained as a recovery candidate. The GPS compendium notes that a good initial
+estimate normally converges in roughly three to five iterations. On the live
+FlexTDOA stream, the embedded solver needed only `2.09` iterations on average,
+while retaining the six-iteration ceiling for recovery from a poor initial
+estimate.
+
+The ESP32-S3 position hot path now builds one compact set of fresh TDOA
+observations per solution and uses hardware-accelerated single-precision math.
+It no longer scans the complete observation matrix for every cost evaluation.
+The least-squares objective, centroid comparison, Levenberg-style damping,
+step bound, line search, convergence threshold, and reported uncertainty are
+unchanged. Anchor self-localization remains double precision and is measured
+separately.
+
+Static hardware measurements on M1, with four live anchors and the same raw
+FlexTDOA stream, gave:
+
+| Metric | Original solver | Optimized solver |
+| --- | ---: | ---: |
+| Solutions per second | `68.0` | `67.9` |
+| Average position solve | `5.88 ms` | `0.89 ms` |
+| Average AlgMin iterations | not instrumented | `2.09` |
+| Average cost evaluations | not instrumented | `9.66` |
+| Solver queue depth, sampled each second | `16.4` average | `5.9` average |
+| Solver queue maximum in the test | `94` | `53` |
+| Queue drops in the final `90 s` run | present | `0` |
+| M1 core 0 load | approximately `67%` | approximately `41.5%` |
+
+The optimized and original 15-second stationary captures remained comparable:
+position standard deviation changed from `4.47/3.18 cm` on X/Y to
+`4.23/3.18 cm`, and RMS residual changed from `9.65 cm` to `10.16 cm`.
+Those differences are within the changing live radio observations and do not
+indicate added filtering; every structurally valid raw observation still feeds
+the solver. Measured wall-time maxima include preemption by Wi-Fi and other
+core-0 work, so they are diagnostic scheduling latency rather than the normal
+AlgMin compute time.
+
 #### FlexTDOA 5.05 ms Baseline Hardware Validation
 
 Before compacting the request and guard budgets, the complete implementation
