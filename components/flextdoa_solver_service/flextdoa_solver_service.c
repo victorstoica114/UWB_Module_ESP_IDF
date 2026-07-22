@@ -5,7 +5,6 @@
 
 #include "app_runtime_config.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -88,8 +87,6 @@ struct flex_solver_position_batch {
 static QueueHandle_t s_queue;
 static bool s_started;
 static uint32_t s_dropped;
-static uint32_t s_last_position_iterations;
-static uint32_t s_last_position_evaluations;
 
 static void flex_solver_apply_runtime_geometry(struct flex_solver_state *state)
 {
@@ -346,7 +343,6 @@ static float flex_solver_position_cost(
     float *h00, float *h01, float *h11, float *g0, float *g1,
     size_t *used_count)
 {
-    s_last_position_evaluations++;
     float local_h00 = 0.0f, local_h01 = 0.0f, local_h11 = 0.0f;
     float local_g0 = 0.0f, local_g1 = 0.0f, sse = 0.0f;
     size_t count = 0;
@@ -390,8 +386,6 @@ static void flex_solver_update_position(struct flex_solver_state *state,
     if (!state->geometry_ready) {
         return;
     }
-    s_last_position_iterations = 0;
-    s_last_position_evaluations = 0;
     const TickType_t now = xTaskGetTickCount();
     struct flex_solver_position_batch batch;
     flex_solver_build_position_batch(state, now, &batch);
@@ -452,7 +446,6 @@ static void flex_solver_update_position(struct flex_solver_state *state,
 
     float damping = 1e-4f;
     for (size_t iteration = 0; iteration < 6U; ++iteration) {
-        s_last_position_iterations++;
         float h00 = 0.0f, h01 = 0.0f, h11 = 0.0f;
         float g0 = 0.0f, g1 = 0.0f;
         size_t count = 0;
@@ -546,17 +539,6 @@ static void flex_solver_task(void *arg)
              (unsigned)state.anchor_count, xPortGetCoreID());
 
     size_t batch_count = 0;
-    TickType_t solve_summary_tick = xTaskGetTickCount();
-    uint64_t solve_total_us = 0;
-    uint64_t solve_iteration_total = 0;
-    uint64_t solve_evaluation_total = 0;
-    uint64_t geometry_total_us = 0;
-    uint32_t solve_max_us = 0;
-    uint32_t solve_iteration_max = 0;
-    uint32_t solve_evaluation_max = 0;
-    uint32_t geometry_max_us = 0;
-    uint32_t solve_count = 0;
-    uint32_t geometry_count = 0;
     while (true) {
         struct flex_solver_item item = {0};
         if (xQueueReceive(s_queue, &item, portMAX_DELAY) != pdTRUE) {
@@ -585,14 +567,7 @@ static void flex_solver_task(void *arg)
                 (state.last_geometry_tick == 0 ||
                 now - state.last_geometry_tick >=
                     pdMS_TO_TICKS(FLEX_SOLVER_GEOMETRY_MIN_PERIOD_MS))) {
-                const int64_t geometry_start_us = esp_timer_get_time();
                 (void)flex_solver_update_geometry(&state);
-                const uint32_t geometry_us = (uint32_t)(
-                    esp_timer_get_time() - geometry_start_us);
-                geometry_total_us += geometry_us;
-                geometry_max_us = geometry_us > geometry_max_us
-                    ? geometry_us : geometry_max_us;
-                geometry_count++;
                 state.last_geometry_tick = now;
             }
         } else if (item.type == FLEX_SOLVER_ITEM_OBSERVATION) {
@@ -601,53 +576,9 @@ static void flex_solver_task(void *arg)
             const uint32_t item_frame =
                 item.slot_id / config->flex_tdoa_slot_count;
             if (state.position_pending && item_frame != pending_frame) {
-                const int64_t solve_start_us = esp_timer_get_time();
                 flex_solver_update_position(
                     &state, state.pending_tag_id,
                     state.pending_position_slot_id);
-                const uint32_t solve_us = (uint32_t)(
-                    esp_timer_get_time() - solve_start_us);
-                solve_total_us += solve_us;
-                solve_max_us = solve_us > solve_max_us ? solve_us : solve_max_us;
-                solve_iteration_total += s_last_position_iterations;
-                solve_iteration_max =
-                    s_last_position_iterations > solve_iteration_max
-                    ? s_last_position_iterations : solve_iteration_max;
-                solve_evaluation_total += s_last_position_evaluations;
-                solve_evaluation_max =
-                    s_last_position_evaluations > solve_evaluation_max
-                    ? s_last_position_evaluations : solve_evaluation_max;
-                solve_count++;
-                if (now - solve_summary_tick >= pdMS_TO_TICKS(1000)) {
-                    ESP_LOGI(TAG,
-                             "perf solves=%lu avg_us=%llu max_us=%lu iter=%llu/%lu eval=%llu/%lu geom=%lu/%llu/%lu queue=%u dropped=%lu",
-                             (unsigned long)solve_count,
-                             (unsigned long long)(solve_total_us / solve_count),
-                             (unsigned long)solve_max_us,
-                             (unsigned long long)(
-                                 solve_iteration_total / solve_count),
-                             (unsigned long)solve_iteration_max,
-                             (unsigned long long)(
-                                 solve_evaluation_total / solve_count),
-                             (unsigned long)solve_evaluation_max,
-                             (unsigned long)geometry_count,
-                             (unsigned long long)(geometry_count > 0
-                                 ? geometry_total_us / geometry_count : 0),
-                             (unsigned long)geometry_max_us,
-                             (unsigned)uxQueueMessagesWaiting(s_queue),
-                             (unsigned long)s_dropped);
-                    solve_total_us = 0;
-                    solve_iteration_total = 0;
-                    solve_evaluation_total = 0;
-                    geometry_total_us = 0;
-                    solve_max_us = 0;
-                    solve_iteration_max = 0;
-                    solve_evaluation_max = 0;
-                    geometry_max_us = 0;
-                    solve_count = 0;
-                    geometry_count = 0;
-                    solve_summary_tick = now;
-                }
             }
             state.observations[first][second] =
                 (struct flex_solver_measurement){
