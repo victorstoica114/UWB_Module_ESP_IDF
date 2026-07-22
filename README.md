@@ -628,6 +628,38 @@ the solver. Measured wall-time maxima include preemption by Wi-Fi and other
 core-0 work, so they are diagnostic scheduling latency rather than the normal
 AlgMin compute time.
 
+#### Live Position Dashboard Throughput
+
+Local position telemetry has a dedicated Server-Sent Events endpoint. The
+dashboard records every received position immediately and schedules the newest
+one for the next browser animation frame. The heavier status, geometry, and
+diagnostic tables remain on the `250 ms` snapshot poll. This separates radio
+and solver throughput from browser repaint rate: an `83.33 Hz` position stream
+can be received completely on a display that can draw only about `60 fps`.
+
+A two-minute hardware run with all five modules and the `12.00 ms Frame`
+profile measured:
+
+| Metric | Result |
+| --- | ---: |
+| Nominal local solution rate | `83.33/s` |
+| Positions received by the SSE server | `9,971` |
+| Measured SSE rate | `83.333/s` |
+| Unique position event IDs | `9,971` |
+| Browser rate, headless 60 Hz display | `83 rx/s`, approximately `55 fps` |
+| Median server delivery age | `1.67 ms` |
+| Telemetry drops | `0` on all five modules |
+| Anchor transmissions | `160,170` |
+| Anchor TX errors | `9` (`0.0056%`) |
+| M1 telemetry queue high-water mark | `1,024/1,024`, without drops |
+| M1 peak core load during the run | core 0 `63.2%`, core 1 `85.2%` |
+
+The exact average output rate proves that the optimized solver and dashboard
+can sustain the `83.33 Hz` experiment. Rare delayed-TX rejects, one long
+delivery interval, and the full M1 telemetry queue also confirm that this is a
+limit test with little scheduling reserve. The `14.80 ms Frame` profile remains
+the robust default until the shorter timing receives a longer clean run.
+
 #### FlexTDOA 5.05 ms Baseline Hardware Validation
 
 Before compacting the request and guard budgets, the complete implementation

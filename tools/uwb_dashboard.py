@@ -528,6 +528,7 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
 class DashboardState:
     def __init__(self, *, max_logs: int) -> None:
         self.lock = threading.Lock()
+        self.position_condition = threading.Condition(self.lock)
         self.max_logs = max_logs
         self.status_online_max_age_sec = 6.0
         self.logs: deque[dict[str, Any]] = deque(maxlen=max_logs)
@@ -542,6 +543,8 @@ class DashboardState:
         self.tdoa_anchor_distances: dict[tuple[int, int], dict[str, Any]] = {}
         self.tdoa_anchor_history: dict[tuple[int, int], deque[dict[str, Any]]] = {}
         self.tdoa_local_positions: dict[int, dict[str, Any]] = {}
+        self.tdoa_position_events: deque[dict[str, Any]] = deque(maxlen=4096)
+        self.next_position_event_id = 1
         self.max_tdoa_samples = 200
         self.next_log_id = 1
         self.next_accel_id = 1
@@ -616,10 +619,39 @@ class DashboardState:
             math.isfinite(value) for value in (x_m, y_m, sigma_m, rms_m)
         ):
             return
-        self.tdoa_local_positions[tag_id] = {
+        stored = {
             **item,
             "received_at": float(item.get("received_at") or time.time()),
+            "position_event_id": self.next_position_event_id,
         }
+        self.next_position_event_id += 1
+        self.tdoa_local_positions[tag_id] = stored
+        self.tdoa_position_events.append(stored)
+        self.position_condition.notify_all()
+
+    def position_events_after(
+        self, after: int, limit: int, wait_sec: float
+    ) -> list[dict[str, Any]]:
+        def collect() -> list[dict[str, Any]]:
+            if not self.tdoa_position_events:
+                return []
+            if after <= 0:
+                return [dict(self.tdoa_position_events[-1])]
+
+            pending: list[dict[str, Any]] = []
+            for item in reversed(self.tdoa_position_events):
+                if int(item.get("position_event_id") or 0) <= after:
+                    break
+                pending.append(item)
+            pending.reverse()
+            return [dict(item) for item in pending[:limit]]
+
+        with self.position_condition:
+            events = collect()
+            if not events:
+                self.position_condition.wait(timeout=max(0.0, wait_sec))
+                events = collect()
+            return events
 
     def parse_line(self, line: str) -> dict[str, Any]:
         match = LOG_RE.match(line)
@@ -3840,11 +3872,18 @@ const state = {
   ranging: {distances: {}, max_age_sec: 3},
   tdoa: {observations: {}, anchor_distances: {}, local_positions: {}, max_age_sec: 3},
   positionTrail: {},
+  positionTrailTokens: {},
   positionAnchorTrail: {},
   positionResults: {},
+  positionModel: null,
   positionWasActive: false,
   positionGeometry: {key: "", fixed: null, ekf: null},
   positionSeeds: {},
+  positionStream: null,
+  positionStreamConnected: false,
+  positionStreamRenderPending: false,
+  positionStreamRxTimes: [],
+  positionStreamRenderTimes: [],
   flexTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.flexTimingSlotSelect") || 0),
 };
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
@@ -5320,6 +5359,26 @@ function updatePositionAnchorTrail(anchors, now) {
   }
 }
 
+function recordPositionTrailPoint(tagId, position, receivedAt, token) {
+  if (!position || !Number.isFinite(Number(position.x)) || !Number.isFinite(Number(position.y))) return;
+  const key = String(tagId);
+  const pointToken = String(token ?? `${receivedAt}:${position.x}:${position.y}`);
+  if (state.positionTrailTokens[key] === pointToken) return;
+  state.positionTrailTokens[key] = pointToken;
+  const timestamp = Number.isFinite(Number(receivedAt)) ? Number(receivedAt) : Date.now() / 1000;
+  const trail = state.positionTrail[key] || [];
+  trail.push({x: Number(position.x), y: Number(position.y), t: timestamp});
+  state.positionTrail[key] = trail
+    .filter(point => timestamp - point.t <= 120)
+    .slice(-2400);
+}
+
+function localPositionAge(item, now = Date.now() / 1000) {
+  const receivedAt = Number(item?.received_at);
+  if (Number.isFinite(receivedAt) && receivedAt > 0) return Math.max(0, now - receivedAt);
+  return Number(item?.age_sec);
+}
+
 function computePositionModel() {
   const settings = positionSettings();
   const selectedIds = selectedPositionModuleIds(settings);
@@ -5330,6 +5389,7 @@ function computePositionModel() {
 
   if (!active && state.positionWasActive) {
     state.positionTrail = {};
+    state.positionTrailTokens = {};
     state.positionAnchorTrail = {};
     state.positionResults = {};
     state.positionSeeds = {};
@@ -5349,6 +5409,7 @@ function computePositionModel() {
       let residuals = {};
       let accuracy = null;
       let coherence = null;
+      let localPosition = null;
       if (positionProtocolUsesTdoa(settings.solver)) {
         coherence = coherentTdoaBatch(
           tagId,
@@ -5376,8 +5437,8 @@ function computePositionModel() {
           fitObservations.length ? fitObservations : observations,
           tdoaResiduals(position, anchors, fitObservations.length ? fitObservations : observations)
         );
-        const localPosition = state.tdoa?.local_positions?.[String(tagId)];
-        if (localPosition && Number(localPosition.age_sec) <= settings.maxAge &&
+        localPosition = state.tdoa?.local_positions?.[String(tagId)];
+        if (localPosition && localPositionAge(localPosition, now) <= settings.maxAge &&
             Number.isFinite(Number(localPosition.x_m)) &&
             Number.isFinite(Number(localPosition.y_m))) {
           position = {
@@ -5414,15 +5475,17 @@ function computePositionModel() {
         accuracy,
         coherence,
         solverSource: state.tdoa?.local_positions?.[String(tagId)] &&
-          Number(state.tdoa.local_positions[String(tagId)].age_sec) <= settings.maxAge
+          localPositionAge(state.tdoa.local_positions[String(tagId)], now) <= settings.maxAge
             ? "ESP32 AlgMin"
             : "PC AlgMin",
       };
       if (position) {
-        const key = String(tagId);
-        const trail = state.positionTrail[key] || [];
-        trail.push({x: position.x, y: position.y, t: now});
-        state.positionTrail[key] = trail.filter(point => now - point.t <= 120).slice(-300);
+        recordPositionTrailPoint(
+          tagId,
+          position,
+          localPosition?.received_at || now,
+          localPosition?.position_event_id ?? localPosition?.slot_id ?? `pc:${now}`
+        );
       }
     }
   }
@@ -5582,10 +5645,14 @@ function drawPosition(model) {
 
   for (const [tagId, trail] of Object.entries(state.positionTrail)) {
     if (trail.length < 2) continue;
+    const stride = Math.max(1, Math.ceil(trail.length / 1200));
+    const visibleTrail = trail.filter((_, index) =>
+      index % stride === 0 || index === trail.length - 1
+    );
     ctx.beginPath();
     ctx.strokeStyle = "rgba(43, 100, 216, 0.72)";
     ctx.lineWidth = 1.5;
-    trail.forEach((point, index) => {
+    visibleTrail.forEach((point, index) => {
       const x = tx.x(point.x);
       const y = tx.y(point.y);
       if (index === 0) ctx.moveTo(x, y);
@@ -5709,6 +5776,7 @@ function renderPositionSolverStatus(model) {
     `<span class="position-pill">Protocol: ${esc(positionSolverLabel(settings.solver))}</span>`,
     `<span class="position-pill good">raw observations</span>`,
     `<span class="position-pill">fresh ${fmtFixed(settings.maxAge, 1)} s</span>`,
+    `<span class="position-pill" id="positionStreamMetrics">position stream connecting</span>`,
   ];
   const firstTag = Object.values(model.tags || {})[0];
   if (firstTag?.solverSource) {
@@ -5823,7 +5891,7 @@ function renderPositionReadout(model) {
     const countText = usesTdoa
       ? `${fitCount}/${total} fit · ${freshCount} fresh`
       : `${fitCount}/${total} fresh distances`;
-    return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span>${countText}${accuracyText}</span></div>`;
+    return `<div class="position-tag-card"><b id="positionTagSummary${esc(tag.tagId)}">Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span id="positionTagMeta${esc(tag.tagId)}">${countText}${accuracyText}</span></div>`;
   });
   const emptyTagCard = !model.geometry?.positionReady
     ? `<div class="position-tag-card"><b>waiting for fixed geometry</b><span>Fix the anchor geometry before tag positioning starts.</span></div>`
@@ -5892,10 +5960,129 @@ function renderPositionReadout(model) {
   }
 }
 
+function trimPositionRateWindow(times, nowMs) {
+  while (times.length && nowMs - times[0] > 1000) times.shift();
+  return times.length;
+}
+
+function updatePositionStreamMetrics() {
+  const nowMs = performance.now();
+  const rxRate = trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
+  const renderRate = trimPositionRateWindow(state.positionStreamRenderTimes, nowMs);
+  const element = document.getElementById("positionStreamMetrics");
+  if (!element) return;
+  if (!state.positionStreamConnected) {
+    element.textContent = "position stream reconnecting";
+    element.className = "position-pill warn";
+    return;
+  }
+  element.textContent = `${rxRate} rx/s · ${renderRate} fps`;
+  element.className = "position-pill good";
+}
+
+function applyStreamPositionToModel(model) {
+  if (!model?.active || !model?.geometry?.positionReady) return;
+  const now = Date.now() / 1000;
+  for (const tag of Object.values(model.tags || {})) {
+    const item = state.tdoa?.local_positions?.[String(tag.tagId)];
+    if (!item || localPositionAge(item, now) > model.settings.maxAge) continue;
+    const x = Number(item.x_m);
+    const y = Number(item.y_m);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    tag.position = {x, y};
+    tag.solverSource = "ESP32 AlgMin";
+    tag.accuracy = {
+      ...(tag.accuracy || {}),
+      sigma_major_m: Number(item.sigma_m),
+      rms_m: Number(item.rms_m),
+    };
+  }
+}
+
+function renderPositionStreamFrame() {
+  state.positionStreamRenderPending = false;
+  if (state.activeTab !== "position") return;
+  if (!state.positionModel) {
+    renderPosition();
+    return;
+  }
+  applyStreamPositionToModel(state.positionModel);
+  drawPosition(state.positionModel);
+  for (const tag of Object.values(state.positionModel.tags || {})) {
+    const item = state.tdoa?.local_positions?.[String(tag.tagId)];
+    if (!item || !tag.position) continue;
+    const summary = document.getElementById(`positionTagSummary${tag.tagId}`);
+    const meta = document.getElementById(`positionTagMeta${tag.tagId}`);
+    if (summary) {
+      summary.textContent = `Tag ${tag.tagId}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m`;
+    }
+    if (meta) {
+      const sigmaText = Number.isFinite(Number(item.sigma_m))
+        ? ` · est. ${fmtPositionSigma(item.sigma_m, 1)}`
+        : "";
+      meta.textContent = `${item.observation_count || 0} raw obs${sigmaText} · live`;
+    }
+  }
+  const nowMs = performance.now();
+  state.positionStreamRenderTimes.push(nowMs);
+  updatePositionStreamMetrics();
+}
+
+function schedulePositionStreamRender() {
+  if (state.activeTab !== "position" || state.positionStreamRenderPending) return;
+  state.positionStreamRenderPending = true;
+  requestAnimationFrame(renderPositionStreamFrame);
+}
+
+function ingestPositionStreamSample(item) {
+  const tagId = Number(item?.tag_id);
+  const eventId = Number(item?.position_event_id);
+  if (!Number.isFinite(tagId) || tagId <= 0 || !Number.isFinite(eventId)) return;
+  const key = String(tagId);
+  const previous = state.tdoa?.local_positions?.[key];
+  if (Number(previous?.position_event_id || 0) >= eventId) return;
+  if (!state.tdoa.local_positions) state.tdoa.local_positions = {};
+  item.age_sec = localPositionAge(item);
+  state.tdoa.local_positions[key] = item;
+  recordPositionTrailPoint(
+    tagId,
+    {x: Number(item.x_m), y: Number(item.y_m)},
+    item.received_at,
+    eventId
+  );
+  const nowMs = performance.now();
+  state.positionStreamRxTimes.push(nowMs);
+  trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
+  schedulePositionStreamRender();
+}
+
+function startPositionStream() {
+  state.positionStream?.close();
+  const stream = new EventSource("/api/position-stream");
+  state.positionStream = stream;
+  stream.onopen = () => {
+    state.positionStreamConnected = true;
+    updatePositionStreamMetrics();
+  };
+  stream.onmessage = event => {
+    try {
+      ingestPositionStreamSample(JSON.parse(event.data));
+    } catch (_) {
+      // EventSource reconnects automatically; a malformed sample is isolated.
+    }
+  };
+  stream.onerror = () => {
+    state.positionStreamConnected = false;
+    updatePositionStreamMetrics();
+  };
+}
+
 function renderPosition() {
   const model = computePositionModel();
+  state.positionModel = model;
   drawPosition(model);
   renderPositionReadout(model);
+  updatePositionStreamMetrics();
 }
 
 function canvasY(value, scale, plotArea) {
@@ -6843,7 +7030,16 @@ function renderPd(statuses) {
 function renderInfo(snapshot) {
   state.statuses = snapshot.statuses || [];
   state.ranging = snapshot.ranging || {distances: {}, max_age_sec: 3};
-  state.tdoa = snapshot.tdoa || {observations: {}, anchor_distances: {}, local_positions: {}, max_age_sec: 3};
+  const previousLocalPositions = state.tdoa?.local_positions || {};
+  const nextTdoa = snapshot.tdoa || {observations: {}, anchor_distances: {}, local_positions: {}, max_age_sec: 3};
+  nextTdoa.local_positions = nextTdoa.local_positions || {};
+  for (const [tagId, previous] of Object.entries(previousLocalPositions)) {
+    const incoming = nextTdoa.local_positions[tagId];
+    if (Number(previous?.position_event_id || 0) > Number(incoming?.position_event_id || 0)) {
+      nextTdoa.local_positions[tagId] = previous;
+    }
+  }
+  state.tdoa = nextTdoa;
   mergeAccelHistory(snapshot.accel_history || {});
   document.getElementById("logPill").textContent = `${snapshot.log_count} logs`;
   const telemetryPill = document.getElementById("telemetryPill");
@@ -8718,6 +8914,7 @@ async function enablePositionRanging() {
   if (runtimeReboot) runtimeReboot.value = "1";
   await postConfig({target_modules: "all", params}, "positionToast");
   state.positionTrail = {};
+  state.positionTrailTokens = {};
   state.positionAnchorTrail = {};
   state.positionSeeds = {};
   setTimeout(fetchSnapshot, 1500);
@@ -8743,6 +8940,7 @@ async function restartAnchorSelfLocalization() {
     if (!apiResponseOk(result)) return;
     resetPaperAnchorSelfLocalization(settings.anchorIds, true);
     state.positionTrail = {};
+    state.positionTrailTokens = {};
     setToast("positionToast", "Paper TWR-EKF anchor self-localization restarted on all modules", "good");
     renderPosition();
 }
@@ -8790,6 +8988,7 @@ async function fixCurrentAnchorGeometry() {
   localStorage.setItem(positionGeometryStorageKey(settings.anchorIds), JSON.stringify(fixed));
   state.positionSeeds = {};
   state.positionTrail = {};
+  state.positionTrailTokens = {};
   setToast("positionToast", "Anchor geometry fixed and persisted on all modules", "good");
   renderPosition();
 }
@@ -8846,6 +9045,7 @@ function wireSettings() {
   });
   document.getElementById("positionResetTrail").addEventListener("click", () => {
     state.positionTrail = {};
+    state.positionTrailTokens = {};
     state.positionAnchorTrail = {};
     renderPosition();
   });
@@ -9137,6 +9337,7 @@ setCalibrationResult(loadCalibrationResult());
 fetchLogs();
 fetchAccel();
 fetchSnapshot();
+startPositionStream();
 setInterval(fetchLogs, 250);
 setInterval(fetchAccel, 50);
 scheduleSnapshotPoll();
@@ -9148,6 +9349,7 @@ scheduleSnapshotPoll();
 
 class HttpHandler(BaseHTTPRequestHandler):
     server: "DashboardHttpServer"
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         if not self.server.quiet:
@@ -9160,6 +9362,9 @@ class HttpHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/snapshot":
             self.send_json(self.server.state.snapshot())
+            return
+        if parsed.path == "/api/position-stream":
+            self.handle_position_stream(parsed)
             return
         if parsed.path == "/api/logs":
             query = urllib.parse.parse_qs(parsed.query)
@@ -9179,6 +9384,42 @@ class HttpHandler(BaseHTTPRequestHandler):
             self.send_json(self.server.calibration_job_status(job_id))
             return
         self.send_error(HTTPStatus.NOT_FOUND, "not found")
+
+    def handle_position_stream(self, parsed: urllib.parse.ParseResult) -> None:
+        query = urllib.parse.parse_qs(parsed.query)
+        header_after = self.headers.get("Last-Event-ID", "")
+        after_text = header_after or query.get("after", ["0"])[0] or "0"
+        try:
+            after = max(0, int(after_text))
+        except ValueError:
+            after = 0
+
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            self.wfile.write(b"retry: 500\n\n")
+            self.wfile.flush()
+
+            while True:
+                events = self.server.state.position_events_after(after, 512, 10.0)
+                if not events:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    continue
+                for item in events:
+                    event_id = int(item.get("position_event_id") or 0)
+                    payload = json.dumps(item, separators=(",", ":"))
+                    message = f"id: {event_id}\ndata: {payload}\n\n".encode("utf-8")
+                    self.wfile.write(message)
+                    after = max(after, event_id)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
