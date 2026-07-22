@@ -27,6 +27,11 @@ static const char *TAG = "app_runtime_config";
 #define KEY_FLEX_SLOTS "flex_slots"
 #define KEY_FLEX_MASKS "flex_masks"
 #define KEY_FLEX_GEN "flex_gen"
+#define KEY_FLEX_GUARD "flex_guard"
+#define KEY_FLEX_REQ "flex_req"
+#define KEY_FLEX_REQP "flex_reqproc"
+#define KEY_FLEX_RESP "flex_resp"
+#define KEY_FLEX_RESPP "flex_rspproc"
 #define KEY_FLEX_GFIX "flex_gfix"
 #define KEY_FLEX_GGEN "flex_ggen"
 #define KEY_FLEX_GX "flex_gx"
@@ -162,6 +167,29 @@ static bool flex_tdoa_config_valid(const app_runtime_config_t *config)
                 config->flex_tdoa_responder_count) {
             return false;
         }
+    }
+
+    const uint32_t timings[] = {
+        config->flex_tdoa_guard_us,
+        config->flex_tdoa_request_subslot_us,
+        config->flex_tdoa_request_process_us,
+        config->flex_tdoa_response_subslot_us,
+        config->flex_tdoa_response_process_us,
+    };
+    for (size_t i = 0; i < sizeof(timings) / sizeof(timings[0]); ++i) {
+        if (timings[i] == 0U || timings[i] > UINT16_MAX) {
+            return false;
+        }
+    }
+
+    const uint32_t slot_us = config->flex_tdoa_guard_us +
+                             config->flex_tdoa_request_subslot_us +
+                             config->flex_tdoa_request_process_us +
+                             (uint32_t)config->flex_tdoa_responder_count *
+                                 (config->flex_tdoa_response_subslot_us +
+                                  config->flex_tdoa_response_process_us);
+    if (slot_us == 0U || slot_us > 1000000U) {
+        return false;
     }
     return true;
 }
@@ -300,6 +328,15 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->anchor_ids[1] = (uint8_t)APP_UWB_ANCHOR_1_ID;
     config->anchor_ids[2] = (uint8_t)APP_UWB_ANCHOR_2_ID;
     config->anchor_ids[3] = (uint8_t)APP_UWB_ANCHOR_3_ID;
+    config->flex_tdoa_guard_us = APP_UWB_FLEX_TDOA_GUARD_US;
+    config->flex_tdoa_request_subslot_us =
+        APP_UWB_FLEX_TDOA_REQUEST_SUBSLOT_US;
+    config->flex_tdoa_request_process_us =
+        APP_UWB_FLEX_TDOA_REQUEST_PROCESS_US;
+    config->flex_tdoa_response_subslot_us =
+        APP_UWB_FLEX_TDOA_RESPONSE_SUBSLOT_US;
+    config->flex_tdoa_response_process_us =
+        APP_UWB_FLEX_TDOA_RESPONSE_PROCESS_US;
     app_runtime_config_reset_flex_tdoa(config);
     config->anchor_survey_coordinator_id =
         (uint8_t)APP_UWB_ANCHOR_SURVEY_COORDINATOR_ID;
@@ -533,6 +570,15 @@ static void read_config_from_nvs(app_runtime_config_t *config)
                              sizeof(config->flex_tdoa_slot_responder_masks));
     found |= read_u32(handle, KEY_FLEX_GEN,
                       &config->flex_tdoa_config_generation);
+    found |= read_u32(handle, KEY_FLEX_GUARD, &config->flex_tdoa_guard_us);
+    found |= read_u32(handle, KEY_FLEX_REQ,
+                      &config->flex_tdoa_request_subslot_us);
+    found |= read_u32(handle, KEY_FLEX_REQP,
+                      &config->flex_tdoa_request_process_us);
+    found |= read_u32(handle, KEY_FLEX_RESP,
+                      &config->flex_tdoa_response_subslot_us);
+    found |= read_u32(handle, KEY_FLEX_RESPP,
+                      &config->flex_tdoa_response_process_us);
     found |= read_bool(handle, KEY_FLEX_GFIX,
                        &config->flex_tdoa_geometry_fixed);
     found |= read_u32(handle, KEY_FLEX_GGEN,
@@ -714,6 +760,16 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
                                sizeof(config->flex_tdoa_slot_responder_masks)));
     WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_GEN,
                             config->flex_tdoa_config_generation));
+    WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_GUARD,
+                            config->flex_tdoa_guard_us));
+    WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_REQ,
+                            config->flex_tdoa_request_subslot_us));
+    WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_REQP,
+                            config->flex_tdoa_request_process_us));
+    WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_RESP,
+                            config->flex_tdoa_response_subslot_us));
+    WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_RESPP,
+                            config->flex_tdoa_response_process_us));
     WRITE_OR_GOTO(write_bool(handle, KEY_FLEX_GFIX,
                              config->flex_tdoa_geometry_fixed));
     WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_GGEN,

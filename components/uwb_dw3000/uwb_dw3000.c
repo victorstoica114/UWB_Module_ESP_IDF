@@ -38,11 +38,13 @@ enum {
     // work; the task sleeps on the DW3000 interrupt between radio events.
     UWB_DW3000_TASK_PRIORITY = 20,
     UWB_DW3000_SPI_BOOT_CLOCK_HZ = 4 * 1000 * 1000,
-    // SPI2 is sourced from the 80 MHz APB clock on ESP32-S3. Requesting
-    // 32 MHz selects the fastest stock-driver divider below the DW3000's
-    // 38 MHz limit: 80 / 3 = 26.666 MHz actual SCK.
-    UWB_DW3000_SPI_OPERATION_REQUEST_HZ = 32 * 1000 * 1000,
+    // The compact FlexTDOA responder path needs the next APB divider above
+    // 26.666 MHz. ESP32-S3 generates 40 MHz exactly; this is 5.3% above the
+    // DW3000 nominal 38 MHz rating and is validated at startup by repeated
+    // device-ID reads before the radio runtime is allowed to start.
+    UWB_DW3000_SPI_OPERATION_REQUEST_HZ = 40 * 1000 * 1000,
     UWB_DW3000_SPI_DATASHEET_MAX_HZ = 38 * 1000 * 1000,
+    UWB_DW3000_SPI_VALIDATED_MAX_HZ = 40 * 1000 * 1000,
     UWB_DW3000_SPI_VERIFY_READS = 8,
     UWB_DW3000_SPI_MAX_TRANSFER_BYTES = 96,
     UWB_DW3000_RESET_SETTLE_MS = 5,
@@ -53,8 +55,9 @@ enum {
     UWB_DW3000_IDLE_TIMEOUT_MS = 1000,
     UWB_DW3000_POLL_INTERVAL_MS = 5,
     UWB_DW3000_TX_TIMEOUT_MS = 120,
+    UWB_FLEX_TDOA_TX_TIMEOUT_MS = 10,
     UWB_DW3000_TX_POLL_MS = 2,
-    UWB_DW3000_PAYLOAD_LEN = 48,
+    UWB_DW3000_PAYLOAD_LEN = 64,
     UWB_RANGING_COMMAND_DELAY_MS = 5,
 };
 
@@ -112,6 +115,7 @@ enum {
 #define DW3000_SYS_ENABLE_LO_SUB 0x3C
 #define DW3000_SYS_ENABLE_HI_SUB 0x40
 #define DW3000_SYS_STATUS_SUB 0x44
+#define DW3000_SYS_STATE_SUB 0x30
 #define DW3000_RX_FINFO_SUB 0x4C
 #define DW3000_RDB_STATUS_SUB 0x24
 #define DW3000_INDIRECT_ADDR_B_SUB 0x0C
@@ -167,6 +171,7 @@ enum {
 #define DW3000_LED_CTRL_BLINK_TIME_MASK 0xFFUL
 
 #define DW3000_STATUS_TXFRS 0x00000080UL
+#define DW3000_STATUS_RX_GOOD_CLEAR_MASK 0x00006F00UL
 #define DW3000_STATUS_RXFR 0x00002000UL
 #define DW3000_STATUS_RXFCG 0x00004000UL
 #define DW3000_STATUS_RXPHE 0x00001000UL
@@ -177,6 +182,7 @@ enum {
 #define DW3000_STATUS_RXPTO 0x00200000UL
 #define DW3000_STATUS_RXSTO 0x04000000UL
 #define DW3000_STATUS_HPDWARN 0x08000000UL
+#define DW3000_SYS_STATE_DELAYED_TX_ERROR 0x000D0000UL
 #define DW3000_STATUS_CPERR 0x10000000UL
 #define DW3000_STATUS_ARFE 0x20000000UL
 #define DW3000_STATUS_SPIRDY 0x00000080UL
@@ -316,7 +322,17 @@ enum {
 #define UWB_FLEX_TDOA_CONFIG_LEN \
     (UWB_FLEX_TDOA_CONFIG_MASKS_OFFSET + \
      ((APP_RUNTIME_CONFIG_MAX_ANCHORS * \
-       APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS + 7U) / 8U))
+       APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS + 7U) / 8U) + 10U)
+#define UWB_FLEX_TDOA_CONFIG_GUARD_US_OFFSET \
+    (UWB_FLEX_TDOA_CONFIG_LEN - 10U)
+#define UWB_FLEX_TDOA_CONFIG_REQ_US_OFFSET \
+    (UWB_FLEX_TDOA_CONFIG_LEN - 8U)
+#define UWB_FLEX_TDOA_CONFIG_REQ_PROCESS_US_OFFSET \
+    (UWB_FLEX_TDOA_CONFIG_LEN - 6U)
+#define UWB_FLEX_TDOA_CONFIG_RESP_US_OFFSET \
+    (UWB_FLEX_TDOA_CONFIG_LEN - 4U)
+#define UWB_FLEX_TDOA_CONFIG_RESP_PROCESS_US_OFFSET \
+    (UWB_FLEX_TDOA_CONFIG_LEN - 2U)
 #define UWB_FLEX_TDOA_GEOMETRY_GENERATION_OFFSET 10U
 #define UWB_FLEX_TDOA_GEOMETRY_FIXED_OFFSET 14U
 #define UWB_FLEX_TDOA_GEOMETRY_COUNT_OFFSET 15U
@@ -328,18 +344,8 @@ enum {
 #define UWB_FLEX_TDOA_CONFIG_PHASE_US 3000000LL
 #define UWB_FLEX_TDOA_CONFIG_TX_SPACING_US 30000LL
 #define UWB_FLEX_TDOA_CONFIG_FRAME_GAP_MS 10U
-#define UWB_FLEX_TDOA_PAPER_GUARD_US 250U
-#define UWB_FLEX_TDOA_PAPER_REQ_SUBSLOT_US 2000U
-#define UWB_FLEX_TDOA_PAPER_REQ_PROCESS_US 250U
-#define UWB_FLEX_TDOA_REQ_PROCESS_US UWB_FLEX_TDOA_PAPER_REQ_PROCESS_US
-#define UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US 250U
-#define UWB_FLEX_TDOA_RESP_SUBSLOT_US UWB_FLEX_TDOA_PAPER_RESP_SUBSLOT_US
-#define UWB_FLEX_TDOA_RESPONSE_BASE_US \
-    (UWB_FLEX_TDOA_PAPER_REQ_SUBSLOT_US + \
-     UWB_FLEX_TDOA_REQ_PROCESS_US)
-#define UWB_FLEX_TDOA_PAPER_RESP_PROCESS_US 600U
 #define UWB_FLEX_TDOA_BOOTSTRAP_LISTEN_US 2000000LL
-// Host-only preparation lead. It must be shorter than one 5.05 ms slot so an
+// Host-only preparation lead. It must be shorter than one 4.80 ms slot so an
 // initiator keeps receiving the preceding slot while still programming its
 // own DW3000 delayed TX with comfortable margin.
 #define UWB_FLEX_TDOA_REQUEST_TX_LEAD_US 1750LL
@@ -545,6 +551,9 @@ enum uwb_flex_tdoa_config_result {
 static void uwb_distance_put_u32(uint8_t *payload, size_t offset,
                                  uint32_t value);
 static uint32_t uwb_distance_get_u32(const uint8_t *payload, size_t offset);
+static void uwb_distance_put_u16(uint8_t *payload, size_t offset,
+                                 uint16_t value);
+static uint16_t uwb_distance_get_u16(const uint8_t *payload, size_t offset);
 static void uwb_distance_put_i32(uint8_t *payload, size_t offset,
                                  int32_t value);
 static int32_t uwb_distance_get_i32(const uint8_t *payload, size_t offset);
@@ -602,6 +611,18 @@ static void uwb_flex_tdoa_build_config(
                 (uint8_t)(1U << (bit_index % 8U));
         }
     }
+    uwb_distance_put_u16(payload, UWB_FLEX_TDOA_CONFIG_GUARD_US_OFFSET,
+                         (uint16_t)config->flex_tdoa_guard_us);
+    uwb_distance_put_u16(payload, UWB_FLEX_TDOA_CONFIG_REQ_US_OFFSET,
+                         (uint16_t)config->flex_tdoa_request_subslot_us);
+    uwb_distance_put_u16(payload,
+                         UWB_FLEX_TDOA_CONFIG_REQ_PROCESS_US_OFFSET,
+                         (uint16_t)config->flex_tdoa_request_process_us);
+    uwb_distance_put_u16(payload, UWB_FLEX_TDOA_CONFIG_RESP_US_OFFSET,
+                         (uint16_t)config->flex_tdoa_response_subslot_us);
+    uwb_distance_put_u16(payload,
+                         UWB_FLEX_TDOA_CONFIG_RESP_PROCESS_US_OFFSET,
+                         (uint16_t)config->flex_tdoa_response_process_us);
 }
 
 static bool uwb_flex_tdoa_parse_config(
@@ -623,6 +644,16 @@ static bool uwb_flex_tdoa_parse_config(
         frame->payload[UWB_FLEX_TDOA_CONFIG_K_OFFSET];
     parsed->flex_tdoa_slot_count =
         frame->payload[UWB_FLEX_TDOA_CONFIG_M_OFFSET];
+    parsed->flex_tdoa_guard_us = uwb_distance_get_u16(
+        frame->payload, UWB_FLEX_TDOA_CONFIG_GUARD_US_OFFSET);
+    parsed->flex_tdoa_request_subslot_us = uwb_distance_get_u16(
+        frame->payload, UWB_FLEX_TDOA_CONFIG_REQ_US_OFFSET);
+    parsed->flex_tdoa_request_process_us = uwb_distance_get_u16(
+        frame->payload, UWB_FLEX_TDOA_CONFIG_REQ_PROCESS_US_OFFSET);
+    parsed->flex_tdoa_response_subslot_us = uwb_distance_get_u16(
+        frame->payload, UWB_FLEX_TDOA_CONFIG_RESP_US_OFFSET);
+    parsed->flex_tdoa_response_process_us = uwb_distance_get_u16(
+        frame->payload, UWB_FLEX_TDOA_CONFIG_RESP_PROCESS_US_OFFSET);
     memcpy(parsed->anchor_ids,
            &frame->payload[UWB_FLEX_TDOA_CONFIG_ANCHORS_OFFSET],
            sizeof(parsed->anchor_ids));
@@ -843,7 +874,7 @@ static bool uwb_flex_tdoa_handle_runtime_config(
     return result != UWB_FLEX_TDOA_CONFIG_INVALID;
 }
 
-static uint32_t uwb_dw3000_remaining_ms(TickType_t start_tick,
+static uint32_t uwb_dw3000_remaining_ms(int64_t start_us,
                                         uint32_t timeout_ms);
 static esp_err_t uwb_dw3000_send_payload(const uint8_t *payload,
                                          size_t payload_len,
@@ -854,6 +885,10 @@ static esp_err_t uwb_dw3000_send_payload_expect_rx(
 static esp_err_t uwb_dw3000_send_payload_delayed(
     const uint8_t *payload, size_t payload_len, uint64_t tx_timestamp,
     uint64_t *programmed_tx_timestamp, uint64_t *actual_tx_timestamp);
+static esp_err_t uwb_dw3000_send_payload_delayed_timeout(
+    const uint8_t *payload, size_t payload_len, uint64_t tx_timestamp,
+    uint32_t tx_timeout_ms, uint64_t *programmed_tx_timestamp,
+    uint64_t *actual_tx_timestamp);
 static esp_err_t uwb_dw3000_send_payload_delayed_expect_rx(
     const uint8_t *payload, size_t payload_len, uint64_t tx_timestamp,
     uint32_t rx_after_tx_delay_uus, uint32_t rx_timeout_ms,
@@ -870,6 +905,8 @@ static void uwb_flex_tdoa_log_anchor_result(
     uint32_t slot_id,
     double distance_m, double raw_distance_m, bool clock_offset_valid,
     double clock_offset_ratio);
+static void uwb_flex_tdoa_record_response_path(
+    const struct uwb_distance_frame *request, size_t responder_index);
 static void uwb_distance_fill_tag_measurement(
     uint8_t peer_id, uint16_t sequence, uint64_t poll_tx_ts,
     const struct uwb_distance_frame *response, uint64_t final_tx_ts,
@@ -888,6 +925,7 @@ static bool s_tx_fctrl_base_valid;
 static size_t s_tx_fctrl_payload_len = SIZE_MAX;
 static bool s_rx_double_buffer_enabled;
 static uint8_t s_rx_double_buffer_index;
+static bool s_flex_tdoa_anchor_request_buffer_pending;
 static uint32_t s_rx_double_buffer_resync_count;
 static uint32_t s_rx_double_buffer_cia_not_ready_count;
 static uint32_t s_rx_double_buffer_release_max_us;
@@ -951,6 +989,15 @@ static uint32_t s_flex_tdoa_response_tx_by_initiator[
 static TickType_t s_flex_tdoa_anchor_summary_tick;
 static uint32_t s_flex_tdoa_rx_errors_since_summary;
 static uint32_t s_flex_tdoa_rx_error_status_since_summary;
+static uint32_t s_flex_tdoa_req_to_dtx_count[
+    UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
+static uint64_t s_flex_tdoa_req_to_dtx_sum_us[
+    UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
+static uint32_t s_flex_tdoa_req_to_dtx_max_us[
+    UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
+static uint32_t s_flex_tdoa_dtx_arm_max_us;
+static int64_t s_last_delayed_command_host_us;
+static uint32_t s_last_delayed_arm_us;
 
 static void uwb_flex_tdoa_schedule_alarm_callback(void *arg)
 {
@@ -1259,14 +1306,14 @@ static void IRAM_ATTR uwb_dw3000_irq_isr_handler(void *arg)
     }
 }
 
-static void uwb_dw3000_wait_for_event_or_delay(TickType_t start_tick,
+static void uwb_dw3000_wait_for_event_or_delay(int64_t start_us,
                                                uint32_t timeout_ms,
                                                uint32_t fallback_delay_ms)
 {
 #if APP_UWB_IRQ_ENABLED
     if (s_irq_enabled) {
         const uint32_t remaining_ms =
-            uwb_dw3000_remaining_ms(start_tick, timeout_ms);
+            uwb_dw3000_remaining_ms(start_us, timeout_ms);
         if (remaining_ms == 0) {
             return;
         }
@@ -1465,15 +1512,21 @@ static esp_err_t uwb_dw3000_add_spi_device(uint32_t requested_clock_hz)
     }
 
     s_spi_clock_hz = (uint32_t)actual_clock_khz * 1000U;
-    if (s_spi_clock_hz > UWB_DW3000_SPI_DATASHEET_MAX_HZ) {
+    if (s_spi_clock_hz > UWB_DW3000_SPI_VALIDATED_MAX_HZ) {
         ESP_LOGE(TAG,
-                 "DW3000 SPI actual clock %lu Hz exceeds datasheet maximum %u Hz",
+                 "DW3000 SPI actual clock %lu Hz exceeds validated maximum %u Hz",
                  (unsigned long)s_spi_clock_hz,
-                 (unsigned)UWB_DW3000_SPI_DATASHEET_MAX_HZ);
+                 (unsigned)UWB_DW3000_SPI_VALIDATED_MAX_HZ);
         (void)spi_bus_remove_device(s_spi);
         s_spi = NULL;
         s_spi_clock_hz = 0;
         return ESP_ERR_INVALID_ARG;
+    }
+    if (s_spi_clock_hz > UWB_DW3000_SPI_DATASHEET_MAX_HZ) {
+        ESP_LOGW(TAG,
+                 "DW3000 SPI actual clock %lu Hz exceeds nominal datasheet maximum %u Hz",
+                 (unsigned long)s_spi_clock_hz,
+                 (unsigned)UWB_DW3000_SPI_DATASHEET_MAX_HZ);
     }
 
     ESP_LOGI(TAG, "DW3000 SPI clock: requested=%lu Hz actual=%lu Hz",
@@ -2084,18 +2137,34 @@ static uint8_t uwb_dw3000_current_rdb_clear_mask(void)
 static esp_err_t uwb_dw3000_release_rx_double_buffer(void)
 {
     // Qorvo's double-buffer sequence is read data, clear the processed RDB
-    // status, then notify the radio that the host has finished with it.
+    // status and the corresponding RX-good events, then toggle the host
+    // buffer pointer. A global CMD_CLR_IRQS here can erase unrelated TX state.
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_len(DW3000_REG_RDB_STATUS,
                                  DW3000_RDB_STATUS_SUB,
                                  uwb_dw3000_current_rdb_clear_mask(), 1),
         TAG, "double-buffer RDB_STATUS clear failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_CLR_IRQS), TAG,
-                        "double-buffer IRQ clear failed");
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW,
+                                 DW3000_SYS_STATUS_SUB,
+                                 DW3000_STATUS_RX_GOOD_CLEAR_MASK, 4),
+        TAG, "double-buffer RX-good status clear failed");
     ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_DB_TOGGLE), TAG,
                         "double-buffer release failed");
     s_rx_double_buffer_index ^= 1U;
     return ESP_OK;
+}
+
+static esp_err_t uwb_dw3000_release_pending_flex_request(void)
+{
+    if (!s_flex_tdoa_anchor_request_buffer_pending) {
+        return ESP_OK;
+    }
+    const esp_err_t err = uwb_dw3000_release_rx_double_buffer();
+    if (err == ESP_OK) {
+        s_flex_tdoa_anchor_request_buffer_pending = false;
+    }
+    return err;
 }
 
 static esp_err_t uwb_dw3000_configure_flex_rx_double_buffer(void)
@@ -2156,6 +2225,7 @@ static esp_err_t uwb_dw3000_configure_flex_rx_double_buffer(void)
     }
 
     s_rx_double_buffer_index = 0;
+    s_flex_tdoa_anchor_request_buffer_pending = false;
     s_rx_double_buffer_resync_count = 0;
     s_rx_double_buffer_cia_not_ready_count = 0;
     s_rx_double_buffer_release_max_us = 0;
@@ -3395,15 +3465,16 @@ static esp_err_t uwb_dw3000_poll_rx(void)
     return ESP_OK;
 }
 
-static uint32_t uwb_dw3000_remaining_ms(TickType_t start_tick,
+static uint32_t uwb_dw3000_remaining_ms(int64_t start_us,
                                         uint32_t timeout_ms)
 {
-    const TickType_t elapsed_ticks = xTaskGetTickCount() - start_tick;
-    const uint32_t elapsed_ms = (uint32_t)elapsed_ticks * portTICK_PERIOD_MS;
-    if (elapsed_ms >= timeout_ms) {
+    const int64_t elapsed_us = esp_timer_get_time() - start_us;
+    const int64_t timeout_us = (int64_t)timeout_ms * 1000LL;
+    if (elapsed_us >= timeout_us) {
         return 0;
     }
-    return timeout_ms - elapsed_ms;
+    const int64_t remaining_us = timeout_us - elapsed_us;
+    return (uint32_t)((remaining_us + 999LL) / 1000LL);
 }
 
 static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
@@ -3420,7 +3491,7 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                             "distance RX arm failed");
     }
 
-    const TickType_t start = xTaskGetTickCount();
+    const int64_t start = esp_timer_get_time();
     while (true) {
         uint32_t status = 0;
         uint8_t rdb_status = 0;
@@ -3483,18 +3554,10 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                 spi_bus_acquired = true;
 
                 // DW3000 does not support RXAUTR in double-buffer mode. The
-                // completed reception left the radio idle, so re-arm it now,
-                // before reading the occupied buffer. The next frame can then
-                // land in the other buffer while the ESP32 copies this one.
+                // completed reception left the radio idle, so reflect that in
+                // software before deciding whether this frame needs immediate
+                // continuous reception.
                 s_rx_armed = false;
-                const esp_err_t rearm_err =
-                    uwb_dw3000_fast_command(DW3000_CMD_RX);
-                if (rearm_err != ESP_OK) {
-                    spi_device_release_bus(s_spi);
-                    s_rx_error_count++;
-                    return rearm_err;
-                }
-                s_rx_armed = true;
             }
             // RX_FINFO, RX_TIME and the payload are valid as soon as the
             // double buffer reports a good frame. FlexTDOA requests do not
@@ -3524,7 +3587,7 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             if (!flex_buffered_fast_path && read_err == ESP_OK &&
                 uwb_dw3000_payload_is_distance_frame(frame->payload,
                                                      frame->payload_len) &&
-                frame->payload[5] != UWB_DISTANCE_FRAME_FLEX_TDOA_REQ) {
+                    frame->payload[5] != UWB_DISTANCE_FRAME_FLEX_TDOA_REQ) {
                 bool cia_ready = true;
                 if (s_rx_double_buffer_enabled) {
                     const uint8_t cia_done_mask =
@@ -3550,6 +3613,27 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                     frame->clock_offset_valid = clock_err == ESP_OK;
                 }
             }
+            const bool flex_anchor_request =
+                flex_buffered_fast_path && read_err == ESP_OK &&
+                s_source_id != app_runtime_config_get()->tag_id &&
+                uwb_dw3000_payload_is_distance_frame(frame->payload,
+                                                     frame->payload_len) &&
+                frame->payload[5] == UWB_DISTANCE_FRAME_FLEX_TDOA_REQ;
+            if (flex_buffered_fast_path && !flex_anchor_request) {
+                // Tags and anchors consuming RESP frames must keep listening
+                // while the occupied buffer is copied and released. An anchor
+                // receiving REQ remains idle because it will transmit next.
+                const esp_err_t rearm_err =
+                    uwb_dw3000_fast_command(DW3000_CMD_RX);
+                if (rearm_err != ESP_OK) {
+                    if (spi_bus_acquired) {
+                        spi_device_release_bus(s_spi);
+                    }
+                    s_rx_error_count++;
+                    return rearm_err;
+                }
+                s_rx_armed = true;
+            }
             esp_err_t diag_err = ESP_OK;
             memset(&frame->diagnostics, 0, sizeof(frame->diagnostics));
             if (read_err == ESP_OK &&
@@ -3558,8 +3642,15 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                 diag_err = uwb_dw3000_read_rx_diagnostics(&frame->diagnostics);
             }
             if (s_rx_double_buffer_enabled) {
+                // A FlexTDOA anchor has no useful RX work between REQ and its
+                // scheduled RESP. Defer the three-operation buffer release so
+                // delayed TX is armed first; the copied frame remains valid.
+                s_flex_tdoa_anchor_request_buffer_pending =
+                    flex_anchor_request;
                 const esp_err_t release_err =
-                    uwb_dw3000_release_rx_double_buffer();
+                    flex_anchor_request
+                        ? ESP_OK
+                        : uwb_dw3000_release_rx_double_buffer();
                 if (spi_bus_acquired) {
                     spi_device_release_bus(s_spi);
                     spi_bus_acquired = false;
@@ -3837,7 +3928,7 @@ static esp_err_t uwb_distance_receive_next(struct uwb_distance_frame *frame,
         return ESP_ERR_INVALID_ARG;
     }
 
-    const TickType_t start = xTaskGetTickCount();
+    const int64_t start = esp_timer_get_time();
 
     while (true) {
         const uint32_t remaining_ms =
@@ -3853,8 +3944,7 @@ static esp_err_t uwb_distance_receive_next(struct uwb_distance_frame *frame,
             return err;
         }
 
-        struct uwb_distance_frame parsed = {0};
-        if (!uwb_distance_parse_frame(&rx_frame, &parsed)) {
+        if (!uwb_distance_parse_frame(&rx_frame, frame)) {
             s_rx_ignored_count++;
             ESP_LOGD(TAG, "Ignoring non-ranging frame len=%u ignored=%lu",
                      (unsigned)rx_frame.payload_len,
@@ -3862,9 +3952,8 @@ static esp_err_t uwb_distance_receive_next(struct uwb_distance_frame *frame,
             continue;
         }
 
-        s_last_rx_source_id = parsed.source_id;
-        s_last_rx_sequence = parsed.sequence;
-        *frame = parsed;
+        s_last_rx_source_id = frame->source_id;
+        s_last_rx_sequence = frame->sequence;
         return ESP_OK;
     }
 }
@@ -3874,7 +3963,7 @@ static esp_err_t uwb_distance_receive_matching(
     uint16_t expected_sequence, struct uwb_distance_frame *frame,
     uint32_t timeout_ms)
 {
-    const TickType_t start = xTaskGetTickCount();
+    const int64_t start = esp_timer_get_time();
 
     while (true) {
         const uint32_t remaining_ms =
@@ -5015,12 +5104,14 @@ uwb_flex_tdoa_next_piggyback_distance(void)
 
 static uint32_t uwb_flex_tdoa_slot_duration_us(size_t responder_count)
 {
-    return UWB_FLEX_TDOA_PAPER_GUARD_US +
-           UWB_FLEX_TDOA_PAPER_REQ_SUBSLOT_US +
-           UWB_FLEX_TDOA_REQ_PROCESS_US +
+    const app_runtime_config_t *config = app_runtime_config_get();
+    return config->flex_tdoa_guard_us +
+           config->flex_tdoa_request_subslot_us +
+           config->flex_tdoa_request_process_us +
            ((uint32_t)responder_count *
-            UWB_FLEX_TDOA_RESP_SUBSLOT_US) +
-           ((uint32_t)responder_count * UWB_FLEX_TDOA_PAPER_RESP_PROCESS_US);
+            config->flex_tdoa_response_subslot_us) +
+           ((uint32_t)responder_count *
+            config->flex_tdoa_response_process_us);
 }
 
 // FlexTDOA CI-CR: the initiator changes in round-robin order every slot, and
@@ -5222,6 +5313,50 @@ static bool uwb_flex_tdoa_parse_request(
     }
     if (metadata_out != NULL) {
         *metadata_out = metadata;
+    }
+    return true;
+}
+
+static bool uwb_flex_tdoa_parse_local_response_request(
+    const struct uwb_distance_frame *frame, const uint8_t *anchor_ids,
+    size_t anchor_count, uint32_t *slot_id, size_t *responder_index)
+{
+    if (frame == NULL || anchor_ids == NULL || anchor_count < 2U ||
+        slot_id == NULL || responder_index == NULL ||
+        frame->type != UWB_DISTANCE_FRAME_FLEX_TDOA_REQ ||
+        !uwb_distance_destination_matches(frame->destination_id) ||
+        !uwb_anchor_survey_id_in_set(anchor_ids, anchor_count,
+                                     frame->source_id) ||
+        frame->payload_len < UWB_FLEX_TDOA_DESTINATIONS_OFFSET) {
+        return false;
+    }
+
+    const uint8_t responder_count =
+        frame->payload[UWB_FLEX_TDOA_DESTINATION_COUNT_OFFSET];
+    const size_t tail_offset =
+        UWB_FLEX_TDOA_DESTINATIONS_OFFSET + responder_count;
+    if (responder_count == 0U || responder_count >= anchor_count ||
+        responder_count > UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U ||
+        frame->payload_len < tail_offset + UWB_FLEX_TDOA_TAIL_LEN) {
+        return false;
+    }
+
+    *slot_id =
+        uwb_distance_get_u32(frame->payload, UWB_FLEX_TDOA_SLOT_ID_OFFSET);
+    *responder_index = SIZE_MAX;
+    for (size_t i = 0; i < responder_count; ++i) {
+        const uint8_t responder_id =
+            frame->payload[UWB_FLEX_TDOA_DESTINATIONS_OFFSET + i];
+        if (!uwb_flex_tdoa_anchor_pair_valid(
+                anchor_ids, anchor_count, frame->source_id, responder_id)) {
+            return false;
+        }
+        if (responder_id == s_source_id) {
+            if (*responder_index != SIZE_MAX) {
+                return false;
+            }
+            *responder_index = i;
+        }
     }
     return true;
 }
@@ -5612,14 +5747,14 @@ static esp_err_t uwb_flex_tdoa_send_response_preparsed(
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Figure 2 reserves a 2 ms request subslot, then 250 us of request
-    // processing, followed by the ordered 250 us response subslots. The
-    // DW3000 delayed-TX timestamp makes the response independent of host
-    // scheduling jitter once it has been armed.
+    const app_runtime_config_t *config = app_runtime_config_get();
+    // The DW3000 timestamp makes each ordered response independent of host
+    // jitter after the configured request-processing window has elapsed.
     const uint32_t response_delay_us =
-        UWB_FLEX_TDOA_RESPONSE_BASE_US +
+        config->flex_tdoa_request_subslot_us +
+        config->flex_tdoa_request_process_us +
         ((uint32_t)responder_index *
-         UWB_FLEX_TDOA_RESP_SUBSLOT_US);
+         config->flex_tdoa_response_subslot_us);
     const uint64_t response_delay_dtu =
         uwb_dw3000_us_to_dtu(response_delay_us);
     const uint64_t response_due = uwb_dw3000_add_timestamp_delta(
@@ -5642,8 +5777,10 @@ static esp_err_t uwb_flex_tdoa_send_response_preparsed(
     }
 
     uint64_t actual_tx_ts = 0;
-    const esp_err_t err = uwb_dw3000_send_payload_delayed(
-        payload, payload_len, response_due, NULL, &actual_tx_ts);
+    const esp_err_t err = uwb_dw3000_send_payload_delayed_timeout(
+        payload, payload_len, response_due, UWB_FLEX_TDOA_TX_TIMEOUT_MS,
+        NULL, &actual_tx_ts);
+    uwb_flex_tdoa_record_response_path(request, responder_index);
     if (err != ESP_OK) {
         ESP_LOGW(TAG,
                  "FLEX_TDOA response failed pair=%u-%u seq=%u slot=%lu index=%u delay=%lu us: %s",
@@ -5654,7 +5791,6 @@ static esp_err_t uwb_flex_tdoa_send_response_preparsed(
         return err;
     }
 
-    const app_runtime_config_t *config = app_runtime_config_get();
     const size_t initiator_index = uwb_anchor_survey_id_index(
         config->anchor_ids, config->anchor_count, request->source_id);
     if (initiator_index != SIZE_MAX) {
@@ -5688,16 +5824,12 @@ static esp_err_t uwb_flex_tdoa_send_response_for_request(
     size_t anchor_count)
 {
     uint32_t slot_id = 0;
-    uint8_t responder_count = 0;
-    uint8_t responders[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U] = {0};
-    if (!uwb_flex_tdoa_parse_request(request, anchor_ids, anchor_count,
-                                     &slot_id, &responder_count,
-                                     responders, NULL)) {
+    size_t responder_index = SIZE_MAX;
+    if (!uwb_flex_tdoa_parse_local_response_request(
+            request, anchor_ids, anchor_count, &slot_id, &responder_index)) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    const size_t responder_index =
-        uwb_flex_tdoa_responder_index(responders, responder_count, s_source_id);
     if (responder_index == SIZE_MAX) {
         return ESP_OK;
     }
@@ -5840,9 +5972,22 @@ static void uwb_flex_tdoa_log_anchor_result(
     const TickType_t now = xTaskGetTickCount();
     if (s_flex_tdoa_anchor_summary_tick == 0 ||
         now - s_flex_tdoa_anchor_summary_tick >= pdMS_TO_TICKS(1000)) {
+        const uint32_t path_avg_0 = s_flex_tdoa_req_to_dtx_count[0] != 0U
+                                        ? (uint32_t)(s_flex_tdoa_req_to_dtx_sum_us[0] /
+                                                     s_flex_tdoa_req_to_dtx_count[0])
+                                        : 0U;
+        const uint32_t path_avg_1 = s_flex_tdoa_req_to_dtx_count[1] != 0U
+                                        ? (uint32_t)(s_flex_tdoa_req_to_dtx_sum_us[1] /
+                                                     s_flex_tdoa_req_to_dtx_count[1])
+                                        : 0U;
+        const uint32_t path_avg_2 = s_flex_tdoa_req_to_dtx_count[2] != 0U
+                                        ? (uint32_t)(s_flex_tdoa_req_to_dtx_sum_us[2] /
+                                                     s_flex_tdoa_req_to_dtx_count[2])
+                                        : 0U;
         (void)wireless_log_service_submit('I', TAG,
                  "FLEX_TDOA anchor n=%lu drop=%lu incoh=%lu idx=%lu/%lu/%lu "
-                 "txresp=%lu/%lu/%lu/%lu rxerr=%lu/0x%08lx rdb=%lu cia=%lu",
+                 "txresp=%lu/%lu/%lu/%lu rxerr=%lu/0x%08lx rdb=%lu cia=%lu "
+                 "path_us=%lu/%lu,%lu/%lu,%lu/%lu arm_max=%lu",
                  (unsigned long)s_flex_tdoa_anchor_results_since_summary,
                  (unsigned long)s_flex_tdoa_anchor_drops_since_summary,
                  (unsigned long)s_flex_tdoa_anchor_incoherent_since_summary,
@@ -5856,7 +6001,14 @@ static void uwb_flex_tdoa_log_anchor_result(
                  (unsigned long)s_flex_tdoa_rx_errors_since_summary,
                  (unsigned long)s_flex_tdoa_rx_error_status_since_summary,
                  (unsigned long)s_rx_double_buffer_release_max_us,
-                 (unsigned long)s_rx_double_buffer_cia_not_ready_count);
+                 (unsigned long)s_rx_double_buffer_cia_not_ready_count,
+                 (unsigned long)path_avg_0,
+                 (unsigned long)s_flex_tdoa_req_to_dtx_max_us[0],
+                 (unsigned long)path_avg_1,
+                 (unsigned long)s_flex_tdoa_req_to_dtx_max_us[1],
+                 (unsigned long)path_avg_2,
+                 (unsigned long)s_flex_tdoa_req_to_dtx_max_us[2],
+                 (unsigned long)s_flex_tdoa_dtx_arm_max_us);
         s_flex_tdoa_anchor_results_since_summary = 0;
         s_flex_tdoa_anchor_drops_since_summary = 0;
         s_flex_tdoa_anchor_incoherent_since_summary = 0;
@@ -5868,9 +6020,44 @@ static void uwb_flex_tdoa_log_anchor_result(
         s_flex_tdoa_rx_error_status_since_summary = 0;
         s_rx_double_buffer_release_max_us = 0;
         s_rx_double_buffer_cia_not_ready_count = 0;
+        memset(s_flex_tdoa_req_to_dtx_count, 0,
+               sizeof(s_flex_tdoa_req_to_dtx_count));
+        memset(s_flex_tdoa_req_to_dtx_sum_us, 0,
+               sizeof(s_flex_tdoa_req_to_dtx_sum_us));
+        memset(s_flex_tdoa_req_to_dtx_max_us, 0,
+               sizeof(s_flex_tdoa_req_to_dtx_max_us));
+        s_flex_tdoa_dtx_arm_max_us = 0;
         s_flex_tdoa_anchor_summary_tick = now;
     }
     (void)clock_offset_valid;
+}
+
+static void uwb_flex_tdoa_record_response_path(
+    const struct uwb_distance_frame *request, size_t responder_index)
+{
+    if (request == NULL ||
+        responder_index >= UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U ||
+        request->rx_host_time_us <= 0 ||
+        s_last_delayed_command_host_us < request->rx_host_time_us) {
+        return;
+    }
+
+    const uint64_t elapsed_us =
+        (uint64_t)(s_last_delayed_command_host_us -
+                   request->rx_host_time_us);
+    if (elapsed_us > UINT32_MAX) {
+        return;
+    }
+
+    s_flex_tdoa_req_to_dtx_count[responder_index]++;
+    s_flex_tdoa_req_to_dtx_sum_us[responder_index] += elapsed_us;
+    if (elapsed_us > s_flex_tdoa_req_to_dtx_max_us[responder_index]) {
+        s_flex_tdoa_req_to_dtx_max_us[responder_index] =
+            (uint32_t)elapsed_us;
+    }
+    if (s_last_delayed_arm_us > s_flex_tdoa_dtx_arm_max_us) {
+        s_flex_tdoa_dtx_arm_max_us = s_last_delayed_arm_us;
+    }
 }
 
 static esp_err_t uwb_flex_tdoa_send_request(
@@ -5892,10 +6079,11 @@ static esp_err_t uwb_flex_tdoa_send_request(
     uint64_t tx_timestamp = 0;
     esp_err_t err = ESP_OK;
     if (scheduled_tx_ts != 0) {
-        err = uwb_dw3000_send_payload_delayed(
-            payload, payload_len, scheduled_tx_ts, NULL, &tx_timestamp);
+        err = uwb_dw3000_send_payload_delayed_timeout(
+            payload, payload_len, scheduled_tx_ts,
+            UWB_FLEX_TDOA_TX_TIMEOUT_MS, NULL, &tx_timestamp);
     } else {
-        esp_rom_delay_us(UWB_FLEX_TDOA_PAPER_GUARD_US);
+        esp_rom_delay_us(app_runtime_config_get()->flex_tdoa_guard_us);
         err = uwb_dw3000_send_payload(payload, payload_len, &tx_timestamp);
     }
     if (err != ESP_OK) {
@@ -6079,10 +6267,10 @@ static void uwb_flex_tdoa_process_frame(
 
     switch (frame->type) {
     case UWB_DISTANCE_FRAME_FLEX_TDOA_REQ:
-        uwb_flex_tdoa_schedule_from_frame(schedule, frame, anchor_ids,
-                                          anchor_count);
         (void)uwb_flex_tdoa_send_response_for_request(
             frame, anchor_ids, anchor_count);
+        uwb_flex_tdoa_schedule_from_frame(schedule, frame, anchor_ids,
+                                          anchor_count);
         break;
     case UWB_DISTANCE_FRAME_FLEX_TDOA_RESP:
         uwb_flex_tdoa_schedule_from_frame(schedule, frame, anchor_ids,
@@ -6251,8 +6439,24 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
         struct uwb_distance_frame frame = {0};
         const esp_err_t err = uwb_distance_receive_next(
             &frame, config->anchor_survey_rx_slice_ms);
+        const bool urgent_request =
+            err == ESP_OK &&
+            frame.type == UWB_DISTANCE_FRAME_FLEX_TDOA_REQ;
+        if (urgent_request) {
+            // Arm delayed TX before stopping the host schedule timer or
+            // running generic frame work; RESP[0] uses the configured window.
+            uwb_flex_tdoa_process_frame(&frame, &schedule, anchor_ids,
+                                        anchor_count);
+            const esp_err_t release_err =
+                uwb_dw3000_release_pending_flex_request();
+            if (release_err != ESP_OK) {
+                ESP_LOGE(TAG, "FlexTDOA REQ buffer release failed: %s",
+                         esp_err_to_name(release_err));
+                s_rx_error_count++;
+            }
+        }
         bool config_frame = false;
-        if (err == ESP_OK) {
+        if (err == ESP_OK && !urgent_request) {
             config_frame = uwb_flex_tdoa_handle_runtime_config(&frame);
         }
         (void)esp_timer_stop(s_flex_tdoa_schedule_timer);
@@ -6260,6 +6464,9 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
         s_flex_tdoa_schedule_alarm_fired = false;
 
         if (err == ESP_OK) {
+            if (urgent_request) {
+                continue;
+            }
             if (config_frame) {
                 continue;
             }
@@ -6881,11 +7088,15 @@ static uint32_t uwb_dw3000_next_random_interval_ms(void)
 static esp_err_t uwb_dw3000_prepare_tx(const uint8_t *payload,
                                        size_t payload_len)
 {
-    ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF), TAG,
-                        "TXRXOFF command failed");
-    s_rx_armed = false;
-    ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
-                        "clear before TX failed");
+    if (s_rx_armed) {
+        ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF), TAG,
+                            "TXRXOFF command failed");
+        s_rx_armed = false;
+    }
+    if (!s_flex_tdoa_anchor_request_buffer_pending) {
+        ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
+                            "clear before TX failed");
+    }
     ESP_RETURN_ON_ERROR(uwb_dw3000_write_tx_payload(payload, payload_len), TAG,
                         "TX buffer write failed");
     ESP_RETURN_ON_ERROR(uwb_dw3000_set_frame_length(payload_len), TAG,
@@ -6893,9 +7104,15 @@ static esp_err_t uwb_dw3000_prepare_tx(const uint8_t *payload,
     return ESP_OK;
 }
 
-static esp_err_t uwb_dw3000_wait_for_tx_complete(uint64_t *tx_timestamp)
+static esp_err_t uwb_dw3000_wait_for_tx_complete_timeout(
+    uint64_t *tx_timestamp, uint32_t timeout_ms, bool delayed_tx,
+    uint32_t delayed_time_word)
 {
-    const TickType_t start = xTaskGetTickCount();
+    if (timeout_ms == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const int64_t start = esp_timer_get_time();
     while (true) {
         uint32_t status = 0;
         if (uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW, 0x44, &status) !=
@@ -6928,11 +7145,40 @@ static esp_err_t uwb_dw3000_wait_for_tx_complete(uint64_t *tx_timestamp)
             return ESP_ERR_INVALID_STATE;
         }
 
-        if ((xTaskGetTickCount() - start) >=
-            pdMS_TO_TICKS(UWB_DW3000_TX_TIMEOUT_MS)) {
+        if (uwb_dw3000_remaining_ms(start, timeout_ms) == 0U) {
             s_tx_error_count++;
-            ESP_LOGW(TAG, "UWB TX timeout SYS_STATUS=0x%08lx",
-                     (unsigned long)status);
+            if (delayed_tx) {
+                uint32_t system_state = 0;
+                uint32_t system_time_word = 0;
+                uint8_t rdb_status = 0;
+                const esp_err_t state_err = uwb_dw3000_read32(
+                    DW3000_REG_DIG_DIAG, DW3000_SYS_STATE_SUB,
+                    &system_state);
+                const esp_err_t time_err = uwb_dw3000_read32(
+                    DW3000_REG_GEN_CFG_AES_LOW, DW3000_SYS_TIME_SUB,
+                    &system_time_word);
+                const esp_err_t rdb_err =
+                    uwb_dw3000_read_rdb_status(&rdb_status);
+                const int32_t deadline_delta_word =
+                    (int32_t)(delayed_time_word - system_time_word);
+                const double deadline_delta_us =
+                    (double)deadline_delta_word * 256.0 *
+                    UWB_DW3000_TIME_UNIT_SECONDS * 1000000.0;
+                ESP_LOGW(TAG,
+                         "UWB delayed TX timeout SYS_STATUS=0x%08lx "
+                         "SYS_STATE=0x%08lx RDB=0x%02x target=0x%08lx "
+                         "now=0x%08lx delta=%.1f us "
+                         "diag=%s/%s/%s",
+                         (unsigned long)status,
+                         (unsigned long)system_state, rdb_status,
+                         (unsigned long)delayed_time_word,
+                         (unsigned long)system_time_word, deadline_delta_us,
+                         esp_err_to_name(state_err),
+                         esp_err_to_name(time_err), esp_err_to_name(rdb_err));
+            } else {
+                ESP_LOGW(TAG, "UWB TX timeout SYS_STATUS=0x%08lx",
+                         (unsigned long)status);
+            }
             ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF),
                                 TAG, "TXRXOFF after TX timeout failed");
             ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
@@ -6940,9 +7186,15 @@ static esp_err_t uwb_dw3000_wait_for_tx_complete(uint64_t *tx_timestamp)
             return ESP_ERR_TIMEOUT;
         }
 
-        uwb_dw3000_wait_for_event_or_delay(start, UWB_DW3000_TX_TIMEOUT_MS,
+        uwb_dw3000_wait_for_event_or_delay(start, timeout_ms,
                                            UWB_DW3000_TX_POLL_MS);
     }
+}
+
+static esp_err_t uwb_dw3000_wait_for_tx_complete(uint64_t *tx_timestamp)
+{
+    return uwb_dw3000_wait_for_tx_complete_timeout(
+        tx_timestamp, UWB_DW3000_TX_TIMEOUT_MS, false, 0U);
 }
 
 static esp_err_t uwb_dw3000_send_payload(const uint8_t *payload,
@@ -6976,30 +7228,69 @@ static esp_err_t uwb_dw3000_send_payload_expect_rx(
     return err;
 }
 
-static esp_err_t uwb_dw3000_send_payload_delayed(
+static esp_err_t uwb_dw3000_send_payload_delayed_timeout(
     const uint8_t *payload, size_t payload_len, uint64_t tx_timestamp,
-    uint64_t *programmed_tx_timestamp, uint64_t *actual_tx_timestamp)
+    uint32_t tx_timeout_ms, uint64_t *programmed_tx_timestamp,
+    uint64_t *actual_tx_timestamp)
 {
-    ESP_RETURN_ON_ERROR(uwb_dw3000_prepare_tx(payload, payload_len), TAG,
-                        "delayed TX prepare failed");
+    if (tx_timeout_ms == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
 
+    const int64_t arm_start_us = esp_timer_get_time();
+    s_last_delayed_command_host_us = 0;
+    s_last_delayed_arm_us = 0;
     const uint32_t delayed_time_word =
         uwb_dw3000_delayed_time_word(tx_timestamp);
-    ESP_RETURN_ON_ERROR(uwb_dw3000_set_delayed_trx_time(delayed_time_word),
-                        TAG, "DX_TIME write failed");
+    const char *failed_step = "SPI bus acquire for delayed TX";
+    esp_err_t err = spi_device_acquire_bus(s_spi, portMAX_DELAY);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "%s failed: %s", failed_step, esp_err_to_name(err));
+        return err;
+    }
 
+    // Keep TX_BUFFER, DX_TIME, deferred RDB release and CMD_DTX in one SPI
+    // ownership interval. Individual transactions still control CS, but no
+    // other caller can add host-side arbitration gaps to this critical path.
+    failed_step = "delayed TX prepare";
+    err = uwb_dw3000_prepare_tx(payload, payload_len);
+    if (err != ESP_OK) {
+        goto release_bus;
+    }
+    failed_step = "DX_TIME write";
+    err = uwb_dw3000_set_delayed_trx_time(delayed_time_word);
+    if (err != ESP_OK) {
+        goto release_bus;
+    }
     if (programmed_tx_timestamp != NULL) {
         *programmed_tx_timestamp =
             uwb_dw3000_programmed_tx_timestamp(delayed_time_word);
     }
 
-    ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_DTX), TAG,
-                        "delayed TX command failed");
+    // The copied REQ remains valid in host memory. Return the occupied DW3000
+    // double buffer before arming delayed TX; DB_TOGGLE while delayed TX is
+    // pending can cancel the scheduled transmission on real hardware.
+    failed_step = "FlexTDOA REQ buffer release before DTX";
+    err = uwb_dw3000_release_pending_flex_request();
+    if (err != ESP_OK) {
+        goto release_bus;
+    }
+    failed_step = "delayed TX command";
+    err = uwb_dw3000_fast_command(DW3000_CMD_DTX);
+    if (err != ESP_OK) {
+        goto release_bus;
+    }
+    s_last_delayed_command_host_us = esp_timer_get_time();
+    s_last_delayed_arm_us = (uint32_t)(
+        s_last_delayed_command_host_us - arm_start_us);
 
     uint32_t status = 0;
-    ESP_RETURN_ON_ERROR(
-        uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW, 0x44, &status), TAG,
-        "SYS_STATUS after delayed TX failed");
+    failed_step = "SYS_STATUS after delayed TX";
+    err = uwb_dw3000_read32(DW3000_REG_GEN_CFG_AES_LOW,
+                            DW3000_SYS_STATUS_SUB, &status);
+    if (err != ESP_OK) {
+        goto release_bus;
+    }
     if ((status & DW3000_STATUS_HPDWARN) != 0) {
         s_tx_error_count++;
         uint32_t system_time_word = 0;
@@ -7019,14 +7310,81 @@ static esp_err_t uwb_dw3000_send_payload_delayed(
                  (unsigned long)delayed_time_word,
                  (unsigned long)system_time_word, lead_us,
                  esp_err_to_name(time_err), (unsigned long)status);
-        ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF), TAG,
-                            "TXRXOFF after delayed TX reject failed");
-        ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
-                            "clear after delayed TX reject failed");
-        return ESP_ERR_INVALID_STATE;
+        failed_step = "TXRXOFF after delayed TX reject";
+        err = uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF);
+        if (err != ESP_OK) {
+            goto release_bus;
+        }
+        failed_step = "clear after delayed TX reject";
+        err = uwb_dw3000_clear_status();
+        if (err == ESP_OK) {
+            err = ESP_ERR_INVALID_STATE;
+        }
+    } else {
+        uint32_t system_state = 0;
+        failed_step = "SYS_STATE after delayed TX";
+        err = uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
+                                DW3000_SYS_STATE_SUB, &system_state);
+        if (err != ESP_OK) {
+            goto release_bus;
+        }
+        if (system_state == DW3000_SYS_STATE_DELAYED_TX_ERROR) {
+            // DW3000 erratum: a late delayed TX can enter TSE=TX while its TX
+            // state remains IDLE without asserting HPDWARN or ever setting
+            // TXFRS. This is the same signature checked by Qorvo dwt_starttx().
+            s_tx_error_count++;
+            uint32_t system_time_word = 0;
+            const esp_err_t time_err = uwb_dw3000_read32(
+                DW3000_REG_GEN_CFG_AES_LOW, DW3000_SYS_TIME_SUB,
+                &system_time_word);
+            const int32_t lead_word =
+                (int32_t)(delayed_time_word - system_time_word);
+            const double lead_us =
+                (double)lead_word * 256.0 * UWB_DW3000_TIME_UNIT_SECONDS *
+                1000000.0;
+            ESP_LOGW(TAG,
+                     "UWB delayed TX state error timestamp=0x%010llx "
+                     "word=0x%08lx now=0x%08lx lead=%.1f us time_err=%s "
+                     "SYS_STATE=0x%08lx arm=%lu us",
+                     (unsigned long long)tx_timestamp,
+                     (unsigned long)delayed_time_word,
+                     (unsigned long)system_time_word, lead_us,
+                     esp_err_to_name(time_err), (unsigned long)system_state,
+                     (unsigned long)s_last_delayed_arm_us);
+            failed_step = "TXRXOFF after delayed TX state error";
+            err = uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF);
+            if (err != ESP_OK) {
+                goto release_bus;
+            }
+            failed_step = "clear after delayed TX state error";
+            err = uwb_dw3000_clear_status();
+            if (err == ESP_OK) {
+                err = ESP_ERR_INVALID_STATE;
+            }
+        }
     }
 
-    return uwb_dw3000_wait_for_tx_complete(actual_tx_timestamp);
+release_bus:
+    spi_device_release_bus(s_spi);
+    if (err != ESP_OK) {
+        if (err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "%s failed: %s", failed_step,
+                     esp_err_to_name(err));
+        }
+        return err;
+    }
+
+    return uwb_dw3000_wait_for_tx_complete_timeout(
+        actual_tx_timestamp, tx_timeout_ms, true, delayed_time_word);
+}
+
+static esp_err_t uwb_dw3000_send_payload_delayed(
+    const uint8_t *payload, size_t payload_len, uint64_t tx_timestamp,
+    uint64_t *programmed_tx_timestamp, uint64_t *actual_tx_timestamp)
+{
+    return uwb_dw3000_send_payload_delayed_timeout(
+        payload, payload_len, tx_timestamp, UWB_DW3000_TX_TIMEOUT_MS,
+        programmed_tx_timestamp, actual_tx_timestamp);
 }
 
 static esp_err_t uwb_dw3000_send_payload_delayed_expect_rx(

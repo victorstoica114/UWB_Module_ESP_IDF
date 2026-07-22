@@ -3206,7 +3206,7 @@ tr.status-stale td { color: #4f3b1d; }
           <div class="flex-timing-head">
             <div>
               <h2>FlexTDOA Protocol Timing</h2>
-              <div class="muted">Live CI-CR frame structure and paper-aligned DW3000 delayed-TX timing.</div>
+              <div class="muted">Live CI-CR frame structure and tuned DW3000 delayed-TX timing.</div>
             </div>
             <div class="flex-timing-select">
               <label for="flexTimingSlotSelect">Inspect slot</label>
@@ -3215,12 +3215,83 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div id="flexTdoaTimingDiagram" class="muted">Waiting for FlexTDOA runtime status...</div>
         </div>
+        <div id="flexTdoaProfilesSection" class="section">
+          <h2>FlexTDOA Frame Profiles</h2>
+          <div class="form-grid">
+            <label for="flexProfileTargets">Targets</label>
+            <select id="flexProfileTargets">
+              <option value="all">all modules</option>
+              <option value="1">module 1</option>
+              <option value="2">module 2</option>
+              <option value="3">module 3</option>
+              <option value="4">module 4</option>
+              <option value="5">module 5</option>
+            </select>
+          </div>
+          <p class="muted profile-note">Each card is a complete on-air CI-CR timing profile. Applying it writes the timing to ESP NVS and reboots the selected modules.</p>
+          <div class="profile-grid">
+            <div class="profile-card flex-profile-card" data-flex-profile="frame19200">
+              <h3>19.20 ms Frame</h3>
+              <p class="muted">Hardware-validated baseline for four anchors and three responders.</p>
+              <div class="form-grid compact">
+                <label for="flexProfile19200GuardUs">Guard us</label>
+                <input id="flexProfile19200GuardUs" value="500" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile19200ReqUs">REQ us</label>
+                <input id="flexProfile19200ReqUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile19200ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile19200ReqProcessUs" value="1500" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile19200RespUs">RESP subslot us</label>
+                <input id="flexProfile19200RespUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile19200RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile19200RespProcessUs" value="600" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile19200RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile19200RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile19200FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile19200FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+              </div>
+              <div class="profile-summary" id="flexProfile19200Summary"></div>
+              <div class="form-actions">
+                <button class="primary apply-flex-profile" data-flex-profile="frame19200">Apply 19.20 ms</button>
+                <button class="reset-flex-profile" data-flex-profile="frame19200">Reset Defaults</button>
+              </div>
+            </div>
+            <div class="profile-card flex-profile-card" data-flex-profile="frame14800">
+              <h3>14.80 ms Frame</h3>
+              <p class="muted">First compact experiment: 3.70 ms slot at N=4, K=3.</p>
+              <div class="form-grid compact">
+                <label for="flexProfile14800GuardUs">Guard us</label>
+                <input id="flexProfile14800GuardUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14800ReqUs">REQ us</label>
+                <input id="flexProfile14800ReqUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14800ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile14800ReqProcessUs" value="1250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14800RespUs">RESP subslot us</label>
+                <input id="flexProfile14800RespUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14800RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile14800RespProcessUs" value="400" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14800RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile14800RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile14800FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile14800FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+              </div>
+              <div class="profile-summary" id="flexProfile14800Summary"></div>
+              <div class="form-actions">
+                <button class="primary apply-flex-profile" data-flex-profile="frame14800">Apply 14.80 ms</button>
+                <button class="reset-flex-profile" data-flex-profile="frame14800">Reset Defaults</button>
+              </div>
+            </div>
+          </div>
+          <div class="form-actions">
+            <button id="resetAllFlexProfiles">Reset FlexTDOA Profile Defaults</button>
+          </div>
+          <div id="flexProfileToast" class="toast"></div>
+        </div>
         <div id="legacyHybridRangingPanel" class="section ranging-protocol-panel hidden" data-ranging-protocol="hybrid">
           <h2>Legacy Hybrid Log Playback</h2>
           <p class="ranging-protocol-empty">This solver interprets captures produced by the former dual-leg hybrid protocol. It has no active radio timing controls; use it only for comparisons with previously recorded data.</p>
         </div>
         <div id="rangingProfilesSection" class="section">
-          <h2>Ranging Profiles</h2>
+          <h2>DS-TWR Profiles</h2>
           <div class="form-grid">
             <label for="rangingProfileTargets">Targets</label>
             <select id="rangingProfileTargets">
@@ -3232,7 +3303,7 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p id="rangingProfileNote" class="muted profile-note">FlexTDOA radio timing is fixed to the paper-aligned 5.05 ms CI-CR slot shown above. Profiles change only observation freshness and the host RX slice.</p>
+          <p id="rangingProfileNote" class="muted profile-note">FlexTDOA radio timing is fixed to the hardware-validated 4.80 ms CI-CR slot shown above. Profiles change only observation freshness and the host RX slice.</p>
           <div class="profile-grid">
             <div class="profile-card" data-profile="static3">
               <h3>Stable Profile</h3>
@@ -3741,6 +3812,39 @@ const rangingProfileDefaults = {
     autoRxDelayUus: 500,
   },
 };
+const flexProfileFields = [
+  {key: "guardUs", suffix: "GuardUs"},
+  {key: "requestUs", suffix: "ReqUs"},
+  {key: "requestProcessUs", suffix: "ReqProcessUs"},
+  {key: "responseUs", suffix: "RespUs"},
+  {key: "responseProcessUs", suffix: "RespProcessUs"},
+  {key: "rxSliceMs", suffix: "RxSliceMs"},
+  {key: "positionMaxAgeSec", suffix: "FreshAgeSec"},
+];
+const flexProfileDefaults = {
+  frame19200: {
+    prefix: "flexProfile19200",
+    label: "19.20 ms Frame",
+    guardUs: 500,
+    requestUs: 250,
+    requestProcessUs: 1500,
+    responseUs: 250,
+    responseProcessUs: 600,
+    rxSliceMs: 5,
+    positionMaxAgeSec: 0.5,
+  },
+  frame14800: {
+    prefix: "flexProfile14800",
+    label: "14.80 ms Frame",
+    guardUs: 250,
+    requestUs: 250,
+    requestProcessUs: 1250,
+    responseUs: 250,
+    responseProcessUs: 400,
+    rxSliceMs: 5,
+    positionMaxAgeSec: 0.5,
+  },
+};
 const rangingProtocolProfileFields = {
   flextdoa: new Set(["positionMaxAgeSec", "rxSliceMs"]),
   ranging: new Set([
@@ -3749,7 +3853,8 @@ const rangingProtocolProfileFields = {
   ]),
   hybrid: new Set(),
 };
-const rangingProfileDefaultsVersion = "2026-07-18-flex-7ms-v4";
+const rangingProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v5";
+const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v1";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -7622,13 +7727,128 @@ function rangingProfileElementId(profileKey, suffix) {
 }
 
 function rangingProfileIds() {
-  const ids = ["rangingProfileTargets"];
+  const ids = ["rangingProfileTargets", "flexProfileTargets"];
   for (const profileKey of Object.keys(rangingProfileDefaults)) {
     for (const field of rangingProfileFields) {
       ids.push(rangingProfileElementId(profileKey, field.suffix));
     }
   }
+  for (const profileKey of Object.keys(flexProfileDefaults)) {
+    const profile = flexProfileDefaults[profileKey];
+    for (const field of flexProfileFields) {
+      ids.push(`${profile.prefix}${field.suffix}`);
+    }
+  }
   return ids;
+}
+
+function readFlexProfile(profileKey) {
+  const profile = flexProfileDefaults[profileKey];
+  const result = {};
+  if (!profile) return result;
+  for (const field of flexProfileFields) {
+    result[field.key] = Number(
+      document.getElementById(`${profile.prefix}${field.suffix}`)?.value
+    );
+  }
+  return result;
+}
+
+function writeFlexProfile(profileKey, values, persist = true) {
+  const profile = flexProfileDefaults[profileKey];
+  if (!profile) return;
+  for (const field of flexProfileFields) {
+    const id = `${profile.prefix}${field.suffix}`;
+    const el = document.getElementById(id);
+    if (!el || values[field.key] === undefined) continue;
+    el.value = String(values[field.key]);
+    if (persist) localStorage.setItem(settingKey(id), el.value);
+  }
+  updateFlexProfileSummary(profileKey);
+}
+
+function flexProfileMetrics(values) {
+  const runtime = flexTimingRuntimeConfig();
+  const K = Math.max(1, Number(runtime.responderCount || 3));
+  const M = Math.max(1, Number(runtime.slotCount || 4));
+  const responseTotalUs = K * values.responseUs;
+  const responseProcessTotalUs = K * values.responseProcessUs;
+  const slotUs = values.guardUs + values.requestUs + values.requestProcessUs +
+    responseTotalUs + responseProcessTotalUs;
+  const frameUs = M * slotUs;
+  return {
+    K,
+    M,
+    responseTotalUs,
+    responseProcessTotalUs,
+    slotUs,
+    frameUs,
+    frameHz: frameUs > 0 ? 1000000 / frameUs : NaN,
+  };
+}
+
+function updateFlexProfileSummary(profileKey) {
+  const profile = flexProfileDefaults[profileKey];
+  const summary = document.getElementById(`${profile?.prefix || ""}Summary`);
+  if (!profile || !summary) return;
+  const values = readFlexProfile(profileKey);
+  const valid = flexProfileFields.every(field =>
+    Number.isFinite(values[field.key]) && values[field.key] > 0
+  );
+  if (!valid) {
+    summary.textContent = "incomplete profile";
+    summary.className = "profile-summary warn";
+    return;
+  }
+  const metrics = flexProfileMetrics(values);
+  summary.textContent =
+    `Guard ${values.guardUs} + REQ ${values.requestUs} + Process REQ ${values.requestProcessUs} + ` +
+    `${metrics.K} × RESP ${metrics.responseTotalUs} + ${metrics.K} × Process RESP ${metrics.responseProcessTotalUs} = ` +
+    `slot ${fmtFixed(metrics.slotUs / 1000, 3)} ms · frame ${fmtFixed(metrics.frameUs / 1000, 3)} ms · ` +
+    `${fmtFixed(metrics.frameHz, 2)} Hz`;
+  summary.className = "profile-summary";
+}
+
+function updateAllFlexProfileSummaries() {
+  Object.keys(flexProfileDefaults).forEach(updateFlexProfileSummary);
+}
+
+async function applyFlexProfile(profileKey) {
+  const profile = flexProfileDefaults[profileKey];
+  if (!profile) return;
+  const values = readFlexProfile(profileKey);
+  if (!flexProfileFields.every(field =>
+    Number.isFinite(values[field.key]) && values[field.key] > 0
+  )) {
+    setToast("flexProfileToast", "Profile has invalid values", "bad");
+    return;
+  }
+  const metrics = flexProfileMetrics(values);
+  setToast(
+    "flexProfileToast",
+    `applying ${fmtFixed(metrics.frameUs / 1000, 3)} ms frame...`,
+    "", null, false
+  );
+  const data = await postConfig({
+    target_modules: document.getElementById("flexProfileTargets").value,
+    params: {
+      flex_guard_us: String(values.guardUs),
+      flex_req_us: String(values.requestUs),
+      flex_req_process_us: String(values.requestProcessUs),
+      flex_resp_us: String(values.responseUs),
+      flex_resp_process_us: String(values.responseProcessUs),
+      survey_rx_ms: String(values.rxSliceMs),
+      reboot: "1",
+    },
+  }, "flexProfileToast");
+  if (apiResponseOk(data)) {
+    const freshAge = document.getElementById("positionMaxAgeSec");
+    if (freshAge) {
+      freshAge.value = String(values.positionMaxAgeSec);
+      localStorage.setItem(settingKey("positionMaxAgeSec"), freshAge.value);
+    }
+    setTimeout(fetchSnapshot, 1800);
+  }
 }
 
 function readRangingProfile(profileKey) {
@@ -7722,7 +7942,7 @@ function setRangingProfileFieldVisible(profileKey, field, visible) {
 
 function rangingProfileDescription(values, solver) {
   if (solver === "flextdoa") {
-    return `${fmtFixed(values.positionMaxAgeSec, 1)} s observation freshness and ${fmtFixed(values.rxSliceMs, 0)} ms host RX slices; radio timing remains paper-aligned.`;
+    return `${fmtFixed(values.positionMaxAgeSec, 1)} s observation freshness and ${fmtFixed(values.rxSliceMs, 0)} ms host RX slices; radio timing uses the fixed compact slot.`;
   }
   return `${fmtFixed(values.dsPositionMaxAgeSec, 1)} s distance freshness with a ${fmtFixed(values.slotMs, 0)} ms DS-TWR slot and ${fmtFixed(values.roundGapMs, 0)} ms cycle gap.`;
 }
@@ -7734,7 +7954,7 @@ function updateRangingSettingsProtocol() {
       title: "FlexTDOA Settings",
       label: "FlexTDOA",
       hint: "Selected in Position Setup. Only controls used by pure FlexTDOA are shown.",
-      note: "FlexTDOA radio timing is fixed to the paper-aligned 5.05 ms CI-CR slot shown above. Profiles change only observation freshness and the host RX slice.",
+      note: "FlexTDOA radio timing is fixed to the hardware-validated 4.80 ms CI-CR slot shown above. Profiles change only observation freshness and the host RX slice.",
     },
     ranging: {
       title: "DS-TWR Settings",
@@ -7758,7 +7978,9 @@ function updateRangingSettingsProtocol() {
   });
 
   const profilesSection = document.getElementById("rangingProfilesSection");
-  profilesSection.classList.toggle("hidden", solver === "hybrid");
+  profilesSection.classList.toggle("hidden", solver !== "ranging");
+  document.getElementById("flexTdoaProfilesSection")
+    ?.classList.toggle("hidden", solver !== "flextdoa");
   document.getElementById("rangingProfileNote").textContent = protocol.note;
 
   const visibleFields = rangingProtocolProfileFields[solver];
@@ -7768,13 +7990,14 @@ function updateRangingSettingsProtocol() {
     }
   }
   updateAllRangingProfileSummaries();
+  updateAllFlexProfileSummaries();
   if (solver === "flextdoa") renderFlexTdoaTimingDiagram();
 }
 
-const flexTimingPaper = {
-  guardUs: 250,
-  requestUs: 2000,
-  requestProcessUs: 250,
+const flexTimingFallback = {
+  guardUs: 500,
+  requestUs: 250,
+  requestProcessUs: 1500,
   responseUs: 250,
   responseProcessUs: 600,
 };
@@ -7802,6 +8025,13 @@ function flexTimingRuntimeConfig() {
   ));
   const masks = (status.runtime_flex_tdoa_slot_responder_masks || [])
     .map(Number);
+  const timing = {
+    guardUs: Number(status.runtime_flex_tdoa_guard_us || flexTimingFallback.guardUs),
+    requestUs: Number(status.runtime_flex_tdoa_request_subslot_us || flexTimingFallback.requestUs),
+    requestProcessUs: Number(status.runtime_flex_tdoa_request_process_us || flexTimingFallback.requestProcessUs),
+    responseUs: Number(status.runtime_flex_tdoa_response_subslot_us || flexTimingFallback.responseUs),
+    responseProcessUs: Number(status.runtime_flex_tdoa_response_process_us || flexTimingFallback.responseProcessUs),
+  };
   return {
     status,
     anchorIds,
@@ -7809,6 +8039,7 @@ function flexTimingRuntimeConfig() {
     masks,
     slotCount,
     responderCount,
+    timing,
     live: Boolean(statusIsFresh(status)),
   };
 }
@@ -7887,7 +8118,7 @@ function renderFlexTdoaTimingDiagram() {
 
   const K = config.responderCount;
   const M = config.slotCount;
-  const timing = flexTimingPaper;
+  const timing = config.timing;
   const responseProcessTotalUs = K * timing.responseProcessUs;
   const slotUs = timing.guardUs + timing.requestUs + timing.requestProcessUs +
     K * timing.responseUs + responseProcessTotalUs;
@@ -7929,8 +8160,8 @@ function renderFlexTdoaTimingDiagram() {
   ).join("");
 
   const segments = [
-    {key: "REQ subslot", short: "REQ", duration: timing.requestUs, cls: "req", detail: `A${selectedInitiator} TX at slot boundary; remainder reserved`},
-    {key: "Process REQ", short: "P_REQ", duration: timing.requestProcessUs, cls: "req-process", detail: "decode + arm delayed TX"},
+    {key: "REQ subslot", short: "REQ", duration: timing.requestUs, cls: "req", detail: `A${selectedInitiator} TX at slot boundary; budget includes frame airtime`},
+    {key: "Process REQ", short: "P_REQ", duration: timing.requestProcessUs, cls: "req-process", detail: "complete RX + decode + arm delayed TX"},
     ...selectedResponders.map((anchorId, index) => ({
       key: `RESP[${index}]`,
       short: `R${index}`,
@@ -7938,7 +8169,7 @@ function renderFlexTdoaTimingDiagram() {
       cls: `response ${index % 2 ? "alt" : ""}`,
       detail: `A${anchorId} delayed TX`,
     })),
-    {key: "Process RESP", short: "P_RESP", duration: responseProcessTotalUs, cls: "response-process", detail: `${K} × 600 us`},
+    {key: "Process RESP", short: "P_RESP", duration: responseProcessTotalUs, cls: "response-process", detail: `${K} × ${timing.responseProcessUs} us`},
     {key: "Gap", short: "GAP", duration: timing.guardUs, cls: "guard", detail: "quiet guard before next REQ"},
   ];
   const segmentCells = segments.map(segment => {
@@ -8075,8 +8306,8 @@ function renderFlexTdoaTimingDiagram() {
         <tbody>
           <tr>
             <td><span class="flex-scope fixed">FlexTDOA radio</span></td>
-            <td>Paper CI-CR constants · ${fmtFixed(slotUs / 1000, 3)} ms/slot</td>
-            <td>Defines the colored REQ, P_REQ, RESP, P_RESP and guard widths. No Ranging Profile field changes this on-air timeline.</td>
+            <td>Compact CI-CR timing · ${fmtFixed(slotUs / 1000, 3)} ms/slot</td>
+            <td>Defines the colored REQ, P_REQ, RESP, P_RESP and guard widths. The active FlexTDOA frame profile writes these values to every ESP and persists them in NVS.</td>
           </tr>
           <tr>
             <td><span class="flex-scope host">FlexTDOA host</span></td>
@@ -8086,14 +8317,14 @@ function renderFlexTdoaTimingDiagram() {
         </tbody>
       </table>
     </div>
-    <div class="flex-timing-note">The cyclic view starts at REQ. Colored widths are protocol time budgets, not packet airtime: REQ and each RESP transmit at their subslot boundary. The final 250 us GAP is the firmware guard interval inside every slot; pure FlexTDOA has no separate frame-level round gap. P_RESP is the paper's aggregate K × 600 us processing budget. Response offsets are native DW3000 delayed-TX targets relative to REQ_RX.</div>`;
+    <div class="flex-timing-note">The cyclic view starts at REQ. Colored widths are protocol time budgets, not packet airtime: REQ and each RESP transmit at their subslot boundary. The final ${timing.guardUs} us GAP is the configured guard interval inside every slot; pure FlexTDOA has no separate frame-level round gap. P_RESP is K × ${timing.responseProcessUs} us. Response offsets are native DW3000 delayed-TX targets relative to REQ_RX.</div>`;
 }
 
 function profileSummaryText(values, solver, anchorCount = 4) {
   if (solver === "flextdoa") {
-    const paperBodyMs = profileFlexTdoaPaperBodyMs(anchorCount);
-    const flexFrameMs = anchorCount * paperBodyMs;
-    return `fresh ${fmtFixed(values.positionMaxAgeSec, 1)} s · fixed ${fmtFixed(paperBodyMs, 2)} ms radio slot · ${fmtFixed(flexFrameMs, 2)} ms frame · RX slice ${fmtFixed(values.rxSliceMs, 0)} ms`;
+    const slotMs = profileFlexTdoaSlotMs(anchorCount);
+    const flexFrameMs = anchorCount * slotMs;
+    return `fresh ${fmtFixed(values.positionMaxAgeSec, 1)} s · fixed ${fmtFixed(slotMs, 2)} ms radio slot · ${fmtFixed(flexFrameMs, 2)} ms frame · RX slice ${fmtFixed(values.rxSliceMs, 0)} ms`;
   }
   const dsCycleMs = anchorCount * values.slotMs + values.roundGapMs;
   const warnings = [];
@@ -8103,10 +8334,13 @@ function profileSummaryText(values, solver, anchorCount = 4) {
   return `fresh ${fmtFixed(values.dsPositionMaxAgeSec, 1)} s · ${fmtFixed(values.slotMs, 0)} ms slot · ${fmtFixed(values.roundGapMs, 0)} ms gap · RX slice ${fmtFixed(values.dsRxSliceMs, 0)} ms · ~${fmtFixed(dsCycleMs, 0)} ms cycle${warnText}`;
 }
 
-function profileFlexTdoaPaperBodyMs(anchorCount = 4) {
+function profileFlexTdoaSlotMs(anchorCount = 4) {
   const responderCount = Math.max(1, anchorCount - 1);
+  const timing = flexTimingRuntimeConfig().timing;
   return (
-    250 + 2000 + 250 + responderCount * 250 + responderCount * 600
+    timing.guardUs + timing.requestUs + timing.requestProcessUs +
+    responderCount * timing.responseUs +
+    responderCount * timing.responseProcessUs
   ) / 1000;
 }
 
@@ -8206,6 +8440,7 @@ function restoreSettings() {
     }
   }
   migrateRangingProfileDefaults();
+  migrateFlexProfileDefaults();
   migrateCalibrationPairSetting();
   migratePositionSolverSetting();
 }
@@ -8217,6 +8452,15 @@ function migrateRangingProfileDefaults() {
     writeRangingProfile(profile, rangingProfileDefaults[profile]);
   }
   localStorage.setItem(key, rangingProfileDefaultsVersion);
+}
+
+function migrateFlexProfileDefaults() {
+  const key = "uwbDash.flexProfileDefaultsVersion";
+  if (localStorage.getItem(key) === flexProfileDefaultsVersion) return;
+  for (const profile of Object.keys(flexProfileDefaults)) {
+    writeFlexProfile(profile, flexProfileDefaults[profile]);
+  }
+  localStorage.setItem(key, flexProfileDefaultsVersion);
 }
 
 function migrateCalibrationPairSetting() {
@@ -8479,7 +8723,7 @@ function wireSettings() {
       }
     }, "telemetryPortToast");
   });
-  document.querySelectorAll(".profile-card input").forEach(el => {
+  document.querySelectorAll(".profile-card[data-profile] input").forEach(el => {
     el.addEventListener("input", () => {
       const profile = el.closest(".profile-card")?.dataset.profile;
       if (profile) updateRangingProfileSummary(profile);
@@ -8505,7 +8749,32 @@ function wireSettings() {
     }
     setToast("rangingProfileToast", "all profile defaults restored locally; press Apply to write ESP NVS", "");
   });
+  document.querySelectorAll(".flex-profile-card input").forEach(el => {
+    const update = () => {
+      const profile = el.closest(".flex-profile-card")?.dataset.flexProfile;
+      if (profile) updateFlexProfileSummary(profile);
+    };
+    el.addEventListener("input", update);
+    el.addEventListener("change", update);
+  });
+  document.querySelectorAll(".apply-flex-profile").forEach(button => {
+    button.addEventListener("click", () => applyFlexProfile(button.dataset.flexProfile));
+  });
+  document.querySelectorAll(".reset-flex-profile").forEach(button => {
+    button.addEventListener("click", () => {
+      const profile = button.dataset.flexProfile;
+      writeFlexProfile(profile, flexProfileDefaults[profile]);
+      setToast("flexProfileToast", "profile defaults restored locally; press Apply to write ESP NVS", "");
+    });
+  });
+  document.getElementById("resetAllFlexProfiles")?.addEventListener("click", () => {
+    for (const profile of Object.keys(flexProfileDefaults)) {
+      writeFlexProfile(profile, flexProfileDefaults[profile]);
+    }
+    setToast("flexProfileToast", "all FlexTDOA defaults restored locally; press Apply to write ESP NVS", "");
+  });
   updateAllRangingProfileSummaries();
+  updateAllFlexProfileSummaries();
   updateRangingSettingsProtocol();
   document.getElementById("applyCalibrationSettings").addEventListener("click", () => {
     postConfig({

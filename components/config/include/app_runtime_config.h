@@ -25,6 +25,11 @@ typedef struct {
     uint8_t flex_tdoa_slot_initiator_ids[APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS];
     uint16_t flex_tdoa_slot_responder_masks[APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS];
     uint32_t flex_tdoa_config_generation;
+    uint32_t flex_tdoa_guard_us;
+    uint32_t flex_tdoa_request_subslot_us;
+    uint32_t flex_tdoa_request_process_us;
+    uint32_t flex_tdoa_response_subslot_us;
+    uint32_t flex_tdoa_response_process_us;
     bool flex_tdoa_geometry_fixed;
     uint32_t flex_tdoa_geometry_generation;
     int32_t flex_tdoa_anchor_x_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS];

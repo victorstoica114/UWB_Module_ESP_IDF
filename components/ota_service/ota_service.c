@@ -663,6 +663,15 @@ static bool runtime_config_reboot_recommended(
            memcmp(before->flex_tdoa_slot_responder_masks,
                   after->flex_tdoa_slot_responder_masks,
                   sizeof(before->flex_tdoa_slot_responder_masks)) != 0 ||
+           before->flex_tdoa_guard_us != after->flex_tdoa_guard_us ||
+           before->flex_tdoa_request_subslot_us !=
+               after->flex_tdoa_request_subslot_us ||
+           before->flex_tdoa_request_process_us !=
+               after->flex_tdoa_request_process_us ||
+           before->flex_tdoa_response_subslot_us !=
+               after->flex_tdoa_response_subslot_us ||
+           before->flex_tdoa_response_process_us !=
+               after->flex_tdoa_response_process_us ||
            before->anchor_survey_coordinator_id !=
                after->anchor_survey_coordinator_id ||
            before->uwb_enabled != after->uwb_enabled ||
@@ -844,6 +853,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_flex_tdoa_slot_initiator_ids\":%s,"
         "\"runtime_flex_tdoa_slot_responder_masks\":%s,"
         "\"runtime_flex_tdoa_config_generation\":%lu,"
+        "\"runtime_flex_tdoa_guard_us\":%lu,"
+        "\"runtime_flex_tdoa_request_subslot_us\":%lu,"
+        "\"runtime_flex_tdoa_request_process_us\":%lu,"
+        "\"runtime_flex_tdoa_response_subslot_us\":%lu,"
+        "\"runtime_flex_tdoa_response_process_us\":%lu,"
         "\"runtime_flex_tdoa_geometry_fixed\":%s,"
         "\"runtime_flex_tdoa_geometry_generation\":%lu,"
         "\"runtime_anchor_survey_coordinator_id\":%u,"
@@ -1264,6 +1278,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         runtime_flex_slots_json,
         runtime_flex_masks_json,
         (unsigned long)runtime_config->flex_tdoa_config_generation,
+        (unsigned long)runtime_config->flex_tdoa_guard_us,
+        (unsigned long)runtime_config->flex_tdoa_request_subslot_us,
+        (unsigned long)runtime_config->flex_tdoa_request_process_us,
+        (unsigned long)runtime_config->flex_tdoa_response_subslot_us,
+        (unsigned long)runtime_config->flex_tdoa_response_process_us,
         runtime_config->flex_tdoa_geometry_fixed ? "true" : "false",
         (unsigned long)runtime_config->flex_tdoa_geometry_generation,
         (unsigned)runtime_config->anchor_survey_coordinator_id,
@@ -3152,6 +3171,12 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         APPLY_U8_PARAM("tag", tag_id);
         APPLY_U8_PARAM("anchor_count", anchor_count);
         APPLY_U8_PARAM("flex_k", flex_tdoa_responder_count);
+        APPLY_U32_PARAM("flex_guard_us", flex_tdoa_guard_us);
+        APPLY_U32_PARAM("flex_req_us", flex_tdoa_request_subslot_us);
+        APPLY_U32_PARAM("flex_req_process_us", flex_tdoa_request_process_us);
+        APPLY_U32_PARAM("flex_resp_us", flex_tdoa_response_subslot_us);
+        APPLY_U32_PARAM("flex_resp_process_us",
+                        flex_tdoa_response_process_us);
         APPLY_U8_PARAM("coordinator", anchor_survey_coordinator_id);
         APPLY_U8_PARAM("coord", anchor_survey_coordinator_id);
         APPLY_U32_PARAM("survey_rx_ms", anchor_survey_rx_slice_ms);
@@ -3247,7 +3272,16 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
                    sizeof(config.flex_tdoa_slot_initiator_ids)) != 0 ||
             memcmp(config.flex_tdoa_slot_responder_masks,
                    before_config.flex_tdoa_slot_responder_masks,
-                   sizeof(config.flex_tdoa_slot_responder_masks)) != 0) {
+                   sizeof(config.flex_tdoa_slot_responder_masks)) != 0 ||
+            config.flex_tdoa_guard_us != before_config.flex_tdoa_guard_us ||
+            config.flex_tdoa_request_subslot_us !=
+                before_config.flex_tdoa_request_subslot_us ||
+            config.flex_tdoa_request_process_us !=
+                before_config.flex_tdoa_request_process_us ||
+            config.flex_tdoa_response_subslot_us !=
+                before_config.flex_tdoa_response_subslot_us ||
+            config.flex_tdoa_response_process_us !=
+                before_config.flex_tdoa_response_process_us) {
             if (config.flex_tdoa_config_generation ==
                 before_config.flex_tdoa_config_generation) {
                 config.flex_tdoa_config_generation =
@@ -3352,6 +3386,11 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         "\"runtime_flex_tdoa_slot_initiator_ids\":%s,"
         "\"runtime_flex_tdoa_slot_responder_masks\":%s,"
         "\"runtime_flex_tdoa_config_generation\":%lu,"
+        "\"runtime_flex_tdoa_guard_us\":%lu,"
+        "\"runtime_flex_tdoa_request_subslot_us\":%lu,"
+        "\"runtime_flex_tdoa_request_process_us\":%lu,"
+        "\"runtime_flex_tdoa_response_subslot_us\":%lu,"
+        "\"runtime_flex_tdoa_response_process_us\":%lu,"
         "\"runtime_flex_tdoa_geometry_fixed\":%s,"
         "\"runtime_flex_tdoa_geometry_generation\":%lu,"
         "\"runtime_anchor_survey_coordinator_id\":%u,"
@@ -3384,6 +3423,11 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         active_flex_slots_json,
         active_flex_masks_json,
         (unsigned long)active_config->flex_tdoa_config_generation,
+        (unsigned long)active_config->flex_tdoa_guard_us,
+        (unsigned long)active_config->flex_tdoa_request_subslot_us,
+        (unsigned long)active_config->flex_tdoa_request_process_us,
+        (unsigned long)active_config->flex_tdoa_response_subslot_us,
+        (unsigned long)active_config->flex_tdoa_response_process_us,
         active_config->flex_tdoa_geometry_fixed ? "true" : "false",
         (unsigned long)active_config->flex_tdoa_geometry_generation,
         (unsigned)active_config->anchor_survey_coordinator_id,

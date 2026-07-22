@@ -423,42 +423,56 @@ running peers.
 
 #### FlexTDOA Slot Timing
 
-The CI-CR slot period follows equation (20) from the paper:
+The CI-CR slot keeps the structure of equation (20) from the paper. Its timing
+terms are runtime parameters persisted in NVS and propagated over UWB, so each
+tested combination is kept as a named frame-length profile in the dashboard:
 
 ```text
 t_slot = guard + request_subslot + request_process
        + K * response_subslot + response_process
 
-guard            = 250 us
-request_subslot  = 2000 us
-request_process  = 250 us
-response_subslot = 250 us
-response_process = K * 600 us
+guard
+request_subslot
+request_process
+response_subslot
+response_process = K * response_process_per_responder
 ```
 
-For four anchors, `K = 3`, and the exact paper body is:
+For four anchors, `K = 3`, the available profiles are:
+
+| Profile | Guard | REQ | Process REQ | 3 x RESP | 3 x Process RESP | Slot | Frame | Frame rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `19.20 ms Frame` | `500 us` | `250 us` | `1500 us` | `750 us` | `1800 us` | `4.800 ms` | `19.200 ms` | `52.08 Hz` |
+| `14.80 ms Frame` | `250 us` | `250 us` | `1250 us` | `750 us` | `1200 us` | `3.700 ms` | `14.800 ms` | `67.57 Hz` |
+
+The `19.20 ms Frame` profile is the conservative hardware-validated baseline.
+The `14.80 ms Frame` profile is the first compact timing experiment. The
+dashboard exposes every term directly and computes slot length, frame length,
+frame rate, and response rate before applying a profile.
+
+For the conservative profile, one slot is:
 
 ```text
-250 + 2000 + 250 + 3*250 + 3*600 = 5050 us
+500 + 250 + 1500 + 3*250 + 3*600 = 4800 us
 ```
 
-The ESP32-S3 implementation now uses those paper values directly. The selected
-responder transmits using DW3000 delayed TX from the request RX timestamp:
+The selected responder transmits using DW3000 delayed TX from the request RX
+timestamp. For the conservative profile:
 
 ```text
-RESP[0] = REQ_RX + 2250 us
-RESP[1] = REQ_RX + 2500 us
-RESP[2] = REQ_RX + 2750 us
+RESP[0] = REQ_RX + 1750 us
+RESP[1] = REQ_RX + 2000 us
+RESP[2] = REQ_RX + 2250 us
 
-four-anchor frame = 4 * 5050 us = 20.20 ms
-frame rate        = 49.50 frames/s
-response rate     = 12 / 20.20 ms = 594.06 responses/s
+four-anchor frame = 4 * 4800 us = 19.20 ms
+frame rate        = 52.08 frames/s
+response rate     = 12 / 19.20 ms = 625.00 responses/s
 ```
 
 The responder does not read `SYS_TIME` to turn that relative delay into an
-absolute radio timestamp. It writes the relative delay to `DX_TIME` and issues
-the native DW3000 `CMD_DTX_RS` fast command. The radio then schedules TX from
-the hardware timestamp of the request it just received. The reply interval
+absolute radio timestamp. It combines the already-read request RX timestamp
+with the relative delay, writes that target to `DX_TIME`, and issues the native
+DW3000 `CMD_DTX` fast command. The reply interval
 carried in `FLEX_TDOA_RESP` is derived from the same quantized delayed-TX target,
 including TX antenna delay, so the tag subtracts the interval that the radio
 actually used rather than an ideal host-side delay.
@@ -480,27 +494,31 @@ path. Full `SYS_TIME` reads remain in generic DS-TWR timestamp reconstruction
 and delayed-TX failure diagnostics; they are not part of the normal FlexTDOA
 slot.
 
-The `2000 us` request subslot is part of the request-to-request slot period. It
-is not added again after `REQ_RX`, because the request is already on air when a
-responder timestamps it. The final `K * 600 us` term is the paper's aggregate
-response-processing budget, not extra spacing between responses.
+The request RX timestamp marks the radio timing reference near the beginning of
+the received frame. The `250 us` request subslot budgets the compact frame's
+airtime. `request_process` gives the responder time to complete reception, read
+and decode the request over SPI, release the RX double buffer, and arm delayed
+TX. Instrumentation measures about `230-250 us` on average and less than
+`500 us` at the observed maximum. `K * response_process` is the paper's
+aggregate response-processing budget, not extra spacing between responses.
+The configured quiet guard ends the slot before the next request.
 
 For a slot where `A3` is the initiator:
 
 ```text
 A3 initiator                  A4/A5/A2 responders             passive tag
  t=0.00 ms  REQ ------------------------>|------------------------> RX REQ
- t=2.25 ms  <---------------- RESP[0] A4 |------------------------> RX RESP
- t=2.50 ms  <---------------- RESP[1] A5 |------------------------> RX RESP
- t=2.75 ms  <---------------- RESP[2] A2 |------------------------> RX RESP
- t=5.05 ms  next initiator request ------|------------------------> next slot
+ t=1.75 ms  <---------------- RESP[0] A4 |------------------------> RX RESP
+ t=2.00 ms  <---------------- RESP[1] A5 |------------------------> RX RESP
+ t=2.25 ms  <---------------- RESP[2] A2 |------------------------> RX RESP
+ t=4.80 ms  next initiator request ------|------------------------> next slot
 ```
 
-The ESP task wakes `1750 us` before its own next request and programs delayed
-TX. This preparation lead is local only and adds no airtime. A longer `5000 us`
-lead was rejected in hardware tests because it stopped reception almost at the
-start of the preceding `5050 us` slot. A responder also requires at least
-`300 us` of remaining delayed-TX lead; stale work is rejected instead of
+The ESP task wakes before its own next request and programs delayed TX. This
+preparation lead is local only and adds no airtime. A longer `5000 us` lead was
+rejected in hardware tests because it stopped reception before the preceding
+slot completed. Delayed responses use the processing budget selected by the
+active profile; a rejected or late command is reported explicitly instead of
 leaking into the next slot.
 
 The passive tag computes the paper TDOA observation:
@@ -529,7 +547,7 @@ estimator are deliberately kept outside this radio validation.
 | Paper requirement | Firmware state |
 | --- | --- |
 | Passive DL-TDOA tag | Implemented. The tag only receives `FLEX_TDOA_REQ/RESP`. |
-| One request and `K` responses per slot | Implemented with the paper's `250 us` response spacing. |
+| One request and `K` responses per slot | Implemented with the paper's `250 us` response spacing. The request budget is compacted to `250 us`; request processing uses the hardware-validated `1500 us` margin and the final guard is `500 us`. |
 | Request carries responder count/list/order | Implemented in `FLEX_TDOA_REQ`. |
 | Every localization packet carries 32-bit slot ID | Implemented in every request and response. This avoids the 256-slot wrap ambiguity of an 8-bit counter. |
 | CI-CR schedule | Implemented by rotating initiator and responder order every slot/round. |
@@ -556,13 +574,14 @@ core 1 and the local solver runs on core 0.
 
 The local solver removes the PC/network round trip from the positioning path;
 it does not shorten radio airtime. With `M=4`, one solution can be published
-after every `20.20 ms` complete frame, or approximately `49.5` solutions/s.
+after every `19.20 ms` complete frame, or approximately `52.1` solutions/s.
 The dashboard prefers this `ESP32 AlgMin` result while it is fresh and falls
 back to its PC solver only when local position telemetry is unavailable.
 
-#### FlexTDOA K=3 Hardware Validation
+#### FlexTDOA 5.05 ms Baseline Hardware Validation
 
-The complete implementation was exercised on five physical modules: four
+Before compacting the request and guard budgets, the complete implementation
+was exercised on five physical modules: four
 anchors and one radio-passive tag. The final image ran for more than three
 minutes with all nodes HTTP-online, no watchdog reset, no panic, and no queue
 drop. One isolated late slot was reported and the affected anchor recovered
@@ -570,7 +589,7 @@ from subsequent radio traffic without restarting the network.
 
 | Metric | Measured | Theoretical / interpretation |
 | --- | ---: | --- |
-| Slot duration | `5.05 ms` | Exact equation (20) timing for `K=3`. |
+| Slot duration | `5.05 ms` | Equation (20) timing used by this baseline test. |
 | Frame duration | `20.20 ms` | Four initiator slots. |
 | Anchor results | usually `141-148/s` per anchor | Maximum `148.5/s` from three responses in each own slot. |
 | Passive-tag observations | usually `470-525/s` | Maximum `594.1/s`; the remaining loss is in the very tight `250 us` receive train. |
@@ -581,30 +600,81 @@ from subsequent radio traffic without restarting the network.
 
 The DW3000 does not support `RXAUTR` together with receive double buffering.
 The fast path therefore issues `CMD_RX` immediately after a good frame, before
-copying the occupied buffer, and then releases that buffer with
-`CMD_CLR_IRQS`/`CMD_DB_TOGGLE`. Expected PHY errors are accumulated into the
-one-second summary instead of synchronously formatting UART warnings from the
-timing-critical UWB task.
+copying the occupied buffer. It releases that buffer by clearing only its RDB
+status and RX-good `SYS_STATUS` events, then issuing `CMD_DB_TOGGLE`. It does
+not use global `CMD_CLR_IRQS`, which can erase unrelated TX state. Expected PHY
+errors are accumulated into the one-second summary instead of synchronously
+formatting UART warnings from the timing-critical UWB task.
 
 Recovery was also tested by rebooting only M4. Its boot counter advanced once,
 it restored generation `3` (`N=4`, `K=3`, `M=4`) from NVS, learned the current
 TDMA phase from live FlexTDOA traffic, and resumed increasing TX/RX counters.
 The other four nodes were not restarted.
 
-#### FlexTDOA Speed Notes
+#### FlexTDOA 14.80 ms Compact Profile Trial
 
-The runtime is limited by host turnaround and RX-buffer draining rather than
-the `6.8 Mbps` UWB PHY. DW3000 SPI runs at the verified `26.666 MHz` ESP32-S3
-divider below the data-sheet limit of `38 MHz`. The hot path uses polling SPI,
-compact payload/metadata reads, `CLR_IRQS/DB_TOGGLE` fast commands, cached
-`TX_FCTRL`, early request-buffer release, and DW3000 delayed TX.
+On 2026-07-22, the compact profile was applied to all five physical modules and
+persisted as runtime configuration generation `6`. Every module restored the
+same five timing values after the requested reboot:
 
 ```text
-paper and ESP32-S3 slot, K=3 = 5.05 ms
-four-anchor frame             = 20.20 ms
-theoretical frame rate        = 49.50/s
-theoretical response rate     = 594.06/s
+guard=250 us, REQ=250 us, process REQ=1250 us,
+RESP=250 us, process RESP=400 us per responder
 ```
+
+For `N=4`, `K=3`, and `M=4`, this produces a `3.700 ms` slot, a `14.800 ms`
+frame, `67.57` frames/s, and `810.8` scheduled responses/s. A monotonic-counter
+window taken after boot stabilization produced:
+
+| Metric | 60 s result |
+| --- | ---: |
+| Anchor TX count | `16,343-16,352` per module |
+| TX errors | `0` on all five modules |
+| RX error ratio | `0.13-0.26%` |
+| Protocol queue drops | `0` |
+| Incoherent anchor observations | `0` |
+| Measured REQ processing path maximum | below `460 us` |
+
+This is a successful first compact-profile trial, not yet a replacement for
+the longer `150 s` validation of the conservative profile. Longer runs and
+dynamic tag tests should be added under the same frame-length profile name so
+timing results remain directly comparable.
+
+#### FlexTDOA Speed Notes
+
+The runtime is limited by worst-case host/radio turnaround rather than the
+`6.8 Mbps` UWB PHY. DW3000 SPI runs at the verified `40 MHz` ESP32-S3 divider,
+slightly above the data-sheet nominal limit of `38 MHz`. The hot path uses
+polling SPI, compact payload/metadata reads, targeted RX status clears plus
+`DB_TOGGLE`, cached `TX_FCTRL`, early request-buffer release, and DW3000 delayed
+TX.
+
+```text
+validated ESP32-S3 slot, K=3 = 4.80 ms
+four-anchor frame            = 19.20 ms
+theoretical frame rate       = 52.08/s
+theoretical response rate    = 625.00/s
+```
+
+The measured REQ-to-`CMD_DTX` software path is normally about `230-250 us`
+and stayed below `500 us` in the final run. That is not itself a safe protocol
+budget: the DW3000 also needs a valid radio state and enough future lead when
+the delayed command is accepted. Hardware tests established the following
+margin boundary:
+
+| REQ processing budget | RX release / delayed-TX order | Hardware result |
+| ---: | --- | --- |
+| `500 us` | release before `CMD_DTX` | Repeated delayed-TX rejects and timeouts. |
+| `500 us` | `CMD_DTX` before release | Faster measured host path, but `DB_TOGGLE` could cancel the pending delayed TX and responder counts became unbalanced. Rejected. |
+| `600-650 us` | release before `CMD_DTX` | Intermittent failures remained. |
+| `750 us` | release before `CMD_DTX` | Rare missed TX/state errors remained during longer runs. |
+| `1500 us` | release before `CMD_DTX` | Validated: `150 s` steady operation with no delayed-TX timeout/reject/state error, no missed slot, no response failure, and balanced `52/52/52` responder counts per anchor summary. |
+
+The safe order is therefore fixed: release the processed RX double buffer
+before arming delayed TX. A one-time cluster can still appear about `31 s`
+after a newly installed image boots, when the boot guard validates the OTA
+image and writes flash. The subsequent steady-state radio test was clean; that
+flash-write disturbance is separate from the FlexTDOA timing margin.
 
 The following table is a historical optimization record from 2026-07-18. Its
 rows precede the final exact-paper timing and used the moved module layout. It
