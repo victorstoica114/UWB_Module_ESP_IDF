@@ -13,6 +13,7 @@
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "i2c_bus_service.h"
@@ -96,6 +97,11 @@ static uint32_t s_last_progress_report_count;
 static uint32_t s_last_stall_recovery_ms;
 static size_t s_last_packet_len;
 static size_t s_last_input_payload_len;
+static int s_i2c_scl_measure_error = ESP_ERR_NOT_SUPPORTED;
+static uint32_t s_i2c_scl_edges;
+static uint32_t s_i2c_scl_elapsed_us;
+static uint32_t s_i2c_scl_measured_hz;
+static uint32_t s_i2c_scl_measure_count;
 
 static esp_err_t bno085_hold_in_reset(void);
 static bool bno085_drain_startup_packets(void);
@@ -399,6 +405,52 @@ static esp_err_t bno085_hard_reset(void)
     return ESP_OK;
 }
 
+static void bno085_record_scl_measure(
+    const i2c_bus_service_scl_measure_result_t *result)
+{
+    if (result == NULL) {
+        return;
+    }
+    s_i2c_scl_measure_error = result->error;
+    s_i2c_scl_edges = result->edges;
+    s_i2c_scl_elapsed_us = result->elapsed_us;
+    s_i2c_scl_measured_hz = result->measured_hz;
+}
+
+static esp_err_t bno085_receive_measured(uint8_t *data, size_t len,
+                                         int timeout_ms)
+{
+    i2c_bus_service_scl_measure_t measure = {0};
+    esp_err_t measure_err = ESP_ERR_NOT_SUPPORTED;
+    const bool should_measure =
+        APP_BNO085_I2C_MEASURE_SCL_ENABLED &&
+        s_i2c_scl_measure_count < APP_BNO085_I2C_MEASURE_MAX_SAMPLES;
+    if (should_measure) {
+        measure_err = i2c_bus_service_scl_measure_start(
+            BOARD_CONFIG_BNO085_SCL_GPIO, &measure);
+    }
+
+    const int64_t start_us = esp_timer_get_time();
+    const esp_err_t err = i2c_master_receive(s_i2c_dev, data, len, timeout_ms);
+    const int64_t elapsed_raw = esp_timer_get_time() - start_us;
+    const uint32_t elapsed_us =
+        elapsed_raw > 0 ? (uint32_t)elapsed_raw : 0U;
+
+    if (should_measure) {
+        i2c_bus_service_scl_measure_result_t result = {
+            .error = measure_err,
+        };
+        if (measure.unit != NULL) {
+            result.error = i2c_bus_service_scl_measure_stop(
+                &measure, elapsed_us, &result);
+        }
+        bno085_record_scl_measure(&result);
+        s_i2c_scl_measure_count++;
+    }
+
+    return err;
+}
+
 static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
                                     size_t *packet_len)
 {
@@ -408,8 +460,8 @@ static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
     }
     i2c_bus_service_note_realtime_activity();
 
-    esp_err_t err = i2c_master_receive(s_i2c_dev, header, sizeof(header),
-                                       BNO085_READ_TIMEOUT_MS);
+    esp_err_t err = bno085_receive_measured(
+        header, sizeof(header), BNO085_READ_TIMEOUT_MS);
     if (err != ESP_OK) {
         i2c_bus_service_unlock();
         return err;
@@ -447,9 +499,9 @@ static esp_err_t bno085_read_packet(uint8_t *packet, size_t packet_size,
 
     if (payload_len > 0) {
         uint8_t chunk[BNO085_MAX_PACKET_LEN] = {0};
-        err = i2c_master_receive(s_i2c_dev, chunk,
-                                 payload_len + BNO085_SHTP_HEADER_LEN,
-                                 BNO085_READ_TIMEOUT_MS);
+        err = bno085_receive_measured(
+            chunk, payload_len + BNO085_SHTP_HEADER_LEN,
+            BNO085_READ_TIMEOUT_MS);
         if (err != ESP_OK) {
             i2c_bus_service_unlock();
             return err;
@@ -908,6 +960,7 @@ static void bno085_task(void *arg)
     s_task_handle = xTaskGetCurrentTaskHandle();
     const uint32_t accel_interval_ms = bno085_accel_interval_ms();
     const uint32_t log_interval_ms = bno085_log_interval_ms();
+    s_i2c_scl_measure_count = 0;
 
     ESP_LOGI(TAG,
              "BNO085 accelerometer test enabled: SDA=%d SCL=%d RST=%d INT=%d addr=0x%02X clock=%u Hz sample=%u ms log=%u ms int_timeout=%u ms core=%d",
@@ -1036,4 +1089,45 @@ esp_err_t bno085_service_start(void)
 esp_err_t bno085_service_apply_runtime_config(void)
 {
     return bno085_service_start();
+}
+
+void bno085_service_get_snapshot(bno085_service_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) {
+        return;
+    }
+
+    *snapshot = (bno085_service_snapshot_t){
+        .service_started = s_service_started,
+        .int_irq_enabled = s_int_irq_enabled,
+        .i2c_clock_hz = APP_BNO085_I2C_CLOCK_HZ,
+        .accel_interval_ms = bno085_accel_interval_ms(),
+        .report_count = s_report_count,
+        .packet_count = s_packet_count,
+        .input_packet_count = s_input_packet_count,
+        .timebase_count = s_timebase_count,
+        .max_reports_per_packet = s_max_reports_per_packet,
+        .continuation_packet_count = s_continuation_packet_count,
+        .continuation_transfer_count = s_continuation_transfer_count,
+        .continuation_header_error_count = s_continuation_header_error_count,
+        .high_rate_poll_count = s_high_rate_poll_count,
+        .wait_immediate_count = s_wait_immediate_count,
+        .wait_notify_count = s_wait_notify_count,
+        .wait_late_active_count = s_wait_late_active_count,
+        .null_header_count = s_null_header_count,
+        .read_error_count = s_read_error_count,
+        .parse_error_count = s_parse_error_count,
+        .int_irq_count = s_int_irq_count,
+        .int_wait_timeout_count = s_int_wait_timeout_count,
+        .last_packet_len = s_last_packet_len,
+        .last_input_payload_len = s_last_input_payload_len,
+        .last_x_mps2 = s_last_x_mps2,
+        .last_y_mps2 = s_last_y_mps2,
+        .last_z_mps2 = s_last_z_mps2,
+        .last_accuracy = s_last_accuracy,
+        .i2c_scl_measure_error = s_i2c_scl_measure_error,
+        .i2c_scl_edges = s_i2c_scl_edges,
+        .i2c_scl_elapsed_us = s_i2c_scl_elapsed_us,
+        .i2c_scl_measured_hz = s_i2c_scl_measured_hz,
+    };
 }
