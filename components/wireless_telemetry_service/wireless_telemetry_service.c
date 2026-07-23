@@ -38,8 +38,14 @@ enum {
     WIRELESS_TELEMETRY_BATCH_MAX = 4096,
     WIRELESS_TELEMETRY_FRAME_HEADER_LEN = 12,
     WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN = 21,
+    WIRELESS_TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26,
+    WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20,
+    WIRELESS_TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32,
     WIRELESS_TELEMETRY_FRAME_VERSION = 1,
     WIRELESS_TELEMETRY_STREAM_BNO085_ACCEL = 1,
+    WIRELESS_TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION = 2,
+    WIRELESS_TELEMETRY_STREAM_FLEX_ANCHOR_RANGE = 3,
+    WIRELESS_TELEMETRY_STREAM_FLEX_POSITION = 4,
     WIRELESS_TELEMETRY_RECONNECT_MS = 2000,
     WIRELESS_TELEMETRY_WIFI_WAIT_MS = 500,
     WIRELESS_TELEMETRY_QUEUE_WAIT_MS = 20,
@@ -55,6 +61,9 @@ enum {
 typedef enum {
     WIRELESS_TELEMETRY_ITEM_TEXT = 0,
     WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL,
+    WIRELESS_TELEMETRY_ITEM_FLEX_TDOA_OBSERVATION,
+    WIRELESS_TELEMETRY_ITEM_FLEX_ANCHOR_RANGE,
+    WIRELESS_TELEMETRY_ITEM_FLEX_POSITION,
 } wireless_telemetry_item_type_t;
 
 typedef struct {
@@ -66,11 +75,47 @@ typedef struct {
 } wireless_telemetry_accel_t;
 
 typedef struct {
+    uint32_t slot_id;
+    int32_t diff_mm;
+    int32_t raw_diff_mm;
+    int32_t anchor_distance_mm;
+    uint16_t sequence;
+    uint8_t tag_id;
+    uint8_t initiator_id;
+    uint8_t responder_id;
+    uint8_t responder_index;
+} wireless_telemetry_flex_observation_t;
+
+typedef struct {
+    uint32_t slot_id;
+    int32_t distance_mm;
+    int32_t raw_distance_mm;
+    uint16_t sequence;
+    uint8_t initiator_id;
+    uint8_t responder_id;
+} wireless_telemetry_flex_anchor_range_t;
+
+typedef struct {
+    uint32_t slot_id;
+    uint32_t geometry_version;
+    int32_t x_mm;
+    int32_t y_mm;
+    int32_t sigma_mm;
+    int32_t rms_mm;
+    uint16_t observation_count;
+    uint8_t tag_id;
+    uint8_t anchor_count;
+} wireless_telemetry_flex_position_t;
+
+typedef struct {
     wireless_telemetry_item_type_t type;
     uint32_t uptime_ms;
     union {
         char line[WIRELESS_TELEMETRY_LINE_MAX];
         wireless_telemetry_accel_t accel;
+        wireless_telemetry_flex_observation_t flex_observation;
+        wireless_telemetry_flex_anchor_range_t flex_anchor_range;
+        wireless_telemetry_flex_position_t flex_position;
     } data;
 } wireless_telemetry_item_t;
 
@@ -100,6 +145,12 @@ static volatile uint32_t s_ring_high_water;
 static volatile uint32_t s_binary_frame_count;
 static volatile uint32_t s_binary_sample_count;
 static volatile uint32_t s_text_frame_count;
+static volatile uint32_t s_connect_count;
+static volatile uint32_t s_send_failure_count;
+static volatile uint32_t s_send_timeout_count;
+static volatile uint32_t s_socket_close_count;
+static volatile uint32_t s_last_send_ms;
+static volatile uint32_t s_max_send_ms;
 static volatile int s_last_error;
 
 static bool wireless_telemetry_target_configured(void)
@@ -321,6 +372,11 @@ static bool wireless_telemetry_send_all(int sock, const uint8_t *payload,
             if ((xTaskGetTickCount() - start) >=
                 pdMS_TO_TICKS(WIRELESS_TELEMETRY_SEND_TIMEOUT_MS)) {
                 s_last_error = ETIMEDOUT;
+                s_last_send_ms = (uint32_t)(
+                    (xTaskGetTickCount() - start) * portTICK_PERIOD_MS);
+                if (s_last_send_ms > s_max_send_ms) {
+                    s_max_send_ms = s_last_send_ms;
+                }
                 return false;
             }
             vTaskDelay(1);
@@ -328,9 +384,19 @@ static bool wireless_telemetry_send_all(int sock, const uint8_t *payload,
         }
 
         s_last_error = errno;
+        s_last_send_ms = (uint32_t)(
+            (xTaskGetTickCount() - start) * portTICK_PERIOD_MS);
+        if (s_last_send_ms > s_max_send_ms) {
+            s_max_send_ms = s_last_send_ms;
+        }
         return false;
     }
 
+    s_last_send_ms = (uint32_t)(
+        (xTaskGetTickCount() - start) * portTICK_PERIOD_MS);
+    if (s_last_send_ms > s_max_send_ms) {
+        s_max_send_ms = s_last_send_ms;
+    }
     return true;
 }
 
@@ -344,10 +410,16 @@ static bool wireless_telemetry_socket_alive(int sock)
     }
 
     if (received == 0) {
+        s_last_error = 0;
         return false;
     }
 
-    return errno == EWOULDBLOCK || errno == EAGAIN;
+    if (errno == EWOULDBLOCK || errno == EAGAIN) {
+        return true;
+    }
+
+    s_last_error = errno;
+    return false;
 }
 
 static void wireless_telemetry_write_u16_le(uint8_t *dst, uint16_t value)
@@ -397,16 +469,43 @@ static bool wireless_telemetry_format_text_item(
     return written > 0 && written < (int)line_size;
 }
 
-static bool wireless_telemetry_start_accel_frame(uint8_t *batch,
-                                                 size_t batch_size,
-                                                 size_t *used,
-                                                 size_t *frame_pos,
-                                                 uint16_t *frame_count)
+static bool wireless_telemetry_binary_item_info(
+    wireless_telemetry_item_type_t type, uint8_t *stream_type,
+    uint8_t *sample_len)
+{
+    if (stream_type == NULL || sample_len == NULL) {
+        return false;
+    }
+
+    switch (type) {
+    case WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_BNO085_ACCEL;
+        *sample_len = WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN;
+        return true;
+    case WIRELESS_TELEMETRY_ITEM_FLEX_TDOA_OBSERVATION:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION;
+        *sample_len = WIRELESS_TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN;
+        return true;
+    case WIRELESS_TELEMETRY_ITEM_FLEX_ANCHOR_RANGE:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_FLEX_ANCHOR_RANGE;
+        *sample_len = WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN;
+        return true;
+    case WIRELESS_TELEMETRY_ITEM_FLEX_POSITION:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_FLEX_POSITION;
+        *sample_len = WIRELESS_TELEMETRY_FLEX_POSITION_SAMPLE_LEN;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool wireless_telemetry_start_binary_frame(
+    uint8_t *batch, size_t batch_size, size_t *used, size_t *frame_pos,
+    uint16_t *frame_count, uint8_t stream_type, uint8_t sample_len)
 {
     if (batch == NULL || used == NULL || frame_pos == NULL ||
         frame_count == NULL ||
-        *used + WIRELESS_TELEMETRY_FRAME_HEADER_LEN +
-                WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN >
+        *used + WIRELESS_TELEMETRY_FRAME_HEADER_LEN + sample_len >
             batch_size) {
         return false;
     }
@@ -417,9 +516,9 @@ static bool wireless_telemetry_start_accel_frame(uint8_t *batch,
     batch[*used + 2U] = 'T';
     batch[*used + 3U] = '1';
     batch[*used + 4U] = WIRELESS_TELEMETRY_FRAME_VERSION;
-    batch[*used + 5U] = WIRELESS_TELEMETRY_STREAM_BNO085_ACCEL;
+    batch[*used + 5U] = stream_type;
     batch[*used + 6U] = app_identity_get_module_id();
-    batch[*used + 7U] = WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN;
+    batch[*used + 7U] = sample_len;
     wireless_telemetry_write_u16_le(&batch[*used + 8U], 0);
     wireless_telemetry_write_u16_le(&batch[*used + 10U], 0);
 
@@ -428,8 +527,9 @@ static bool wireless_telemetry_start_accel_frame(uint8_t *batch,
     return true;
 }
 
-static void wireless_telemetry_finish_accel_frame(
+static void wireless_telemetry_finish_binary_frame(
     uint8_t *batch, size_t frame_pos, uint16_t frame_count,
+    uint8_t sample_len,
     wireless_telemetry_batch_stats_t *stats)
 {
     if (batch == NULL || frame_count == 0) {
@@ -439,7 +539,7 @@ static void wireless_telemetry_finish_accel_frame(
     wireless_telemetry_write_u16_le(&batch[frame_pos + 8U], frame_count);
     wireless_telemetry_write_u16_le(
         &batch[frame_pos + 10U],
-        (uint16_t)(frame_count * WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN));
+        (uint16_t)(frame_count * sample_len));
 
     if (stats != NULL) {
         stats->binary_frames++;
@@ -447,30 +547,82 @@ static void wireless_telemetry_finish_accel_frame(
     }
 }
 
-static bool wireless_telemetry_append_accel_sample(
+static bool wireless_telemetry_append_binary_sample(
     uint8_t *batch, size_t batch_size, size_t *used,
-    const wireless_telemetry_item_t *item, uint16_t *frame_count)
+    const wireless_telemetry_item_t *item, uint16_t *frame_count,
+    uint8_t sample_len)
 {
     if (batch == NULL || used == NULL || item == NULL ||
-        frame_count == NULL ||
-        *used + WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN > batch_size ||
+        frame_count == NULL || *used + sample_len > batch_size ||
         *frame_count == UINT16_MAX) {
         return false;
     }
 
     uint8_t *sample = &batch[*used];
     wireless_telemetry_write_u32_le(&sample[0], item->uptime_ms);
-    wireless_telemetry_write_u32_le(&sample[4],
-                                    item->data.accel.report_count);
-    wireless_telemetry_write_i32_le(&sample[8],
-                                    item->data.accel.x_milli_mps2);
-    wireless_telemetry_write_i32_le(&sample[12],
-                                    item->data.accel.y_milli_mps2);
-    wireless_telemetry_write_i32_le(&sample[16],
-                                    item->data.accel.z_milli_mps2);
-    sample[20] = item->data.accel.accuracy;
+    switch (item->type) {
+    case WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL:
+        wireless_telemetry_write_u32_le(&sample[4],
+                                        item->data.accel.report_count);
+        wireless_telemetry_write_i32_le(&sample[8],
+                                        item->data.accel.x_milli_mps2);
+        wireless_telemetry_write_i32_le(&sample[12],
+                                        item->data.accel.y_milli_mps2);
+        wireless_telemetry_write_i32_le(&sample[16],
+                                        item->data.accel.z_milli_mps2);
+        sample[20] = item->data.accel.accuracy;
+        break;
+    case WIRELESS_TELEMETRY_ITEM_FLEX_TDOA_OBSERVATION:
+        wireless_telemetry_write_u32_le(
+            &sample[4], item->data.flex_observation.slot_id);
+        wireless_telemetry_write_i32_le(
+            &sample[8], item->data.flex_observation.diff_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[12], item->data.flex_observation.raw_diff_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[16], item->data.flex_observation.anchor_distance_mm);
+        wireless_telemetry_write_u16_le(
+            &sample[20], item->data.flex_observation.sequence);
+        sample[22] = item->data.flex_observation.tag_id;
+        sample[23] = item->data.flex_observation.initiator_id;
+        sample[24] = item->data.flex_observation.responder_id;
+        sample[25] = item->data.flex_observation.responder_index;
+        break;
+    case WIRELESS_TELEMETRY_ITEM_FLEX_ANCHOR_RANGE:
+        wireless_telemetry_write_i32_le(
+            &sample[8], item->data.flex_anchor_range.distance_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[12], item->data.flex_anchor_range.raw_distance_mm);
+        wireless_telemetry_write_u32_le(
+            &sample[4], item->data.flex_anchor_range.slot_id);
+        wireless_telemetry_write_u16_le(
+            &sample[16], item->data.flex_anchor_range.sequence);
+        sample[18] = item->data.flex_anchor_range.initiator_id;
+        sample[19] = item->data.flex_anchor_range.responder_id;
+        break;
+    case WIRELESS_TELEMETRY_ITEM_FLEX_POSITION:
+        wireless_telemetry_write_u32_le(
+            &sample[4], item->data.flex_position.slot_id);
+        wireless_telemetry_write_i32_le(
+            &sample[8], item->data.flex_position.x_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[12], item->data.flex_position.y_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[16], item->data.flex_position.sigma_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[20], item->data.flex_position.rms_mm);
+        wireless_telemetry_write_u32_le(
+            &sample[24], item->data.flex_position.geometry_version);
+        wireless_telemetry_write_u16_le(
+            &sample[28], item->data.flex_position.observation_count);
+        sample[30] = item->data.flex_position.tag_id;
+        sample[31] = item->data.flex_position.anchor_count;
+        break;
+    default:
+        return false;
+    }
 
-    *used += WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN;
+    *used += sample_len;
     (*frame_count)++;
     return true;
 }
@@ -517,16 +669,30 @@ static bool wireless_telemetry_take_batch(
     }
 
     size_t used = 0;
-    bool accel_frame_open = false;
-    size_t accel_frame_pos = 0;
-    uint16_t accel_frame_count = 0;
+    bool binary_frame_open = false;
+    size_t binary_frame_pos = 0;
+    uint16_t binary_frame_count = 0;
+    uint8_t binary_stream_type = 0;
+    uint8_t binary_sample_len = 0;
 
     while (true) {
-        if (item.type == WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL) {
-            if (!accel_frame_open &&
-                !wireless_telemetry_start_accel_frame(
-                    batch, batch_size, &used, &accel_frame_pos,
-                    &accel_frame_count)) {
+        uint8_t item_stream_type = 0;
+        uint8_t item_sample_len = 0;
+        const bool binary_item = wireless_telemetry_binary_item_info(
+            item.type, &item_stream_type, &item_sample_len);
+        if (binary_item) {
+            if (binary_frame_open &&
+                item_stream_type != binary_stream_type) {
+                wireless_telemetry_finish_binary_frame(
+                    batch, binary_frame_pos, binary_frame_count,
+                    binary_sample_len, stats);
+                binary_frame_open = false;
+            }
+            if (!binary_frame_open &&
+                !wireless_telemetry_start_binary_frame(
+                    batch, batch_size, &used, &binary_frame_pos,
+                    &binary_frame_count, item_stream_type,
+                    item_sample_len)) {
                 if (used == 0) {
                     s_dropped_count++;
                     s_drop_format_count++;
@@ -534,23 +700,28 @@ static bool wireless_telemetry_take_batch(
                 break;
             }
 
-            if (!wireless_telemetry_append_accel_sample(
-                    batch, batch_size, &used, &item, &accel_frame_count)) {
-                wireless_telemetry_finish_accel_frame(
-                    batch, accel_frame_pos, accel_frame_count, stats);
-                accel_frame_open = false;
+            binary_stream_type = item_stream_type;
+            binary_sample_len = item_sample_len;
+            if (!wireless_telemetry_append_binary_sample(
+                    batch, batch_size, &used, &item, &binary_frame_count,
+                    binary_sample_len)) {
+                wireless_telemetry_finish_binary_frame(
+                    batch, binary_frame_pos, binary_frame_count,
+                    binary_sample_len, stats);
+                binary_frame_open = false;
                 if (used == 0) {
                     s_dropped_count++;
                     s_drop_format_count++;
                 }
                 break;
             }
-            accel_frame_open = true;
+            binary_frame_open = true;
         } else {
-            if (accel_frame_open) {
-                wireless_telemetry_finish_accel_frame(
-                    batch, accel_frame_pos, accel_frame_count, stats);
-                accel_frame_open = false;
+            if (binary_frame_open) {
+                wireless_telemetry_finish_binary_frame(
+                    batch, binary_frame_pos, binary_frame_count,
+                    binary_sample_len, stats);
+                binary_frame_open = false;
             }
             if (!wireless_telemetry_append_text_item(batch, batch_size, &used,
                                                      &item, stats)) {
@@ -569,9 +740,10 @@ static bool wireless_telemetry_take_batch(
         }
     }
 
-    if (accel_frame_open) {
-        wireless_telemetry_finish_accel_frame(batch, accel_frame_pos,
-                                              accel_frame_count, stats);
+    if (binary_frame_open) {
+        wireless_telemetry_finish_binary_frame(
+            batch, binary_frame_pos, binary_frame_count, binary_sample_len,
+            stats);
     }
 
     *batch_len = used;
@@ -636,9 +808,12 @@ static void wireless_telemetry_task(void *arg)
             s_connected = true;
             connected_port = active_port;
             s_status = WIRELESS_TELEMETRY_STATUS_CONNECTED;
-            ESP_LOGI(TAG, "connected target=%s port=%u",
+            s_connect_count++;
+            ESP_LOGI(TAG, "connected target=%s port=%u count=%lu queue=%lu",
                      APP_WIRELESS_TELEMETRY_TARGET,
-                     (unsigned)active_port);
+                     (unsigned)active_port,
+                     (unsigned long)s_connect_count,
+                     (unsigned long)wireless_telemetry_service_get_queue_depth());
         }
 
         size_t batch_len = 0;
@@ -647,6 +822,11 @@ static void wireless_telemetry_task(void *arg)
                                            WIRELESS_TELEMETRY_BATCH_MAX,
                                            &batch_len, &batch_stats)) {
             if (!wireless_telemetry_socket_alive(sock)) {
+                s_socket_close_count++;
+                ESP_LOGW(TAG,
+                         "socket closed while idle err=%d closes=%lu queue=%lu",
+                         s_last_error, (unsigned long)s_socket_close_count,
+                         (unsigned long)wireless_telemetry_service_get_queue_depth());
                 wireless_telemetry_close_socket(&sock);
                 s_status = WIRELESS_TELEMETRY_STATUS_FAILED;
             }
@@ -654,6 +834,17 @@ static void wireless_telemetry_task(void *arg)
         }
 
         if (!wireless_telemetry_send_all(sock, s_batch_buffer, batch_len)) {
+            s_send_failure_count++;
+            if (s_last_error == ETIMEDOUT) {
+                s_send_timeout_count++;
+            }
+            ESP_LOGW(TAG,
+                     "send failed err=%d bytes=%u send_ms=%lu failures=%lu timeouts=%lu queue=%lu",
+                     s_last_error, (unsigned)batch_len,
+                     (unsigned long)s_last_send_ms,
+                     (unsigned long)s_send_failure_count,
+                     (unsigned long)s_send_timeout_count,
+                     (unsigned long)wireless_telemetry_service_get_queue_depth());
             wireless_telemetry_close_socket(&sock);
             connected_port = 0;
             s_status = WIRELESS_TELEMETRY_STATUS_FAILED;
@@ -785,6 +976,15 @@ uint32_t wireless_telemetry_service_get_drop_format_count(void)
     return s_drop_format_count;
 }
 
+uint32_t wireless_telemetry_service_get_queue_depth(void)
+{
+    uint32_t depth;
+    taskENTER_CRITICAL(&s_ring_lock);
+    depth = (uint32_t)s_ring_count;
+    taskEXIT_CRITICAL(&s_ring_lock);
+    return depth;
+}
+
 uint32_t wireless_telemetry_service_get_queue_high_water(void)
 {
     return s_ring_high_water;
@@ -803,6 +1003,36 @@ uint32_t wireless_telemetry_service_get_binary_sample_count(void)
 uint32_t wireless_telemetry_service_get_text_frame_count(void)
 {
     return s_text_frame_count;
+}
+
+uint32_t wireless_telemetry_service_get_connect_count(void)
+{
+    return s_connect_count;
+}
+
+uint32_t wireless_telemetry_service_get_send_failure_count(void)
+{
+    return s_send_failure_count;
+}
+
+uint32_t wireless_telemetry_service_get_send_timeout_count(void)
+{
+    return s_send_timeout_count;
+}
+
+uint32_t wireless_telemetry_service_get_socket_close_count(void)
+{
+    return s_socket_close_count;
+}
+
+uint32_t wireless_telemetry_service_get_last_send_ms(void)
+{
+    return s_last_send_ms;
+}
+
+uint32_t wireless_telemetry_service_get_max_send_ms(void)
+{
+    return s_max_send_ms;
 }
 
 int wireless_telemetry_service_get_last_error(void)
@@ -864,5 +1094,94 @@ bool wireless_telemetry_service_submit_bno085_accel(
         },
     };
 
+    return wireless_telemetry_enqueue(&item);
+}
+
+bool wireless_telemetry_service_submit_flex_tdoa_observation(
+    uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
+    uint8_t responder_index, uint16_t sequence, uint32_t slot_id,
+    int32_t diff_mm, int32_t raw_diff_mm, int32_t anchor_distance_mm)
+{
+    if (!s_connected) {
+        return false;
+    }
+
+    const uint32_t uptime_ms =
+        (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_FLEX_TDOA_OBSERVATION,
+        .uptime_ms = uptime_ms,
+        .data = {
+            .flex_observation = {
+                .slot_id = slot_id,
+                .diff_mm = diff_mm,
+                .raw_diff_mm = raw_diff_mm,
+                .anchor_distance_mm = anchor_distance_mm,
+                .sequence = sequence,
+                .tag_id = tag_id,
+                .initiator_id = initiator_id,
+                .responder_id = responder_id,
+                .responder_index = responder_index,
+            },
+        },
+    };
+    return wireless_telemetry_enqueue(&item);
+}
+
+bool wireless_telemetry_service_submit_flex_anchor_range(
+    uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
+    uint32_t slot_id, int32_t distance_mm, int32_t raw_distance_mm)
+{
+    if (!s_connected) {
+        return false;
+    }
+
+    const uint32_t uptime_ms =
+        (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_FLEX_ANCHOR_RANGE,
+        .uptime_ms = uptime_ms,
+        .data = {
+            .flex_anchor_range = {
+                .slot_id = slot_id,
+                .distance_mm = distance_mm,
+                .raw_distance_mm = raw_distance_mm,
+                .sequence = sequence,
+                .initiator_id = initiator_id,
+                .responder_id = responder_id,
+            },
+        },
+    };
+    return wireless_telemetry_enqueue(&item);
+}
+
+bool wireless_telemetry_service_submit_flex_position(
+    uint8_t tag_id, uint32_t slot_id, int32_t x_mm, int32_t y_mm,
+    int32_t sigma_mm, int32_t rms_mm, uint16_t observation_count,
+    uint8_t anchor_count, uint32_t geometry_version)
+{
+    if (!s_connected) {
+        return false;
+    }
+
+    const uint32_t uptime_ms =
+        (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    const wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_FLEX_POSITION,
+        .uptime_ms = uptime_ms,
+        .data = {
+            .flex_position = {
+                .slot_id = slot_id,
+                .geometry_version = geometry_version,
+                .x_mm = x_mm,
+                .y_mm = y_mm,
+                .sigma_mm = sigma_mm,
+                .rms_mm = rms_mm,
+                .observation_count = observation_count,
+                .tag_id = tag_id,
+                .anchor_count = anchor_count,
+            },
+        },
+    };
     return wireless_telemetry_enqueue(&item);
 }

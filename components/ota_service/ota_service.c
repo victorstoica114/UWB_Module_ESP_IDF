@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "flextdoa_solver_service.h"
 #include "app_identity.h"
 #include "app_runtime_config.h"
 #include "bno085_service.h"
@@ -81,6 +82,9 @@ typedef struct {
     char pd_last_response_hex[(MAX77958_SERVICE_AP_DATA_BYTES * 2U) + 1U];
     char pd_source_pdos_json[128];
     char pd_sink_pdos_json[96];
+    char runtime_anchor_ids_json[48];
+    char runtime_flex_slots_json[48];
+    char runtime_flex_masks_json[72];
     char response[OTA_SERVICE_STATUS_RESPONSE_SIZE];
 } ota_status_context_t;
 
@@ -154,6 +158,32 @@ static void format_u32_array_json(const uint32_t *values, size_t count,
     if (offset + 2U <= buffer_size) {
         (void)snprintf(&buffer[offset], buffer_size - offset, "]");
     }
+}
+
+static void format_u8_array_json(const uint8_t *values, size_t count,
+                                 char *buffer, size_t buffer_size)
+{
+    uint32_t expanded[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+    const size_t limit = count < APP_RUNTIME_CONFIG_MAX_ANCHORS
+                             ? count
+                             : APP_RUNTIME_CONFIG_MAX_ANCHORS;
+    for (size_t i = 0; i < limit; ++i) {
+        expanded[i] = values[i];
+    }
+    format_u32_array_json(expanded, limit, buffer, buffer_size);
+}
+
+static void format_u16_array_json(const uint16_t *values, size_t count,
+                                  char *buffer, size_t buffer_size)
+{
+    uint32_t expanded[APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS] = {0};
+    const size_t limit = count < APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS
+                             ? count
+                             : APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS;
+    for (size_t i = 0; i < limit; ++i) {
+        expanded[i] = values[i];
+    }
+    format_u32_array_json(expanded, limit, buffer, buffer_size);
 }
 
 static void format_json_string(const char *value, char *buffer,
@@ -481,6 +511,101 @@ static bool ota_parse_u8_list(const char *text, uint8_t *values,
     return true;
 }
 
+static bool ota_parse_u16_list(const char *text, uint16_t *values,
+                               size_t max_count, uint8_t *count)
+{
+    if (text == NULL || text[0] == '\0' || values == NULL || count == NULL ||
+        max_count == 0U) {
+        return false;
+    }
+
+    const char *cursor = text;
+    uint8_t parsed_count = 0;
+    while (*cursor != '\0') {
+        while (*cursor == ' ') {
+            cursor++;
+        }
+        errno = 0;
+        char *end = NULL;
+        const unsigned long parsed = strtoul(cursor, &end, 0);
+        if (errno != 0 || end == cursor || parsed > UINT16_MAX ||
+            parsed_count >= max_count) {
+            return false;
+        }
+        values[parsed_count++] = (uint16_t)parsed;
+        cursor = end;
+        while (*cursor == ' ') {
+            cursor++;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+        if (*cursor != ',' && *cursor != ';') {
+            return false;
+        }
+        cursor++;
+    }
+    *count = parsed_count;
+    return parsed_count > 0U;
+}
+
+static bool ota_parse_flex_geometry(
+    const char *text, const app_runtime_config_t *config,
+    int32_t x_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS],
+    int32_t y_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS])
+{
+    if (text == NULL || config == NULL || x_mm == NULL || y_mm == NULL) {
+        return false;
+    }
+    bool seen[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+    const char *cursor = text;
+    size_t parsed_count = 0;
+    while (*cursor != '\0') {
+        errno = 0;
+        char *end = NULL;
+        const unsigned long id = strtoul(cursor, &end, 10);
+        if (errno != 0 || end == cursor || id > UINT8_MAX || *end != ':') {
+            return false;
+        }
+        cursor = end + 1;
+        errno = 0;
+        const long x = strtol(cursor, &end, 10);
+        if (errno != 0 || end == cursor || x < INT32_MIN || x > INT32_MAX ||
+            *end != ':') {
+            return false;
+        }
+        cursor = end + 1;
+        errno = 0;
+        const long y = strtol(cursor, &end, 10);
+        if (errno != 0 || end == cursor || y < INT32_MIN || y > INT32_MAX) {
+            return false;
+        }
+        size_t index = SIZE_MAX;
+        for (size_t i = 0; i < config->anchor_count; ++i) {
+            if (config->anchor_ids[i] == (uint8_t)id) {
+                index = i;
+                break;
+            }
+        }
+        if (index == SIZE_MAX || seen[index]) {
+            return false;
+        }
+        seen[index] = true;
+        x_mm[index] = (int32_t)x;
+        y_mm[index] = (int32_t)y;
+        parsed_count++;
+        cursor = end;
+        if (*cursor == '\0') {
+            break;
+        }
+        if (*cursor != ',') {
+            return false;
+        }
+        cursor++;
+    }
+    return parsed_count == config->anchor_count;
+}
+
 static bool ota_parse_calibration_method(const char *text, uint8_t *value)
 {
     uint8_t parsed = 0;
@@ -530,6 +655,24 @@ static bool runtime_config_reboot_recommended(
            before->anchor_count != after->anchor_count ||
            memcmp(before->anchor_ids, after->anchor_ids,
                   sizeof(before->anchor_ids)) != 0 ||
+           before->flex_tdoa_responder_count !=
+               after->flex_tdoa_responder_count ||
+           before->flex_tdoa_slot_count != after->flex_tdoa_slot_count ||
+           memcmp(before->flex_tdoa_slot_initiator_ids,
+                  after->flex_tdoa_slot_initiator_ids,
+                  sizeof(before->flex_tdoa_slot_initiator_ids)) != 0 ||
+           memcmp(before->flex_tdoa_slot_responder_masks,
+                  after->flex_tdoa_slot_responder_masks,
+                  sizeof(before->flex_tdoa_slot_responder_masks)) != 0 ||
+           before->flex_tdoa_guard_us != after->flex_tdoa_guard_us ||
+           before->flex_tdoa_request_subslot_us !=
+               after->flex_tdoa_request_subslot_us ||
+           before->flex_tdoa_request_process_us !=
+               after->flex_tdoa_request_process_us ||
+           before->flex_tdoa_response_subslot_us !=
+               after->flex_tdoa_response_subslot_us ||
+           before->flex_tdoa_response_process_us !=
+               after->flex_tdoa_response_process_us ||
            before->anchor_survey_coordinator_id !=
                after->anchor_survey_coordinator_id ||
            before->uwb_enabled != after->uwb_enabled ||
@@ -610,6 +753,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #define pd_last_response_hex (ctx->pd_last_response_hex)
 #define pd_source_pdos_json (ctx->pd_source_pdos_json)
 #define pd_sink_pdos_json (ctx->pd_sink_pdos_json)
+#define runtime_anchor_ids_json (ctx->runtime_anchor_ids_json)
+#define runtime_flex_slots_json (ctx->runtime_flex_slots_json)
+#define runtime_flex_masks_json (ctx->runtime_flex_masks_json)
 
     const esp_app_desc_t *app = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -641,6 +787,18 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     format_u32_array_json(pd_snapshot.sink_pdos,
                           pd_snapshot.sink_pdo_count,
                           pd_sink_pdos_json, sizeof(pd_sink_pdos_json));
+    format_u8_array_json(runtime_config->anchor_ids,
+                         runtime_config->anchor_count,
+                         runtime_anchor_ids_json,
+                         sizeof(runtime_anchor_ids_json));
+    format_u8_array_json(runtime_config->flex_tdoa_slot_initiator_ids,
+                         runtime_config->flex_tdoa_slot_count,
+                         runtime_flex_slots_json,
+                         sizeof(runtime_flex_slots_json));
+    format_u16_array_json(runtime_config->flex_tdoa_slot_responder_masks,
+                          runtime_config->flex_tdoa_slot_count,
+                          runtime_flex_masks_json,
+                          sizeof(runtime_flex_masks_json));
 
     char *response = ctx->response;
 
@@ -692,7 +850,19 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_mode_name\":\"%s\","
         "\"runtime_tag_id\":%u,"
         "\"runtime_anchor_count\":%u,"
-        "\"runtime_anchor_ids\":[%u,%u,%u,%u],"
+        "\"runtime_anchor_ids\":%s,"
+        "\"runtime_flex_tdoa_responder_count\":%u,"
+        "\"runtime_flex_tdoa_slot_count\":%u,"
+        "\"runtime_flex_tdoa_slot_initiator_ids\":%s,"
+        "\"runtime_flex_tdoa_slot_responder_masks\":%s,"
+        "\"runtime_flex_tdoa_config_generation\":%lu,"
+        "\"runtime_flex_tdoa_guard_us\":%lu,"
+        "\"runtime_flex_tdoa_request_subslot_us\":%lu,"
+        "\"runtime_flex_tdoa_request_process_us\":%lu,"
+        "\"runtime_flex_tdoa_response_subslot_us\":%lu,"
+        "\"runtime_flex_tdoa_response_process_us\":%lu,"
+        "\"runtime_flex_tdoa_geometry_fixed\":%s,"
+        "\"runtime_flex_tdoa_geometry_generation\":%lu,"
         "\"runtime_anchor_survey_coordinator_id\":%u,"
         "\"runtime_anchor_survey_rx_slice_ms\":%lu,"
         "\"runtime_anchor_survey_command_delay_ms\":%lu,"
@@ -1081,6 +1251,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"uwb_event_counters_enabled\":%s,"
         "\"uwb_event_counters_log_every\":%u,"
         "\"uwb_device_id\":\"0x%08lx\","
+        "\"uwb_spi_clock_hz\":%lu,"
         "\"uwb_source_id\":%u,"
         "\"uwb_active_antenna_delay\":%u,"
         "\"uwb_active_antenna_delay_hex\":\"0x%04x\","
@@ -1108,10 +1279,17 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"wireless_telemetry_drop_full\":%lu,"
         "\"wireless_telemetry_drop_mutex\":%lu,"
         "\"wireless_telemetry_drop_format\":%lu,"
+        "\"wireless_telemetry_queue_depth\":%lu,"
         "\"wireless_telemetry_queue_high_water\":%lu,"
         "\"wireless_telemetry_binary_frames\":%lu,"
         "\"wireless_telemetry_binary_samples\":%lu,"
         "\"wireless_telemetry_text_frames\":%lu,"
+        "\"wireless_telemetry_connect_count\":%lu,"
+        "\"wireless_telemetry_send_failures\":%lu,"
+        "\"wireless_telemetry_send_timeouts\":%lu,"
+        "\"wireless_telemetry_socket_closes\":%lu,"
+        "\"wireless_telemetry_last_send_ms\":%lu,"
+        "\"wireless_telemetry_max_send_ms\":%lu,"
         "\"wireless_telemetry_last_error\":%d"
         "}\n",
         app->project_name, app->version, app->idf_ver,
@@ -1156,10 +1334,19 @@ static esp_err_t status_get_handler(httpd_req_t *req)
             runtime_config->runtime_mode),
         (unsigned)runtime_config->tag_id,
         (unsigned)runtime_config->anchor_count,
-        (unsigned)runtime_config->anchor_ids[0],
-        (unsigned)runtime_config->anchor_ids[1],
-        (unsigned)runtime_config->anchor_ids[2],
-        (unsigned)runtime_config->anchor_ids[3],
+        runtime_anchor_ids_json,
+        (unsigned)runtime_config->flex_tdoa_responder_count,
+        (unsigned)runtime_config->flex_tdoa_slot_count,
+        runtime_flex_slots_json,
+        runtime_flex_masks_json,
+        (unsigned long)runtime_config->flex_tdoa_config_generation,
+        (unsigned long)runtime_config->flex_tdoa_guard_us,
+        (unsigned long)runtime_config->flex_tdoa_request_subslot_us,
+        (unsigned long)runtime_config->flex_tdoa_request_process_us,
+        (unsigned long)runtime_config->flex_tdoa_response_subslot_us,
+        (unsigned long)runtime_config->flex_tdoa_response_process_us,
+        runtime_config->flex_tdoa_geometry_fixed ? "true" : "false",
+        (unsigned long)runtime_config->flex_tdoa_geometry_generation,
         (unsigned)runtime_config->anchor_survey_coordinator_id,
         (unsigned long)runtime_config->anchor_survey_rx_slice_ms,
         (unsigned long)runtime_config->anchor_survey_command_delay_ms,
@@ -1560,6 +1747,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         APP_UWB_EVENT_COUNTERS_ENABLED ? "true" : "false",
         (unsigned)APP_UWB_EVENT_COUNTERS_LOG_EVERY,
         (unsigned long)uwb_dw3000_get_device_id(),
+        (unsigned long)uwb_dw3000_get_spi_clock_hz(),
         (unsigned)uwb_dw3000_get_source_id(),
         (unsigned)active_antenna_delay, (unsigned)active_antenna_delay,
         (unsigned)configured_antenna_delay,
@@ -1588,10 +1776,17 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)wireless_telemetry_service_get_drop_full_count(),
         (unsigned long)wireless_telemetry_service_get_drop_mutex_count(),
         (unsigned long)wireless_telemetry_service_get_drop_format_count(),
+        (unsigned long)wireless_telemetry_service_get_queue_depth(),
         (unsigned long)wireless_telemetry_service_get_queue_high_water(),
         (unsigned long)wireless_telemetry_service_get_binary_frame_count(),
         (unsigned long)wireless_telemetry_service_get_binary_sample_count(),
         (unsigned long)wireless_telemetry_service_get_text_frame_count(),
+        (unsigned long)wireless_telemetry_service_get_connect_count(),
+        (unsigned long)wireless_telemetry_service_get_send_failure_count(),
+        (unsigned long)wireless_telemetry_service_get_send_timeout_count(),
+        (unsigned long)wireless_telemetry_service_get_socket_close_count(),
+        (unsigned long)wireless_telemetry_service_get_last_send_ms(),
+        (unsigned long)wireless_telemetry_service_get_max_send_ms(),
         wireless_telemetry_service_get_last_error());
 
     if (len < 0 || len >= OTA_SERVICE_STATUS_RESPONSE_SIZE) {
@@ -1615,6 +1810,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #undef pd_last_response_hex
 #undef pd_source_pdos_json
 #undef pd_sink_pdos_json
+#undef runtime_anchor_ids_json
+#undef runtime_flex_slots_json
+#undef runtime_flex_masks_json
     return response_err;
 }
 
@@ -2896,10 +3094,93 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
             memset(config.anchor_ids, 0, sizeof(config.anchor_ids));
             memcpy(config.anchor_ids, ids, count);
             config.anchor_count = count;
+            app_runtime_config_reset_flex_tdoa(&config);
             changed = true;
         } else if (query_err != ESP_ERR_NOT_FOUND) {
             return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                        "Invalid anchors");
+        }
+
+        char flex_slots_text[80] = {0};
+        query_err = httpd_query_key_value(query, "flex_slots",
+                                          flex_slots_text,
+                                          sizeof(flex_slots_text));
+        if (query_err == ESP_OK) {
+            uint8_t count = 0;
+            memset(config.flex_tdoa_slot_initiator_ids, 0,
+                   sizeof(config.flex_tdoa_slot_initiator_ids));
+            if (!ota_parse_u8_list(
+                    flex_slots_text, config.flex_tdoa_slot_initiator_ids,
+                    APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS, &count)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid flex_slots");
+            }
+            config.flex_tdoa_slot_count = count;
+            changed = true;
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid flex_slots");
+        }
+
+        char flex_masks_text[120] = {0};
+        query_err = httpd_query_key_value(query, "flex_masks",
+                                          flex_masks_text,
+                                          sizeof(flex_masks_text));
+        if (query_err == ESP_OK) {
+            uint8_t count = 0;
+            memset(config.flex_tdoa_slot_responder_masks, 0,
+                   sizeof(config.flex_tdoa_slot_responder_masks));
+            if (!ota_parse_u16_list(
+                    flex_masks_text, config.flex_tdoa_slot_responder_masks,
+                    APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS, &count) ||
+                count != config.flex_tdoa_slot_count) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid flex_masks");
+            }
+            changed = true;
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid flex_masks");
+        }
+
+        const bool flex_geometry_clear =
+            ota_query_option_enabled(query, "flex_geometry_clear");
+        char flex_geometry_text[512] = {0};
+        query_err = httpd_query_key_value(
+            query, "flex_geometry", flex_geometry_text,
+            sizeof(flex_geometry_text));
+        if (query_err == ESP_OK) {
+            int32_t x_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+            int32_t y_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+            if (!ota_parse_flex_geometry(flex_geometry_text, &config,
+                                         x_mm, y_mm)) {
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                           "Invalid flex_geometry");
+            }
+            memcpy(config.flex_tdoa_anchor_x_mm, x_mm,
+                   sizeof(config.flex_tdoa_anchor_x_mm));
+            memcpy(config.flex_tdoa_anchor_y_mm, y_mm,
+                   sizeof(config.flex_tdoa_anchor_y_mm));
+            config.flex_tdoa_geometry_fixed = true;
+            config.flex_tdoa_geometry_generation =
+                before_config.flex_tdoa_geometry_generation == UINT32_MAX
+                    ? 1U
+                    : before_config.flex_tdoa_geometry_generation + 1U;
+            changed = true;
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "Invalid flex_geometry");
+        } else if (flex_geometry_clear) {
+            config.flex_tdoa_geometry_fixed = false;
+            memset(config.flex_tdoa_anchor_x_mm, 0,
+                   sizeof(config.flex_tdoa_anchor_x_mm));
+            memset(config.flex_tdoa_anchor_y_mm, 0,
+                   sizeof(config.flex_tdoa_anchor_y_mm));
+            config.flex_tdoa_geometry_generation =
+                before_config.flex_tdoa_geometry_generation == UINT32_MAX
+                    ? 1U
+                    : before_config.flex_tdoa_geometry_generation + 1U;
+            changed = true;
         }
 
         char cal_three_text[64] = {0};
@@ -3011,6 +3292,13 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
 
         APPLY_U8_PARAM("tag", tag_id);
         APPLY_U8_PARAM("anchor_count", anchor_count);
+        APPLY_U8_PARAM("flex_k", flex_tdoa_responder_count);
+        APPLY_U32_PARAM("flex_guard_us", flex_tdoa_guard_us);
+        APPLY_U32_PARAM("flex_req_us", flex_tdoa_request_subslot_us);
+        APPLY_U32_PARAM("flex_req_process_us", flex_tdoa_request_process_us);
+        APPLY_U32_PARAM("flex_resp_us", flex_tdoa_response_subslot_us);
+        APPLY_U32_PARAM("flex_resp_process_us",
+                        flex_tdoa_response_process_us);
         APPLY_U8_PARAM("coordinator", anchor_survey_coordinator_id);
         APPLY_U8_PARAM("coord", anchor_survey_coordinator_id);
         APPLY_U32_PARAM("survey_rx_ms", anchor_survey_rx_slice_ms);
@@ -3098,6 +3386,33 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
 #undef APPLY_U32_PARAM
 #undef APPLY_U8_PARAM
 
+        if (config.flex_tdoa_responder_count !=
+                before_config.flex_tdoa_responder_count ||
+            config.flex_tdoa_slot_count != before_config.flex_tdoa_slot_count ||
+            memcmp(config.flex_tdoa_slot_initiator_ids,
+                   before_config.flex_tdoa_slot_initiator_ids,
+                   sizeof(config.flex_tdoa_slot_initiator_ids)) != 0 ||
+            memcmp(config.flex_tdoa_slot_responder_masks,
+                   before_config.flex_tdoa_slot_responder_masks,
+                   sizeof(config.flex_tdoa_slot_responder_masks)) != 0 ||
+            config.flex_tdoa_guard_us != before_config.flex_tdoa_guard_us ||
+            config.flex_tdoa_request_subslot_us !=
+                before_config.flex_tdoa_request_subslot_us ||
+            config.flex_tdoa_request_process_us !=
+                before_config.flex_tdoa_request_process_us ||
+            config.flex_tdoa_response_subslot_us !=
+                before_config.flex_tdoa_response_subslot_us ||
+            config.flex_tdoa_response_process_us !=
+                before_config.flex_tdoa_response_process_us) {
+            if (config.flex_tdoa_config_generation ==
+                before_config.flex_tdoa_config_generation) {
+                config.flex_tdoa_config_generation =
+                    before_config.flex_tdoa_config_generation == UINT32_MAX
+                        ? 1U
+                        : before_config.flex_tdoa_config_generation + 1U;
+            }
+        }
+
         if (!app_runtime_config_validate(&config)) {
             return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                        "Invalid runtime config");
@@ -3105,6 +3420,11 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
 
         if (changed) {
             err = app_runtime_config_save(&config);
+            if (err == ESP_OK &&
+                config.flex_tdoa_geometry_generation !=
+                    before_config.flex_tdoa_geometry_generation) {
+                (void)flextdoa_solver_service_reload_geometry();
+            }
         }
     }
 
@@ -3115,6 +3435,21 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
     }
 
     const app_runtime_config_t *active_config = app_runtime_config_get();
+    char active_anchor_ids_json[48] = {0};
+    char active_flex_slots_json[48] = {0};
+    char active_flex_masks_json[72] = {0};
+    format_u8_array_json(active_config->anchor_ids,
+                         active_config->anchor_count,
+                         active_anchor_ids_json,
+                         sizeof(active_anchor_ids_json));
+    format_u8_array_json(active_config->flex_tdoa_slot_initiator_ids,
+                         active_config->flex_tdoa_slot_count,
+                         active_flex_slots_json,
+                         sizeof(active_flex_slots_json));
+    format_u16_array_json(active_config->flex_tdoa_slot_responder_masks,
+                          active_config->flex_tdoa_slot_count,
+                          active_flex_masks_json,
+                          sizeof(active_flex_masks_json));
     if (changed && before_config.gps_enabled != active_config->gps_enabled) {
         const esp_err_t gps_err = gps_service_apply_runtime_config();
         if (gps_err != ESP_OK) {
@@ -3140,17 +3475,17 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
     const bool reboot_recommended =
         runtime_config_reboot_recommended(&before_config, active_config);
     ESP_LOGW(TAG,
-             "Runtime config: changed=%s cleared=%s mode=%s(%u) tag=%u anchors=[%u,%u,%u,%u] count=%u coord=%u reboot_recommended=%s reboot_requested=%s",
+             "Runtime config: changed=%s cleared=%s mode=%s(%u) tag=%u anchors=%s count=%u K=%u M=%u generation=%lu coord=%u reboot_recommended=%s reboot_requested=%s",
              changed ? "true" : "false", cleared ? "true" : "false",
              app_runtime_config_runtime_mode_to_string(
                  active_config->runtime_mode),
              (unsigned)active_config->runtime_mode,
              (unsigned)active_config->tag_id,
-             (unsigned)active_config->anchor_ids[0],
-             (unsigned)active_config->anchor_ids[1],
-             (unsigned)active_config->anchor_ids[2],
-             (unsigned)active_config->anchor_ids[3],
+             active_anchor_ids_json,
              (unsigned)active_config->anchor_count,
+             (unsigned)active_config->flex_tdoa_responder_count,
+             (unsigned)active_config->flex_tdoa_slot_count,
+             (unsigned long)active_config->flex_tdoa_config_generation,
              (unsigned)active_config->anchor_survey_coordinator_id,
              reboot_recommended ? "true" : "false",
              reboot_requested ? "true" : "false");
@@ -3167,7 +3502,19 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         "\"runtime_mode_name\":\"%s\","
         "\"runtime_tag_id\":%u,"
         "\"runtime_anchor_count\":%u,"
-        "\"runtime_anchor_ids\":[%u,%u,%u,%u],"
+        "\"runtime_anchor_ids\":%s,"
+        "\"runtime_flex_tdoa_responder_count\":%u,"
+        "\"runtime_flex_tdoa_slot_count\":%u,"
+        "\"runtime_flex_tdoa_slot_initiator_ids\":%s,"
+        "\"runtime_flex_tdoa_slot_responder_masks\":%s,"
+        "\"runtime_flex_tdoa_config_generation\":%lu,"
+        "\"runtime_flex_tdoa_guard_us\":%lu,"
+        "\"runtime_flex_tdoa_request_subslot_us\":%lu,"
+        "\"runtime_flex_tdoa_request_process_us\":%lu,"
+        "\"runtime_flex_tdoa_response_subslot_us\":%lu,"
+        "\"runtime_flex_tdoa_response_process_us\":%lu,"
+        "\"runtime_flex_tdoa_geometry_fixed\":%s,"
+        "\"runtime_flex_tdoa_geometry_generation\":%lu,"
         "\"runtime_anchor_survey_coordinator_id\":%u,"
         "\"runtime_ranging_slot_ms\":%lu,"
         "\"runtime_ranging_round_gap_ms\":%lu,"
@@ -3192,10 +3539,19 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
             active_config->runtime_mode),
         (unsigned)active_config->tag_id,
         (unsigned)active_config->anchor_count,
-        (unsigned)active_config->anchor_ids[0],
-        (unsigned)active_config->anchor_ids[1],
-        (unsigned)active_config->anchor_ids[2],
-        (unsigned)active_config->anchor_ids[3],
+        active_anchor_ids_json,
+        (unsigned)active_config->flex_tdoa_responder_count,
+        (unsigned)active_config->flex_tdoa_slot_count,
+        active_flex_slots_json,
+        active_flex_masks_json,
+        (unsigned long)active_config->flex_tdoa_config_generation,
+        (unsigned long)active_config->flex_tdoa_guard_us,
+        (unsigned long)active_config->flex_tdoa_request_subslot_us,
+        (unsigned long)active_config->flex_tdoa_request_process_us,
+        (unsigned long)active_config->flex_tdoa_response_subslot_us,
+        (unsigned long)active_config->flex_tdoa_response_process_us,
+        active_config->flex_tdoa_geometry_fixed ? "true" : "false",
+        (unsigned long)active_config->flex_tdoa_geometry_generation,
         (unsigned)active_config->anchor_survey_coordinator_id,
         (unsigned long)active_config->ranging_slot_ms,
         (unsigned long)active_config->ranging_round_gap_ms,

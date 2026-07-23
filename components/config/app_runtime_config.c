@@ -21,6 +21,21 @@ static const char *TAG = "app_runtime_config";
 #define KEY_A1 "a1"
 #define KEY_A2 "a2"
 #define KEY_A3 "a3"
+#define KEY_ANCHORS "anchors"
+#define KEY_FLEX_K "flex_k"
+#define KEY_FLEX_M "flex_m"
+#define KEY_FLEX_SLOTS "flex_slots"
+#define KEY_FLEX_MASKS "flex_masks"
+#define KEY_FLEX_GEN "flex_gen"
+#define KEY_FLEX_GUARD "flex_guard"
+#define KEY_FLEX_REQ "flex_req"
+#define KEY_FLEX_REQP "flex_reqproc"
+#define KEY_FLEX_RESP "flex_resp"
+#define KEY_FLEX_RESPP "flex_rspproc"
+#define KEY_FLEX_GFIX "flex_gfix"
+#define KEY_FLEX_GGEN "flex_ggen"
+#define KEY_FLEX_GX "flex_gx"
+#define KEY_FLEX_GY "flex_gy"
 #define KEY_COORD "coord"
 #define KEY_AS_RX "as_rx"
 #define KEY_AS_CMD "as_cmd"
@@ -118,6 +133,87 @@ static bool anchor_ids_valid(const app_runtime_config_t *config)
         }
     }
 
+    return true;
+}
+
+static int anchor_index(const app_runtime_config_t *config, uint8_t id)
+{
+    for (size_t i = 0; i < config->anchor_count; ++i) {
+        if (config->anchor_ids[i] == id) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static bool flex_tdoa_config_valid(const app_runtime_config_t *config)
+{
+    if (config->flex_tdoa_responder_count == 0U ||
+        config->flex_tdoa_responder_count >= config->anchor_count ||
+        config->flex_tdoa_slot_count == 0U ||
+        config->flex_tdoa_slot_count > APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS) {
+        return false;
+    }
+
+    const uint16_t valid_mask =
+        (uint16_t)((1U << config->anchor_count) - 1U);
+    for (size_t slot = 0; slot < config->flex_tdoa_slot_count; ++slot) {
+        const int initiator_index = anchor_index(
+            config, config->flex_tdoa_slot_initiator_ids[slot]);
+        const uint16_t mask = config->flex_tdoa_slot_responder_masks[slot];
+        if (initiator_index < 0 || (mask & ~valid_mask) != 0U ||
+            (mask & (uint16_t)(1U << initiator_index)) != 0U ||
+            __builtin_popcount((unsigned)mask) <
+                config->flex_tdoa_responder_count) {
+            return false;
+        }
+    }
+
+    const uint32_t timings[] = {
+        config->flex_tdoa_guard_us,
+        config->flex_tdoa_request_subslot_us,
+        config->flex_tdoa_request_process_us,
+        config->flex_tdoa_response_subslot_us,
+        config->flex_tdoa_response_process_us,
+    };
+    for (size_t i = 0; i < sizeof(timings) / sizeof(timings[0]); ++i) {
+        if (timings[i] == 0U || timings[i] > UINT16_MAX) {
+            return false;
+        }
+    }
+
+    const uint32_t slot_us = config->flex_tdoa_guard_us +
+                             config->flex_tdoa_request_subslot_us +
+                             config->flex_tdoa_request_process_us +
+                             (uint32_t)config->flex_tdoa_responder_count *
+                                 (config->flex_tdoa_response_subslot_us +
+                                  config->flex_tdoa_response_process_us);
+    if (slot_us == 0U || slot_us > 1000000U) {
+        return false;
+    }
+    return true;
+}
+
+static bool flex_tdoa_geometry_valid(const app_runtime_config_t *config)
+{
+    if (!config->flex_tdoa_geometry_fixed) {
+        return true;
+    }
+    if (config->flex_tdoa_geometry_generation == 0U ||
+        config->anchor_count < 3U ||
+        config->flex_tdoa_anchor_x_mm[0] != 0 ||
+        config->flex_tdoa_anchor_y_mm[0] != 0 ||
+        config->flex_tdoa_anchor_x_mm[1] != 0) {
+        return false;
+    }
+    for (size_t i = 0; i < config->anchor_count; ++i) {
+        if (config->flex_tdoa_anchor_x_mm[i] < -100000000 ||
+            config->flex_tdoa_anchor_x_mm[i] > 100000000 ||
+            config->flex_tdoa_anchor_y_mm[i] < -100000000 ||
+            config->flex_tdoa_anchor_y_mm[i] > 100000000) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -232,6 +328,16 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->anchor_ids[1] = (uint8_t)APP_UWB_ANCHOR_1_ID;
     config->anchor_ids[2] = (uint8_t)APP_UWB_ANCHOR_2_ID;
     config->anchor_ids[3] = (uint8_t)APP_UWB_ANCHOR_3_ID;
+    config->flex_tdoa_guard_us = APP_UWB_FLEX_TDOA_GUARD_US;
+    config->flex_tdoa_request_subslot_us =
+        APP_UWB_FLEX_TDOA_REQUEST_SUBSLOT_US;
+    config->flex_tdoa_request_process_us =
+        APP_UWB_FLEX_TDOA_REQUEST_PROCESS_US;
+    config->flex_tdoa_response_subslot_us =
+        APP_UWB_FLEX_TDOA_RESPONSE_SUBSLOT_US;
+    config->flex_tdoa_response_process_us =
+        APP_UWB_FLEX_TDOA_RESPONSE_PROCESS_US;
+    app_runtime_config_reset_flex_tdoa(config);
     config->anchor_survey_coordinator_id =
         (uint8_t)APP_UWB_ANCHOR_SURVEY_COORDINATOR_ID;
     config->anchor_survey_rx_slice_ms = APP_UWB_ANCHOR_SURVEY_RX_SLICE_MS;
@@ -291,11 +397,47 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->from_nvs = false;
 }
 
+void app_runtime_config_reset_flex_tdoa(app_runtime_config_t *config)
+{
+    if (config == NULL || config->anchor_count < 2U ||
+        config->anchor_count > APP_RUNTIME_CONFIG_MAX_ANCHORS) {
+        return;
+    }
+
+    const uint32_t previous_generation = config->flex_tdoa_config_generation;
+    config->flex_tdoa_responder_count = (uint8_t)(config->anchor_count - 1U);
+    config->flex_tdoa_slot_count = config->anchor_count;
+    memset(config->flex_tdoa_slot_initiator_ids, 0,
+           sizeof(config->flex_tdoa_slot_initiator_ids));
+    memset(config->flex_tdoa_slot_responder_masks, 0,
+           sizeof(config->flex_tdoa_slot_responder_masks));
+    const uint16_t all_anchors =
+        (uint16_t)((1U << config->anchor_count) - 1U);
+    for (size_t slot = 0; slot < config->flex_tdoa_slot_count; ++slot) {
+        config->flex_tdoa_slot_initiator_ids[slot] = config->anchor_ids[slot];
+        config->flex_tdoa_slot_responder_masks[slot] =
+            (uint16_t)(all_anchors & ~(1U << slot));
+    }
+    config->flex_tdoa_config_generation =
+        previous_generation == UINT32_MAX ? 1U : previous_generation + 1U;
+    config->flex_tdoa_geometry_fixed = false;
+    memset(config->flex_tdoa_anchor_x_mm, 0,
+           sizeof(config->flex_tdoa_anchor_x_mm));
+    memset(config->flex_tdoa_anchor_y_mm, 0,
+           sizeof(config->flex_tdoa_anchor_y_mm));
+    config->flex_tdoa_geometry_generation =
+        config->flex_tdoa_geometry_generation == UINT32_MAX
+            ? 1U
+            : config->flex_tdoa_geometry_generation + 1U;
+}
+
 bool app_runtime_config_validate(const app_runtime_config_t *config)
 {
     if (config == NULL ||
         !app_runtime_config_runtime_mode_valid(config->runtime_mode) ||
         !id_valid(config->tag_id) || !anchor_ids_valid(config) ||
+        !flex_tdoa_config_valid(config) ||
+        !flex_tdoa_geometry_valid(config) ||
         !id_valid(config->anchor_survey_coordinator_id) ||
         !ms_valid(config->anchor_survey_rx_slice_ms) ||
         !ms_valid(config->anchor_survey_command_delay_ms) ||
@@ -386,6 +528,14 @@ static bool read_bool(nvs_handle_t handle, const char *key, bool *value)
     return false;
 }
 
+static bool read_blob_exact(nvs_handle_t handle, const char *key, void *value,
+                            size_t expected_size)
+{
+    size_t size = expected_size;
+    return nvs_get_blob(handle, key, value, &size) == ESP_OK &&
+           size == expected_size;
+}
+
 static void read_config_from_nvs(app_runtime_config_t *config)
 {
     nvs_handle_t handle = 0;
@@ -403,6 +553,42 @@ static void read_config_from_nvs(app_runtime_config_t *config)
     found |= read_u8(handle, KEY_A1, &config->anchor_ids[1]);
     found |= read_u8(handle, KEY_A2, &config->anchor_ids[2]);
     found |= read_u8(handle, KEY_A3, &config->anchor_ids[3]);
+    uint8_t stored_anchors[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+    if (read_blob_exact(handle, KEY_ANCHORS, stored_anchors,
+                        sizeof(stored_anchors))) {
+        memcpy(config->anchor_ids, stored_anchors, sizeof(stored_anchors));
+        found = true;
+    }
+    found |= read_u8(handle, KEY_FLEX_K,
+                     &config->flex_tdoa_responder_count);
+    found |= read_u8(handle, KEY_FLEX_M, &config->flex_tdoa_slot_count);
+    found |= read_blob_exact(handle, KEY_FLEX_SLOTS,
+                             config->flex_tdoa_slot_initiator_ids,
+                             sizeof(config->flex_tdoa_slot_initiator_ids));
+    found |= read_blob_exact(handle, KEY_FLEX_MASKS,
+                             config->flex_tdoa_slot_responder_masks,
+                             sizeof(config->flex_tdoa_slot_responder_masks));
+    found |= read_u32(handle, KEY_FLEX_GEN,
+                      &config->flex_tdoa_config_generation);
+    found |= read_u32(handle, KEY_FLEX_GUARD, &config->flex_tdoa_guard_us);
+    found |= read_u32(handle, KEY_FLEX_REQ,
+                      &config->flex_tdoa_request_subslot_us);
+    found |= read_u32(handle, KEY_FLEX_REQP,
+                      &config->flex_tdoa_request_process_us);
+    found |= read_u32(handle, KEY_FLEX_RESP,
+                      &config->flex_tdoa_response_subslot_us);
+    found |= read_u32(handle, KEY_FLEX_RESPP,
+                      &config->flex_tdoa_response_process_us);
+    found |= read_bool(handle, KEY_FLEX_GFIX,
+                       &config->flex_tdoa_geometry_fixed);
+    found |= read_u32(handle, KEY_FLEX_GGEN,
+                      &config->flex_tdoa_geometry_generation);
+    found |= read_blob_exact(handle, KEY_FLEX_GX,
+                             config->flex_tdoa_anchor_x_mm,
+                             sizeof(config->flex_tdoa_anchor_x_mm));
+    found |= read_blob_exact(handle, KEY_FLEX_GY,
+                             config->flex_tdoa_anchor_y_mm,
+                             sizeof(config->flex_tdoa_anchor_y_mm));
     found |= read_u8(handle, KEY_COORD, &config->anchor_survey_coordinator_id);
     found |= read_u32(handle, KEY_AS_RX, &config->anchor_survey_rx_slice_ms);
     found |= read_u32(handle, KEY_AS_CMD,
@@ -560,6 +746,40 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
     WRITE_OR_GOTO(write_u8(handle, KEY_A1, config->anchor_ids[1]));
     WRITE_OR_GOTO(write_u8(handle, KEY_A2, config->anchor_ids[2]));
     WRITE_OR_GOTO(write_u8(handle, KEY_A3, config->anchor_ids[3]));
+    WRITE_OR_GOTO(nvs_set_blob(handle, KEY_ANCHORS, config->anchor_ids,
+                               sizeof(config->anchor_ids)));
+    WRITE_OR_GOTO(write_u8(handle, KEY_FLEX_K,
+                           config->flex_tdoa_responder_count));
+    WRITE_OR_GOTO(write_u8(handle, KEY_FLEX_M,
+                           config->flex_tdoa_slot_count));
+    WRITE_OR_GOTO(nvs_set_blob(handle, KEY_FLEX_SLOTS,
+                               config->flex_tdoa_slot_initiator_ids,
+                               sizeof(config->flex_tdoa_slot_initiator_ids)));
+    WRITE_OR_GOTO(nvs_set_blob(handle, KEY_FLEX_MASKS,
+                               config->flex_tdoa_slot_responder_masks,
+                               sizeof(config->flex_tdoa_slot_responder_masks)));
+    WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_GEN,
+                            config->flex_tdoa_config_generation));
+    WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_GUARD,
+                            config->flex_tdoa_guard_us));
+    WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_REQ,
+                            config->flex_tdoa_request_subslot_us));
+    WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_REQP,
+                            config->flex_tdoa_request_process_us));
+    WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_RESP,
+                            config->flex_tdoa_response_subslot_us));
+    WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_RESPP,
+                            config->flex_tdoa_response_process_us));
+    WRITE_OR_GOTO(write_bool(handle, KEY_FLEX_GFIX,
+                             config->flex_tdoa_geometry_fixed));
+    WRITE_OR_GOTO(write_u32(handle, KEY_FLEX_GGEN,
+                            config->flex_tdoa_geometry_generation));
+    WRITE_OR_GOTO(nvs_set_blob(handle, KEY_FLEX_GX,
+                               config->flex_tdoa_anchor_x_mm,
+                               sizeof(config->flex_tdoa_anchor_x_mm)));
+    WRITE_OR_GOTO(nvs_set_blob(handle, KEY_FLEX_GY,
+                               config->flex_tdoa_anchor_y_mm,
+                               sizeof(config->flex_tdoa_anchor_y_mm)));
     WRITE_OR_GOTO(write_u8(handle, KEY_COORD,
                            config->anchor_survey_coordinator_id));
     WRITE_OR_GOTO(write_u32(handle, KEY_AS_RX,
@@ -674,12 +894,13 @@ esp_err_t app_runtime_config_clear(void)
     return err;
 }
 
-size_t app_runtime_config_get_anchor_ids(
-    uint8_t ids[APP_RUNTIME_CONFIG_MAX_ANCHORS])
+size_t app_runtime_config_get_anchor_ids(uint8_t *ids, size_t capacity)
 {
     const app_runtime_config_t *config = app_runtime_config_get();
     if (ids != NULL) {
-        for (size_t i = 0; i < APP_RUNTIME_CONFIG_MAX_ANCHORS; ++i) {
+        const size_t copy_count =
+            capacity < config->anchor_count ? capacity : config->anchor_count;
+        for (size_t i = 0; i < copy_count; ++i) {
             ids[i] = config->anchor_ids[i];
         }
     }
@@ -696,9 +917,26 @@ void app_runtime_config_format_anchors(char *buffer, size_t buffer_size,
         config = app_runtime_config_get();
     }
 
-    (void)snprintf(buffer, buffer_size, "[%u,%u,%u,%u]",
-                   (unsigned)config->anchor_ids[0],
-                   (unsigned)config->anchor_ids[1],
-                   (unsigned)config->anchor_ids[2],
-                   (unsigned)config->anchor_ids[3]);
+    size_t offset = 0;
+    int written = snprintf(buffer, buffer_size, "[");
+    if (written < 0 || (size_t)written >= buffer_size) {
+        buffer[0] = '\0';
+        return;
+    }
+    offset = (size_t)written;
+    for (size_t i = 0; i < config->anchor_count; ++i) {
+        written = snprintf(&buffer[offset], buffer_size - offset,
+                           "%s%u", i == 0 ? "" : ",",
+                           (unsigned)config->anchor_ids[i]);
+        if (written < 0 || (size_t)written >= buffer_size - offset) {
+            buffer[0] = '\0';
+            return;
+        }
+        offset += (size_t)written;
+    }
+    if (offset + 2U > buffer_size) {
+        buffer[0] = '\0';
+        return;
+    }
+    (void)snprintf(&buffer[offset], buffer_size - offset, "]");
 }

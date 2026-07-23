@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
@@ -56,26 +57,50 @@ FLOAT_TEXT_RE = r"[-+]?(?:\d+(?:\.\d+)?|nan|inf)"
 FLEX_TDOA_RE = re.compile(
     r"\bUWB_FLEX_TDOA obs\s+tag=(?P<tag>\d+)\s+"
     r"initiator=(?P<initiator>\d+)\s+responder=(?P<responder>\d+)\s+"
-    r"seq=(?P<seq>\d+)\s+diff=(?P<diff>[-+]?\d+(?:\.\d+)?)\s+m\s+"
+    r"seq=(?P<seq>\d+)\s+"
+    r"(?:slot=(?P<slot>\d+)\s+index=(?P<index>\d+)\s+)?"
+    r"diff=(?P<diff>[-+]?\d+(?:\.\d+)?)\s+m\s+"
     r"raw=(?P<raw>[-+]?\d+(?:\.\d+)?)\s+m\s+"
     r"anchor=(?P<anchor_distance>[-+]?\d+(?:\.\d+)?)\s+m"
 )
 FLEX_TDOA_EXTRA_RE = re.compile(
     rf"\balt=(?P<alt>{FLOAT_TEXT_RE})\s+m\s+"
     rf"agree=(?P<agree>{FLOAT_TEXT_RE})\s+m\s+"
+    rf"(?:blend=(?P<blend>{FLOAT_TEXT_RE})\s+)?"
     r"fused=(?P<fused>[01])\s+suspect=(?P<suspect>[01])"
+)
+FLEX_TDOA_PRIMARY_RE = re.compile(
+    rf"\bprimary=(?P<primary>{FLOAT_TEXT_RE})\s+m"
 )
 FLEX_TDOA_ANCHOR_RE = re.compile(
     r"\bFLEX_TDOA anchor result\s+pair=(?P<initiator>\d+)-(?P<responder>\d+)\s+"
     r"seq=(?P<seq>\d+)\s+distance=(?P<distance>[-+]?\d+(?:\.\d+)?)\s+m\s+"
-    r"[-+]?\d+(?:\.\d+)?\s+cm\s+raw=(?P<raw>[-+]?\d+(?:\.\d+)?)\s+m"
+    r"(?:[-+]?\d+(?:\.\d+)?\s+cm\s+)?"
+    r"raw=(?P<raw>[-+]?\d+(?:\.\d+)?)\s+m"
 )
 CAL_SYNC_SKIP_RE = re.compile(r"\bUWB CAL slot skipped due to sync fail\b")
 TELEMETRY_BINARY_MAGIC = b"UWT1"
 TELEMETRY_BINARY_HEADER_LEN = 12
 TELEMETRY_STREAM_BNO085_ACCEL = 1
+TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION = 2
+TELEMETRY_STREAM_FLEX_ANCHOR_RANGE = 3
+TELEMETRY_STREAM_FLEX_POSITION = 4
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
+TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
+TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
+TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
+TELEMETRY_FLEX_OBSERVATION_STRUCT = struct.Struct("<IIiiiHBBBB")
+TELEMETRY_FLEX_ANCHOR_RANGE_STRUCT = struct.Struct("<IIiiHBB")
+TELEMETRY_FLEX_POSITION_STRUCT = struct.Struct("<IIiiiiIHBB")
+TELEMETRY_STREAM_SAMPLE_SIZES = {
+    TELEMETRY_STREAM_BNO085_ACCEL: TELEMETRY_ACCEL_SAMPLE_LEN,
+    TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION:
+        TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN,
+    TELEMETRY_STREAM_FLEX_ANCHOR_RANGE:
+        TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN,
+    TELEMETRY_STREAM_FLEX_POSITION: TELEMETRY_FLEX_POSITION_SAMPLE_LEN,
+}
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
 
 
@@ -359,10 +384,11 @@ def binary_telemetry_frame_len(buffer: bytes) -> int | None:
     sample_size = buffer[7]
     count = int.from_bytes(buffer[8:10], "little")
     payload_len = int.from_bytes(buffer[10:12], "little")
+    expected_sample_size = TELEMETRY_STREAM_SAMPLE_SIZES.get(stream_type)
     if (
         version != 1
-        or stream_type != TELEMETRY_STREAM_BNO085_ACCEL
-        or sample_size != TELEMETRY_ACCEL_SAMPLE_LEN
+        or expected_sample_size is None
+        or sample_size != expected_sample_size
         or payload_len != count * sample_size
         or payload_len > 4096
     ):
@@ -379,14 +405,14 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
         return []
     if not frame.startswith(TELEMETRY_BINARY_MAGIC):
         return []
-    if frame[5] != TELEMETRY_STREAM_BNO085_ACCEL:
-        return []
 
+    stream_type = int(frame[5])
     module_id = int(frame[6])
     sample_size = int(frame[7])
     count = int.from_bytes(frame[8:10], "little")
     payload_len = int.from_bytes(frame[10:12], "little")
-    if sample_size != TELEMETRY_ACCEL_SAMPLE_LEN:
+    expected_sample_size = TELEMETRY_STREAM_SAMPLE_SIZES.get(stream_type)
+    if expected_sample_size is None or sample_size != expected_sample_size:
         return []
     if payload_len != count * sample_size:
         return []
@@ -394,30 +420,116 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
     samples: list[dict[str, Any]] = []
     offset = TELEMETRY_BINARY_HEADER_LEN
     end = min(len(frame), offset + payload_len)
-    while offset + TELEMETRY_ACCEL_SAMPLE_LEN <= end:
-        uptime_ms, reports, x, y, z, accuracy = TELEMETRY_ACCEL_STRUCT.unpack_from(
-            frame, offset
-        )
-        samples.append(
-            {
-                "module_id": module_id,
-                "host": f"uwb-module-{module_id}",
-                "uptime_ms": int(uptime_ms),
-                "topic": "bno085.accel",
-                "x": x / 1000.0,
-                "y": y / 1000.0,
-                "z": z / 1000.0,
-                "accuracy": int(accuracy),
-                "reports": int(reports),
-            }
-        )
-        offset += TELEMETRY_ACCEL_SAMPLE_LEN
+    while offset + sample_size <= end:
+        common = {
+            "module_id": module_id,
+            "host": f"uwb-module-{module_id}",
+        }
+        if stream_type == TELEMETRY_STREAM_BNO085_ACCEL:
+            uptime_ms, reports, x, y, z, accuracy = (
+                TELEMETRY_ACCEL_STRUCT.unpack_from(frame, offset)
+            )
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "topic": "bno085.accel",
+                    "x": x / 1000.0,
+                    "y": y / 1000.0,
+                    "z": z / 1000.0,
+                    "accuracy": int(accuracy),
+                    "reports": int(reports),
+                }
+            )
+        elif stream_type == TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION:
+            (
+                uptime_ms,
+                slot_id,
+                diff_mm,
+                raw_diff_mm,
+                anchor_distance_mm,
+                sequence,
+                tag_id,
+                initiator_id,
+                responder_id,
+                responder_index,
+            ) = TELEMETRY_FLEX_OBSERVATION_STRUCT.unpack_from(frame, offset)
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "topic": "uwb.flex_tdoa.observation",
+                    "slot_id": int(slot_id),
+                    "diff_m": diff_mm / 1000.0,
+                    "raw_diff_m": raw_diff_mm / 1000.0,
+                    "anchor_distance_m": anchor_distance_mm / 1000.0,
+                    "seq": int(sequence),
+                    "tag_id": int(tag_id),
+                    "initiator_id": int(initiator_id),
+                    "responder_id": int(responder_id),
+                    "responder_index": int(responder_index),
+                }
+            )
+        elif stream_type == TELEMETRY_STREAM_FLEX_ANCHOR_RANGE:
+            (
+                uptime_ms,
+                slot_id,
+                distance_mm,
+                raw_distance_mm,
+                sequence,
+                initiator_id,
+                responder_id,
+            ) = TELEMETRY_FLEX_ANCHOR_RANGE_STRUCT.unpack_from(frame, offset)
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "topic": "uwb.flex_tdoa.anchor_range",
+                    "slot_id": int(slot_id),
+                    "distance_m": distance_mm / 1000.0,
+                    "raw_distance_m": raw_distance_mm / 1000.0,
+                    "seq": int(sequence),
+                    "initiator_id": int(initiator_id),
+                    "responder_id": int(responder_id),
+                }
+            )
+        elif stream_type == TELEMETRY_STREAM_FLEX_POSITION:
+            (
+                uptime_ms,
+                slot_id,
+                x_mm,
+                y_mm,
+                sigma_mm,
+                rms_mm,
+                geometry_version,
+                observation_count,
+                tag_id,
+                anchor_count,
+            ) = TELEMETRY_FLEX_POSITION_STRUCT.unpack_from(frame, offset)
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "topic": "uwb.flex_tdoa.position",
+                    "slot_id": int(slot_id),
+                    "x_m": x_mm / 1000.0,
+                    "y_m": y_mm / 1000.0,
+                    "sigma_m": sigma_mm / 1000.0,
+                    "rms_m": rms_mm / 1000.0,
+                    "geometry_version": int(geometry_version),
+                    "observation_count": int(observation_count),
+                    "tag_id": int(tag_id),
+                    "anchor_count": int(anchor_count),
+                }
+            )
+        offset += sample_size
     return samples
 
 
 class DashboardState:
     def __init__(self, *, max_logs: int) -> None:
         self.lock = threading.Lock()
+        self.position_condition = threading.Condition(self.lock)
         self.max_logs = max_logs
         self.status_online_max_age_sec = 6.0
         self.logs: deque[dict[str, Any]] = deque(maxlen=max_logs)
@@ -431,6 +543,9 @@ class DashboardState:
         self.tdoa_history: dict[tuple[int, int, int], deque[dict[str, Any]]] = {}
         self.tdoa_anchor_distances: dict[tuple[int, int], dict[str, Any]] = {}
         self.tdoa_anchor_history: dict[tuple[int, int], deque[dict[str, Any]]] = {}
+        self.tdoa_local_positions: dict[int, dict[str, Any]] = {}
+        self.tdoa_position_events: deque[dict[str, Any]] = deque(maxlen=4096)
+        self.next_position_event_id = 1
         self.max_tdoa_samples = 200
         self.next_log_id = 1
         self.next_accel_id = 1
@@ -482,7 +597,65 @@ class DashboardState:
             for sample in samples:
                 sample["received_at"] = now
                 sample["client"] = client
-                self.record_accel_sample_locked(sample)
+                topic = str(sample.get("topic") or "")
+                if topic == "bno085.accel":
+                    self.record_accel_sample_locked(sample)
+                elif topic == "uwb.flex_tdoa.observation":
+                    self.record_tdoa_sample_locked(sample)
+                elif topic == "uwb.flex_tdoa.anchor_range":
+                    self.record_tdoa_anchor_sample_locked(sample)
+                elif topic == "uwb.flex_tdoa.position":
+                    self.record_tdoa_position_sample_locked(sample)
+
+    def record_tdoa_position_sample_locked(self, item: dict[str, Any]) -> None:
+        try:
+            tag_id = int(item["tag_id"])
+            x_m = float(item["x_m"])
+            y_m = float(item["y_m"])
+            sigma_m = float(item["sigma_m"])
+            rms_m = float(item["rms_m"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if tag_id <= 0 or not all(
+            math.isfinite(value) for value in (x_m, y_m, sigma_m, rms_m)
+        ):
+            return
+        stored = {
+            **item,
+            "received_at": float(item.get("received_at") or time.time()),
+            "position_event_id": self.next_position_event_id,
+        }
+        self.next_position_event_id += 1
+        self.tdoa_local_positions[tag_id] = stored
+        self.tdoa_position_events.append(stored)
+        self.position_condition.notify_all()
+
+    def position_events_after(
+        self, after: int, limit: int, wait_sec: float
+    ) -> list[dict[str, Any]]:
+        def collect() -> list[dict[str, Any]]:
+            if not self.tdoa_position_events:
+                return []
+            newest_id = int(
+                self.tdoa_position_events[-1].get("position_event_id") or 0
+            )
+            if after <= 0 or after > newest_id:
+                return [dict(self.tdoa_position_events[-1])]
+
+            pending: list[dict[str, Any]] = []
+            for item in reversed(self.tdoa_position_events):
+                if int(item.get("position_event_id") or 0) <= after:
+                    break
+                pending.append(item)
+            pending.reverse()
+            return [dict(item) for item in pending[:limit]]
+
+        with self.position_condition:
+            events = collect()
+            if not events:
+                self.position_condition.wait(timeout=max(0.0, wait_sec))
+                events = collect()
+            return events
 
     def parse_line(self, line: str) -> dict[str, Any]:
         match = LOG_RE.match(line)
@@ -632,6 +805,12 @@ class DashboardState:
             initiator_id = int(match.group("initiator"))
             responder_id = int(match.group("responder"))
             seq = int(match.group("seq"))
+            slot_id = (
+                int(match.group("slot")) if match.group("slot") is not None else None
+            )
+            responder_index = (
+                int(match.group("index")) if match.group("index") is not None else None
+            )
             diff_m = float(match.group("diff"))
             raw_diff_m = float(match.group("raw"))
             anchor_distance_m = float(match.group("anchor_distance"))
@@ -640,12 +819,18 @@ class DashboardState:
 
         extra_match = FLEX_TDOA_EXTRA_RE.search(raw_message)
         alt_diff_m = None
+        primary_diff_m = None
         agreement_m = None
+        blend_weight = None
         fused = False
         suspect = False
+        primary_match = FLEX_TDOA_PRIMARY_RE.search(raw_message)
+        if primary_match is not None:
+            primary_diff_m = self.optional_float(primary_match.group("primary"))
         if extra_match is not None:
             alt_diff_m = self.optional_float(extra_match.group("alt"))
             agreement_m = self.optional_float(extra_match.group("agree"))
+            blend_weight = self.optional_float(extra_match.group("blend"))
             fused = extra_match.group("fused") == "1"
             suspect = extra_match.group("suspect") == "1"
 
@@ -656,10 +841,14 @@ class DashboardState:
             "initiator_id": initiator_id,
             "responder_id": responder_id,
             "seq": seq,
+            "slot_id": slot_id,
+            "responder_index": responder_index,
             "diff_m": diff_m,
             "raw_diff_m": raw_diff_m,
+            "primary_diff_m": primary_diff_m,
             "alt_diff_m": alt_diff_m,
             "agreement_m": agreement_m,
+            "blend_weight": blend_weight,
             "fused": fused,
             "suspect": suspect,
             "anchor_distance_m": anchor_distance_m,
@@ -676,6 +865,70 @@ class DashboardState:
             initiator_id=initiator_id,
             responder_id=responder_id,
             seq=seq,
+            slot_id=None,
+            distance_m=anchor_distance_m,
+            raw_distance_m=None,
+            item=item,
+            source="tdoa_obs",
+        )
+
+    def record_tdoa_sample_locked(self, item: dict[str, Any]) -> None:
+        try:
+            tag_id = int(item["tag_id"])
+            initiator_id = int(item["initiator_id"])
+            responder_id = int(item["responder_id"])
+            seq = int(item["seq"])
+            slot_id = int(item["slot_id"])
+            responder_index = int(item["responder_index"])
+            diff_m = float(item["diff_m"])
+            raw_diff_m = float(item["raw_diff_m"])
+            anchor_distance_m = float(item["anchor_distance_m"])
+        except (KeyError, TypeError, ValueError):
+            return
+
+        if (
+            tag_id <= 0
+            or initiator_id <= 0
+            or responder_id <= 0
+            or not math.isfinite(diff_m)
+            or not math.isfinite(raw_diff_m)
+            or not math.isfinite(anchor_distance_m)
+            or anchor_distance_m <= 0
+        ):
+            return
+
+        now = float(item.get("received_at") or time.time())
+        key = (tag_id, initiator_id, responder_id)
+        sample = {
+            "tag_id": tag_id,
+            "initiator_id": initiator_id,
+            "responder_id": responder_id,
+            "seq": seq,
+            "slot_id": slot_id,
+            "responder_index": responder_index,
+            "diff_m": diff_m,
+            "raw_diff_m": raw_diff_m,
+            "primary_diff_m": None,
+            "alt_diff_m": None,
+            "agreement_m": None,
+            "blend_weight": None,
+            "fused": False,
+            "suspect": False,
+            "anchor_distance_m": anchor_distance_m,
+            "received_at": now,
+            "log_id": None,
+            "source_module_id": item.get("module_id"),
+            "raw": "binary telemetry",
+        }
+        self.tdoa_observations[key] = sample
+        self.tdoa_history.setdefault(
+            key, deque(maxlen=self.max_tdoa_samples)
+        ).append(sample)
+        self.store_tdoa_anchor_distance_locked(
+            initiator_id=initiator_id,
+            responder_id=responder_id,
+            seq=seq,
+            slot_id=slot_id,
             distance_m=anchor_distance_m,
             raw_distance_m=None,
             item=item,
@@ -702,6 +955,29 @@ class DashboardState:
             initiator_id=initiator_id,
             responder_id=responder_id,
             seq=seq,
+            slot_id=None,
+            distance_m=distance_m,
+            raw_distance_m=raw_distance_m,
+            item=item,
+            source="anchor_result",
+        )
+
+    def record_tdoa_anchor_sample_locked(self, item: dict[str, Any]) -> None:
+        try:
+            initiator_id = int(item["initiator_id"])
+            responder_id = int(item["responder_id"])
+            seq = int(item["seq"])
+            slot_id = int(item["slot_id"])
+            distance_m = float(item["distance_m"])
+            raw_distance_m = float(item["raw_distance_m"])
+        except (KeyError, TypeError, ValueError):
+            return
+
+        self.store_tdoa_anchor_distance_locked(
+            initiator_id=initiator_id,
+            responder_id=responder_id,
+            seq=seq,
+            slot_id=slot_id,
             distance_m=distance_m,
             raw_distance_m=raw_distance_m,
             item=item,
@@ -714,6 +990,7 @@ class DashboardState:
         initiator_id: int,
         responder_id: int,
         seq: int,
+        slot_id: int | None,
         distance_m: float,
         raw_distance_m: float | None,
         item: dict[str, Any],
@@ -741,6 +1018,7 @@ class DashboardState:
             "initiator_id": initiator_id,
             "responder_id": responder_id,
             "seq": seq,
+            "slot_id": slot_id,
             "distance_m": distance_m,
             "raw_distance_m": raw_distance_m,
             "received_at": now,
@@ -772,25 +1050,6 @@ class DashboardState:
             return None
         return parsed if math.isfinite(parsed) else None
 
-    @staticmethod
-    def sequence_delta(start: int, end: int) -> int:
-        return (int(end) - int(start)) % 65536
-
-    @classmethod
-    def tdoa_sequences_are_paired(
-        cls, left: dict[str, Any], right: dict[str, Any], pair_count: int
-    ) -> bool:
-        if pair_count <= 0:
-            return False
-        try:
-            left_seq = int(left["seq"])
-            right_seq = int(right["seq"])
-        except (KeyError, TypeError, ValueError):
-            return False
-        forward = cls.sequence_delta(left_seq, right_seq)
-        reverse = cls.sequence_delta(right_seq, left_seq)
-        return 0 < min(forward, reverse) <= pair_count
-
     def tdoa_runtime_anchor_ids_locked(self) -> list[int]:
         for item in self.status_by_module.values():
             anchor_ids = item.get("runtime_anchor_ids")
@@ -807,131 +1066,6 @@ class DashboardState:
             ids.add(int(anchor_a_id))
             ids.add(int(anchor_b_id))
         return sorted(ids)
-
-    def tdoa_paired_observations_locked(
-        self, now: float, max_age_sec: float
-    ) -> dict[str, Any]:
-        anchor_ids = self.tdoa_runtime_anchor_ids_locked()
-        slot_count = len(anchor_ids) * (len(anchor_ids) - 1) // 2
-        if slot_count <= 0:
-            return {}
-
-        tag_ids = sorted({key[0] for key in self.tdoa_history})
-        paired_observations: dict[str, Any] = {}
-        for tag_id in tag_ids:
-            for i, initiator_id in enumerate(anchor_ids):
-                for responder_id in anchor_ids[i + 1 :]:
-                    left_history = [
-                        sample
-                        for sample in self.tdoa_history.get(
-                            (tag_id, initiator_id, responder_id), []
-                        )
-                        if now - float(sample.get("received_at") or 0.0)
-                        <= max_age_sec
-                    ]
-                    right_history = [
-                        sample
-                        for sample in self.tdoa_history.get(
-                            (tag_id, responder_id, initiator_id), []
-                        )
-                        if now - float(sample.get("received_at") or 0.0)
-                        <= max_age_sec
-                    ]
-                    if not left_history or not right_history:
-                        continue
-
-                    matched: list[tuple[dict[str, Any], dict[str, Any]]] = []
-                    for left in left_history:
-                        compatible = [
-                            right
-                            for right in right_history
-                            if self.tdoa_sequences_are_paired(
-                                left, right, slot_count
-                            )
-                        ]
-                        if not compatible:
-                            continue
-                        compatible.sort(
-                            key=lambda right: abs(
-                                float(left.get("received_at") or 0.0)
-                                - float(right.get("received_at") or 0.0)
-                            )
-                        )
-                        matched.append((left, compatible[0]))
-                    if not matched:
-                        continue
-
-                    diffs: list[float] = []
-                    raw_diffs: list[float] = []
-                    reverse_sums: list[float] = []
-                    agreement_values: list[float] = []
-                    fused_count = 0
-                    suspect_count = 0
-                    for left, right in matched:
-                        left_diff = float(left["diff_m"])
-                        right_diff = float(right["diff_m"])
-                        diffs.append((left_diff - right_diff) / 2.0)
-                        reverse_sums.append(left_diff + right_diff)
-                        left_raw = float(left.get("raw_diff_m") or math.nan)
-                        right_raw = float(right.get("raw_diff_m") or math.nan)
-                        if math.isfinite(left_raw) and math.isfinite(right_raw):
-                            raw_diffs.append((left_raw - right_raw) / 2.0)
-                        for sample in (left, right):
-                            if sample.get("fused"):
-                                fused_count += 1
-                            if sample.get("suspect"):
-                                suspect_count += 1
-                            agreement_m = self.optional_float(
-                                sample.get("agreement_m")
-                            )
-                            if agreement_m is not None:
-                                agreement_values.append(agreement_m)
-
-                    diff_m = self.median_float(diffs)
-                    reverse_sum_m = self.median_float(reverse_sums)
-                    if diff_m is None or reverse_sum_m is None:
-                        continue
-                    raw_diff_m = self.median_float(raw_diffs)
-                    agreement_m = self.median_float(agreement_values)
-                    latest_left, latest_right = max(
-                        matched,
-                        key=lambda pair: max(
-                            float(pair[0].get("received_at") or 0.0),
-                            float(pair[1].get("received_at") or 0.0),
-                        ),
-                    )
-                    received_at = max(
-                        float(latest_left.get("received_at") or 0.0),
-                        float(latest_right.get("received_at") or 0.0),
-                    )
-                    paired_observations[
-                        f"{tag_id}:{initiator_id}:{responder_id}"
-                    ] = {
-                        "tag_id": tag_id,
-                        "initiator_id": initiator_id,
-                        "responder_id": responder_id,
-                        "seq": int(latest_left["seq"]),
-                        "reverse_seq": int(latest_right["seq"]),
-                        "diff_m": diff_m,
-                        "raw_diff_m": raw_diff_m
-                        if raw_diff_m is not None
-                        else float(latest_left["raw_diff_m"]),
-                        "reverse_sum_m": reverse_sum_m,
-                        "latest_reverse_sum_m": float(latest_left["diff_m"])
-                        + float(latest_right["diff_m"]),
-                        "agreement_m": agreement_m,
-                        "fused_count": fused_count,
-                        "suspect_count": suspect_count,
-                        "suspect": suspect_count > len(matched),
-                        "anchor_distance_m": float(
-                            latest_left["anchor_distance_m"]
-                        ),
-                        "age_sec": now - received_at,
-                        "samples": len(matched),
-                        "source_module_id": latest_left.get("source_module_id"),
-                        "log_id": latest_left.get("log_id"),
-                    }
-        return paired_observations
 
     def ranging_snapshot_locked(self, now: float) -> dict[str, Any]:
         distances: dict[str, Any] = {}
@@ -976,6 +1110,8 @@ class DashboardState:
     def tdoa_snapshot_locked(self, now: float) -> dict[str, Any]:
         observations: dict[str, Any] = {}
         anchor_distances: dict[str, Any] = {}
+        recent_observations: list[dict[str, Any]] = []
+        recent_anchor_ranges: list[dict[str, Any]] = []
         max_age_sec = 3.0
         for (tag_id, initiator_id, responder_id), item in sorted(
             self.tdoa_observations.items()
@@ -1001,10 +1137,14 @@ class DashboardState:
                 "initiator_id": initiator_id,
                 "responder_id": responder_id,
                 "seq": int(item["seq"]),
+                "slot_id": item.get("slot_id"),
+                "responder_index": item.get("responder_index"),
                 "diff_m": float(item["diff_m"]),
                 "raw_diff_m": float(item["raw_diff_m"]),
+                "primary_diff_m": item.get("primary_diff_m"),
                 "alt_diff_m": item.get("alt_diff_m"),
                 "agreement_m": item.get("agreement_m"),
+                "blend_weight": item.get("blend_weight"),
                 "fused": bool(item.get("fused")),
                 "suspect": bool(item.get("suspect")),
                 "anchor_distance_m": float(item["anchor_distance_m"]),
@@ -1021,6 +1161,27 @@ class DashboardState:
                     "max_m": max(values) if values else None,
                 },
             }
+            for sample in history:
+                age_sec = now - float(sample.get("received_at") or 0.0)
+                if age_sec > 10.0:
+                    continue
+                recent_observations.append(
+                    {
+                        "tag_id": int(sample["tag_id"]),
+                        "initiator_id": int(sample["initiator_id"]),
+                        "responder_id": int(sample["responder_id"]),
+                        "seq": int(sample["seq"]),
+                        "slot_id": sample.get("slot_id"),
+                        "responder_index": sample.get("responder_index"),
+                        "diff_m": float(sample["diff_m"]),
+                        "raw_diff_m": float(sample["raw_diff_m"]),
+                        "primary_diff_m": sample.get("primary_diff_m"),
+                        "anchor_distance_m": float(sample["anchor_distance_m"]),
+                        "age_sec": age_sec,
+                        "received_at": float(sample.get("received_at") or 0.0),
+                        "log_id": sample.get("log_id"),
+                    }
+                )
         for (anchor_a_id, anchor_b_id), item in sorted(
             self.tdoa_anchor_distances.items()
         ):
@@ -1033,7 +1194,6 @@ class DashboardState:
                 if now - float(sample.get("received_at") or 0.0) <= 10.0
             ]
             mean_m = sum(values) / len(values) if values else None
-            median_m = self.median_float(values)
             std_m = None
             if len(values) >= 2 and mean_m is not None:
                 variance = sum((value - mean_m) ** 2 for value in values) / (
@@ -1056,18 +1216,48 @@ class DashboardState:
                 "stats": {
                     "samples": len(values),
                     "mean_m": mean_m,
-                    "median_m": median_m,
                     "std_m": std_m,
                     "min_m": min(values) if values else None,
                     "max_m": max(values) if values else None,
                 },
             }
+            for sample in history:
+                slot_id = sample.get("slot_id")
+                age_sec = now - float(sample.get("received_at") or 0.0)
+                if slot_id is None or age_sec > max_age_sec or sample.get("source") != "anchor_result":
+                    continue
+                recent_anchor_ranges.append(
+                    {
+                        "anchor_a_id": int(sample["anchor_a_id"]),
+                        "anchor_b_id": int(sample["anchor_b_id"]),
+                        "initiator_id": int(sample["initiator_id"]),
+                        "responder_id": int(sample["responder_id"]),
+                        "seq": int(sample["seq"]),
+                        "slot_id": int(slot_id),
+                        "distance_m": float(sample["distance_m"]),
+                        "raw_distance_m": sample.get("raw_distance_m"),
+                        "age_sec": age_sec,
+                        "received_at": float(sample.get("received_at") or 0.0),
+                    }
+                )
         return {
             "observations": observations,
+            "recent_observations": sorted(
+                recent_observations,
+                key=lambda sample: float(sample.get("received_at") or 0.0),
+            )[-300:],
+            "recent_anchor_ranges": sorted(
+                recent_anchor_ranges,
+                key=lambda sample: float(sample.get("received_at") or 0.0),
+            )[-600:],
             "anchor_distances": anchor_distances,
-            "paired_observations": self.tdoa_paired_observations_locked(
-                now, max_age_sec
-            ),
+            "local_positions": {
+                str(tag_id): {
+                    **item,
+                    "age_sec": now - float(item.get("received_at") or 0.0),
+                }
+                for tag_id, item in self.tdoa_local_positions.items()
+            },
             "max_age_sec": max_age_sec,
         }
 
@@ -1148,10 +1338,10 @@ class DashboardState:
                     age_sec is not None
                     and age_sec <= self.status_online_max_age_sec
                     and bool(item.get("wifi_connected"))
-                    and not error
                 )
                 item["http_status_age_sec"] = age_sec
                 item["http_status_online"] = online
+                item["http_status_degraded"] = bool(error) and online
                 if error:
                     item["http_status_error"] = error
                 statuses.append(item)
@@ -1447,10 +1637,22 @@ class StatusPoller(threading.Thread):
         self.stop_event = threading.Event()
 
     def run(self) -> None:
-        while not self.stop_event.is_set():
-            for target in self.targets:
-                self.poll_target(target)
+        if not self.targets:
             self.stop_event.wait(self.interval)
+            return
+
+        spacing = max(0.05, self.interval / len(self.targets))
+        pending: dict[str, Any] = {}
+        with ThreadPoolExecutor(
+            max_workers=max(1, len(self.targets)), thread_name_prefix="status"
+        ) as executor:
+            while not self.stop_event.is_set():
+                for target in self.targets:
+                    previous = pending.get(target)
+                    if previous is None or previous.done():
+                        pending[target] = executor.submit(self.poll_target, target)
+                    if self.stop_event.wait(spacing):
+                        return
 
     def poll_target(self, target: str) -> None:
         try:
@@ -1777,6 +1979,39 @@ tr.status-stale td { color: #4f3b1d; }
   min-height: 34px;
   line-height: 1.35;
 }
+.profile-validation {
+  display: inline-block;
+  margin: 0 0 10px;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  background: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.profile-validation.good { border-color: #78bb98; background: #f2fbf6; color: #116f3b; }
+.profile-validation.warn { border-color: #d8b55f; background: #fffaf0; color: #805b00; }
+.profile-validation.bad { border-color: #e2a4a4; background: #fff5f5; color: #a32626; }
+.ranging-protocol-context {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.ranging-protocol-context h2 { margin-bottom: 3px; }
+.ranging-protocol-badge {
+  flex: 0 0 auto;
+  border: 1px solid #78bb98;
+  background: #f2fbf6;
+  color: #116f3b;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.ranging-protocol-empty {
+  max-width: 760px;
+  color: var(--muted);
+  line-height: 1.5;
+}
 .profile-summary {
   color: var(--muted);
   font-size: 12px;
@@ -1785,6 +2020,293 @@ tr.status-stale td { color: #4f3b1d; }
   padding-top: 9px;
   border-top: 1px solid var(--line);
 }
+.flex-timing-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.flex-timing-head h2 { margin-bottom: 2px; }
+.flex-timing-select {
+  display: grid;
+  grid-template-columns: auto minmax(170px, 240px);
+  align-items: center;
+  gap: 8px;
+}
+.flex-timing-select label { color: var(--muted); font-size: 12px; }
+.flex-timing-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(100px, 1fr));
+  border: 1px solid var(--line);
+  background: #fbfcfe;
+  margin-bottom: 14px;
+}
+.flex-timing-metric {
+  min-width: 0;
+  padding: 9px 11px;
+  border-right: 1px solid var(--line);
+}
+.flex-timing-metric:last-child { border-right: 0; }
+.flex-timing-metric span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 3px;
+}
+.flex-timing-metric strong { font-size: 14px; }
+.flex-timing-scroll { overflow-x: auto; padding-bottom: 5px; }
+.flex-timing-canvas { min-width: 920px; }
+.flex-timing-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 11px 0 6px;
+}
+.flex-timing-label strong { font-size: 13px; }
+.flex-timing-label span { color: var(--muted); font-size: 11px; }
+.flex-frame-track {
+  display: grid;
+  border: 1px solid #8d9caf;
+  background: #fff;
+}
+.flex-frame-slot {
+  min-width: 0;
+  min-height: 76px;
+  padding: 9px 10px;
+  border-right: 1px solid #8d9caf;
+  background: #f7f9fc;
+}
+.flex-frame-slot:last-child { border-right: 0; }
+.flex-frame-slot.selected {
+  background: #edf4ff;
+  box-shadow: inset 0 -3px 0 #2e67d1;
+}
+.flex-frame-slot.live { box-shadow: inset 0 3px 0 #16894b; }
+.flex-frame-slot.selected.live {
+  box-shadow: inset 0 3px 0 #16894b, inset 0 -3px 0 #2e67d1;
+}
+.flex-frame-slot b { display: block; font-size: 12px; }
+.flex-frame-slot strong { display: block; font-size: 14px; margin-top: 2px; }
+.flex-frame-slot span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.flex-frame-axis,
+.flex-slot-axis {
+  position: relative;
+  height: 25px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.flex-slot-axis { height: 38px; }
+.flex-axis-mark.stagger { top: 13px; }
+.flex-axis-mark {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+.flex-axis-mark::before {
+  content: "";
+  display: block;
+  width: 1px;
+  height: 5px;
+  margin: 0 auto 2px;
+  background: #8d9caf;
+}
+.flex-axis-mark.edge-start { transform: none; }
+.flex-axis-mark.edge-end { transform: translateX(-100%); }
+.flex-dimensions {
+  position: relative;
+  height: 63px;
+  margin-top: 1px;
+  color: #42536a;
+  font-size: 10px;
+}
+.flex-dimension {
+  position: absolute;
+  height: 23px;
+}
+.flex-dimension-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 7px;
+  border-top: 1px solid #52647a;
+}
+.flex-dimension-line::before,
+.flex-dimension-line::after {
+  content: "";
+  position: absolute;
+  top: -4px;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+}
+.flex-dimension-line::before {
+  left: 0;
+  border-left: 6px solid #52647a;
+}
+.flex-dimension-line::after {
+  right: 0;
+  border-right: 6px solid #52647a;
+}
+.flex-dimension-label {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  transform: translateX(-50%);
+  padding: 0 5px;
+  background: #fff;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.flex-dimension.gap .flex-dimension-line { border-color: #7a651c; }
+.flex-dimension.gap .flex-dimension-line::before { border-left-color: #7a651c; }
+.flex-dimension.gap .flex-dimension-line::after { border-right-color: #7a651c; }
+.flex-dimension.gap .flex-dimension-label {
+  left: auto;
+  right: 0;
+  transform: none;
+  color: #67540f;
+}
+.flex-frame-dimensions {
+  position: relative;
+  height: 45px;
+  margin-top: 1px;
+  color: #42536a;
+  font-size: 10px;
+}
+.flex-round-gap-zero {
+  position: absolute;
+  right: 0;
+  top: 24px;
+  height: 17px;
+  border-right: 3px double #52647a;
+}
+.flex-round-gap-zero span {
+  position: absolute;
+  right: 7px;
+  top: -1px;
+  white-space: nowrap;
+  font-weight: 700;
+}
+.flex-slot-track {
+  display: grid;
+  height: 76px;
+  border: 1px solid #8d9caf;
+  background: #fff;
+}
+.flex-slot-segment {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 5px 3px;
+  border-right: 1px solid rgba(41, 54, 73, 0.34);
+  text-align: center;
+  overflow: hidden;
+}
+.flex-slot-segment:last-child { border-right: 0; }
+.flex-slot-segment b { font-size: 13px; white-space: nowrap; }
+.flex-slot-segment span { font-size: 11px; margin-top: 3px; white-space: nowrap; }
+.flex-slot-segment.req { color: #fff; background: #2e67d1; }
+.flex-slot-segment.req-process { color: #443307; background: #f1cf72; }
+.flex-slot-segment.response { color: #fff; background: #16894b; }
+.flex-slot-segment.response.alt { background: #147b72; }
+.flex-slot-segment.response-process { color: #263548; background: #dce4ed; }
+.flex-slot-segment.guard { color: #263548; background: #eef1f5; }
+.flex-timing-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(520px, 1.25fr) minmax(300px, 0.75fr);
+  gap: 14px;
+  margin-top: 12px;
+  align-items: start;
+}
+.flex-timing-table { width: 100%; font-size: 11px; }
+.flex-timing-table th,
+.flex-timing-table td { padding: 5px 7px; }
+.flex-timing-table td:first-child { font-weight: 700; }
+.flex-packet-flow {
+  border-left: 3px solid #2e67d1;
+  padding: 2px 0 2px 11px;
+}
+.flex-packet-row { margin-bottom: 9px; }
+.flex-packet-row:last-child { margin-bottom: 0; }
+.flex-packet-row b { display: block; font-size: 12px; }
+.flex-packet-row code {
+  display: block;
+  margin-top: 3px;
+  color: #42536a;
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: normal;
+}
+.flex-timing-note {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.flex-host-window {
+  display: grid;
+  grid-template-columns: 150px minmax(360px, 1fr) 260px;
+  align-items: center;
+  gap: 10px;
+  margin: 3px 0 13px;
+  font-size: 11px;
+}
+.flex-host-window strong { font-size: 12px; }
+.flex-host-window > span { color: var(--muted); text-align: right; }
+.flex-host-track {
+  position: relative;
+  height: 18px;
+  border: 1px dashed #6f7e91;
+  background: #fff;
+  overflow: hidden;
+}
+.flex-host-fill {
+  height: 100%;
+  min-width: 2px;
+  background: #e4edff;
+  border-right: 2px solid #2e67d1;
+}
+.flex-host-measure {
+  position: relative;
+  height: 25px;
+  margin-top: 3px;
+}
+.flex-host-measure .flex-dimension-line { top: 7px; }
+.flex-host-measure .flex-dimension-label {
+  font-size: 10px;
+  color: #2455ae;
+}
+.flex-parameter-map { margin-top: 13px; }
+.flex-parameter-table { width: 100%; font-size: 11px; }
+.flex-parameter-table th,
+.flex-parameter-table td { padding: 6px 8px; vertical-align: top; }
+.flex-parameter-table td:nth-child(1) { width: 120px; font-weight: 700; }
+.flex-parameter-table td:nth-child(2) { width: 230px; }
+.flex-scope {
+  display: inline-block;
+  padding: 1px 5px;
+  border: 1px solid #b8c4d3;
+  color: #42536a;
+  background: #f7f9fc;
+  font-size: 10px;
+  font-weight: 700;
+}
+.flex-scope.host { border-color: #8aa9e8; color: #2455ae; background: #f1f6ff; }
+.flex-scope.fixed { border-color: #78bb98; color: #116f3b; background: #f2fbf6; }
 .field-note {
   min-height: 31px;
   display: flex;
@@ -2087,6 +2609,63 @@ tr.status-stale td { color: #4f3b1d; }
   color: var(--muted);
   font-size: 12px;
 }
+.position-metric-note {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.position-error-table {
+  table-layout: fixed;
+  font-size: 12px;
+}
+.position-error-table th,
+.position-error-table td {
+  padding: 6px 3px;
+  text-align: right;
+  white-space: nowrap;
+}
+.position-error-table th:first-child,
+.position-error-table td:first-child {
+  text-align: left;
+}
+.position-filter-card {
+  border: 1px solid var(--line);
+  background: #fff;
+  padding: 8px;
+}
+.position-filter-card b {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.position-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.position-pill {
+  border: 1px solid var(--line);
+  background: #f8fafc;
+  color: var(--text);
+  padding: 3px 7px;
+  font-size: 12px;
+}
+.position-pill.good {
+  border-color: #bfe8cc;
+  color: #087a2a;
+  background: #f4fbf6;
+}
+.position-pill.warn {
+  border-color: #f3d29c;
+  color: #a15b00;
+  background: #fff9ed;
+}
+.position-pill.bad {
+  border-color: #f2b8b5;
+  color: #b3261e;
+  background: #fff7f6;
+}
 .position-legend {
   display: flex;
   gap: 10px;
@@ -2118,6 +2697,13 @@ tr.status-stale td { color: #4f3b1d; }
 @media (max-width: 940px) {
   .terminal-grid, .settings-grid, .charger-grid, .pd-grid, .graphs-layout, .position-layout { grid-template-columns: 1fr; }
   .profile-grid { grid-template-columns: 1fr; }
+  .flex-timing-head { align-items: stretch; flex-direction: column; }
+  .flex-timing-select { grid-template-columns: 100px minmax(0, 1fr); }
+  .flex-timing-metrics { grid-template-columns: repeat(3, 1fr); }
+  .flex-timing-metric:nth-child(3) { border-right: 0; }
+  .flex-timing-metric:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
+  .flex-timing-detail-grid { grid-template-columns: 1fr; }
+  .flex-host-window { grid-template-columns: 120px minmax(300px, 1fr) 220px; }
   .page { height: auto; }
   .terminal { height: 520px; }
   .chart-stack { grid-template-rows: none; }
@@ -2185,39 +2771,61 @@ tr.status-stale td { color: #4f3b1d; }
             <label for="positionAnchorCount">Anchors used</label>
             <select id="positionAnchorCount"><option value="4">4 anchors</option><option value="3">3 anchors</option></select>
             <label for="positionSolver">Solver</label>
-            <select id="positionSolver"><option value="tdoa" selected>FlexTDOA</option><option value="ranging">DS-TWR ranges</option></select>
+            <select id="positionSolver"><option value="flextdoa" selected>FlexTDOA</option><option value="ranging">DS-TWR ranges</option><option value="hybrid">Legacy hybrid logs</option></select>
             <label for="positionAnchors">Anchor IDs</label>
             <input id="positionAnchors" value="2,3,4,5">
             <label for="positionTags">Tag IDs</label>
             <input id="positionTags" value="1">
             <label for="positionMaxAgeSec">Fresh age s</label>
             <input id="positionMaxAgeSec" value="3" type="number" min="0.2" step="0.1">
+            <label for="positionReferenceMode">Known reference</label>
+            <select id="positionReferenceMode">
+              <option value="centroid" selected>anchor centroid</option>
+              <option value="manual">manual coordinates</option>
+              <option value="none">disabled</option>
+            </select>
+            <label for="positionReferenceX">Reference X m</label>
+            <input id="positionReferenceX" value="1.50" type="number" step="0.001">
+            <label for="positionReferenceY">Reference Y m</label>
+            <input id="positionReferenceY" value="1.50" type="number" step="0.001">
+            <label for="positionErrorWindowSec">Error window s</label>
+            <input id="positionErrorWindowSec" value="30" type="number" min="1" max="120" step="1">
           </div>
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
+            <div><b>Solver</b><span>FlexTDOA uses passive tag range differences from request/response anchor slots. DS-TWR uses active tag-anchor distances. Legacy hybrid is only for older dual-leg logs.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
-            <div><b>Geometry</b><span>FlexTDOA uses live anchor-anchor ranges, so the anchors do not need to form a perfect square.</span></div>
+            <div><b>Geometry</b><span>Paper-style anchor self-localization uses batched TWR ranges and an EKF. Fix the resulting coordinates once before positioning, and restart self-localization after moving an anchor.</span></div>
+            <div><b>Known reference</b><span>Use the anchor centroid while the tag is physically centered. Manual coordinates support other surveyed test points.</span></div>
           </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
+            <button id="positionRestartAnchorSelfLocalization">Restart Anchor Self-Localization</button>
+            <button id="positionFixAnchorGeometry">Fix Anchor Geometry</button>
             <button class="primary" id="positionEnableRangingSide">Enable Position Runtime</button>
           </div>
           <div id="positionToast" class="toast"></div>
           <div class="section" style="margin-top:12px;">
             <h2>Measured Anchor Geometry</h2>
-            <div class="muted" style="margin-bottom:8px;">Relative anchor coordinates are reconstructed from live anchor-anchor ranges.</div>
+            <div id="positionGeometryStatus" class="muted" style="margin-bottom:8px;">Waiting to learn anchor geometry.</div>
             <table>
-              <thead><tr><th>Pair</th><th>med / avg</th><th>std</th><th>age</th><th>fit</th></tr></thead>
+              <thead><tr><th>Pair</th><th>m / avg</th><th>std</th><th>age</th><th>fit</th></tr></thead>
               <tbody id="positionGeometryRows"></tbody>
             </table>
           </div>
           <div class="section">
             <h2>Live Position</h2>
-            <div class="position-legend"><span style="color:#d7352a">tag</span><span style="color:#2b64d8">trail</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
+            <div class="position-legend"><span style="color:#d7352a">tag</span><span style="color:#2b64d8">trail</span><span style="color:#6d4c9f">known reference</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
             <div id="positionReadout" class="position-readout"></div>
             <table>
-              <thead><tr><th>Tag</th><th>est. 1σ</th><th>RMS</th><th>max</th></tr></thead>
+              <thead><tr><th>Tag</th><th>solver σaxis</th><th>TDOA RMS</th><th>TDOA max</th></tr></thead>
               <tbody id="positionAccuracyRows"></tbody>
+            </table>
+            <p class="position-metric-note">Solver diagnostics come from equation residuals. They are not measured position error.</p>
+            <div id="positionReferenceStatus" class="muted" style="margin:12px 0 5px;">Known position reference disabled.</div>
+            <table class="position-error-table">
+              <thead><tr><th>Tag</th><th>now</th><th>bias</th><th>RMSE</th><th>P95</th><th>max</th></tr></thead>
+              <tbody id="positionErrorRows"></tbody>
             </table>
           </div>
           <div class="section">
@@ -2248,6 +2856,8 @@ tr.status-stale td { color: #4f3b1d; }
               </select>
               <label for="accelSampleHz">Samples/s</label>
               <input id="accelSampleHz" value="20" type="number" min="1" max="500" step="1" inputmode="numeric">
+              <label for="accelEnabled">Sensor</label>
+              <div class="checkbox-row"><input id="accelEnabled" type="checkbox"><span id="accelEnabledLabel">BNO085 disabled</span></div>
               <label for="accelTargets">Targets</label>
               <select id="accelTargets">
                 <option value="all">all modules</option>
@@ -2686,8 +3296,209 @@ tr.status-stale td { color: #4f3b1d; }
     </section>
     <section id="rangingSettings" class="page">
       <div class="settings">
-        <div class="section">
-          <h2>Ranging Profiles</h2>
+        <div class="section ranging-protocol-context">
+          <div>
+            <h2 id="rangingProtocolTitle">FlexTDOA Settings</h2>
+            <div id="rangingProtocolHint" class="muted">Protocol selected in Position Setup.</div>
+          </div>
+          <span id="rangingProtocolBadge" class="ranging-protocol-badge">FlexTDOA</span>
+        </div>
+        <div id="flexTdoaRangingPanel" class="section ranging-protocol-panel" data-ranging-protocol="flextdoa">
+          <div class="flex-timing-head">
+            <div>
+              <h2>FlexTDOA Protocol Timing</h2>
+              <div class="muted">Live CI-CR frame structure and tuned DW3000 delayed-TX timing.</div>
+            </div>
+            <div class="flex-timing-select">
+              <label for="flexTimingSlotSelect">Inspect slot</label>
+              <select id="flexTimingSlotSelect"></select>
+            </div>
+          </div>
+          <div id="flexTdoaTimingDiagram" class="muted">Waiting for FlexTDOA runtime status...</div>
+        </div>
+        <div id="flexTdoaProfilesSection" class="section">
+          <h2>FlexTDOA Frame Profiles</h2>
+          <div class="form-grid">
+            <label for="flexProfileTargets">Targets</label>
+            <select id="flexProfileTargets">
+              <option value="all">all modules</option>
+              <option value="1">module 1</option>
+              <option value="2">module 2</option>
+              <option value="3">module 3</option>
+              <option value="4">module 4</option>
+              <option value="5">module 5</option>
+            </select>
+          </div>
+          <p class="muted profile-note">Each card is a complete on-air CI-CR timing profile. Applying it writes the timing to ESP NVS and reboots the selected modules.</p>
+          <div class="profile-grid">
+            <div class="profile-card flex-profile-card" data-flex-profile="frame19200">
+              <h3>19.20 ms Frame</h3>
+              <p class="muted">Hardware-validated baseline for four anchors and three responders.</p>
+              <div class="profile-validation good">validated conservative baseline</div>
+              <div class="form-grid compact">
+                <label for="flexProfile19200GuardUs">Guard us</label>
+                <input id="flexProfile19200GuardUs" value="500" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile19200ReqUs">REQ us</label>
+                <input id="flexProfile19200ReqUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile19200ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile19200ReqProcessUs" value="1500" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile19200RespUs">RESP subslot us</label>
+                <input id="flexProfile19200RespUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile19200RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile19200RespProcessUs" value="600" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile19200RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile19200RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile19200FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile19200FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+              </div>
+              <div class="profile-summary" id="flexProfile19200Summary"></div>
+              <div class="form-actions">
+                <button class="primary apply-flex-profile" data-flex-profile="frame19200">Apply 19.20 ms</button>
+                <button class="reset-flex-profile" data-flex-profile="frame19200">Reset Defaults</button>
+              </div>
+            </div>
+            <div class="profile-card flex-profile-card" data-flex-profile="frame14800">
+              <h3>14.80 ms Frame</h3>
+              <p class="muted">Fastest clean steady-state profile measured on all five modules.</p>
+              <div class="profile-validation good">recommended · 0 TX failures / 60 s</div>
+              <div class="form-grid compact">
+                <label for="flexProfile14800GuardUs">Guard us</label>
+                <input id="flexProfile14800GuardUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14800ReqUs">REQ us</label>
+                <input id="flexProfile14800ReqUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14800ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile14800ReqProcessUs" value="1250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14800RespUs">RESP subslot us</label>
+                <input id="flexProfile14800RespUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14800RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile14800RespProcessUs" value="400" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14800RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile14800RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile14800FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile14800FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+              </div>
+              <div class="profile-summary" id="flexProfile14800Summary"></div>
+              <div class="form-actions">
+                <button class="primary apply-flex-profile" data-flex-profile="frame14800">Apply 14.80 ms</button>
+                <button class="reset-flex-profile" data-flex-profile="frame14800">Reset Defaults</button>
+              </div>
+            </div>
+            <div class="profile-card flex-profile-card" data-flex-profile="frame14200">
+              <h3>14.20 ms Frame</h3>
+              <p class="muted">First timing boundary below the recommended profile.</p>
+              <div class="profile-validation warn">borderline · 1 delayed-TX failure / 30 s</div>
+              <div class="form-grid compact">
+                <label for="flexProfile14200GuardUs">Guard us</label>
+                <input id="flexProfile14200GuardUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14200ReqUs">REQ us</label>
+                <input id="flexProfile14200ReqUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14200ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile14200ReqProcessUs" value="1250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14200RespUs">RESP subslot us</label>
+                <input id="flexProfile14200RespUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14200RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile14200RespProcessUs" value="350" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile14200RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile14200RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile14200FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile14200FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+              </div>
+              <div class="profile-summary" id="flexProfile14200Summary"></div>
+              <div class="form-actions">
+                <button class="primary apply-flex-profile" data-flex-profile="frame14200">Apply 14.20 ms</button>
+                <button class="reset-flex-profile" data-flex-profile="frame14200">Reset Defaults</button>
+              </div>
+            </div>
+            <div class="profile-card flex-profile-card" data-flex-profile="frame13600">
+              <h3>13.60 ms Frame</h3>
+              <p class="muted">Higher response rate with insufficient delayed-TX margin.</p>
+              <div class="profile-validation warn">borderline · 1 delayed-TX failure / 30 s</div>
+              <div class="form-grid compact">
+                <label for="flexProfile13600GuardUs">Guard us</label>
+                <input id="flexProfile13600GuardUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile13600ReqUs">REQ us</label>
+                <input id="flexProfile13600ReqUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile13600ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile13600ReqProcessUs" value="1250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile13600RespUs">RESP subslot us</label>
+                <input id="flexProfile13600RespUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile13600RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile13600RespProcessUs" value="300" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile13600RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile13600RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile13600FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile13600FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+              </div>
+              <div class="profile-summary" id="flexProfile13600Summary"></div>
+              <div class="form-actions">
+                <button class="primary apply-flex-profile" data-flex-profile="frame13600">Apply 13.60 ms</button>
+                <button class="reset-flex-profile" data-flex-profile="frame13600">Reset Defaults</button>
+              </div>
+            </div>
+            <div class="profile-card flex-profile-card" data-flex-profile="frame12600">
+              <h3>12.60 ms Frame</h3>
+              <p class="muted">Limit-search profile that repeatedly missed delayed TX.</p>
+              <div class="profile-validation bad">failed · 2 delayed-TX failures / 30 s</div>
+              <div class="form-grid compact">
+                <label for="flexProfile12600GuardUs">Guard us</label>
+                <input id="flexProfile12600GuardUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12600ReqUs">REQ us</label>
+                <input id="flexProfile12600ReqUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12600ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile12600ReqProcessUs" value="1000" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12600RespUs">RESP subslot us</label>
+                <input id="flexProfile12600RespUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12600RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile12600RespProcessUs" value="300" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12600RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile12600RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile12600FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile12600FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+              </div>
+              <div class="profile-summary" id="flexProfile12600Summary"></div>
+              <div class="form-actions">
+                <button class="primary apply-flex-profile" data-flex-profile="frame12600">Apply 12.60 ms</button>
+                <button class="reset-flex-profile" data-flex-profile="frame12600">Reset Defaults</button>
+              </div>
+            </div>
+            <div class="profile-card flex-profile-card" data-flex-profile="frame12000">
+              <h3>12.00 ms Frame</h3>
+              <p class="muted">One-kilohertz response-rate experiment beyond the robust limit.</p>
+              <div class="profile-validation bad">failed · 3 TX failures / 30 s</div>
+              <div class="form-grid compact">
+                <label for="flexProfile12000GuardUs">Guard us</label>
+                <input id="flexProfile12000GuardUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12000ReqUs">REQ us</label>
+                <input id="flexProfile12000ReqUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12000ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile12000ReqProcessUs" value="1000" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12000RespUs">RESP subslot us</label>
+                <input id="flexProfile12000RespUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12000RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile12000RespProcessUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile12000RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile12000RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile12000FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile12000FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+              </div>
+              <div class="profile-summary" id="flexProfile12000Summary"></div>
+              <div class="form-actions">
+                <button class="primary apply-flex-profile" data-flex-profile="frame12000">Apply 12.00 ms</button>
+                <button class="reset-flex-profile" data-flex-profile="frame12000">Reset Defaults</button>
+              </div>
+            </div>
+          </div>
+          <div class="form-actions">
+            <button id="resetAllFlexProfiles">Reset FlexTDOA Profile Defaults</button>
+          </div>
+          <div id="flexProfileToast" class="toast"></div>
+        </div>
+        <div id="legacyHybridRangingPanel" class="section ranging-protocol-panel hidden" data-ranging-protocol="hybrid">
+          <h2>Legacy Hybrid Log Playback</h2>
+          <p class="ranging-protocol-empty">This solver interprets captures produced by the former dual-leg hybrid protocol. It has no active radio timing controls; use it only for comparisons with previously recorded data.</p>
+        </div>
+        <div id="rangingProfilesSection" class="section">
+          <h2>DS-TWR Profiles</h2>
           <div class="form-grid">
             <label for="rangingProfileTargets">Targets</label>
             <select id="rangingProfileTargets">
@@ -2699,122 +3510,138 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p class="muted profile-note">Apply writes every timing parameter in the selected profile to ESP32 NVS through runtime config. The same profile updates FlexTDOA anchor slots and classic ranging slots.</p>
+          <p id="rangingProfileNote" class="muted profile-note">FlexTDOA radio timing is fixed to the hardware-validated 4.80 ms CI-CR slot shown above. Profiles change only observation freshness and the host RX slice.</p>
           <div class="profile-grid">
-            <div class="profile-card" data-profile="baseline">
-              <h3>Stable Baseline</h3>
-              <p class="muted">Known-good reference profile using the currently validated timing values.</p>
+            <div class="profile-card" data-profile="static3">
+              <h3>Stable Profile</h3>
+              <p id="profileStatic3Description" class="muted">Long 3.0 s FlexTDOA observation freshness and a conservative host RX window.</p>
               <div class="form-grid compact">
-                <label for="profileBaselineSlotMs">Slot ms</label>
-                <input id="profileBaselineSlotMs" value="100" type="number" min="1" step="1">
-                <label for="profileBaselineRoundGapMs">Round gap ms</label>
-                <input id="profileBaselineRoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileBaselineRxSliceMs">RX slice ms</label>
-                <input id="profileBaselineRxSliceMs" value="100" type="number" min="1" step="1">
-                <label for="profileBaselineCommandDelayMs">Command delay ms</label>
-                <input id="profileBaselineCommandDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileBaselineTimeoutMs">Classic DS-TWR timeout ms</label>
-                <input id="profileBaselineTimeoutMs" value="90" type="number" min="1" step="1">
-                <label for="profileBaselineRespDelayMs">RESP delay ms</label>
-                <input id="profileBaselineRespDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileBaselineFinalDelayMs">FINAL delay ms</label>
-                <input id="profileBaselineFinalDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileBaselineReportDelayMs">REPORT delay ms</label>
-                <input id="profileBaselineReportDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileBaselineAutoRxDelayUus">Auto RX delay UUS</label>
-                <input id="profileBaselineAutoRxDelayUus" value="500" type="number" min="1" step="1">
+                <label for="profileStatic3FreshAgeSec">Observation freshness s</label>
+                <input id="profileStatic3FreshAgeSec" value="3" type="number" min="0.1" step="0.1">
+                <label class="hidden" for="profileStatic3DsFreshAgeSec">Distance freshness s</label>
+                <input class="hidden" id="profileStatic3DsFreshAgeSec" value="3" type="number" min="0.1" step="0.1">
+                <label for="profileStatic3SlotMs">DS-TWR slot ms</label>
+                <input id="profileStatic3SlotMs" value="100" type="number" min="1" step="1">
+                <label for="profileStatic3RoundGapMs">DS-TWR gap ms</label>
+                <input id="profileStatic3RoundGapMs" value="10" type="number" min="1" step="1">
+                <label for="profileStatic3RxSliceMs">Host RX slice ms</label>
+                <input id="profileStatic3RxSliceMs" value="100" type="number" min="1" step="1">
+                <label class="hidden" for="profileStatic3DsRxSliceMs">DS-TWR RX slice ms</label>
+                <input class="hidden" id="profileStatic3DsRxSliceMs" value="100" type="number" min="1" step="1">
+                <label for="profileStatic3TimeoutMs">DS-TWR timeout ms</label>
+                <input id="profileStatic3TimeoutMs" value="90" type="number" min="1" step="1">
+                <label for="profileStatic3RespDelayMs">DS-TWR RESP delay ms</label>
+                <input id="profileStatic3RespDelayMs" value="20" type="number" min="1" step="1">
+                <label for="profileStatic3FinalDelayMs">DS-TWR FINAL delay ms</label>
+                <input id="profileStatic3FinalDelayMs" value="20" type="number" min="1" step="1">
+                <label for="profileStatic3ReportDelayMs">DS-TWR REPORT delay ms</label>
+                <input id="profileStatic3ReportDelayMs" value="10" type="number" min="1" step="1">
+                <label for="profileStatic3AutoRxDelayUus">DS-TWR Auto RX delay UUS</label>
+                <input id="profileStatic3AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
-              <div class="profile-summary" id="profileBaselineSummary"></div>
+              <div class="profile-summary" id="profileStatic3Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="baseline">Apply Stable Baseline</button>
-                <button class="reset-ranging-profile" data-profile="baseline">Reset Defaults</button>
+                <button class="primary apply-ranging-profile" data-profile="static3">Apply Stable</button>
+                <button class="reset-ranging-profile" data-profile="static3">Reset Defaults</button>
               </div>
             </div>
-            <div class="profile-card" data-profile="safe">
-              <h3>Safe Fast</h3>
-              <p class="muted">First fast profile to try when stability matters more than minimum latency.</p>
+            <div class="profile-card" data-profile="dynamic15">
+              <h3>Balanced Profile</h3>
+              <p id="profileDynamic15Description" class="muted">Balanced 1.5 s FlexTDOA observation freshness and a conservative host RX window.</p>
               <div class="form-grid compact">
-                <label for="profileSafeSlotMs">Slot ms</label>
-                <input id="profileSafeSlotMs" value="60" type="number" min="1" step="1">
-                <label for="profileSafeRoundGapMs">Round gap ms</label>
-                <input id="profileSafeRoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileSafeRxSliceMs">RX slice ms</label>
-                <input id="profileSafeRxSliceMs" value="60" type="number" min="1" step="1">
-                <label for="profileSafeCommandDelayMs">Command delay ms</label>
-                <input id="profileSafeCommandDelayMs" value="5" type="number" min="1" step="1">
-                <label for="profileSafeTimeoutMs">Classic DS-TWR timeout ms</label>
-                <input id="profileSafeTimeoutMs" value="35" type="number" min="1" step="1">
-                <label for="profileSafeRespDelayMs">RESP delay ms</label>
-                <input id="profileSafeRespDelayMs" value="15" type="number" min="1" step="1">
-                <label for="profileSafeFinalDelayMs">FINAL delay ms</label>
-                <input id="profileSafeFinalDelayMs" value="15" type="number" min="1" step="1">
-                <label for="profileSafeReportDelayMs">REPORT delay ms</label>
-                <input id="profileSafeReportDelayMs" value="5" type="number" min="1" step="1">
-                <label for="profileSafeAutoRxDelayUus">Auto RX delay UUS</label>
-                <input id="profileSafeAutoRxDelayUus" value="500" type="number" min="1" step="1">
+                <label for="profileDynamic15FreshAgeSec">Observation freshness s</label>
+                <input id="profileDynamic15FreshAgeSec" value="1.5" type="number" min="0.1" step="0.1">
+                <label class="hidden" for="profileDynamic15DsFreshAgeSec">Distance freshness s</label>
+                <input class="hidden" id="profileDynamic15DsFreshAgeSec" value="1.5" type="number" min="0.1" step="0.1">
+                <label for="profileDynamic15SlotMs">DS-TWR slot ms</label>
+                <input id="profileDynamic15SlotMs" value="100" type="number" min="1" step="1">
+                <label for="profileDynamic15RoundGapMs">DS-TWR gap ms</label>
+                <input id="profileDynamic15RoundGapMs" value="10" type="number" min="1" step="1">
+                <label for="profileDynamic15RxSliceMs">Host RX slice ms</label>
+                <input id="profileDynamic15RxSliceMs" value="100" type="number" min="1" step="1">
+                <label class="hidden" for="profileDynamic15DsRxSliceMs">DS-TWR RX slice ms</label>
+                <input class="hidden" id="profileDynamic15DsRxSliceMs" value="100" type="number" min="1" step="1">
+                <label for="profileDynamic15TimeoutMs">DS-TWR timeout ms</label>
+                <input id="profileDynamic15TimeoutMs" value="90" type="number" min="1" step="1">
+                <label for="profileDynamic15RespDelayMs">DS-TWR RESP delay ms</label>
+                <input id="profileDynamic15RespDelayMs" value="20" type="number" min="1" step="1">
+                <label for="profileDynamic15FinalDelayMs">DS-TWR FINAL delay ms</label>
+                <input id="profileDynamic15FinalDelayMs" value="20" type="number" min="1" step="1">
+                <label for="profileDynamic15ReportDelayMs">DS-TWR REPORT delay ms</label>
+                <input id="profileDynamic15ReportDelayMs" value="10" type="number" min="1" step="1">
+                <label for="profileDynamic15AutoRxDelayUus">DS-TWR Auto RX delay UUS</label>
+                <input id="profileDynamic15AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
-              <div class="profile-summary" id="profileSafeSummary"></div>
+              <div class="profile-summary" id="profileDynamic15Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="safe">Apply Safe Fast</button>
-                <button class="reset-ranging-profile" data-profile="safe">Reset Defaults</button>
+                <button class="primary apply-ranging-profile" data-profile="dynamic15">Apply Balanced</button>
+                <button class="reset-ranging-profile" data-profile="dynamic15">Reset Defaults</button>
               </div>
             </div>
-            <div class="profile-card" data-profile="balanced">
-              <h3>Balanced</h3>
-              <p class="muted">Recommended next target: much faster than current settings, still with useful margin.</p>
+            <div class="profile-card" data-profile="dynamic12">
+              <h3>Reactive Profile</h3>
+              <p id="profileDynamic12Description" class="muted">Reactive 1.2 s FlexTDOA observation freshness and a conservative host RX window.</p>
               <div class="form-grid compact">
-                <label for="profileBalancedSlotMs">Slot ms</label>
-                <input id="profileBalancedSlotMs" value="50" type="number" min="1" step="1">
-                <label for="profileBalancedRoundGapMs">Round gap ms</label>
-                <input id="profileBalancedRoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileBalancedRxSliceMs">RX slice ms</label>
-                <input id="profileBalancedRxSliceMs" value="50" type="number" min="1" step="1">
-                <label for="profileBalancedCommandDelayMs">Command delay ms</label>
-                <input id="profileBalancedCommandDelayMs" value="5" type="number" min="1" step="1">
-                <label for="profileBalancedTimeoutMs">Classic DS-TWR timeout ms</label>
-                <input id="profileBalancedTimeoutMs" value="25" type="number" min="1" step="1">
-                <label for="profileBalancedRespDelayMs">RESP delay ms</label>
-                <input id="profileBalancedRespDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileBalancedFinalDelayMs">FINAL delay ms</label>
-                <input id="profileBalancedFinalDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileBalancedReportDelayMs">REPORT delay ms</label>
-                <input id="profileBalancedReportDelayMs" value="5" type="number" min="1" step="1">
-                <label for="profileBalancedAutoRxDelayUus">Auto RX delay UUS</label>
-                <input id="profileBalancedAutoRxDelayUus" value="500" type="number" min="1" step="1">
+                <label for="profileDynamic12FreshAgeSec">Observation freshness s</label>
+                <input id="profileDynamic12FreshAgeSec" value="1.2" type="number" min="0.1" step="0.1">
+                <label class="hidden" for="profileDynamic12DsFreshAgeSec">Distance freshness s</label>
+                <input class="hidden" id="profileDynamic12DsFreshAgeSec" value="1.2" type="number" min="0.1" step="0.1">
+                <label for="profileDynamic12SlotMs">DS-TWR slot ms</label>
+                <input id="profileDynamic12SlotMs" value="100" type="number" min="1" step="1">
+                <label for="profileDynamic12RoundGapMs">DS-TWR gap ms</label>
+                <input id="profileDynamic12RoundGapMs" value="10" type="number" min="1" step="1">
+                <label for="profileDynamic12RxSliceMs">Host RX slice ms</label>
+                <input id="profileDynamic12RxSliceMs" value="100" type="number" min="1" step="1">
+                <label class="hidden" for="profileDynamic12DsRxSliceMs">DS-TWR RX slice ms</label>
+                <input class="hidden" id="profileDynamic12DsRxSliceMs" value="100" type="number" min="1" step="1">
+                <label for="profileDynamic12TimeoutMs">DS-TWR timeout ms</label>
+                <input id="profileDynamic12TimeoutMs" value="90" type="number" min="1" step="1">
+                <label for="profileDynamic12RespDelayMs">DS-TWR RESP delay ms</label>
+                <input id="profileDynamic12RespDelayMs" value="20" type="number" min="1" step="1">
+                <label for="profileDynamic12FinalDelayMs">DS-TWR FINAL delay ms</label>
+                <input id="profileDynamic12FinalDelayMs" value="20" type="number" min="1" step="1">
+                <label for="profileDynamic12ReportDelayMs">DS-TWR REPORT delay ms</label>
+                <input id="profileDynamic12ReportDelayMs" value="10" type="number" min="1" step="1">
+                <label for="profileDynamic12AutoRxDelayUus">DS-TWR Auto RX delay UUS</label>
+                <input id="profileDynamic12AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
-              <div class="profile-summary" id="profileBalancedSummary"></div>
+              <div class="profile-summary" id="profileDynamic12Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="balanced">Apply Balanced</button>
-                <button class="reset-ranging-profile" data-profile="balanced">Reset Defaults</button>
+                <button class="primary apply-ranging-profile" data-profile="dynamic12">Apply Reactive</button>
+                <button class="reset-ranging-profile" data-profile="dynamic12">Reset Defaults</button>
               </div>
             </div>
-            <div class="profile-card" data-profile="aggressive">
-              <h3>Aggressive</h3>
-              <p class="muted">Lowest-latency candidate. Use after Safe Fast/Balanced look clean.</p>
+            <div class="profile-card" data-profile="fastRaw">
+              <h3>Fast Profile</h3>
+              <p id="profileFastRawDescription" class="muted">Short 0.5 s FlexTDOA observation freshness and 5 ms host RX slices.</p>
               <div class="form-grid compact">
-                <label for="profileAggressiveSlotMs">Slot ms</label>
-                <input id="profileAggressiveSlotMs" value="40" type="number" min="1" step="1">
-                <label for="profileAggressiveRoundGapMs">Round gap ms</label>
-                <input id="profileAggressiveRoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileAggressiveRxSliceMs">RX slice ms</label>
-                <input id="profileAggressiveRxSliceMs" value="40" type="number" min="1" step="1">
-                <label for="profileAggressiveCommandDelayMs">Command delay ms</label>
-                <input id="profileAggressiveCommandDelayMs" value="3" type="number" min="1" step="1">
-                <label for="profileAggressiveTimeoutMs">Classic DS-TWR timeout ms</label>
-                <input id="profileAggressiveTimeoutMs" value="18" type="number" min="1" step="1">
-                <label for="profileAggressiveRespDelayMs">RESP delay ms</label>
-                <input id="profileAggressiveRespDelayMs" value="7" type="number" min="1" step="1">
-                <label for="profileAggressiveFinalDelayMs">FINAL delay ms</label>
-                <input id="profileAggressiveFinalDelayMs" value="7" type="number" min="1" step="1">
-                <label for="profileAggressiveReportDelayMs">REPORT delay ms</label>
-                <input id="profileAggressiveReportDelayMs" value="3" type="number" min="1" step="1">
-                <label for="profileAggressiveAutoRxDelayUus">Auto RX delay UUS</label>
-                <input id="profileAggressiveAutoRxDelayUus" value="500" type="number" min="1" step="1">
+                <label for="profileFastRawFreshAgeSec">Observation freshness s</label>
+                <input id="profileFastRawFreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+                <label class="hidden" for="profileFastRawDsFreshAgeSec">Distance freshness s</label>
+                <input class="hidden" id="profileFastRawDsFreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+                <label for="profileFastRawSlotMs">DS-TWR slot ms</label>
+                <input id="profileFastRawSlotMs" value="7" type="number" min="1" step="1">
+                <label for="profileFastRawRoundGapMs">DS-TWR gap ms</label>
+                <input id="profileFastRawRoundGapMs" value="1" type="number" min="1" step="1">
+                <label for="profileFastRawRxSliceMs">Host RX slice ms</label>
+                <input id="profileFastRawRxSliceMs" value="5" type="number" min="1" step="1">
+                <label class="hidden" for="profileFastRawDsRxSliceMs">DS-TWR RX slice ms</label>
+                <input class="hidden" id="profileFastRawDsRxSliceMs" value="5" type="number" min="1" step="1">
+                <label for="profileFastRawTimeoutMs">DS-TWR timeout ms</label>
+                <input id="profileFastRawTimeoutMs" value="12" type="number" min="1" step="1">
+                <label for="profileFastRawRespDelayMs">DS-TWR RESP delay ms</label>
+                <input id="profileFastRawRespDelayMs" value="8" type="number" min="1" step="1">
+                <label for="profileFastRawFinalDelayMs">DS-TWR FINAL delay ms</label>
+                <input id="profileFastRawFinalDelayMs" value="8" type="number" min="1" step="1">
+                <label for="profileFastRawReportDelayMs">DS-TWR REPORT delay ms</label>
+                <input id="profileFastRawReportDelayMs" value="3" type="number" min="1" step="1">
+                <label for="profileFastRawAutoRxDelayUus">DS-TWR Auto RX delay UUS</label>
+                <input id="profileFastRawAutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
-              <div class="profile-summary" id="profileAggressiveSummary"></div>
+              <div class="profile-summary" id="profileFastRawSummary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="aggressive">Apply Aggressive</button>
-                <button class="reset-ranging-profile" data-profile="aggressive">Reset Defaults</button>
+                <button class="primary apply-ranging-profile" data-profile="fastRaw">Apply Fast</button>
+                <button class="reset-ranging-profile" data-profile="fastRaw">Reset Defaults</button>
               </div>
             </div>
           </div>
@@ -2829,6 +3656,28 @@ tr.status-stale td { color: #4f3b1d; }
       <div class="settings">
         <div class="settings-grid">
           <div>
+            <div class="section">
+              <h2>FlexTDOA Network</h2>
+              <div class="form-grid">
+                <label for="uwbFlexAnchors">Anchor IDs</label>
+                <input id="uwbFlexAnchors" value="2,3,4,5">
+                <label for="uwbFlexK">Responders K</label>
+                <input id="uwbFlexK" value="3" type="number" min="1" max="9" step="1">
+                <label for="uwbFlexSlots">Slot initiators</label>
+                <input id="uwbFlexSlots" value="2,3,4,5">
+                <label for="uwbFlexMasks">Responder masks</label>
+                <input id="uwbFlexMasks" value="14,13,11,7">
+                <label for="uwbFlexGeneration">Generation</label>
+                <input id="uwbFlexGeneration" value="-" readonly>
+              </div>
+              <div class="param-legend">
+                <div><b>N</b><span>The number of IDs in Anchor IDs. Firmware supports 3 to 10 anchors.</span></div>
+                <div><b>K</b><span>How many responders are selected in every request slot.</span></div>
+                <div><b>M</b><span>The number of comma separated Slot initiators.</span></div>
+                <div><b>Masks</b><span>One decimal or 0x hexadecimal bit mask per slot. Bits follow the Anchor IDs order; the initiator bit must be clear.</span></div>
+                <div><b>Propagation</b><span>Write one module and reboot it. A newer generation is rebroadcast over UWB and persisted by the other FlexTDOA nodes.</span></div>
+              </div>
+            </div>
             <div class="section">
               <h2>Survey Timing</h2>
               <div class="form-grid">
@@ -3078,26 +3927,37 @@ const state = {
   hydratedSettings: false,
   calibrationResult: null,
   ranging: {distances: {}, max_age_sec: 3},
-  tdoa: {observations: {}, anchor_distances: {}, max_age_sec: 3},
+  tdoa: {observations: {}, anchor_distances: {}, local_positions: {}, max_age_sec: 3},
   positionTrail: {},
+  positionTrailTokens: {},
   positionAnchorTrail: {},
   positionResults: {},
+  positionModel: null,
   positionWasActive: false,
+  positionGeometry: {key: "", fixed: null, ekf: null},
+  positionSeeds: {},
+  positionStream: null,
+  positionStreamConnected: false,
+  positionStreamRenderPending: false,
+  positionStreamRxTimes: [],
+  positionStreamRenderTimes: [],
+  flexTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.flexTimingSlotSelect") || 0),
 };
-const tdoaReverseSumRejectM = 0.75;
-const tdoaResidualRejectM = 0.45;
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
 const maxSeriesPoints = 1600;
+const maxTerminalRenderLines = 1000;
 const plot = {left: 52, right: 704, top: 14, bottom: 166, width: 652, height: 152};
 const toastTimers = new Map();
 let calibrationPollTimer = null;
 let calibrationJobId = null;
 const rangingProfileFields = [
+  {key: "positionMaxAgeSec", suffix: "FreshAgeSec"},
+  {key: "dsPositionMaxAgeSec", suffix: "DsFreshAgeSec"},
   {key: "slotMs", suffix: "SlotMs"},
   {key: "roundGapMs", suffix: "RoundGapMs"},
   {key: "rxSliceMs", suffix: "RxSliceMs"},
-  {key: "commandDelayMs", suffix: "CommandDelayMs"},
+  {key: "dsRxSliceMs", suffix: "DsRxSliceMs"},
   {key: "timeoutMs", suffix: "TimeoutMs"},
   {key: "respDelayMs", suffix: "RespDelayMs"},
   {key: "finalDelayMs", suffix: "FinalDelayMs"},
@@ -3105,59 +3965,154 @@ const rangingProfileFields = [
   {key: "autoRxDelayUus", suffix: "AutoRxDelayUus"},
 ];
 const rangingProfileDefaults = {
-  baseline: {
-    prefix: "profileBaseline",
-    label: "Stable Baseline",
+  static3: {
+    prefix: "profileStatic3",
+    label: "Stable Profile",
+    positionMaxAgeSec: 3,
+    dsPositionMaxAgeSec: 3,
     slotMs: 100,
     roundGapMs: 10,
     rxSliceMs: 100,
-    commandDelayMs: 10,
+    dsRxSliceMs: 100,
     timeoutMs: 90,
     respDelayMs: 20,
     finalDelayMs: 20,
     reportDelayMs: 10,
     autoRxDelayUus: 500,
   },
-  safe: {
-    prefix: "profileSafe",
-    label: "Safe Fast",
-    slotMs: 60,
+  dynamic15: {
+    prefix: "profileDynamic15",
+    label: "Balanced Profile",
+    positionMaxAgeSec: 1.5,
+    dsPositionMaxAgeSec: 1.5,
+    slotMs: 100,
     roundGapMs: 10,
-    rxSliceMs: 60,
-    commandDelayMs: 5,
-    timeoutMs: 35,
-    respDelayMs: 15,
-    finalDelayMs: 15,
-    reportDelayMs: 5,
+    rxSliceMs: 100,
+    dsRxSliceMs: 100,
+    timeoutMs: 90,
+    respDelayMs: 20,
+    finalDelayMs: 20,
+    reportDelayMs: 10,
     autoRxDelayUus: 500,
   },
-  balanced: {
-    prefix: "profileBalanced",
-    label: "Balanced",
-    slotMs: 50,
+  dynamic12: {
+    prefix: "profileDynamic12",
+    label: "Reactive Profile",
+    positionMaxAgeSec: 1.2,
+    dsPositionMaxAgeSec: 1.2,
+    slotMs: 100,
     roundGapMs: 10,
-    rxSliceMs: 50,
-    commandDelayMs: 5,
-    timeoutMs: 25,
-    respDelayMs: 10,
-    finalDelayMs: 10,
-    reportDelayMs: 5,
+    rxSliceMs: 100,
+    dsRxSliceMs: 100,
+    timeoutMs: 90,
+    respDelayMs: 20,
+    finalDelayMs: 20,
+    reportDelayMs: 10,
     autoRxDelayUus: 500,
   },
-  aggressive: {
-    prefix: "profileAggressive",
-    label: "Aggressive",
-    slotMs: 40,
-    roundGapMs: 10,
-    rxSliceMs: 40,
-    commandDelayMs: 3,
-    timeoutMs: 18,
-    respDelayMs: 7,
-    finalDelayMs: 7,
+  fastRaw: {
+    prefix: "profileFastRaw",
+    label: "Fast Profile",
+    positionMaxAgeSec: 0.5,
+    dsPositionMaxAgeSec: 0.5,
+    slotMs: 7,
+    roundGapMs: 1,
+    rxSliceMs: 5,
+    dsRxSliceMs: 5,
+    timeoutMs: 12,
+    respDelayMs: 8,
+    finalDelayMs: 8,
     reportDelayMs: 3,
     autoRxDelayUus: 500,
   },
 };
+const flexProfileFields = [
+  {key: "guardUs", suffix: "GuardUs"},
+  {key: "requestUs", suffix: "ReqUs"},
+  {key: "requestProcessUs", suffix: "ReqProcessUs"},
+  {key: "responseUs", suffix: "RespUs"},
+  {key: "responseProcessUs", suffix: "RespProcessUs"},
+  {key: "rxSliceMs", suffix: "RxSliceMs"},
+  {key: "positionMaxAgeSec", suffix: "FreshAgeSec"},
+];
+const flexProfileDefaults = {
+  frame19200: {
+    prefix: "flexProfile19200",
+    label: "19.20 ms Frame",
+    guardUs: 500,
+    requestUs: 250,
+    requestProcessUs: 1500,
+    responseUs: 250,
+    responseProcessUs: 600,
+    rxSliceMs: 5,
+    positionMaxAgeSec: 0.5,
+  },
+  frame14800: {
+    prefix: "flexProfile14800",
+    label: "14.80 ms Frame",
+    guardUs: 250,
+    requestUs: 250,
+    requestProcessUs: 1250,
+    responseUs: 250,
+    responseProcessUs: 400,
+    rxSliceMs: 5,
+    positionMaxAgeSec: 0.5,
+  },
+  frame14200: {
+    prefix: "flexProfile14200",
+    label: "14.20 ms Frame",
+    guardUs: 250,
+    requestUs: 250,
+    requestProcessUs: 1250,
+    responseUs: 250,
+    responseProcessUs: 350,
+    rxSliceMs: 5,
+    positionMaxAgeSec: 0.5,
+  },
+  frame13600: {
+    prefix: "flexProfile13600",
+    label: "13.60 ms Frame",
+    guardUs: 250,
+    requestUs: 250,
+    requestProcessUs: 1250,
+    responseUs: 250,
+    responseProcessUs: 300,
+    rxSliceMs: 5,
+    positionMaxAgeSec: 0.5,
+  },
+  frame12600: {
+    prefix: "flexProfile12600",
+    label: "12.60 ms Frame",
+    guardUs: 250,
+    requestUs: 250,
+    requestProcessUs: 1000,
+    responseUs: 250,
+    responseProcessUs: 300,
+    rxSliceMs: 5,
+    positionMaxAgeSec: 0.5,
+  },
+  frame12000: {
+    prefix: "flexProfile12000",
+    label: "12.00 ms Frame",
+    guardUs: 250,
+    requestUs: 250,
+    requestProcessUs: 1000,
+    responseUs: 250,
+    responseProcessUs: 250,
+    rxSliceMs: 5,
+    positionMaxAgeSec: 0.5,
+  },
+};
+const rangingProtocolProfileFields = {
+  flextdoa: new Set(["positionMaxAgeSec", "rxSliceMs"]),
+  ranging: new Set([
+    "dsPositionMaxAgeSec", "slotMs", "roundGapMs", "dsRxSliceMs", "timeoutMs",
+    "respDelayMs", "finalDelayMs", "reportDelayMs", "autoRxDelayUus",
+  ]),
+  hybrid: new Set(),
+};
+const rangingProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v5";
+const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -3408,9 +4363,18 @@ function scrollTerminalToBottom(term) {
 
 function renderTerminal(term) {
   const shouldFollow = term.follow || term.body.scrollHeight <= term.body.clientHeight + 40;
-  const latest = [...state.logs].reverse().find(log => terminalMatchesModule(term, log));
+  let latest = null;
+  const items = [];
+  for (let i = state.logs.length - 1; i >= 0; i--) {
+    const log = state.logs[i];
+    if (!latest && terminalMatchesModule(term, log)) latest = log;
+    if (logAllowed(term, log)) {
+      items.push(log);
+      if (items.length >= maxTerminalRenderLines && latest) break;
+    }
+  }
+  items.reverse();
   term.meta.textContent = latest ? `last log ${fmtAge(latest.received_at)} · #${latest.id}` : "no logs yet";
-  const items = state.logs.filter(log => logAllowed(term, log)).slice(-1000);
   term.body.innerHTML = items.map(formatLog).join("");
   if (shouldFollow) {
     scrollTerminalToBottom(term);
@@ -3637,13 +4601,117 @@ function parseIdList(text, expected = null) {
   return expected ? unique.slice(0, expected) : unique;
 }
 
+function normalizePositionSolver(value) {
+  if (value === "hybrid") return "hybrid";
+  if (value === "tdoa") return "flextdoa";
+  if (value === "flextdoa") return "flextdoa";
+  return "ranging";
+}
+
+function positionProtocolUsesTdoa(solver) {
+  return solver === "flextdoa" || solver === "hybrid";
+}
+
+function positionRuntimeModeForSolver(solver) {
+  return positionProtocolUsesTdoa(solver) ? "flex_tdoa" : "ranging";
+}
+
+function positionGeometryMaxAge(settings) {
+  return positionProtocolUsesTdoa(settings.solver)
+    ? settings.maxAge
+    : Number.POSITIVE_INFINITY;
+}
+
+function positionSolverLabel(solver) {
+  if (solver === "hybrid") return "Legacy hybrid logs";
+  if (solver === "flextdoa") return "FlexTDOA";
+  return "DS-TWR ranges";
+}
+
 function positionSettings() {
   const anchorCount = Math.max(3, Math.min(4, Number(document.getElementById("positionAnchorCount")?.value || 4)));
-  const solver = document.getElementById("positionSolver")?.value === "tdoa" ? "tdoa" : "ranging";
+  const solver = normalizePositionSolver(document.getElementById("positionSolver")?.value || "flextdoa");
   const anchorIds = parseIdList(document.getElementById("positionAnchors")?.value, anchorCount);
   const tagIds = parseIdList(document.getElementById("positionTags")?.value);
   const maxAge = Math.max(0.2, Number(document.getElementById("positionMaxAgeSec")?.value || 3));
-  return {anchorCount, solver, anchorIds, tagIds, maxAge};
+  const referenceMode = String(document.getElementById("positionReferenceMode")?.value || "none");
+  const referenceX = Number(document.getElementById("positionReferenceX")?.value);
+  const referenceY = Number(document.getElementById("positionReferenceY")?.value);
+  const errorWindowSec = Math.max(
+    1, Math.min(120, Number(document.getElementById("positionErrorWindowSec")?.value || 30)));
+  return {
+    anchorCount,
+    solver,
+    anchorIds,
+    tagIds,
+    maxAge,
+    referenceMode,
+    referenceX,
+    referenceY,
+    errorWindowSec,
+  };
+}
+
+function positionKnownReference(settings, anchors) {
+  if (settings.referenceMode === "centroid") {
+    const points = settings.anchorIds.map(id => anchors[id]).filter(Boolean);
+    if (points.length !== settings.anchorIds.length || !points.length) return null;
+    return {
+      x: points.reduce((sum, point) => sum + Number(point.x), 0) / points.length,
+      y: points.reduce((sum, point) => sum + Number(point.y), 0) / points.length,
+      label: "anchor centroid",
+    };
+  }
+  if (settings.referenceMode === "manual" &&
+      Number.isFinite(settings.referenceX) && Number.isFinite(settings.referenceY)) {
+    return {x: settings.referenceX, y: settings.referenceY, label: "manual"};
+  }
+  return null;
+}
+
+function percentile(values, fraction) {
+  if (!values.length) return NaN;
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = (sorted.length - 1) * fraction;
+  const lower = Math.floor(index);
+  const upper = Math.min(sorted.length - 1, lower + 1);
+  const blend = index - lower;
+  return sorted[lower] * (1 - blend) + sorted[upper] * blend;
+}
+
+function positionReferenceErrorStats(tagId, position, reference, windowSec) {
+  if (!position || !reference) return null;
+  const now = Date.now() / 1000;
+  const samples = (state.positionTrail[String(tagId)] || []).filter(point =>
+    Number.isFinite(Number(point.x)) &&
+    Number.isFinite(Number(point.y)) &&
+    now - Number(point.t) <= windowSec);
+  const currentErrorM = Math.hypot(
+    Number(position.x) - reference.x, Number(position.y) - reference.y);
+  if (!samples.length) {
+    return {
+      count: 1,
+      spanSec: 0,
+      currentErrorM,
+      biasM: currentErrorM,
+      rmseM: currentErrorM,
+      p95M: currentErrorM,
+      maxM: currentErrorM,
+    };
+  }
+  const errors = samples.map(point =>
+    Math.hypot(Number(point.x) - reference.x, Number(point.y) - reference.y));
+  const meanX = samples.reduce((sum, point) => sum + Number(point.x), 0) / samples.length;
+  const meanY = samples.reduce((sum, point) => sum + Number(point.y), 0) / samples.length;
+  return {
+    count: samples.length,
+    spanSec: Math.max(0, Number(samples[samples.length - 1].t) - Number(samples[0].t)),
+    currentErrorM,
+    biasM: Math.hypot(meanX - reference.x, meanY - reference.y),
+    rmseM: Math.sqrt(errors.reduce((sum, value) => sum + value * value, 0) / errors.length),
+    p95M: percentile(errors, 0.95),
+    maxM: Math.max(...errors),
+  };
 }
 
 function selectedPositionModuleIds(settings = positionSettings()) {
@@ -3655,6 +4723,32 @@ function statusForModule(moduleId) {
   return state.statuses.find(item => Number(item.module_id) === Number(moduleId));
 }
 
+function selectedAccelModuleIds() {
+  const target = String(document.getElementById("accelTargets")?.value || "all");
+  return target === "all" ? [1, 2, 3, 4, 5] : [Number(target)];
+}
+
+function updateAccelEnabledControl() {
+  const checkbox = document.getElementById("accelEnabled");
+  const label = document.getElementById("accelEnabledLabel");
+  if (!checkbox || !label) return;
+  const statuses = selectedAccelModuleIds()
+    .map(statusForModule)
+    .filter(Boolean);
+  if (!statuses.length) {
+    checkbox.indeterminate = false;
+    checkbox.checked = false;
+    label.textContent = "BNO085 status unavailable";
+    return;
+  }
+  const enabled = statuses.filter(item => Boolean(item.runtime_bno085_accel_enabled)).length;
+  checkbox.indeterminate = enabled > 0 && enabled < statuses.length;
+  checkbox.checked = enabled === statuses.length;
+  label.textContent = checkbox.indeterminate
+    ? `BNO085 mixed (${enabled}/${statuses.length} enabled)`
+    : `BNO085 ${checkbox.checked ? "enabled" : "disabled"}`;
+}
+
 function moduleHttpOnline(item) {
   return Boolean(item?.http_status_online);
 }
@@ -3662,7 +4756,7 @@ function moduleHttpOnline(item) {
 function moduleInPositionRuntime(item, solver) {
   if (!item || !moduleHttpOnline(item)) return false;
   const mode = String(item.runtime_mode_name || item.runtime_mode || "").toLowerCase();
-  const wanted = solver === "tdoa" ? "flex_tdoa" : "ranging";
+  const wanted = positionRuntimeModeForSolver(solver);
   return Boolean(item.runtime_uwb_enabled) && mode.includes(wanted);
 }
 
@@ -3767,10 +4861,6 @@ function anchorPairKey(a, b) {
 function freshAnchorPairDistance(a, b, maxAge) {
   const item = state.tdoa?.anchor_distances?.[anchorPairKey(a, b)];
   if (!item || Number(item.age_sec) > maxAge) return null;
-  const median = Number(item.stats?.median_m);
-  if (Number.isFinite(median) && median > 0) {
-    return {...item, latest_distance_m: Number(item.distance_m), distance_m: median};
-  }
   return item;
 }
 
@@ -3796,139 +4886,329 @@ function anchorGeometryResiduals(anchors, distanceItems) {
   return residuals;
 }
 
-function refineMeasuredAnchorGeometry(anchorIds, anchors, distanceItems) {
+function anchorGeometryFitQuality(anchorIds, residuals) {
+  const values = Object.values(residuals || {})
+    .map(Number)
+    .filter(Number.isFinite);
+  const expected = selectedAnchorPairs(anchorIds).length;
+  const rmsM = values.length
+    ? Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length)
+    : NaN;
+  const maxM = values.length ? Math.max(...values.map(Math.abs)) : NaN;
+  // The paper uses R = 10 cm^2. Three standard deviations is 9.49 cm.
+  const fixLimitM = 3 * Math.sqrt(10) * 0.01;
+  return {
+    complete: values.length === expected,
+    rmsM,
+    maxM,
+    fixLimitM,
+    acceptable: values.length === expected && Number.isFinite(rmsM) && rmsM <= fixLimitM,
+  };
+}
+
+function currentAnchorDistanceBatch(anchorIds, maxAge) {
+  const ids = anchorIds.map(Number).filter(id => Number.isInteger(id) && id > 0);
+  const liveItems = {};
+  for (const [a, b] of selectedAnchorPairs(ids)) {
+    const item = freshAnchorPairDistance(a, b, maxAge);
+    if (item) liveItems[anchorPairKey(a, b)] = item;
+  }
+
+  const selected = new Set(ids);
+  const groups = new Map();
+  for (const sample of state.tdoa?.recent_anchor_ranges || []) {
+    const initiator = Number(sample.initiator_id);
+    const responder = Number(sample.responder_id);
+    const slotId = Number(sample.slot_id);
+    if (!selected.has(initiator) || !selected.has(responder) ||
+        !Number.isInteger(slotId) || Number(sample.age_sec) > maxAge) continue;
+    const frameId = Math.floor(slotId / ids.length);
+    const group = groups.get(frameId) || {frameId, items: {}, newestAt: 0};
+    const pair = anchorPairKey(initiator, responder);
+    group.items[pair] = {...(liveItems[pair] || {}), ...sample};
+    group.newestAt = Math.max(group.newestAt, Number(sample.received_at) || 0);
+    groups.set(frameId, group);
+  }
+
+  const expectedPairs = selectedAnchorPairs(ids);
+  const complete = [...groups.values()]
+    .filter(group => expectedPairs.every(([a, b]) => group.items[anchorPairKey(a, b)]))
+    .sort((left, right) => right.frameId - left.frameId)[0];
+  const distanceItems = complete?.items || liveItems;
+  const missingPairs = expectedPairs.filter(
+    ([a, b]) => !distanceItems[anchorPairKey(a, b)]);
+  return {
+    ids,
+    distanceItems,
+    missingPairs,
+    coherent: Boolean(complete),
+    frameId: complete?.frameId ?? null,
+  };
+}
+
+function initialPaperAnchorCoordinates(anchorIds, distanceItems) {
   const ids = anchorIds.map(Number);
-  const variables = [];
-  if (anchors[ids[1]]) {
-    variables.push({id: ids[1], axis: "x"});
-  }
-  for (const id of ids.slice(2)) {
-    if (anchors[id]) {
-      variables.push({id, axis: "x"});
-      variables.push({id, axis: "y"});
-    }
-  }
-  if (!variables.length) return anchors;
+  if (ids.length < 3 || ids.length > 4) return null;
+  const distance = (a, b) => Number(distanceItems[anchorPairKey(a, b)]?.distance_m);
+  const d01 = distance(ids[0], ids[1]);
+  const d02 = distance(ids[0], ids[2]);
+  const d12 = distance(ids[1], ids[2]);
+  if (![d01, d02, d12].every(value => Number.isFinite(value) && value > 0)) return null;
 
-  const indexFor = new Map(
-    variables.map((variable, index) => [`${variable.id}:${variable.axis}`, index])
-  );
-  for (let iter = 0; iter < 20; iter++) {
-    const n = variables.length;
-    const normal = Array.from({length: n}, () => Array(n).fill(0));
-    const rhs = Array(n).fill(0);
-    let used = 0;
+  // Paper frame convention adapted to 2D: A0=(0,0), A1 on +Y, A2 on +X.
+  const y2 = (d02 * d02 + d01 * d01 - d12 * d12) / (2 * d01);
+  const x2sq = d02 * d02 - y2 * y2;
+  if (x2sq < -0.02) return null;
+  const anchors = {
+    [ids[0]]: {x: 0, y: 0},
+    [ids[1]]: {x: 0, y: d01},
+    [ids[2]]: {x: Math.sqrt(Math.max(0, x2sq)), y: y2},
+  };
 
-    for (const item of Object.values(distanceItems || {})) {
-      const a = anchors[Number(item.anchor_a_id)];
-      const b = anchors[Number(item.anchor_b_id)];
-      const measured = Number(item.distance_m);
-      if (!a || !b || !Number.isFinite(measured) || measured <= 0) continue;
-      const dx = a.x - b.x;
-      const dy = a.y - b.y;
-      const predicted = Math.max(1e-6, Math.hypot(dx, dy));
-      const residual = predicted - measured;
-      const gradient = Array(n).fill(0);
-
-      const ax = indexFor.get(`${item.anchor_a_id}:x`);
-      const ay = indexFor.get(`${item.anchor_a_id}:y`);
-      const bx = indexFor.get(`${item.anchor_b_id}:x`);
-      const by = indexFor.get(`${item.anchor_b_id}:y`);
-      if (ax !== undefined) gradient[ax] = dx / predicted;
-      if (ay !== undefined) gradient[ay] = dy / predicted;
-      if (bx !== undefined) gradient[bx] = -dx / predicted;
-      if (by !== undefined) gradient[by] = -dy / predicted;
-
-      for (let r = 0; r < n; r++) {
-        rhs[r] += -gradient[r] * residual;
-        for (let c = 0; c < n; c++) normal[r][c] += gradient[r] * gradient[c];
-      }
-      used++;
-    }
-
-    if (used < variables.length) break;
-    for (let i = 0; i < n; i++) normal[i][i] += 1e-6;
-    const step = solveLinearSystem(normal, rhs);
-    if (!step) break;
-
-    let stepNorm = 0;
-    for (let i = 0; i < variables.length; i++) {
-      const variable = variables[i];
-      const delta = Math.max(-0.25, Math.min(0.25, Number(step[i]) || 0));
-      anchors[variable.id][variable.axis] += delta;
-      stepNorm += delta * delta;
-    }
-    if (Math.sqrt(stepNorm) < 0.0005) break;
+  if (ids.length === 4) {
+    const d03 = distance(ids[0], ids[3]);
+    const d13 = distance(ids[1], ids[3]);
+    const d23 = distance(ids[2], ids[3]);
+    if (![d03, d13, d23].every(value => Number.isFinite(value) && value > 0)) return null;
+    const y3 = (d03 * d03 + d01 * d01 - d13 * d13) / (2 * d01);
+    const x3sq = d03 * d03 - y3 * y3;
+    if (x3sq < -0.02) return null;
+    const x3abs = Math.sqrt(Math.max(0, x3sq));
+    const candidates = [{x: x3abs, y: y3}, {x: -x3abs, y: y3}];
+    candidates.sort((left, right) =>
+      Math.abs(Math.hypot(left.x - anchors[ids[2]].x, left.y - anchors[ids[2]].y) - d23) -
+      Math.abs(Math.hypot(right.x - anchors[ids[2]].x, right.y - anchors[ids[2]].y) - d23));
+    anchors[ids[3]] = candidates[0];
   }
   return anchors;
 }
 
-function measuredAnchorGeometry(anchorIds, maxAge) {
-  const ids = anchorIds.map(Number).filter(id => Number.isInteger(id) && id > 0);
-  const distanceItems = {};
-  const missingPairs = [];
-  for (const [a, b] of selectedAnchorPairs(ids)) {
-    const item = freshAnchorPairDistance(a, b, maxAge);
-    if (item) distanceItems[anchorPairKey(a, b)] = item;
-    else missingPairs.push([a, b]);
+function paperAnchorVariables(anchorIds) {
+  const ids = anchorIds.map(Number);
+  const variables = [{id: ids[1], axis: "y"}];
+  for (const id of ids.slice(2)) {
+    variables.push({id, axis: "x"}, {id, axis: "y"});
   }
+  return variables;
+}
 
-  const result = {
-    anchors: {},
-    distanceItems,
-    missingPairs,
-    residuals: {},
-    complete: false,
-    status: "waiting",
-  };
-  if (ids.length < 3) return result;
+function paperAnchorStateFromCoordinates(variables, anchors) {
+  return variables.map(variable => Number(anchors[variable.id][variable.axis]));
+}
 
-  const distance = (a, b) => {
-    const item = distanceItems[anchorPairKey(a, b)];
-    return item ? Number(item.distance_m) : NaN;
-  };
-  const d01 = distance(ids[0], ids[1]);
-  const d02 = distance(ids[0], ids[2]);
-  const d12 = distance(ids[1], ids[2]);
-  if (![d01, d02, d12].every(value => Number.isFinite(value) && value > 0)) {
-    return result;
+function paperAnchorCoordinatesFromState(anchorIds, variables, vector) {
+  const ids = anchorIds.map(Number);
+  const anchors = {[ids[0]]: {x: 0, y: 0}, [ids[1]]: {x: 0, y: 0}};
+  for (const id of ids.slice(2)) anchors[id] = {x: 0, y: 0};
+  variables.forEach((variable, index) => {
+    anchors[variable.id][variable.axis] = Number(vector[index]);
+  });
+  return anchors;
+}
+
+function invertMatrix(matrix) {
+  const n = matrix.length;
+  const inverse = Array.from({length: n}, () => Array(n).fill(0));
+  for (let col = 0; col < n; col++) {
+    const rhs = Array(n).fill(0);
+    rhs[col] = 1;
+    const solution = solveLinearSystem(matrix, rhs);
+    if (!solution) return null;
+    for (let row = 0; row < n; row++) inverse[row][col] = solution[row];
   }
+  return inverse;
+}
 
-  const p0 = {x: 0, y: 0};
-  const p1 = {x: d01, y: 0};
-  const x2 = (d02 * d02 + d01 * d01 - d12 * d12) / (2 * d01);
-  const y2sq = d02 * d02 - x2 * x2;
-  const p2 = {x: x2, y: Math.sqrt(Math.max(0, y2sq))};
-  result.anchors[ids[0]] = p0;
-  result.anchors[ids[1]] = p1;
-  result.anchors[ids[2]] = p2;
-  result.complete = missingPairs.length === 0 && y2sq >= -0.02;
-  result.status = result.complete ? "ok" : "inconsistent";
+function multiplyMatrixVector(matrix, vector) {
+  return matrix.map(row => row.reduce(
+    (sum, value, index) => sum + value * vector[index], 0));
+}
 
-  if (ids.length >= 4) {
-    const d03 = distance(ids[0], ids[3]);
-    const d13 = distance(ids[1], ids[3]);
-    const d23 = distance(ids[2], ids[3]);
-    if ([d03, d13, d23].every(value => Number.isFinite(value) && value > 0)) {
-      const x3 = (d03 * d03 + d01 * d01 - d13 * d13) / (2 * d01);
-      const y3sq = d03 * d03 - x3 * x3;
-      const y3abs = Math.sqrt(Math.max(0, y3sq));
-      const candidates = [{x: x3, y: y3abs}, {x: x3, y: -y3abs}];
-      candidates.sort((left, right) =>
-        Math.abs(Math.hypot(left.x - p2.x, left.y - p2.y) - d23) -
-        Math.abs(Math.hypot(right.x - p2.x, right.y - p2.y) - d23));
-      result.anchors[ids[3]] = candidates[0];
-      result.complete = result.complete && y3sq >= -0.02;
-      result.status = result.complete ? "ok" : "inconsistent";
-    } else {
-      result.complete = false;
-      result.status = "waiting";
+function updatePaperAnchorEkf(ekf, anchorIds, distanceItems) {
+  const variables = ekf.variables;
+  const n = variables.length;
+  const anchors = paperAnchorCoordinatesFromState(anchorIds, variables, ekf.state);
+  const indexFor = new Map(
+    variables.map((variable, index) => [`${variable.id}:${variable.axis}`, index])
+  );
+
+  // FlexTDOA paper parameters: sigma_Q^2=1 cm^2, sigma_R^2=10 cm^2.
+  const qVarianceM2 = 1 * 0.01 * 0.01;
+  const rVarianceM2 = 10 * 0.01 * 0.01;
+  const predictedCovariance = ekf.covariance.map((row, r) =>
+    row.map((value, c) => value + (r === c ? qVarianceM2 : 0)));
+  const information = invertMatrix(predictedCovariance);
+  if (!information) return false;
+  const rhs = Array(n).fill(0);
+
+  for (const item of Object.values(distanceItems)) {
+    const a = anchors[Number(item.anchor_a_id)];
+    const b = anchors[Number(item.anchor_b_id)];
+    const measured = Number(item.distance_m);
+    if (!a || !b || !Number.isFinite(measured) || measured <= 0) return false;
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    const predicted = Math.max(1e-6, Math.hypot(dx, dy));
+    const innovation = measured - predicted;
+    const gradient = Array(n).fill(0);
+    const ax = indexFor.get(`${item.anchor_a_id}:x`);
+    const ay = indexFor.get(`${item.anchor_a_id}:y`);
+    const bx = indexFor.get(`${item.anchor_b_id}:x`);
+    const by = indexFor.get(`${item.anchor_b_id}:y`);
+    if (ax !== undefined) gradient[ax] = dx / predicted;
+    if (ay !== undefined) gradient[ay] = dy / predicted;
+    if (bx !== undefined) gradient[bx] = -dx / predicted;
+    if (by !== undefined) gradient[by] = -dy / predicted;
+
+    for (let r = 0; r < n; r++) {
+      rhs[r] += gradient[r] * innovation / rVarianceM2;
+      for (let c = 0; c < n; c++) {
+        information[r][c] += gradient[r] * gradient[c] / rVarianceM2;
+      }
     }
   }
 
-  refineMeasuredAnchorGeometry(ids, result.anchors, distanceItems);
-  result.residuals = anchorGeometryResiduals(result.anchors, distanceItems);
-  return result;
+  const posteriorCovariance = invertMatrix(information);
+  if (!posteriorCovariance) return false;
+  const correction = multiplyMatrixVector(posteriorCovariance, rhs);
+  if (!correction.every(Number.isFinite)) return false;
+  ekf.state = ekf.state.map((value, index) => value + correction[index]);
+  ekf.covariance = posteriorCovariance;
+  ekf.updates++;
+  ekf.lastUpdateAt = Date.now() / 1000;
+  return true;
+}
+
+function positionGeometryKey(anchorIds) {
+  return anchorIds.map(Number).filter(Number.isFinite).join(",");
+}
+
+function positionGeometryStorageKey(anchorIds) {
+  return `uwbDash.flexTdoaPaperGeometry.v1.${positionGeometryKey(anchorIds)}`;
+}
+
+function cloneAnchorCoordinates(anchors) {
+  return Object.fromEntries(Object.entries(anchors || {}).map(([id, point]) => [
+    id,
+    {x: Number(point.x), y: Number(point.y)},
+  ]));
+}
+
+function loadFixedPaperAnchorGeometry(anchorIds) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(positionGeometryStorageKey(anchorIds)) || "null");
+    if (!parsed || positionGeometryKey(parsed.anchorIds || []) !== positionGeometryKey(anchorIds)) return null;
+    const anchors = cloneAnchorCoordinates(parsed.anchors);
+    if (Object.keys(anchors).length !== anchorIds.length) return null;
+    if (!Object.values(anchors).every(point => Number.isFinite(point.x) && Number.isFinite(point.y))) return null;
+    return {...parsed, anchors};
+  } catch (_) {
+    return null;
+  }
+}
+
+function resetPaperAnchorSelfLocalization(anchorIds, forgetStored = true) {
+  if (forgetStored) localStorage.removeItem(positionGeometryStorageKey(anchorIds));
+  state.positionGeometry = {
+    key: positionGeometryKey(anchorIds),
+    fixed: null,
+    ekf: null,
+  };
+  state.positionSeeds = {};
+  state.positionAnchorTrail = {};
+}
+
+function paperAnchorGeometry(anchorIds, maxAge) {
+  const key = positionGeometryKey(anchorIds);
+  if (state.positionGeometry.key !== key) {
+    state.positionGeometry = {
+      key,
+      fixed: loadFixedPaperAnchorGeometry(anchorIds),
+      ekf: null,
+    };
+    state.positionSeeds = {};
+  }
+
+  const batch = currentAnchorDistanceBatch(anchorIds, maxAge);
+  const session = state.positionGeometry;
+  if (session.fixed) {
+    const anchors = cloneAnchorCoordinates(session.fixed.anchors);
+    const residuals = anchorGeometryResiduals(anchors, batch.distanceItems);
+    const fitQuality = anchorGeometryFitQuality(anchorIds, residuals);
+    return {
+      anchors,
+      distanceItems: batch.distanceItems,
+      missingPairs: batch.missingPairs,
+      residuals,
+      fitQuality,
+      complete: true,
+      positionReady: true,
+      canFix: false,
+      status: "fixed",
+      liveInconsistent: fitQuality.complete && !fitQuality.acceptable,
+      fixedAt: Number(session.fixed.fixedAt),
+      updates: Number(session.fixed.updates || 0),
+    };
+  }
+
+  if (!session.ekf && batch.coherent && batch.missingPairs.length === 0) {
+    const anchors = initialPaperAnchorCoordinates(batch.ids, batch.distanceItems);
+    if (anchors) {
+      const variables = paperAnchorVariables(batch.ids);
+      const n = variables.length;
+      session.ekf = {
+        variables,
+        state: paperAnchorStateFromCoordinates(variables, anchors),
+        covariance: Array.from({length: n}, (_, r) =>
+          Array.from({length: n}, (_, c) => r === c ? 1 : 0)),
+        lastFrameId: batch.frameId,
+        updates: 0,
+        startedAt: Date.now() / 1000,
+        lastUpdateAt: 0,
+      };
+    }
+  } else if (session.ekf && batch.coherent && batch.missingPairs.length === 0) {
+    if (batch.frameId !== session.ekf.lastFrameId &&
+        updatePaperAnchorEkf(session.ekf, batch.ids, batch.distanceItems)) {
+      session.ekf.lastFrameId = batch.frameId;
+    }
+  }
+
+  if (!session.ekf) {
+    return {
+      anchors: {},
+      distanceItems: batch.distanceItems,
+      missingPairs: batch.missingPairs,
+      residuals: {},
+      complete: false,
+      positionReady: false,
+      canFix: false,
+      status: batch.missingPairs.length ? "waiting" : "inconsistent",
+    };
+  }
+
+  const anchors = paperAnchorCoordinatesFromState(
+    batch.ids, session.ekf.variables, session.ekf.state);
+  const residuals = anchorGeometryResiduals(anchors, batch.distanceItems);
+  const fitQuality = anchorGeometryFitQuality(anchorIds, residuals);
+  const sigmaValues = session.ekf.covariance.map(
+    (row, index) => Math.sqrt(Math.max(0, Number(row[index]))));
+  return {
+    anchors,
+    distanceItems: batch.distanceItems,
+    missingPairs: batch.missingPairs,
+    residuals,
+    fitQuality,
+    complete: true,
+    positionReady: false,
+    canFix: batch.coherent && batch.missingPairs.length === 0 &&
+      session.ekf.updates > 0 && fitQuality.acceptable,
+    status: "self_localizing",
+    updates: session.ekf.updates,
+    frameId: session.ekf.lastFrameId,
+    elapsedSec: Date.now() / 1000 - session.ekf.startedAt,
+    maxSigmaM: sigmaValues.length ? Math.max(...sigmaValues) : NaN,
+  };
 }
 
 function freshTdoaObservations(tagId, anchorIds, maxAge) {
@@ -3945,82 +5225,74 @@ function freshTdoaObservations(tagId, anchorIds, maxAge) {
       Number(a.responder_id) - Number(b.responder_id));
 }
 
-function sequenceForwardDelta(from, to) {
-  const start = Number(from);
-  const end = Number(to);
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return NaN;
-  return ((Math.trunc(end) - Math.trunc(start)) + 65536) % 65536;
+function normalizeTdoaObservation(item, protocol) {
+  const legacyDiff = Number(item.primary_diff_m);
+  const diff = protocol === "hybrid" && Number.isFinite(legacyDiff)
+    ? legacyDiff
+    : Number(item.diff_m);
+  return {
+    ...item,
+    diff_m: diff,
+    tdoa_protocol: protocol === "hybrid" ? "legacy" : "flextdoa",
+    used_in_fit: true,
+    reject_reason: "",
+  };
 }
 
-function tdoaSequencesArePaired(left, right, pairCount) {
-  const forward = sequenceForwardDelta(left?.seq, right?.seq);
-  const reverse = sequenceForwardDelta(right?.seq, left?.seq);
-  const nearest = Math.min(forward, reverse);
-  return nearest > 0 && nearest <= pairCount;
-}
-
-function pairedTdoaObservations(tagId, anchorIds, maxAge) {
+function coherentTdoaBatch(tagId, anchorIds, maxAge, protocol = "flextdoa") {
   const selected = new Set(anchorIds.map(Number));
-  const serverPaired = Object.values(state.tdoa?.paired_observations || {})
-    .filter(item =>
-      Number(item.tag_id) === Number(tagId) &&
-      selected.has(Number(item.initiator_id)) &&
-      selected.has(Number(item.responder_id)) &&
-      Number(item.age_sec) <= maxAge &&
-      Number.isFinite(Number(item.diff_m)))
-    .sort((left, right) =>
-      Number(left.initiator_id) - Number(right.initiator_id) ||
-      Number(left.responder_id) - Number(right.responder_id));
-  if (serverPaired.length) return serverPaired;
-
-  const fresh = freshTdoaObservations(tagId, anchorIds, maxAge);
-  const byDirection = new Map(
-    fresh.map(item => [`${item.initiator_id}-${item.responder_id}`, item])
-  );
-  const pairs = selectedAnchorPairs(anchorIds);
-  const pairCount = pairs.length;
-  const paired = [];
-
-  for (const [a, b] of pairs) {
-    const ab = byDirection.get(`${a}-${b}`);
-    const ba = byDirection.get(`${b}-${a}`);
-    if (!ab || !ba || !tdoaSequencesArePaired(ab, ba, pairCount)) continue;
-
-    const abDiff = Number(ab.diff_m);
-    const baDiff = Number(ba.diff_m);
-    if (!Number.isFinite(abDiff) || !Number.isFinite(baDiff)) continue;
-
-    const rawAbDiff = Number(ab.raw_diff_m);
-    const rawBaDiff = Number(ba.raw_diff_m);
-    const age = Math.max(Number(ab.age_sec) || 0, Number(ba.age_sec) || 0);
-    const reverseSum = abDiff + baDiff;
-    paired.push({
-      ...ab,
-      initiator_id: a,
-      responder_id: b,
-      diff_m: (abDiff - baDiff) / 2,
-      raw_diff_m: Number.isFinite(rawAbDiff) && Number.isFinite(rawBaDiff)
-        ? (rawAbDiff - rawBaDiff) / 2
-        : Number(ab.raw_diff_m),
-      age_sec: age,
-      paired: true,
-      reverse_seq: ba.seq,
-      reverse_age_sec: ba.age_sec,
-      reverse_diff_m: baDiff,
-      reverse_sum_m: reverseSum,
-      seq_gap: Math.min(
-        sequenceForwardDelta(ab.seq, ba.seq),
-        sequenceForwardDelta(ba.seq, ab.seq)
-      ),
-    });
+  const recent = Array.isArray(state.tdoa?.recent_observations) && state.tdoa.recent_observations.length
+    ? state.tdoa.recent_observations
+    : freshTdoaObservations(tagId, anchorIds, maxAge);
+  const groups = new Map();
+  for (const rawItem of recent) {
+    if (Number(rawItem.tag_id) !== Number(tagId) ||
+        !selected.has(Number(rawItem.initiator_id)) ||
+        !selected.has(Number(rawItem.responder_id)) ||
+        Number(rawItem.age_sec) > maxAge) continue;
+    const item = normalizeTdoaObservation(rawItem, protocol);
+    if (!Number.isFinite(Number(item.diff_m))) continue;
+    const slotValue = Number(item.slot_id);
+    const slotKey = Number.isInteger(slotValue)
+      ? `slot:${slotValue}`
+      : `legacy:${Number(item.seq)}:${Number(item.initiator_id)}`;
+    const group = groups.get(slotKey) || {
+      key: slotKey,
+      slotId: Number.isInteger(slotValue) ? slotValue : null,
+      seq: Number(item.seq),
+      initiatorId: Number(item.initiator_id),
+      itemsByResponder: new Map(),
+      newestAt: 0,
+      oldestAt: Number.POSITIVE_INFINITY,
+    };
+    const receivedAt = Number(item.received_at) || (Date.now() / 1000 - Number(item.age_sec || 0));
+    group.itemsByResponder.set(Number(item.responder_id), item);
+    group.newestAt = Math.max(group.newestAt, receivedAt);
+    group.oldestAt = Math.min(group.oldestAt, receivedAt);
+    groups.set(slotKey, group);
   }
 
-  return paired.sort((left, right) =>
-    Number(left.initiator_id) - Number(right.initiator_id) ||
-    Number(left.responder_id) - Number(right.responder_id));
+  const expected = Math.max(2, anchorIds.length - 1);
+  const ordered = [...groups.values()].sort((left, right) => right.newestAt - left.newestAt);
+  const selectedGroup = ordered.find(group => group.itemsByResponder.size >= expected) || ordered[0];
+  if (!selectedGroup) {
+    return {items: [], complete: false, expected, slotId: null, seq: null, spanMs: null};
+  }
+  const items = [...selectedGroup.itemsByResponder.values()].sort((left, right) =>
+    Number(left.responder_index ?? 99) - Number(right.responder_index ?? 99));
+  return {
+    items,
+    complete: items.length >= expected,
+    expected,
+    slotId: selectedGroup.slotId,
+    seq: selectedGroup.seq,
+    initiatorId: selectedGroup.initiatorId,
+    frameId: selectedGroup.slotId === null ? null : Math.floor(selectedGroup.slotId / anchorIds.length),
+    spanMs: Math.max(0, (selectedGroup.newestAt - selectedGroup.oldestAt) * 1000),
+  };
 }
 
-function solveTdoa(anchors, observations) {
+function solveTdoa(anchors, observations, initialPosition = null) {
   const usable = observations
     .map(item => ({
       item,
@@ -4032,8 +5304,12 @@ function solveTdoa(anchors, observations) {
   if (usable.length < 2) return null;
 
   const anchorValues = Object.values(anchors);
-  let x = anchorValues.reduce((sum, anchor) => sum + anchor.x, 0) / anchorValues.length;
-  let y = anchorValues.reduce((sum, anchor) => sum + anchor.y, 0) / anchorValues.length;
+  let x = Number(initialPosition?.x);
+  let y = Number(initialPosition?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    x = anchorValues.reduce((sum, anchor) => sum + anchor.x, 0) / anchorValues.length;
+    y = anchorValues.reduce((sum, anchor) => sum + anchor.y, 0) / anchorValues.length;
+  }
 
   for (let iter = 0; iter < 24; iter++) {
     let nxx = 1e-6;
@@ -4050,11 +5326,12 @@ function solveTdoa(anchors, observations) {
       const residual = (dr - di) - entry.diff;
       const gx = (x - ar.x) / dr - (x - ai.x) / di;
       const gy = (y - ar.y) / dr - (y - ai.y) / di;
-      nxx += gx * gx;
-      nxy += gx * gy;
-      nyy += gy * gy;
-      rhsX += -gx * residual;
-      rhsY += -gy * residual;
+      const weight = 1;
+      nxx += weight * gx * gx;
+      nxy += weight * gx * gy;
+      nyy += weight * gy * gy;
+      rhsX += -weight * gx * residual;
+      rhsY += -weight * gy * residual;
       used++;
     }
     if (used < 2) return null;
@@ -4091,103 +5368,40 @@ function tdoaObservationKey(item) {
   return `${Number(item.initiator_id)}-${Number(item.responder_id)}`;
 }
 
-function tdoaRmsForResiduals(residuals, observations) {
-  const values = (observations || [])
-    .map(item => Number(residuals?.[tdoaObservationKey(item)]))
-    .filter(value => Number.isFinite(value));
-  if (!values.length) return Infinity;
-  return Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length);
-}
-
 function minTdoaObservationCount(anchorIds) {
   return Math.max(2, Math.min(3, Number(anchorIds?.length || 0) - 1));
 }
 
-function robustTdoaFit(anchorIds, anchors, observations) {
+function rawTdoaFit(anchorIds, anchors, observations, initialPosition = null) {
   const all = (observations || []).filter(item =>
     anchors[Number(item.initiator_id)] &&
     anchors[Number(item.responder_id)] &&
     Number.isFinite(Number(item.diff_m)));
   const minCount = minTdoaObservationCount(anchorIds);
-  const notes = new Map();
   if (all.length < minCount) {
     return {
       position: null,
       used: [],
       annotated: all.map(item => ({...item, used_in_fit: false, reject_reason: "need more"})),
-      notes,
     };
   }
 
-  let candidates = all.filter(item => {
-    const ok = !item.suspect;
-    if (!ok) notes.set(tdoaObservationKey(item), "suspect");
-    return ok;
-  });
-  if (candidates.length < minCount) {
-    candidates = all;
-    notes.clear();
-  }
-
-  let used = candidates.filter(item => {
-    const reverseSum = Number(item.reverse_sum_m);
-    const ok = !Number.isFinite(reverseSum) || Math.abs(reverseSum) <= tdoaReverseSumRejectM;
-    if (!ok) notes.set(tdoaObservationKey(item), "rev sum");
-    return ok;
-  });
-  if (used.length < minCount) {
-    used = candidates;
-    for (const item of candidates) {
-      const key = tdoaObservationKey(item);
-      if (notes.get(key) === "rev sum") notes.delete(key);
-    }
-  }
-
-  let position = solveTdoa(anchors, used);
+  const used = all;
+  let position = solveTdoa(anchors, used, initialPosition);
   if (!position) {
     return {
       position: null,
       used: [],
-      annotated: all.map(item => ({...item, used_in_fit: false, reject_reason: notes.get(tdoaObservationKey(item)) || "fit fail"})),
-      notes,
+      annotated: all.map(item => ({...item, used_in_fit: false, reject_reason: "fit fail"})),
     };
-  }
-  let residuals = tdoaResiduals(position, anchors, used);
-  let rms = tdoaRmsForResiduals(residuals, used);
-
-  for (let iter = 0; iter < 2 && used.length > minCount; iter++) {
-    let worst = null;
-    let worstAbs = 0;
-    for (const item of used) {
-      const residual = Number(residuals[tdoaObservationKey(item)]);
-      const absResidual = Math.abs(residual);
-      if (Number.isFinite(absResidual) && absResidual > worstAbs) {
-        worst = item;
-        worstAbs = absResidual;
-      }
-    }
-    if (!worst || worstAbs <= tdoaResidualRejectM) break;
-
-    const trialUsed = used.filter(item => item !== worst);
-    const trialPosition = solveTdoa(anchors, trialUsed);
-    if (!trialPosition) break;
-    const trialResiduals = tdoaResiduals(trialPosition, anchors, trialUsed);
-    const trialRms = tdoaRmsForResiduals(trialResiduals, trialUsed);
-    if (!(trialRms < rms * 0.85 || rms > tdoaResidualRejectM)) break;
-
-    notes.set(tdoaObservationKey(worst), "resid");
-    used = trialUsed;
-    position = trialPosition;
-    residuals = trialResiduals;
-    rms = trialRms;
   }
 
   const usedKeys = new Set(used.map(tdoaObservationKey));
   const annotated = all.map(item => {
     const key = tdoaObservationKey(item);
-    return {...item, used_in_fit: usedKeys.has(key), reject_reason: notes.get(key) || ""};
+    return {...item, used_in_fit: usedKeys.has(key), reject_reason: ""};
   });
-  return {position, used, annotated, notes};
+  return {position, used, annotated};
 }
 
 function positionAccuracyFromRows(rows) {
@@ -4202,18 +5416,23 @@ function positionAccuracyFromRows(rows) {
   let hxx = 0;
   let hxy = 0;
   let hyy = 0;
+  let weightSum = 0;
   for (const row of usable) {
     const residual = Number(row.residual);
-    sse += residual * residual;
+    const weight = Number.isFinite(Number(row.weight))
+      ? Math.max(0.05, Number(row.weight))
+      : 1;
+    sse += weight * residual * residual;
+    weightSum += weight;
     maxAbs = Math.max(maxAbs, Math.abs(residual));
-    hxx += row.gx * row.gx;
-    hxy += row.gx * row.gy;
-    hyy += row.gy * row.gy;
+    hxx += weight * row.gx * row.gx;
+    hxy += weight * row.gx * row.gy;
+    hyy += weight * row.gy * row.gy;
   }
 
   const count = usable.length;
   const dof = Math.max(1, count - 2);
-  const rms = Math.sqrt(sse / count);
+  const rms = Math.sqrt(sse / Math.max(1e-6, weightSum));
   const variance = sse / dof;
   const inv = inverse2x2(hxx, hxy, hxy, hyy);
   let sigmaX = NaN;
@@ -4258,6 +5477,7 @@ function tdoaPositionAccuracy(position, anchors, observations, residuals) {
       residual,
       gx: (position.x - responder.x) / dr - (position.x - initiator.x) / di,
       gy: (position.y - responder.y) / dr - (position.y - initiator.y) / di,
+      weight: 1,
     });
   }
   return positionAccuracyFromRows(rows);
@@ -4293,25 +5513,53 @@ function updatePositionAnchorTrail(anchors, now) {
   }
 }
 
+function recordPositionTrailPoint(tagId, position, receivedAt, token, metrics = null) {
+  if (!position || !Number.isFinite(Number(position.x)) || !Number.isFinite(Number(position.y))) return;
+  const key = String(tagId);
+  const pointToken = String(token ?? `${receivedAt}:${position.x}:${position.y}`);
+  if (state.positionTrailTokens[key] === pointToken) return;
+  state.positionTrailTokens[key] = pointToken;
+  const timestamp = Number.isFinite(Number(receivedAt)) ? Number(receivedAt) : Date.now() / 1000;
+  const trail = state.positionTrail[key] || [];
+  trail.push({
+    x: Number(position.x),
+    y: Number(position.y),
+    t: timestamp,
+    sigma_m: Number(metrics?.sigma_m),
+    rms_m: Number(metrics?.rms_m),
+  });
+  state.positionTrail[key] = trail
+    .filter(point => timestamp - point.t <= 120)
+    .slice(-12000);
+}
+
+function localPositionAge(item, now = Date.now() / 1000) {
+  const receivedAt = Number(item?.received_at);
+  if (Number.isFinite(receivedAt) && receivedAt > 0) return Math.max(0, now - receivedAt);
+  return Number(item?.age_sec);
+}
+
 function computePositionModel() {
   const settings = positionSettings();
   const selectedIds = selectedPositionModuleIds(settings);
   const offlineModuleIds = selectedIds.filter(id => !moduleHttpOnline(statusForModule(id)));
   const active = positionRangingActive(settings);
-  const geometry = measuredAnchorGeometry(settings.anchorIds, settings.maxAge);
+  const geometry = paperAnchorGeometry(settings.anchorIds, positionGeometryMaxAge(settings));
   const anchors = {...(geometry?.anchors || {})};
 
   if (!active && state.positionWasActive) {
     state.positionTrail = {};
+    state.positionTrailTokens = {};
     state.positionAnchorTrail = {};
     state.positionResults = {};
+    state.positionSeeds = {};
   }
   state.positionWasActive = active;
 
   const tags = {};
   const now = Date.now() / 1000;
   updatePositionAnchorTrail(anchors, now);
-  if (active) {
+  if (active && geometry.positionReady) {
     for (const tagId of settings.tagIds) {
       const distances = {};
       const distanceItems = {};
@@ -4320,10 +5568,25 @@ function computePositionModel() {
       let position = null;
       let residuals = {};
       let accuracy = null;
-      if (settings.solver === "tdoa") {
-        observations = pairedTdoaObservations(tagId, settings.anchorIds, settings.maxAge)
+      let coherence = null;
+      let localPosition = null;
+      if (positionProtocolUsesTdoa(settings.solver)) {
+        coherence = coherentTdoaBatch(
+          tagId,
+          settings.anchorIds,
+          settings.maxAge,
+          settings.solver
+        );
+        observations = coherence.items
           .filter(item => anchors[Number(item.initiator_id)] && anchors[Number(item.responder_id)]);
-        const fit = robustTdoaFit(settings.anchorIds, anchors, observations);
+        const seedKey = `${positionGeometryKey(settings.anchorIds)}:${tagId}`;
+        const fitInput = coherence.complete ? observations : [];
+        const fit = rawTdoaFit(
+          settings.anchorIds,
+          anchors,
+          fitInput,
+          state.positionSeeds[seedKey] || null
+        );
         position = fit.position;
         fitObservations = fit.used || [];
         observations = fit.annotated || observations.map(item => ({...item, used_in_fit: true, reject_reason: ""}));
@@ -4334,6 +5597,23 @@ function computePositionModel() {
           fitObservations.length ? fitObservations : observations,
           tdoaResiduals(position, anchors, fitObservations.length ? fitObservations : observations)
         );
+        localPosition = state.tdoa?.local_positions?.[String(tagId)];
+        if (localPosition && localPositionAge(localPosition, now) <= settings.maxAge &&
+            Number.isFinite(Number(localPosition.x_m)) &&
+            Number.isFinite(Number(localPosition.y_m))) {
+          position = {
+            x: Number(localPosition.x_m),
+            y: Number(localPosition.y_m),
+          };
+          accuracy = {
+            count: Number(localPosition.observation_count),
+            sigma_major_m: Number(localPosition.sigma_m),
+            rms_m: Number(localPosition.rms_m),
+            max_abs_m: NaN,
+            gdop: NaN,
+          };
+        }
+        if (position) state.positionSeeds[seedKey] = {x: position.x, y: position.y};
       } else {
         for (const anchorId of settings.anchorIds) {
           const item = freshDistanceFor(tagId, anchorId, settings.maxAge);
@@ -4346,18 +5626,36 @@ function computePositionModel() {
         residuals = positionResiduals(position, anchors, distances);
         accuracy = rangingPositionAccuracy(position, anchors, distances, residuals);
       }
-      tags[tagId] = {tagId, distances, distanceItems, observations, fitObservations, position, residuals, accuracy};
+      tags[tagId] = {
+        tagId,
+        distances,
+        distanceItems,
+        observations,
+        fitObservations,
+        position,
+        residuals,
+        accuracy,
+        coherence,
+        solverSource: state.tdoa?.local_positions?.[String(tagId)] &&
+          localPositionAge(state.tdoa.local_positions[String(tagId)], now) <= settings.maxAge
+            ? "ESP32 AlgMin"
+            : "PC AlgMin",
+      };
       if (position) {
-        const key = String(tagId);
-        const trail = state.positionTrail[key] || [];
-        trail.push({x: position.x, y: position.y, t: now});
-        state.positionTrail[key] = trail.filter(point => now - point.t <= 120).slice(-300);
+        recordPositionTrailPoint(
+          tagId,
+          position,
+          localPosition?.received_at || now,
+          localPosition?.position_event_id ?? localPosition?.slot_id ?? `pc:${now}`,
+          localPosition
+        );
       }
     }
   }
 
   state.positionResults = tags;
-  return {settings, active, anchors, tags, geometry, offlineModuleIds};
+  const reference = positionKnownReference(settings, anchors);
+  return {settings, active, anchors, tags, geometry, offlineModuleIds, reference};
 }
 
 function positionBounds(model) {
@@ -4369,6 +5667,7 @@ function positionBounds(model) {
   for (const trail of Object.values(state.positionTrail)) {
     for (const point of trail) points.push(point);
   }
+  if (model.reference) points.push(model.reference);
   if (!points.length) {
     points.push({x: 0, y: 0}, {x: 2, y: 2});
   }
@@ -4478,6 +5777,27 @@ function drawPosition(model) {
   const tx = positionTransform(model, width, height);
   drawPositionGrid(ctx, tx, width, height);
 
+  if (model.reference) {
+    const x = tx.x(model.reference.x);
+    const y = tx.y(model.reference.y);
+    ctx.save();
+    ctx.strokeStyle = "#6d4c9f";
+    ctx.fillStyle = "#6d4c9f";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.arc(x, y, 9, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(x - 6, y);
+    ctx.lineTo(x + 6, y);
+    ctx.moveTo(x, y - 6);
+    ctx.lineTo(x, y + 6);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   ctx.strokeStyle = "#98a2b3";
   ctx.lineWidth = 2;
   const anchorIds = model.settings.anchorIds.filter(id => model.anchors[id]);
@@ -4495,7 +5815,7 @@ function drawPosition(model) {
     ctx.stroke();
   }
 
-  if (model.settings.solver !== "tdoa") {
+  if (!positionProtocolUsesTdoa(model.settings.solver)) {
     for (const tag of Object.values(model.tags)) {
       for (const [anchorId, distance] of Object.entries(tag.distances || {})) {
         const anchor = model.anchors[Number(anchorId)];
@@ -4521,6 +5841,21 @@ function drawPosition(model) {
       else ctx.lineTo(x, y);
     });
     ctx.stroke();
+  }
+
+  if (model.reference) {
+    for (const tag of Object.values(model.tags)) {
+      if (!tag.position) continue;
+      ctx.save();
+      ctx.strokeStyle = "rgba(109, 76, 159, 0.68)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(tx.x(model.reference.x), tx.y(model.reference.y));
+      ctx.lineTo(tx.x(tag.position.x), tx.y(tag.position.y));
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   drawAnchorStabilityRings(ctx, tx, anchorIds, model.anchors);
@@ -4562,9 +5897,38 @@ function drawPosition(model) {
 
 function renderPositionGeometryPanel(model) {
   const rows = document.getElementById("positionGeometryRows");
+  const status = document.getElementById("positionGeometryStatus");
+  const fixButton = document.getElementById("positionFixAnchorGeometry");
   if (!rows) return;
 
   const geometry = model.geometry || {};
+  if (status) {
+    if (geometry.status === "fixed") {
+      const fitText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
+        ? ` · live fit RMS ${fmtPositionCm(geometry.fitQuality.rmsM, 1)}`
+        : "";
+      const warningText = geometry.liveInconsistent
+        ? ` · diagnostic warning above ${fmtPositionCm(geometry.fitQuality?.fixLimitM, 1)}`
+        : "";
+      status.textContent = `Fixed paper geometry · ${fmtAge(Number(geometry.fixedAt || 0))} · ${geometry.updates || 0} EKF updates${fitText}${warningText}`;
+      status.className = geometry.liveInconsistent ? "muted stale" : "muted fresh";
+    } else if (geometry.status === "self_localizing") {
+      const fitText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
+        ? ` · fit RMS ${fmtPositionCm(geometry.fitQuality.rmsM, 1)}`
+        : "";
+      status.textContent = `Paper TWR-EKF self-localization · ${geometry.updates || 0} updates · ${fmtFixed(geometry.elapsedSec || 0, 0)} s · max σ ${fmtPositionCm(geometry.maxSigmaM, 1)}${fitText}`;
+      status.className = geometry.fitQuality?.acceptable ? "muted" : "muted stale";
+    } else {
+      status.textContent = "Waiting for all fresh anchor-anchor ranges.";
+      status.className = "muted stale";
+    }
+  }
+  if (fixButton) {
+    fixButton.disabled = !geometry.canFix && geometry.status !== "fixed";
+    fixButton.textContent = geometry.status === "fixed"
+      ? "Persist Anchor Geometry"
+      : "Fix Anchor Geometry";
+  }
   const pairRows = selectedAnchorPairs(model.settings.anchorIds).map(([a, b]) => {
     const key = anchorPairKey(a, b);
     const item = geometry.distanceItems?.[key];
@@ -4596,18 +5960,61 @@ function fmtPositionSigma(value, digits = 1) {
   return Number.isFinite(Number(value)) ? `±${fmtCmFromM(value, digits)} cm` : "-";
 }
 
+function renderPositionSolverStatus(model) {
+  const settings = model.settings || {};
+  if (!positionProtocolUsesTdoa(settings.solver)) {
+    return `<div class="position-filter-card">
+      <b>Solver Status</b>
+      <div class="position-filter-row"><span class="position-pill">DS-TWR ranges</span></div>
+    </div>`;
+  }
+
+  const pills = [
+    `<span class="position-pill">Protocol: ${esc(positionSolverLabel(settings.solver))}</span>`,
+    `<span class="position-pill good">raw observations</span>`,
+    `<span class="position-pill">fresh ${fmtFixed(settings.maxAge, 1)} s</span>`,
+    `<span class="position-pill" id="positionStreamMetrics">position stream connecting</span>`,
+  ];
+  const firstTag = Object.values(model.tags || {})[0];
+  if (firstTag?.solverSource) {
+    pills.push(`<span class="position-pill good">${esc(firstTag.solverSource)}</span>`);
+  }
+  const coherence = firstTag?.coherence;
+  if (coherence) {
+    const slotText = coherence.slotId === null ? `seq ${coherence.seq ?? "-"}` : `slot ${coherence.slotId}`;
+    pills.push(`<span class="position-pill ${coherence.complete ? "good" : "warn"}">${esc(slotText)} · ${coherence.items?.length || 0}/${coherence.expected} coherent</span>`);
+    if (Number.isFinite(Number(coherence.frameId))) {
+      pills.push(`<span class="position-pill">frame ${esc(coherence.frameId)} · span ${fmtFixed(coherence.spanMs, 1)} ms</span>`);
+    }
+  }
+  pills.push(`<span class="position-pill ${model.geometry?.status === "fixed" ? "good" : "warn"}">geometry ${esc(model.geometry?.status || "waiting")}</span>`);
+
+  return `<div class="position-filter-card">
+    <b>Position Solver</b>
+    <div class="position-filter-row">${pills.join("")}</div>
+  </div>`;
+}
+
 function renderPositionReadout(model) {
   const readout = document.getElementById("positionReadout");
   const accuracyRows = document.getElementById("positionAccuracyRows");
+  const referenceStatus = document.getElementById("positionReferenceStatus");
+  const errorRows = document.getElementById("positionErrorRows");
   const rows = document.getElementById("positionDistanceRows");
   const head = document.getElementById("positionMeasurementHead");
   const title = document.getElementById("positionMeasurementTitle");
   const overlay = document.getElementById("positionOverlay");
   if (!readout || !accuracyRows || !rows || !head || !title || !overlay) return;
-  const solverName = model.settings.solver === "tdoa" ? "FlexTDOA" : "ranging";
-  const enableText = model.settings.solver === "tdoa" ? "Enable FlexTDOA" : "Enable Ranging";
-  document.querySelectorAll("#positionEnableRanging, #positionEnableRangingSide")
-    .forEach(button => { button.textContent = enableText; });
+  const solverName = positionSolverLabel(model.settings.solver);
+  const enableText = `Enable ${solverName}`;
+  const overlayButton = document.getElementById("positionEnableRanging");
+  const sideButton = document.getElementById("positionEnableRangingSide");
+  if (sideButton) sideButton.textContent = enableText;
+  if (overlayButton) {
+    overlayButton.textContent = enableText;
+    overlayButton.disabled = false;
+    overlayButton.dataset.action = "enable";
+  }
   renderPositionGeometryPanel(model);
 
   if (!model.active) {
@@ -4619,9 +6026,13 @@ function renderPositionReadout(model) {
       overlay.querySelector("h2").textContent = `${solverName} is not active`;
       overlay.querySelector("p").textContent = "Enable the selected position runtime to clear old measurements and compute a new live position.";
     }
-    readout.innerHTML = `<div class="position-tag-card"><b>${esc(solverName)} inactive</b><span>No stored position is shown while the selected modules are not in the selected runtime.</span></div>`;
+    readout.innerHTML = `${renderPositionSolverStatus(model)}<div class="position-tag-card"><b>${esc(solverName)} inactive</b><span>No stored position is shown while the selected modules are not in the selected runtime.</span></div>`;
     accuracyRows.innerHTML = "";
-    title.textContent = model.settings.solver === "tdoa" ? "TDOA Observations" : "Distances";
+    referenceStatus.textContent = model.reference
+      ? `${model.reference.label}: x=${fmtFixed(model.reference.x, 3)} m, y=${fmtFixed(model.reference.y, 3)} m`
+      : "Known position reference disabled.";
+    errorRows.innerHTML = `<tr><td colspan="6"><span class="muted">position runtime inactive</span></td></tr>`;
+    title.textContent = positionProtocolUsesTdoa(model.settings.solver) ? "TDOA Observations" : "Distances";
     rows.innerHTML = "";
     return;
   }
@@ -4630,7 +6041,34 @@ function renderPositionReadout(model) {
   if (missingCoords.length) {
     overlay.classList.add("active");
     overlay.querySelector("h2").textContent = "Waiting for measured anchor geometry";
-    overlay.querySelector("p").textContent = `Waiting for fresh anchor-anchor ranges involving: ${missingCoords.join(", ")}.`;
+    overlay.querySelector("p").textContent = positionProtocolUsesTdoa(model.settings.solver)
+      ? `Waiting for fresh anchor-anchor ranges involving: ${missingCoords.join(", ")}.`
+      : `No measured anchor geometry is available yet for anchors: ${missingCoords.join(", ")}. Run FlexTDOA once to measure the anchor layout, then DS-TWR ranges can use the last measured geometry.`;
+    if (overlayButton) {
+      overlayButton.textContent = "Waiting for Anchor Ranges";
+      overlayButton.disabled = true;
+      overlayButton.dataset.action = "wait";
+    }
+  } else if (!model.geometry?.positionReady) {
+    overlay.classList.add("active");
+    const canFix = Boolean(model.geometry?.canFix);
+    const hasBadFit = model.geometry?.status === "self_localizing" &&
+      model.geometry?.fitQuality?.complete && !model.geometry?.fitQuality?.acceptable;
+    overlay.querySelector("h2").textContent = canFix
+      ? "Anchor geometry is ready"
+      : hasBadFit ? "Anchor geometry is not consistent" : "Anchor self-localization in progress";
+    overlay.querySelector("p").textContent = canFix
+      ? "Review the measured geometry, then fix it to start live FlexTDOA positioning."
+      : hasBadFit
+        ? `The current fit is ${fmtPositionCm(model.geometry.fitQuality?.rmsM, 1)} RMS. Restart self-localization if it does not recover below ${fmtPositionCm(model.geometry.fitQuality?.fixLimitM, 1)}.`
+        : "FlexTDOA positioning starts after the TWR-EKF has a complete anchor geometry.";
+    if (overlayButton) {
+      overlayButton.textContent = canFix
+        ? "Fix Anchor Geometry"
+        : hasBadFit ? "Restart Anchor Self-Localization" : "Waiting for Anchor Geometry";
+      overlayButton.disabled = !canFix && !hasBadFit;
+      overlayButton.dataset.action = canFix ? "fix" : hasBadFit ? "restart_geometry" : "wait";
+    }
   } else {
     overlay.classList.remove("active");
     overlay.querySelector("h2").textContent = `${solverName} is not active`;
@@ -4638,60 +6076,94 @@ function renderPositionReadout(model) {
   }
 
   const tagCards = Object.values(model.tags).map(tag => {
-    const fitCount = model.settings.solver === "tdoa"
+    const usesTdoa = positionProtocolUsesTdoa(model.settings.solver);
+    const fitCount = usesTdoa
       ? (tag.fitObservations || []).length
       : Object.keys(tag.distances || {}).length;
-    const freshCount = model.settings.solver === "tdoa"
+    const freshCount = usesTdoa
       ? (tag.observations || []).length
       : Object.keys(tag.distances || {}).length;
-    const total = model.settings.solver === "tdoa"
-      ? Math.max(0, model.settings.anchorIds.length * (model.settings.anchorIds.length - 1) / 2)
+    const total = usesTdoa
+      ? Math.max(0, model.settings.anchorIds.length * (model.settings.anchorIds.length - 1))
       : model.settings.anchorIds.length;
     if (!tag.position) {
-      return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}</b><span>${freshCount}/${total} fresh ${model.settings.solver === "tdoa" ? "TDOA observations" : "distances"}</span></div>`;
+      return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}</b><span>${freshCount}/${total} fresh ${usesTdoa ? "TDOA observations" : "distances"}</span></div>`;
     }
     const sigma = tag.accuracy?.sigma_major_m;
-    const accuracyText = Number.isFinite(Number(sigma)) ? ` · est. ${fmtPositionSigma(sigma, 1)}` : "";
-    const countText = model.settings.solver === "tdoa"
+    const accuracyText = Number.isFinite(Number(sigma)) ? ` · solver σaxis ${fmtPositionSigma(sigma, 1)}` : "";
+    const referenceStats = positionReferenceErrorStats(
+      tag.tagId, tag.position, model.reference, model.settings.errorWindowSec);
+    const referenceText = referenceStats
+      ? ` · actual ${fmtPositionCm(referenceStats.currentErrorM, 1)}`
+      : "";
+    const countText = tag.solverSource === "ESP32 AlgMin" &&
+      Number.isFinite(Number(tag.accuracy?.count))
+      ? `${tag.accuracy.count} raw obs`
+      : usesTdoa
       ? `${fitCount}/${total} fit · ${freshCount} fresh`
       : `${fitCount}/${total} fresh distances`;
-    return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span>${countText}${accuracyText}</span></div>`;
+    return `<div class="position-tag-card"><b id="positionTagSummary${esc(tag.tagId)}">Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span id="positionTagMeta${esc(tag.tagId)}">${countText}${accuracyText}${referenceText}</span></div>`;
   });
-  readout.innerHTML = tagCards.join("") || `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
+  const emptyTagCard = !model.geometry?.positionReady
+    ? `<div class="position-tag-card"><b>waiting for fixed geometry</b><span>Fix the anchor geometry before tag positioning starts.</span></div>`
+    : `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
+  readout.innerHTML = `${renderPositionSolverStatus(model)}${tagCards.join("") || emptyTagCard}`;
   const accuracyTableRows = Object.values(model.tags).map(tag => {
     const accuracy = tag.accuracy;
     if (!tag.position || !accuracy) {
       return `<tr><td>T${esc(tag.tagId)}</td><td colspan="3"><span class="muted">waiting</span></td></tr>`;
     }
-    return `<tr>
-      <td>T${esc(tag.tagId)}<br><span class="muted">${esc(accuracy.count)} obs · GDOP ${esc(fmtFixed(accuracy.gdop, 2))}</span></td>
-      <td>${fmtPositionSigma(accuracy.sigma_major_m, 1)}</td>
-      <td>${fmtPositionCm(accuracy.rms_m, 1)}</td>
-      <td>${fmtPositionCm(accuracy.max_abs_m, 1)}</td>
+    return `<tr id="positionAccuracyRow${esc(tag.tagId)}">
+      <td>T${esc(tag.tagId)}<br><span class="muted">${esc(accuracy.count)} raw obs · GDOP ${esc(fmtFixed(accuracy.gdop, 2))}</span></td>
+      <td id="positionSolverSigma${esc(tag.tagId)}">${fmtPositionSigma(accuracy.sigma_major_m, 1)}</td>
+      <td id="positionTdoaRms${esc(tag.tagId)}">${fmtPositionCm(accuracy.rms_m, 1)}</td>
+      <td id="positionTdoaMax${esc(tag.tagId)}">${fmtPositionCm(accuracy.max_abs_m, 1)}</td>
     </tr>`;
   });
   accuracyRows.innerHTML = accuracyTableRows.join("") || `<tr><td colspan="4"><span class="muted">waiting</span></td></tr>`;
+  if (model.reference) {
+    referenceStatus.textContent =
+      `${model.reference.label}: x=${fmtFixed(model.reference.x, 3)} m, y=${fmtFixed(model.reference.y, 3)} m · rolling ${fmtFixed(model.settings.errorWindowSec, 0)} s`;
+    errorRows.innerHTML = Object.values(model.tags).map(tag => {
+      const stats = positionReferenceErrorStats(
+        tag.tagId, tag.position, model.reference, model.settings.errorWindowSec);
+      if (!stats) return `<tr><td>T${esc(tag.tagId)}</td><td colspan="5">waiting</td></tr>`;
+      return `<tr id="positionErrorRow${esc(tag.tagId)}">
+        <td>T${esc(tag.tagId)}<br><span class="muted" id="positionErrorCount${esc(tag.tagId)}">${esc(stats.count)} pts · ${fmtFixed(stats.spanSec, 1)} s</span></td>
+        <td id="positionErrorNow${esc(tag.tagId)}">${fmtPositionCm(stats.currentErrorM, 1)}</td>
+        <td id="positionErrorBias${esc(tag.tagId)}">${fmtPositionCm(stats.biasM, 1)}</td>
+        <td id="positionErrorRmse${esc(tag.tagId)}">${fmtPositionCm(stats.rmseM, 1)}</td>
+        <td id="positionErrorP95${esc(tag.tagId)}">${fmtPositionCm(stats.p95M, 1)}</td>
+        <td id="positionErrorMax${esc(tag.tagId)}">${fmtPositionCm(stats.maxM, 1)}</td>
+      </tr>`;
+    }).join("");
+  } else {
+    referenceStatus.textContent = "Known position reference disabled.";
+    errorRows.innerHTML = `<tr><td colspan="6"><span class="muted">enable a known reference in Position Setup</span></td></tr>`;
+  }
 
-  if (model.settings.solver === "tdoa") {
+  if (positionProtocolUsesTdoa(model.settings.solver)) {
     title.textContent = "TDOA Observations";
-    head.innerHTML = `<tr><th>Tag</th><th>Pair</th><th>diff m</th><th>rev sum</th><th>age</th><th>resid.</th></tr>`;
+    head.innerHTML = `<tr><th>Tag</th><th>Observation</th><th>diff m</th><th>raw m</th><th>age</th><th>resid.</th></tr>`;
     const tdoaRows = [];
     for (const tag of Object.values(model.tags)) {
       for (const item of tag.observations || []) {
         const key = `${item.initiator_id}-${item.responder_id}`;
-        const reverseSum = Number(item.reverse_sum_m);
         const residual = tag.residuals?.[key];
         const used = item.used_in_fit !== false;
-        const fitNote = used ? "fit" : `skip ${item.reject_reason || "outlier"}`;
+        const fitNote = used ? "raw fit" : `skip ${item.reject_reason || "unusable"}`;
         const agreement = Number(item.agreement_m);
         const agreementText = Number.isFinite(agreement) ? ` · agree ${fmtCmFromM(agreement, 1)} cm` : "";
+        const blend = Number(item.blend_weight);
+        const blendText = Number.isFinite(blend) ? ` · blend ${(blend * 100).toFixed(0)}%` : "";
+        const protocolText = item.tdoa_protocol === "flextdoa" ? "FlexTDOA" : "legacy";
         const suspectText = item.suspect ? " · suspect" : "";
         const fusedText = Number(item.fused_count || 0) > 0 ? ` · fused ${esc(item.fused_count)}` : "";
         tdoaRows.push(`<tr class="${used ? "" : "position-skip"}">
           <td>T${esc(tag.tagId)}</td>
-          <td>A${esc(item.initiator_id)}↔A${esc(item.responder_id)}<br><span class="muted">seq ${esc(item.seq)}/${esc(item.reverse_seq)} · n ${esc(item.samples || 1)}${agreementText}${fusedText}${suspectText} · ${esc(fitNote)}</span></td>
+          <td>A${esc(item.initiator_id)}→A${esc(item.responder_id)}<br><span class="muted">${esc(protocolText)} · seq ${esc(item.seq)}${agreementText}${blendText}${fusedText}${suspectText} · ${esc(fitNote)}</span></td>
           <td>${fmtFixed(item.diff_m, 3)}</td>
-          <td>${Number.isFinite(reverseSum) ? fmtCmFromM(reverseSum, 1) + " cm" : "-"}</td>
+          <td>${Number.isFinite(Number(item.raw_diff_m)) ? fmtFixed(item.raw_diff_m, 3) : "-"}</td>
           <td class="${Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${fmtFixed(item.age_sec, 1)}s</td>
           <td>${residual === undefined ? "-" : fmtFixed(residual * 100, 1) + " cm"}</td>
         </tr>`);
@@ -4719,10 +6191,183 @@ function renderPositionReadout(model) {
   }
 }
 
+function trimPositionRateWindow(times, nowMs) {
+  while (times.length && nowMs - times[0] > 1000) times.shift();
+  return times.length;
+}
+
+function updatePositionStreamMetrics() {
+  const nowMs = performance.now();
+  const rxRate = trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
+  const renderRate = trimPositionRateWindow(state.positionStreamRenderTimes, nowMs);
+  const element = document.getElementById("positionStreamMetrics");
+  if (!element) return;
+  if (!state.positionStreamConnected) {
+    element.textContent = "position stream reconnecting";
+    element.className = "position-pill warn";
+    return;
+  }
+  element.textContent = `${rxRate} rx/s · ${renderRate} fps`;
+  element.className = "position-pill good";
+}
+
+function applyStreamPositionToModel(model) {
+  if (!model?.active || !model?.geometry?.positionReady) return;
+  const now = Date.now() / 1000;
+  for (const tag of Object.values(model.tags || {})) {
+    const item = state.tdoa?.local_positions?.[String(tag.tagId)];
+    if (!item || localPositionAge(item, now) > model.settings.maxAge) continue;
+    const x = Number(item.x_m);
+    const y = Number(item.y_m);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    tag.position = {x, y};
+    tag.solverSource = "ESP32 AlgMin";
+    tag.accuracy = {
+      count: Number(item.observation_count),
+      sigma_major_m: Number(item.sigma_m),
+      rms_m: Number(item.rms_m),
+      max_abs_m: NaN,
+      gdop: NaN,
+    };
+  }
+}
+
+function updatePositionLiveMetrics(model) {
+  for (const tag of Object.values(model.tags || {})) {
+    const item = state.tdoa?.local_positions?.[String(tag.tagId)];
+    if (!item || !tag.position) continue;
+    const summary = document.getElementById(`positionTagSummary${tag.tagId}`);
+    const meta = document.getElementById(`positionTagMeta${tag.tagId}`);
+    const sigma = Number(item.sigma_m);
+    const referenceStats = positionReferenceErrorStats(
+      tag.tagId, tag.position, model.reference, model.settings.errorWindowSec);
+    if (summary) {
+      summary.textContent = `Tag ${tag.tagId}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m`;
+    }
+    if (meta) {
+      const sigmaText = Number.isFinite(sigma)
+        ? ` · solver σaxis ${fmtPositionSigma(sigma, 1)}`
+        : "";
+      const referenceText = referenceStats
+        ? ` · actual ${fmtPositionCm(referenceStats.currentErrorM, 1)}`
+        : "";
+      meta.textContent = `${item.observation_count || 0} raw obs${sigmaText}${referenceText} · live`;
+    }
+    const solverSigma = document.getElementById(`positionSolverSigma${tag.tagId}`);
+    const tdoaRms = document.getElementById(`positionTdoaRms${tag.tagId}`);
+    const tdoaMax = document.getElementById(`positionTdoaMax${tag.tagId}`);
+    if (solverSigma) solverSigma.textContent = fmtPositionSigma(item.sigma_m, 1);
+    if (tdoaRms) tdoaRms.textContent = fmtPositionCm(item.rms_m, 1);
+    if (tdoaMax) tdoaMax.textContent = "-";
+    if (referenceStats) {
+      const values = {
+        positionErrorNow: referenceStats.currentErrorM,
+        positionErrorBias: referenceStats.biasM,
+        positionErrorRmse: referenceStats.rmseM,
+        positionErrorP95: referenceStats.p95M,
+        positionErrorMax: referenceStats.maxM,
+      };
+      for (const [prefix, value] of Object.entries(values)) {
+        const element = document.getElementById(`${prefix}${tag.tagId}`);
+        if (element) element.textContent = fmtPositionCm(value, 1);
+      }
+      const count = document.getElementById(`positionErrorCount${tag.tagId}`);
+      if (count) count.textContent =
+        `${referenceStats.count} pts · ${fmtFixed(referenceStats.spanSec, 1)} s`;
+    }
+  }
+}
+
+function renderPositionStreamFrame() {
+  state.positionStreamRenderPending = false;
+  if (state.activeTab !== "position") return;
+  if (!state.positionModel) {
+    renderPosition();
+    return;
+  }
+  const now = Date.now() / 1000;
+  const needsRecoveryRender = Object.values(state.positionModel.tags || {}).some(tag => {
+    const item = state.tdoa?.local_positions?.[String(tag.tagId)];
+    const livePosition = item &&
+      localPositionAge(item, now) <= state.positionModel.settings.maxAge &&
+      Number.isFinite(Number(item.x_m)) &&
+      Number.isFinite(Number(item.y_m));
+    return livePosition && (
+      !tag.position ||
+      tag.solverSource !== "ESP32 AlgMin" ||
+      !document.getElementById(`positionTagSummary${tag.tagId}`) ||
+      !document.getElementById(`positionAccuracyRow${tag.tagId}`)
+    );
+  });
+  applyStreamPositionToModel(state.positionModel);
+  if (needsRecoveryRender) {
+    renderPosition();
+    void fetchSnapshot();
+    return;
+  }
+  drawPosition(state.positionModel);
+  updatePositionLiveMetrics(state.positionModel);
+  const nowMs = performance.now();
+  state.positionStreamRenderTimes.push(nowMs);
+  updatePositionStreamMetrics();
+}
+
+function schedulePositionStreamRender() {
+  if (state.activeTab !== "position" || state.positionStreamRenderPending) return;
+  state.positionStreamRenderPending = true;
+  requestAnimationFrame(renderPositionStreamFrame);
+}
+
+function ingestPositionStreamSample(item) {
+  const tagId = Number(item?.tag_id);
+  const eventId = Number(item?.position_event_id);
+  if (!Number.isFinite(tagId) || tagId <= 0 || !Number.isFinite(eventId)) return;
+  const key = String(tagId);
+  const previous = state.tdoa?.local_positions?.[key];
+  if (Number(previous?.position_event_id || 0) >= eventId) return;
+  if (!state.tdoa.local_positions) state.tdoa.local_positions = {};
+  item.age_sec = localPositionAge(item);
+  state.tdoa.local_positions[key] = item;
+  recordPositionTrailPoint(
+    tagId,
+    {x: Number(item.x_m), y: Number(item.y_m)},
+    item.received_at,
+    eventId,
+    item
+  );
+  const nowMs = performance.now();
+  state.positionStreamRxTimes.push(nowMs);
+  trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
+  schedulePositionStreamRender();
+}
+
+function startPositionStream() {
+  state.positionStream?.close();
+  const stream = new EventSource("/api/position-stream");
+  state.positionStream = stream;
+  stream.onopen = () => {
+    state.positionStreamConnected = true;
+    updatePositionStreamMetrics();
+  };
+  stream.onmessage = event => {
+    try {
+      ingestPositionStreamSample(JSON.parse(event.data));
+    } catch (_) {
+      // EventSource reconnects automatically; a malformed sample is isolated.
+    }
+  };
+  stream.onerror = () => {
+    state.positionStreamConnected = false;
+    updatePositionStreamMetrics();
+  };
+}
+
 function renderPosition() {
   const model = computePositionModel();
+  state.positionModel = model;
   drawPosition(model);
   renderPositionReadout(model);
+  updatePositionStreamMetrics();
 }
 
 function canvasY(value, scale, plotArea) {
@@ -4816,6 +6461,7 @@ function drawAccelCanvas(canvas, samples, scale, latest, windowSec) {
 }
 
 function scheduleAccelRender() {
+  if (state.activeTab !== "graphs") return;
   if (state.accelRenderPending) return;
   state.accelRenderPending = true;
   requestAnimationFrame(() => {
@@ -4842,7 +6488,10 @@ function renderAccelGraphs() {
     const ageEl = document.getElementById(`chartAge${moduleId}`);
     if (ageEl) {
       const rateText = rate?.rxHz ? ` · ${Math.round(rate.rxHz)} rx/s` : "";
-      ageEl.textContent = latest ? `last ${fmtAge(latest.received_at)}${rateText}` : "waiting";
+      const enabled = Boolean(statusForModule(moduleId)?.runtime_bno085_accel_enabled);
+      ageEl.textContent = enabled
+        ? (latest ? `last ${fmtAge(latest.received_at)}${rateText}` : "waiting")
+        : (latest ? `disabled · last ${fmtAge(latest.received_at)}` : "disabled");
     }
     if (!latest) {
       continue;
@@ -4864,14 +6513,20 @@ function setActiveTab(id) {
   localStorage.setItem("uwbDash.activeTab", id);
   document.querySelectorAll(".tab").forEach(tab => tab.classList.toggle("active", tab.dataset.tab === id));
   document.querySelectorAll(".page").forEach(page => page.classList.toggle("active", page.id === id));
-  requestAnimationFrame(renderAllTerminals);
+  requestAnimationFrame(renderVisibleTerminals);
   requestAnimationFrame(renderPosition);
+  if (id === "rangingSettings") requestAnimationFrame(updateRangingSettingsProtocol);
+  if (id === "graphs") fetchAccel();
   scheduleAccelRender();
 }
 
 async function fetchLogs() {
   const res = await fetch(`/api/logs?after=${state.lastId}&limit=4000`, {cache: "no-store"});
   const data = await res.json();
+  if (!data.logs.length && Number(data.next_id) <= state.lastId) {
+    state.lastId = 0;
+    return;
+  }
   if (data.logs.length) {
     state.logs.push(...data.logs);
     if (state.logs.length > 8000) state.logs.splice(0, state.logs.length - 8000);
@@ -4884,11 +6539,16 @@ async function fetchLogs() {
 }
 
 async function fetchAccel() {
+  if (state.activeTab !== "graphs") return;
   if (state.accelFetchPending) return;
   state.accelFetchPending = true;
   try {
     const res = await fetch(`/api/accel?after=${state.lastAccelId}&limit=12000`, {cache: "no-store"});
     const data = await res.json();
+    if (!data.samples.length && Number(data.next_id) <= state.lastAccelId) {
+      state.lastAccelId = 0;
+      return;
+    }
     if (data.samples.length) {
       for (const sample of data.samples) mergeAccelSample(sample);
       state.lastAccelId = Math.max(state.lastAccelId, ...data.samples.map(item => item.sample_id || 0));
@@ -5669,7 +7329,16 @@ function renderPd(statuses) {
 function renderInfo(snapshot) {
   state.statuses = snapshot.statuses || [];
   state.ranging = snapshot.ranging || {distances: {}, max_age_sec: 3};
-  state.tdoa = snapshot.tdoa || {observations: {}, anchor_distances: {}, max_age_sec: 3};
+  const previousLocalPositions = state.tdoa?.local_positions || {};
+  const nextTdoa = snapshot.tdoa || {observations: {}, anchor_distances: {}, local_positions: {}, max_age_sec: 3};
+  nextTdoa.local_positions = nextTdoa.local_positions || {};
+  for (const [tagId, previous] of Object.entries(previousLocalPositions)) {
+    const incoming = nextTdoa.local_positions[tagId];
+    if (Number(previous?.position_event_id || 0) > Number(incoming?.position_event_id || 0)) {
+      nextTdoa.local_positions[tagId] = previous;
+    }
+  }
+  state.tdoa = nextTdoa;
   mergeAccelHistory(snapshot.accel_history || {});
   document.getElementById("logPill").textContent = `${snapshot.log_count} logs`;
   const telemetryPill = document.getElementById("telemetryPill");
@@ -5717,7 +7386,7 @@ function renderInfo(snapshot) {
       <td>${renderGpsCell(item)}</td>
       <td>${esc(item.uwb_status)}<br>tx ${esc(item.uwb_tx_count)} / rx ${esc(item.uwb_rx_count)}<br>err ${esc(item.uwb_tx_error_count)}/${esc(item.uwb_rx_error_count)}</td>
       <td>${esc(item.uwb_active_antenna_delay_hex)}<br><span class="muted">NVS ${item.uwb_antenna_delay_from_nvs ? "yes" : "no"}</span></td>
-      <td>log ${esc(item.wireless_log_status)}<br>dropped ${esc(item.wireless_log_dropped)}<br>tel ${esc(item.wireless_telemetry_status || "-")}<br>port ${esc(item.wireless_telemetry_port ?? item.runtime_wireless_telemetry_port ?? "-")}<br>tel drop ${esc(item.wireless_telemetry_dropped ?? "-")}<br><span class="muted">full ${esc(item.wireless_telemetry_drop_full ?? "-")} · mutex ${esc(item.wireless_telemetry_drop_mutex ?? "-")} · fmt ${esc(item.wireless_telemetry_drop_format ?? "-")}<br>qmax ${esc(item.wireless_telemetry_queue_high_water ?? "-")}<br>bin ${esc(item.wireless_telemetry_binary_frames ?? "-")}f / ${esc(item.wireless_telemetry_binary_samples ?? "-")}s · text ${esc(item.wireless_telemetry_text_frames ?? "-")}</span><br>tel err ${esc(item.wireless_telemetry_last_error ?? "-")}<br>age ${fmtAge(item.status_updated_at)}</td>
+      <td>log ${esc(item.wireless_log_status)}<br>dropped ${esc(item.wireless_log_dropped)}<br>tel ${esc(item.wireless_telemetry_status || "-")}<br>port ${esc(item.wireless_telemetry_port ?? item.runtime_wireless_telemetry_port ?? "-")}<br>tel drop ${esc(item.wireless_telemetry_dropped ?? "-")}<br><span class="muted">full ${esc(item.wireless_telemetry_drop_full ?? "-")} · mutex ${esc(item.wireless_telemetry_drop_mutex ?? "-")} · fmt ${esc(item.wireless_telemetry_drop_format ?? "-")}<br>queue ${esc(item.wireless_telemetry_queue_depth ?? "-")} / 1024 · max ${esc(item.wireless_telemetry_queue_high_water ?? "-")}<br>connect ${esc(item.wireless_telemetry_connect_count ?? "-")} · fail ${esc(item.wireless_telemetry_send_failures ?? "-")} · timeout ${esc(item.wireless_telemetry_send_timeouts ?? "-")} · close ${esc(item.wireless_telemetry_socket_closes ?? "-")}<br>send ${esc(item.wireless_telemetry_last_send_ms ?? "-")} ms · max ${esc(item.wireless_telemetry_max_send_ms ?? "-")} ms<br>bin ${esc(item.wireless_telemetry_binary_frames ?? "-")}f / ${esc(item.wireless_telemetry_binary_samples ?? "-")}s · text ${esc(item.wireless_telemetry_text_frames ?? "-")}</span><br>tel err ${esc(item.wireless_telemetry_last_error ?? "-")}<br>age ${fmtAge(item.status_updated_at)}</td>
       <td>${renderResourceCell(item)}</td>
       <td>${renderBatteryCell(item)}</td>
     </tr>`).join("");
@@ -5726,7 +7395,9 @@ function renderInfo(snapshot) {
   renderCharger(state.statuses);
   renderPd(state.statuses);
   renderPosition();
+  renderFlexTdoaTimingDiagram();
   scheduleAccelRender();
+  updateAccelEnabledControl();
   hydrateSettingsFromStatus(freshStatus);
   hydrateChargerSettings();
   hydratePdSettings();
@@ -5763,6 +7434,11 @@ function hydrateSettingsFromStatus(item) {
   setSettingIfFresh("runtimeGps", item.runtime_gps_enabled);
   setSettingIfFresh("runtimeTelemetryPort", item.runtime_wireless_telemetry_port || item.wireless_telemetry_port);
   setSettingIfFresh("uwbRadioChannel", item.runtime_radio_channel || item.uwb_radio_channel);
+  setSettingIfFresh("uwbFlexAnchors", (item.runtime_anchor_ids || []).filter(Boolean).join(","));
+  setSettingIfFresh("uwbFlexK", item.runtime_flex_tdoa_responder_count);
+  setSettingIfFresh("uwbFlexSlots", (item.runtime_flex_tdoa_slot_initiator_ids || []).join(","));
+  setSettingIfFresh("uwbFlexMasks", (item.runtime_flex_tdoa_slot_responder_masks || []).join(","));
+  setSettingIfFresh("uwbFlexGeneration", item.runtime_flex_tdoa_config_generation, true);
   setSettingIfFresh("uwbSurveyRxMs", item.runtime_anchor_survey_rx_slice_ms);
   setSettingIfFresh("uwbSurveyDelayMs", item.runtime_anchor_survey_command_delay_ms);
   setSettingIfFresh("uwbSurveySlotMs", item.runtime_anchor_survey_slot_ms);
@@ -5811,8 +7487,31 @@ function renderUwbRadio(item) {
 }
 
 async function fetchSnapshot() {
-  const res = await fetch("/api/snapshot", {cache: "no-store"});
-  renderInfo(await res.json());
+  if (state.snapshotFetchPending) return;
+  state.snapshotFetchPending = true;
+  try {
+    const res = await fetch("/api/snapshot", {cache: "no-store"});
+    if (!res.ok) throw new Error(`snapshot HTTP ${res.status}`);
+    renderInfo(await res.json());
+  } catch (error) {
+    console.warn("snapshot refresh failed; retrying", error);
+  } finally {
+    state.snapshotFetchPending = false;
+  }
+}
+
+function snapshotPollDelayMs() {
+  return state.activeTab === "position" ? 250 : 1500;
+}
+
+function scheduleSnapshotPoll() {
+  setTimeout(async () => {
+    try {
+      await fetchSnapshot();
+    } finally {
+      scheduleSnapshotPoll();
+    }
+  }, snapshotPollDelayMs());
 }
 
 function parseCalibrationIds(inputId, expected) {
@@ -6692,13 +8391,128 @@ function rangingProfileElementId(profileKey, suffix) {
 }
 
 function rangingProfileIds() {
-  const ids = ["rangingProfileTargets"];
+  const ids = ["rangingProfileTargets", "flexProfileTargets"];
   for (const profileKey of Object.keys(rangingProfileDefaults)) {
     for (const field of rangingProfileFields) {
       ids.push(rangingProfileElementId(profileKey, field.suffix));
     }
   }
+  for (const profileKey of Object.keys(flexProfileDefaults)) {
+    const profile = flexProfileDefaults[profileKey];
+    for (const field of flexProfileFields) {
+      ids.push(`${profile.prefix}${field.suffix}`);
+    }
+  }
   return ids;
+}
+
+function readFlexProfile(profileKey) {
+  const profile = flexProfileDefaults[profileKey];
+  const result = {};
+  if (!profile) return result;
+  for (const field of flexProfileFields) {
+    result[field.key] = Number(
+      document.getElementById(`${profile.prefix}${field.suffix}`)?.value
+    );
+  }
+  return result;
+}
+
+function writeFlexProfile(profileKey, values, persist = true) {
+  const profile = flexProfileDefaults[profileKey];
+  if (!profile) return;
+  for (const field of flexProfileFields) {
+    const id = `${profile.prefix}${field.suffix}`;
+    const el = document.getElementById(id);
+    if (!el || values[field.key] === undefined) continue;
+    el.value = String(values[field.key]);
+    if (persist) localStorage.setItem(settingKey(id), el.value);
+  }
+  updateFlexProfileSummary(profileKey);
+}
+
+function flexProfileMetrics(values) {
+  const runtime = flexTimingRuntimeConfig();
+  const K = Math.max(1, Number(runtime.responderCount || 3));
+  const M = Math.max(1, Number(runtime.slotCount || 4));
+  const responseTotalUs = K * values.responseUs;
+  const responseProcessTotalUs = K * values.responseProcessUs;
+  const slotUs = values.guardUs + values.requestUs + values.requestProcessUs +
+    responseTotalUs + responseProcessTotalUs;
+  const frameUs = M * slotUs;
+  return {
+    K,
+    M,
+    responseTotalUs,
+    responseProcessTotalUs,
+    slotUs,
+    frameUs,
+    frameHz: frameUs > 0 ? 1000000 / frameUs : NaN,
+  };
+}
+
+function updateFlexProfileSummary(profileKey) {
+  const profile = flexProfileDefaults[profileKey];
+  const summary = document.getElementById(`${profile?.prefix || ""}Summary`);
+  if (!profile || !summary) return;
+  const values = readFlexProfile(profileKey);
+  const valid = flexProfileFields.every(field =>
+    Number.isFinite(values[field.key]) && values[field.key] > 0
+  );
+  if (!valid) {
+    summary.textContent = "incomplete profile";
+    summary.className = "profile-summary warn";
+    return;
+  }
+  const metrics = flexProfileMetrics(values);
+  summary.textContent =
+    `Guard ${values.guardUs} + REQ ${values.requestUs} + Process REQ ${values.requestProcessUs} + ` +
+    `${metrics.K} × RESP ${metrics.responseTotalUs} + ${metrics.K} × Process RESP ${metrics.responseProcessTotalUs} = ` +
+    `slot ${fmtFixed(metrics.slotUs / 1000, 3)} ms · frame ${fmtFixed(metrics.frameUs / 1000, 3)} ms · ` +
+    `${fmtFixed(metrics.frameHz, 2)} Hz`;
+  summary.className = "profile-summary";
+}
+
+function updateAllFlexProfileSummaries() {
+  Object.keys(flexProfileDefaults).forEach(updateFlexProfileSummary);
+}
+
+async function applyFlexProfile(profileKey) {
+  const profile = flexProfileDefaults[profileKey];
+  if (!profile) return;
+  const values = readFlexProfile(profileKey);
+  if (!flexProfileFields.every(field =>
+    Number.isFinite(values[field.key]) && values[field.key] > 0
+  )) {
+    setToast("flexProfileToast", "Profile has invalid values", "bad");
+    return;
+  }
+  const metrics = flexProfileMetrics(values);
+  setToast(
+    "flexProfileToast",
+    `applying ${fmtFixed(metrics.frameUs / 1000, 3)} ms frame...`,
+    "", null, false
+  );
+  const data = await postConfig({
+    target_modules: document.getElementById("flexProfileTargets").value,
+    params: {
+      flex_guard_us: String(values.guardUs),
+      flex_req_us: String(values.requestUs),
+      flex_req_process_us: String(values.requestProcessUs),
+      flex_resp_us: String(values.responseUs),
+      flex_resp_process_us: String(values.responseProcessUs),
+      survey_rx_ms: String(values.rxSliceMs),
+      reboot: "1",
+    },
+  }, "flexProfileToast");
+  if (apiResponseOk(data)) {
+    const freshAge = document.getElementById("positionMaxAgeSec");
+    if (freshAge) {
+      freshAge.value = String(values.positionMaxAgeSec);
+      localStorage.setItem(settingKey("positionMaxAgeSec"), freshAge.value);
+    }
+    setTimeout(fetchSnapshot, 1800);
+  }
 }
 
 function readRangingProfile(profileKey) {
@@ -6721,32 +8535,39 @@ function writeRangingProfile(profileKey, values, persist = true) {
   updateRangingProfileSummary(profileKey);
 }
 
-function rangingProfileRuntimeParams(values) {
-  return {
-    survey_slot_ms: String(values.slotMs),
-    survey_gap_ms: String(values.roundGapMs),
-    survey_rx_ms: String(values.rxSliceMs),
-    survey_delay_ms: String(values.commandDelayMs),
-    ranging_slot_ms: String(values.slotMs),
-    ranging_gap_ms: String(values.roundGapMs),
-    ranging_rx_ms: String(values.rxSliceMs),
-    dt_rx_timeout_ms: String(values.timeoutMs),
-    dt_resp_delay_ms: String(values.respDelayMs),
-    dt_final_delay_ms: String(values.finalDelayMs),
-    dt_report_delay_ms: String(values.reportDelayMs),
-    dt_auto_rx_delay_uus: String(values.autoRxDelayUus),
-  };
+function rangingSettingsSolver() {
+  return normalizePositionSolver(
+    document.getElementById("positionSolver")?.value || "flextdoa"
+  );
 }
 
-function mirrorRangingProfileToUwbFields(values) {
-  const fields = {
-    uwbSurveySlotMs: values.slotMs,
-    uwbSurveyGapMs: values.roundGapMs,
+function rangingProfileRuntimeParams(values, solver) {
+  if (solver === "flextdoa") {
+    // Pure FlexTDOA has fixed on-air timing. This is only the host RX call ceiling.
+    return {survey_rx_ms: String(values.rxSliceMs)};
+  }
+  if (solver === "ranging") {
+    return {
+      ranging_slot_ms: String(values.slotMs),
+      ranging_gap_ms: String(values.roundGapMs),
+      ranging_rx_ms: String(values.dsRxSliceMs),
+      dt_rx_timeout_ms: String(values.timeoutMs),
+      dt_resp_delay_ms: String(values.respDelayMs),
+      dt_final_delay_ms: String(values.finalDelayMs),
+      dt_report_delay_ms: String(values.reportDelayMs),
+      dt_auto_rx_delay_uus: String(values.autoRxDelayUus),
+    };
+  }
+  return {};
+}
+
+function mirrorRangingProfileToUwbFields(values, solver) {
+  const fields = solver === "flextdoa" ? {
     uwbSurveyRxMs: values.rxSliceMs,
-    uwbSurveyDelayMs: values.commandDelayMs,
+  } : {
     uwbRangingSlotMs: values.slotMs,
     uwbRangingGapMs: values.roundGapMs,
-    uwbRangingRxMs: values.rxSliceMs,
+    uwbRangingRxMs: values.dsRxSliceMs,
     uwbDtRxTimeoutMs: values.timeoutMs,
     uwbDtRespDelayMs: values.respDelayMs,
     uwbDtFinalDelayMs: values.finalDelayMs,
@@ -6761,18 +8582,430 @@ function mirrorRangingProfileToUwbFields(values) {
   }
 }
 
-function profileSummaryText(values) {
-  const flexResponseWindowMs = 3 * values.commandDelayMs;
-  const classicProgrammedMs =
-    values.respDelayMs + values.finalDelayMs + 2 * values.reportDelayMs;
-  const marginMs = values.slotMs - flexResponseWindowMs;
-  const roundMs = 4 * values.slotMs + values.roundGapMs;
+function applyRangingProfilePositionSettings(values, solver) {
+  const fields = {
+    positionMaxAgeSec: solver === "ranging"
+      ? values.dsPositionMaxAgeSec
+      : values.positionMaxAgeSec,
+  };
+  for (const [id, value] of Object.entries(fields)) {
+    const el = document.getElementById(id);
+    if (!el || value === undefined || value === null) continue;
+    el.value = String(value);
+    localStorage.setItem(settingKey(id), el.value);
+  }
+}
+
+function setRangingProfileFieldVisible(profileKey, field, visible) {
+  const id = rangingProfileElementId(profileKey, field.suffix);
+  const input = document.getElementById(id);
+  const label = document.querySelector(`label[for="${id}"]`);
+  input?.classList.toggle("hidden", !visible);
+  label?.classList.toggle("hidden", !visible);
+}
+
+function rangingProfileDescription(values, solver) {
+  if (solver === "flextdoa") {
+    return `${fmtFixed(values.positionMaxAgeSec, 1)} s observation freshness and ${fmtFixed(values.rxSliceMs, 0)} ms host RX slices; radio timing uses the fixed compact slot.`;
+  }
+  return `${fmtFixed(values.dsPositionMaxAgeSec, 1)} s distance freshness with a ${fmtFixed(values.slotMs, 0)} ms DS-TWR slot and ${fmtFixed(values.roundGapMs, 0)} ms cycle gap.`;
+}
+
+function updateRangingSettingsProtocol() {
+  const solver = rangingSettingsSolver();
+  const protocol = {
+    flextdoa: {
+      title: "FlexTDOA Settings",
+      label: "FlexTDOA",
+      hint: "Selected in Position Setup. Only controls used by pure FlexTDOA are shown.",
+      note: "FlexTDOA radio timing is fixed to the hardware-validated 4.80 ms CI-CR slot shown above. Profiles change only observation freshness and the host RX slice.",
+    },
+    ranging: {
+      title: "DS-TWR Settings",
+      label: "DS-TWR ranges",
+      hint: "Selected in Position Setup. These controls configure the complete POLL, RESP, FINAL, REPORT and REPORT2 exchange.",
+      note: "Profiles below change only DS-TWR scheduling, receive waits and delayed-TX timing. FlexTDOA and anchor-survey settings are left untouched.",
+    },
+    hybrid: {
+      title: "Legacy Hybrid Settings",
+      label: "Legacy hybrid logs",
+      hint: "Selected in Position Setup. This compatibility solver reads older captures and does not configure a current radio protocol.",
+      note: "",
+    },
+  }[solver];
+
+  document.getElementById("rangingProtocolTitle").textContent = protocol.title;
+  document.getElementById("rangingProtocolHint").textContent = protocol.hint;
+  document.getElementById("rangingProtocolBadge").textContent = protocol.label;
+  document.querySelectorAll(".ranging-protocol-panel").forEach(panel => {
+    panel.classList.toggle("hidden", panel.dataset.rangingProtocol !== solver);
+  });
+
+  const profilesSection = document.getElementById("rangingProfilesSection");
+  profilesSection.classList.toggle("hidden", solver !== "ranging");
+  document.getElementById("flexTdoaProfilesSection")
+    ?.classList.toggle("hidden", solver !== "flextdoa");
+  document.getElementById("rangingProfileNote").textContent = protocol.note;
+
+  const visibleFields = rangingProtocolProfileFields[solver];
+  for (const profileKey of Object.keys(rangingProfileDefaults)) {
+    for (const field of rangingProfileFields) {
+      setRangingProfileFieldVisible(profileKey, field, visibleFields.has(field.key));
+    }
+  }
+  updateAllRangingProfileSummaries();
+  updateAllFlexProfileSummaries();
+  if (solver === "flextdoa") renderFlexTdoaTimingDiagram();
+}
+
+const flexTimingFallback = {
+  guardUs: 500,
+  requestUs: 250,
+  requestProcessUs: 1500,
+  responseUs: 250,
+  responseProcessUs: 600,
+};
+
+function flexTimingRuntimeConfig() {
+  const candidates = state.statuses.filter(item =>
+    Array.isArray(item.runtime_anchor_ids) && item.runtime_anchor_ids.length >= 3
+  );
+  const status = candidates.find(item =>
+    statusIsFresh(item) && item.runtime_mode_name === "uwb_flex_tdoa"
+  ) || candidates.find(statusIsFresh) || candidates[0] || {};
+  const anchorIds = (status.runtime_anchor_ids || [2, 3, 4, 5])
+    .map(Number)
+    .filter(Number.isFinite);
+  const initiators = (status.runtime_flex_tdoa_slot_initiator_ids || anchorIds)
+    .map(Number)
+    .filter(Number.isFinite);
+  const slotCount = Math.max(1, Math.min(
+    Number(status.runtime_flex_tdoa_slot_count || initiators.length || anchorIds.length),
+    initiators.length || anchorIds.length
+  ));
+  const responderCount = Math.max(1, Math.min(
+    Number(status.runtime_flex_tdoa_responder_count || anchorIds.length - 1),
+    Math.max(1, anchorIds.length - 1)
+  ));
+  const masks = (status.runtime_flex_tdoa_slot_responder_masks || [])
+    .map(Number);
+  const timing = {
+    guardUs: Number(status.runtime_flex_tdoa_guard_us || flexTimingFallback.guardUs),
+    requestUs: Number(status.runtime_flex_tdoa_request_subslot_us || flexTimingFallback.requestUs),
+    requestProcessUs: Number(status.runtime_flex_tdoa_request_process_us || flexTimingFallback.requestProcessUs),
+    responseUs: Number(status.runtime_flex_tdoa_response_subslot_us || flexTimingFallback.responseUs),
+    responseProcessUs: Number(status.runtime_flex_tdoa_response_process_us || flexTimingFallback.responseProcessUs),
+  };
+  return {
+    status,
+    anchorIds,
+    initiators: initiators.slice(0, slotCount),
+    masks,
+    slotCount,
+    responderCount,
+    timing,
+    live: Boolean(statusIsFresh(status)),
+  };
+}
+
+function flexTimingLatestSlotId() {
+  const values = [];
+  for (const item of Object.values(state.tdoa.local_positions || {})) {
+    if (Number.isFinite(Number(item.slot_id))) values.push(Number(item.slot_id));
+  }
+  for (const item of Object.values(state.tdoa.observations || {})) {
+    if (Number.isFinite(Number(item.slot_id))) values.push(Number(item.slot_id));
+  }
+  return values.length ? Math.max(...values) : 0;
+}
+
+function flexTimingResponders(config, initiatorId, absoluteSlotId, slotIndex) {
+  const mask = Number(config.masks[slotIndex]);
+  let allowed = config.anchorIds.filter((anchorId, anchorIndex) =>
+    anchorId !== initiatorId &&
+    (!Number.isFinite(mask) || (mask & (1 << anchorIndex)) !== 0)
+  );
+  if (!allowed.length) {
+    allowed = config.anchorIds.filter(anchorId => anchorId !== initiatorId);
+  }
+  if (!allowed.length) return [];
+  const rotation = ((absoluteSlotId % allowed.length) + allowed.length) % allowed.length;
+  const ordered = [];
+  for (let index = 0; index < config.responderCount; index += 1) {
+    ordered.push(allowed[(index + rotation) % allowed.length]);
+  }
+  return ordered;
+}
+
+function flexTimingAxisMark(position, label, edge = "", stagger = false) {
+  return `<span class="flex-axis-mark ${edge} ${stagger ? "stagger" : ""}" style="left:${position}%">${esc(label)}</span>`;
+}
+
+function flexTimingRuntimeConsensus(field, unit = "") {
+  const values = state.statuses
+    .filter(statusIsFresh)
+    .map(item => Number(item[field]))
+    .filter(Number.isFinite);
+  if (!values.length) return {value: null, text: "unavailable"};
+  const unique = [...new Set(values)];
+  if (unique.length > 1) {
+    return {value: null, text: `mixed (${unique.join(", ")})${unit ? ` ${unit}` : ""}`};
+  }
+  return {value: unique[0], text: `${unique[0]}${unit ? ` ${unit}` : ""}`};
+}
+
+function renderFlexTdoaTimingDiagram() {
+  const root = document.getElementById("flexTdoaTimingDiagram");
+  const selector = document.getElementById("flexTimingSlotSelect");
+  if (!root || !selector) return;
+  if (rangingSettingsSolver() !== "flextdoa") return;
+
+  const config = flexTimingRuntimeConfig();
+  if (config.anchorIds.length < 3 || config.initiators.length < 1) {
+    root.className = "muted";
+    root.textContent = "FlexTDOA topology is unavailable.";
+    return;
+  }
+
+  const latestSlotId = flexTimingLatestSlotId();
+  const frameStartSlot = latestSlotId - (latestSlotId % config.slotCount);
+  const liveSlotIndex = latestSlotId % config.slotCount;
+  const selectedIndex = Math.max(0, Math.min(
+    config.slotCount - 1,
+    Number(state.flexTimingSlotIndex || 0)
+  ));
+  state.flexTimingSlotIndex = selectedIndex;
+  selector.innerHTML = config.initiators.map((initiatorId, index) =>
+    `<option value="${index}">frame[${index}] · A${esc(initiatorId)}</option>`
+  ).join("");
+  selector.value = String(selectedIndex);
+
+  const K = config.responderCount;
+  const M = config.slotCount;
+  const timing = config.timing;
+  const responseProcessTotalUs = K * timing.responseProcessUs;
+  const slotUs = timing.guardUs + timing.requestUs + timing.requestProcessUs +
+    K * timing.responseUs + responseProcessTotalUs;
+  const frameUs = M * slotUs;
+  const frameHz = 1000000 / frameUs;
+  const responseHz = M * K * frameHz;
+  const rxSlice = flexTimingRuntimeConsensus(
+    "runtime_anchor_survey_rx_slice_ms", "ms"
+  );
+  const rxSliceUs = Number.isFinite(rxSlice.value) ? rxSlice.value * 1000 : 0;
+  const rxSliceWidth = rxSliceUs > 0 ? Math.min(100, 100 * rxSliceUs / slotUs) : 0;
+  const rxSliceSlots = rxSliceUs > 0 ? rxSliceUs / slotUs : 0;
+  const selectedSlotId = frameStartSlot + selectedIndex;
+  const selectedInitiator = config.initiators[selectedIndex];
+  const selectedResponders = flexTimingResponders(
+    config, selectedInitiator, selectedSlotId, selectedIndex
+  );
+
+  const frameSlots = config.initiators.map((initiatorId, index) => {
+    const absoluteSlotId = frameStartSlot + index;
+    const responders = flexTimingResponders(config, initiatorId, absoluteSlotId, index);
+    const classes = [
+      "flex-frame-slot",
+      index === selectedIndex ? "selected" : "",
+      config.live && index === liveSlotIndex ? "live" : "",
+    ].filter(Boolean).join(" ");
+    return `<div class="${classes}">
+      <b>slot ${esc(absoluteSlotId)} · frame[${index}]</b>
+      <strong>A${esc(initiatorId)} initiator</strong>
+      <span title="${esc(responders.map(id => `A${id}`).join(" → "))}">RESP ${esc(responders.map(id => `A${id}`).join(" → "))}</span>
+    </div>`;
+  }).join("");
+  const frameAxis = Array.from({length: M + 1}, (_, index) =>
+    flexTimingAxisMark(
+      100 * index / M,
+      `${fmtFixed(index * slotUs / 1000, 2)} ms`,
+      index === 0 ? "edge-start" : (index === M ? "edge-end" : "")
+    )
+  ).join("");
+
+  const segments = [
+    {key: "REQ subslot", short: "REQ", duration: timing.requestUs, cls: "req", detail: `A${selectedInitiator} TX at slot boundary; budget includes frame airtime`},
+    {key: "Process REQ", short: "P_REQ", duration: timing.requestProcessUs, cls: "req-process", detail: "complete RX + decode + arm delayed TX"},
+    ...selectedResponders.map((anchorId, index) => ({
+      key: `RESP[${index}]`,
+      short: `R${index}`,
+      duration: timing.responseUs,
+      cls: `response ${index % 2 ? "alt" : ""}`,
+      detail: `A${anchorId} delayed TX`,
+    })),
+    {key: "Process RESP", short: "P_RESP", duration: responseProcessTotalUs, cls: "response-process", detail: `${K} × ${timing.responseProcessUs} us`},
+    {key: "Gap", short: "GAP", duration: timing.guardUs, cls: "guard", detail: "quiet guard before next REQ"},
+  ];
+  const segmentCells = segments.map(segment => {
+    return `<div class="flex-slot-segment ${segment.cls}" title="${esc(`${segment.key}: ${segment.detail}, ${segment.duration} us`)}">
+      <b>${esc(segment.short)}</b><span>${esc(segment.duration)} us</span>
+    </div>`;
+  }).join("");
+
+  const boundaries = [0];
+  let elapsedUs = 0;
+  for (const segment of segments) {
+    elapsedUs += segment.duration;
+    boundaries.push(elapsedUs);
+  }
+  const slotAxis = boundaries.map((value, index) =>
+    flexTimingAxisMark(
+      100 * value / slotUs,
+      value >= 1000 ? `${fmtFixed(value / 1000, value % 1000 ? 2 : 1)} ms` : `${value} us`,
+      index === 0 ? "edge-start" : (index === boundaries.length - 1 ? "edge-end" : ""),
+      index > 1 && index < boundaries.length - 2 && index % 2 === 1
+    )
+  ).join("");
+
+  elapsedUs = 0;
+  const detailRows = segments.map((segment, index) => {
+    const startUs = elapsedUs;
+    const endUs = startUs + segment.duration;
+    elapsedUs = endUs;
+    let action = segment.detail;
+    if (segment.key.startsWith("RESP[")) {
+      const responseIndex = Number(segment.key.match(/\d+/)?.[0] || 0);
+      const responderId = selectedResponders[responseIndex];
+      const delayedUs = timing.requestUs + timing.requestProcessUs +
+        responseIndex * timing.responseUs;
+      action = `A${responderId} delayed TX at REQ_RX + ${fmtFixed(delayedUs / 1000, 2)} ms`;
+    }
+    return `<tr>
+      <td>${esc(segment.key)}</td>
+      <td>${fmtFixed(startUs / 1000, 2)}</td>
+      <td>${fmtFixed(endUs / 1000, 2)}</td>
+      <td>${esc(segment.duration)} us</td>
+      <td>${esc(action)}</td>
+    </tr>`;
+  }).join("");
+
+  const responseFlow = selectedResponders.map((anchorId, index) => {
+    const delayedUs = timing.requestUs + timing.requestProcessUs + index * timing.responseUs;
+    return `<div class="flex-packet-row">
+      <b>RESP[${index}] · A${esc(anchorId)} → broadcast · +${fmtFixed(delayedUs / 1000, 2)} ms</b>
+      <code>header(type, source, seq) | slot32 | destination_count=0 | processing_dtu=reply | previous_twr(responder, distance_mm, slot16)</code>
+    </div>`;
+  }).join("");
+
+  root.className = "";
+  root.innerHTML = `
+    <div class="flex-timing-metrics">
+      <div class="flex-timing-metric"><span>Topology</span><strong>N=${config.anchorIds.length} · K=${K} · M=${M}</strong></div>
+      <div class="flex-timing-metric"><span>Slot period</span><strong>${fmtFixed(slotUs / 1000, 3)} ms</strong></div>
+      <div class="flex-timing-metric"><span>Frame period</span><strong>${fmtFixed(frameUs / 1000, 3)} ms</strong></div>
+      <div class="flex-timing-metric"><span>Frame rate</span><strong>${fmtFixed(frameHz, 2)} Hz</strong></div>
+      <div class="flex-timing-metric"><span>TDOA / frame</span><strong>${M * K}</strong></div>
+      <div class="flex-timing-metric"><span>Response rate</span><strong>${fmtFixed(responseHz, 1)} /s</strong></div>
+    </div>
+    <div class="flex-timing-scroll">
+      <div class="flex-timing-canvas">
+        <div class="flex-timing-label">
+          <strong>Frame · ${M} initiator slots</strong>
+          <span>${config.live ? `live frame containing slot ${latestSlotId}` : "configured topology"}</span>
+        </div>
+        <div class="flex-frame-track" style="grid-template-columns:repeat(${M}, minmax(170px, 1fr))">${frameSlots}</div>
+        <div class="flex-frame-axis">${frameAxis}</div>
+        <div class="flex-frame-dimensions">
+          <div class="flex-dimension" style="left:0%;width:100%;top:0">
+            <div class="flex-dimension-line"></div>
+            <span class="flex-dimension-label">Frame = ${M} × ${fmtFixed(slotUs / 1000, 3)} ms = ${fmtFixed(frameUs / 1000, 3)} ms</span>
+          </div>
+          <div class="flex-round-gap-zero"><span>FlexTDOA frame gap = 0 ms · next frame starts immediately</span></div>
+        </div>
+        <div class="flex-timing-label">
+          <strong>Selected slot ${selectedSlotId} · A${esc(selectedInitiator)} initiates · ${K} response subslots</strong>
+          <span>REQ-to-REQ time reference</span>
+        </div>
+        <div class="flex-slot-track" style="grid-template-columns:${segments.map(segment => `${segment.duration}fr`).join(" ")}">${segmentCells}</div>
+        <div class="flex-slot-axis">${slotAxis}</div>
+        <div class="flex-dimensions">
+          <div class="flex-dimension" style="left:0%;width:100%;top:0">
+            <div class="flex-dimension-line"></div>
+            <span class="flex-dimension-label">FlexTDOA slot = ${fmtFixed(slotUs / 1000, 3)} ms</span>
+          </div>
+          <div class="flex-dimension gap" style="left:${100 * (slotUs - timing.guardUs) / slotUs}%;width:${100 * timing.guardUs / slotUs}%;top:31px">
+            <div class="flex-dimension-line"></div>
+            <span class="flex-dimension-label">In-slot GAP = ${timing.guardUs} us</span>
+          </div>
+        </div>
+        <div class="flex-host-window">
+          <strong>RX host window</strong>
+          <div>
+            <div class="flex-host-track" title="Maximum receive-call duration; not radio airtime">
+              <div class="flex-host-fill" style="width:${rxSliceWidth}%"></div>
+            </div>
+            <div class="flex-host-measure" style="width:${rxSliceWidth || 100}%">
+              <div class="flex-dimension-line"></div>
+              <span class="flex-dimension-label">RX slice = ${esc(rxSlice.text)}</span>
+            </div>
+          </div>
+          <span>${esc(rxSlice.text)}${rxSliceSlots > 0 ? ` · ${fmtFixed(rxSliceSlots, 2)} slot${rxSliceSlots === 1 ? "" : "s"} max` : ""}</span>
+        </div>
+      </div>
+    </div>
+    <div class="flex-timing-detail-grid">
+      <table class="flex-timing-table">
+        <thead><tr><th>Interval</th><th>Start ms</th><th>End ms</th><th>Budget</th><th>Radio action</th></tr></thead>
+        <tbody>${detailRows}</tbody>
+      </table>
+      <div class="flex-packet-flow">
+        <div class="flex-packet-row">
+          <b>REQ · A${esc(selectedInitiator)} → ${esc(selectedResponders.map(id => `A${id}`).join(", "))}</b>
+          <code>header(type, source, seq) | slot32 | destination_count=${K} | responders[${K}] | processing_dtu=0 | previous_twr(responder, distance_mm, slot16)</code>
+        </div>
+        ${responseFlow}
+        <div class="flex-packet-row">
+          <b>Passive tag</b>
+          <code>RX timestamps REQ and every RESP; emits no UWB packet.</code>
+        </div>
+      </div>
+    </div>
+    <div class="flex-parameter-map">
+      <div class="flex-timing-label">
+        <strong>Live runtime parameter map</strong>
+        <span>Values read from all fresh modules; “mixed” is reported explicitly.</span>
+      </div>
+      <table class="flex-parameter-table">
+        <thead><tr><th>Scope</th><th>Parameter and live value</th><th>Where it acts</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="flex-scope fixed">FlexTDOA radio</span></td>
+            <td>Compact CI-CR timing · ${fmtFixed(slotUs / 1000, 3)} ms/slot</td>
+            <td>Defines the colored REQ, P_REQ, RESP, P_RESP and guard widths. The active FlexTDOA frame profile writes these values to every ESP and persists them in NVS.</td>
+          </tr>
+          <tr>
+            <td><span class="flex-scope host">FlexTDOA host</span></td>
+            <td>RX slice · ${esc(rxSlice.text)}</td>
+            <td>Maximum duration of one software receive call, shown by the outlined bar above. It is not airtime; an anchor schedule alarm can end it early.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="flex-timing-note">The cyclic view starts at REQ. Colored widths are protocol time budgets, not packet airtime: REQ and each RESP transmit at their subslot boundary. The final ${timing.guardUs} us GAP is the configured guard interval inside every slot; pure FlexTDOA has no separate frame-level round gap. P_RESP is K × ${timing.responseProcessUs} us. Response offsets are native DW3000 delayed-TX targets relative to REQ_RX.</div>`;
+}
+
+function profileSummaryText(values, solver, anchorCount = 4) {
+  if (solver === "flextdoa") {
+    const slotMs = profileFlexTdoaSlotMs(anchorCount);
+    const flexFrameMs = anchorCount * slotMs;
+    return `fresh ${fmtFixed(values.positionMaxAgeSec, 1)} s · fixed ${fmtFixed(slotMs, 2)} ms radio slot · ${fmtFixed(flexFrameMs, 2)} ms frame · RX slice ${fmtFixed(values.rxSliceMs, 0)} ms`;
+  }
+  const dsCycleMs = anchorCount * values.slotMs + values.roundGapMs;
   const warnings = [];
   if (values.timeoutMs >= values.slotMs) warnings.push("timeout >= slot");
-  if (values.rxSliceMs > values.slotMs) warnings.push("RX slice > slot");
-  if (marginMs < 5) warnings.push("low slot margin");
+  if (values.dsRxSliceMs > values.slotMs) warnings.push("RX slice > slot");
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `4 anchors: ~${fmtFixed(roundMs, 0)} ms/round · Flex response window ${fmtFixed(flexResponseWindowMs, 0)} ms · classic DS-TWR ${fmtFixed(classicProgrammedMs, 0)} ms · margin ${fmtFixed(marginMs, 0)} ms${warnText}`;
+  return `fresh ${fmtFixed(values.dsPositionMaxAgeSec, 1)} s · ${fmtFixed(values.slotMs, 0)} ms slot · ${fmtFixed(values.roundGapMs, 0)} ms gap · RX slice ${fmtFixed(values.dsRxSliceMs, 0)} ms · ~${fmtFixed(dsCycleMs, 0)} ms cycle${warnText}`;
+}
+
+function profileFlexTdoaSlotMs(anchorCount = 4) {
+  const responderCount = Math.max(1, anchorCount - 1);
+  const timing = flexTimingRuntimeConfig().timing;
+  return (
+    timing.guardUs + timing.requestUs + timing.requestProcessUs +
+    responderCount * timing.responseUs +
+    responderCount * timing.responseProcessUs
+  ) / 1000;
 }
 
 function updateRangingProfileSummary(profileKey) {
@@ -6780,10 +9013,21 @@ function updateRangingProfileSummary(profileKey) {
   if (!profile) return;
   const summary = document.getElementById(`${profile.prefix}Summary`);
   if (!summary) return;
+  const solver = rangingSettingsSolver();
   const values = readRangingProfile(profileKey);
-  const valid = Object.values(values).every(value => Number.isFinite(value));
-  summary.textContent = valid ? profileSummaryText(values) : "incomplete profile";
-  summary.className = `profile-summary ${valid && values.slotMs - (3 * values.commandDelayMs) < 5 ? "warn" : ""}`.trim();
+  const description = document.getElementById(`${profile.prefix}Description`);
+  if (description && solver !== "hybrid") {
+    description.textContent = rangingProfileDescription(values, solver);
+  }
+  const visibleFields = rangingProtocolProfileFields[solver];
+  const valid = [...visibleFields].every(key => Number.isFinite(values[key]));
+  summary.textContent = valid
+    ? `${positionSolverLabel(solver)} · ${profileSummaryText(values, solver, 4)}`
+    : "incomplete profile";
+  const warn = solver === "ranging" && (
+    values.timeoutMs >= values.slotMs || values.dsRxSliceMs > values.slotMs
+  );
+  summary.className = `profile-summary ${valid && warn ? "warn" : ""}`.trim();
 }
 
 function updateAllRangingProfileSummaries() {
@@ -6793,18 +9037,22 @@ function updateAllRangingProfileSummaries() {
 async function applyRangingProfile(profileKey) {
   const profile = rangingProfileDefaults[profileKey];
   if (!profile) return;
+  const solver = rangingSettingsSolver();
+  if (solver === "hybrid") return;
   const values = readRangingProfile(profileKey);
-  if (!Object.values(values).every(value => Number.isFinite(value) && value > 0)) {
+  const visibleFields = rangingProtocolProfileFields[solver];
+  if (![...visibleFields].every(key => Number.isFinite(values[key]) && values[key] > 0)) {
     setToast("rangingProfileToast", "Profile has invalid values", "bad");
     return;
   }
-  setToast("rangingProfileToast", `applying ${profile.label}...`, "", null, false);
+  setToast("rangingProfileToast", `applying ${profile.label} to ${positionSolverLabel(solver)}...`, "", null, false);
   const data = await postConfig({
     target_modules: document.getElementById("rangingProfileTargets").value,
-    params: rangingProfileRuntimeParams(values),
+    params: rangingProfileRuntimeParams(values, solver),
   }, "rangingProfileToast");
   if (apiResponseOk(data)) {
-    mirrorRangingProfileToUwbFields(values);
+    mirrorRangingProfileToUwbFields(values, solver);
+    applyRangingProfilePositionSettings(values, solver);
     setTimeout(fetchSnapshot, 500);
   }
 }
@@ -6815,8 +9063,10 @@ function persistedSettingIds() {
     "runtimeUwb", "runtimeBno085", "runtimeGps", "runtimeTelemetryPort",
     "accelTimebase", "accelSampleHz", "accelTargets",
     "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
-    "positionMaxAgeSec",
-    "uwbTargets", "uwbRadioChannel", "uwbSurveyRxMs", "uwbSurveyDelayMs", "uwbSurveySlotMs",
+    "positionMaxAgeSec", "positionReferenceMode", "positionReferenceX",
+    "positionReferenceY", "positionErrorWindowSec",
+    "uwbTargets", "uwbRadioChannel", "uwbFlexAnchors", "uwbFlexK",
+    "uwbFlexSlots", "uwbFlexMasks", "uwbSurveyRxMs", "uwbSurveyDelayMs", "uwbSurveySlotMs",
     "uwbSurveyGapMs", "uwbSurveyLogEvery", "uwbRangingSlotMs",
     "uwbRangingGapMs", "uwbRangingRxMs", "uwbDtInitiator", "uwbDtResponder",
     "uwbDtIntervalMs", "uwbDtRxTimeoutMs", "uwbDtRespDelayMs",
@@ -6854,8 +9104,28 @@ function restoreSettings() {
       el.value = saved;
     }
   }
+  migrateRangingProfileDefaults();
+  migrateFlexProfileDefaults();
   migrateCalibrationPairSetting();
   migratePositionSolverSetting();
+}
+
+function migrateRangingProfileDefaults() {
+  const key = "uwbDash.rangingProfileDefaultsVersion";
+  if (localStorage.getItem(key) === rangingProfileDefaultsVersion) return;
+  for (const profile of Object.keys(rangingProfileDefaults)) {
+    writeRangingProfile(profile, rangingProfileDefaults[profile]);
+  }
+  localStorage.setItem(key, rangingProfileDefaultsVersion);
+}
+
+function migrateFlexProfileDefaults() {
+  const key = "uwbDash.flexProfileDefaultsVersion";
+  if (localStorage.getItem(key) === flexProfileDefaultsVersion) return;
+  for (const profile of Object.keys(flexProfileDefaults)) {
+    writeFlexProfile(profile, flexProfileDefaults[profile]);
+  }
+  localStorage.setItem(key, flexProfileDefaultsVersion);
 }
 
 function migrateCalibrationPairSetting() {
@@ -6876,15 +9146,19 @@ function migrateCalibrationPairSetting() {
 
 function migratePositionSolverSetting() {
   const legacyCoordsKey = settingKey("positionAnchorCoords");
-  if (localStorage.getItem(legacyCoordsKey) === null) return;
-  localStorage.removeItem(legacyCoordsKey);
+  if (localStorage.getItem(legacyCoordsKey) !== null) {
+    localStorage.removeItem(legacyCoordsKey);
+  }
 
   const solverKey = settingKey("positionSolver");
   const solverEl = document.getElementById("positionSolver");
   const savedSolver = localStorage.getItem(solverKey);
-  if (savedSolver === null || savedSolver === "ranging") {
-    if (solverEl) solverEl.value = "tdoa";
-    localStorage.setItem(solverKey, "tdoa");
+  if (savedSolver === null || savedSolver === "tdoa") {
+    if (solverEl) solverEl.value = "flextdoa";
+    localStorage.setItem(solverKey, "flextdoa");
+  } else if (solverEl) {
+    solverEl.value = normalizePositionSolver(savedSolver);
+    localStorage.setItem(solverKey, solverEl.value);
   }
 }
 
@@ -6927,7 +9201,7 @@ async function enablePositionRanging() {
     return;
   }
   const anchors = settings.anchorIds.join(",");
-  const mode = settings.solver === "tdoa" ? "flex_tdoa" : "ranging";
+  const mode = positionRuntimeModeForSolver(settings.solver);
   const params = {
     mode,
     tag: String(tagId),
@@ -6947,8 +9221,83 @@ async function enablePositionRanging() {
   if (runtimeReboot) runtimeReboot.value = "1";
   await postConfig({target_modules: "all", params}, "positionToast");
   state.positionTrail = {};
+  state.positionTrailTokens = {};
   state.positionAnchorTrail = {};
+  state.positionSeeds = {};
   setTimeout(fetchSnapshot, 1500);
+}
+
+function runPositionOverlayAction(event) {
+  const action = event.currentTarget?.dataset?.action || "enable";
+  if (action === "fix") {
+    fixCurrentAnchorGeometry();
+  } else if (action === "restart_geometry") {
+    restartAnchorSelfLocalization();
+  } else if (action === "enable") {
+    enablePositionRanging();
+  }
+}
+
+async function restartAnchorSelfLocalization() {
+    const settings = positionSettings();
+    const result = await postConfig({
+      target_modules: "all",
+      params: {flex_geometry_clear: "1"},
+    }, "positionToast");
+    if (!apiResponseOk(result)) return;
+    resetPaperAnchorSelfLocalization(settings.anchorIds, true);
+    state.positionTrail = {};
+    state.positionTrailTokens = {};
+    setToast("positionToast", "Paper TWR-EKF anchor self-localization restarted on all modules", "good");
+    renderPosition();
+}
+
+async function fixCurrentAnchorGeometry() {
+  const settings = positionSettings();
+  const session = state.positionGeometry;
+  if (session.key !== positionGeometryKey(settings.anchorIds)) {
+    setToast("positionToast", "Anchor geometry does not match the selected IDs", "bad");
+    return;
+  }
+  const existingFixed = session.fixed;
+  if (!existingFixed && (!session.ekf || session.ekf.updates < 1)) {
+    setToast("positionToast", "Anchor EKF has no complete update yet", "bad");
+    return;
+  }
+  const geometry = paperAnchorGeometry(
+    settings.anchorIds, positionGeometryMaxAge(settings));
+  if (!existingFixed && !geometry.canFix) {
+    const rmsText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
+      ? `: ${fmtPositionCm(geometry.fitQuality.rmsM, 1)} RMS`
+      : "";
+    setToast("positionToast", `Anchor geometry fit is not acceptable${rmsText}`, "bad");
+    renderPosition();
+    return;
+  }
+  const anchors = cloneAnchorCoordinates(
+    existingFixed?.anchors || geometry.anchors);
+  const fixed = existingFixed || {
+    anchorIds: settings.anchorIds.map(Number),
+    anchors: cloneAnchorCoordinates(anchors),
+    fixedAt: Date.now() / 1000,
+    updates: session.ekf.updates,
+  };
+  const geometryText = settings.anchorIds.map(id => {
+    const point = anchors[id];
+    return `${id}:${Math.round(point.x * 1000)}:${Math.round(point.y * 1000)}`;
+  }).join(",");
+  const result = await postConfig({
+    target_modules: "all",
+    params: {flex_geometry: geometryText},
+  }, "positionToast");
+  if (!apiResponseOk(result)) return;
+  session.fixed = fixed;
+  localStorage.setItem(positionGeometryStorageKey(settings.anchorIds), JSON.stringify(fixed));
+  state.positionSeeds = {};
+  state.positionTrail = {};
+  state.positionTrailTokens = {};
+  setToast("positionToast", "Anchor geometry fixed and persisted on all modules", "good");
+  renderPosition();
 }
 
 function wireSettings() {
@@ -6959,6 +9308,17 @@ function wireSettings() {
   wirePdDirtyTracking();
   updateChargerRawVisibility();
   updatePdRawVisibility();
+  const flexTimingSlotSelect = document.getElementById("flexTimingSlotSelect");
+  if (flexTimingSlotSelect) {
+    flexTimingSlotSelect.addEventListener("change", () => {
+      state.flexTimingSlotIndex = Number(flexTimingSlotSelect.value || 0);
+      localStorage.setItem(
+        settingKey("flexTimingSlotSelect"),
+        String(state.flexTimingSlotIndex)
+      );
+      renderFlexTdoaTimingDiagram();
+    });
+  }
   const chargerShowRawTools = document.getElementById("chargerShowRawTools");
   if (chargerShowRawTools) {
     chargerShowRawTools.addEventListener("change", updateChargerRawVisibility);
@@ -6975,18 +9335,39 @@ function wireSettings() {
       renderAccelGraphs();
     });
   }
-  ["positionAnchorCount", "positionSolver", "positionAnchors", "positionTags", "positionMaxAgeSec"].forEach(id => {
+  [
+    "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
+    "positionMaxAgeSec", "positionReferenceMode", "positionReferenceX",
+    "positionReferenceY", "positionErrorWindowSec",
+  ].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
-    el.addEventListener("input", renderPosition);
-    el.addEventListener("change", renderPosition);
+    el.addEventListener("input", () => {
+      renderPosition();
+      if (id === "positionSolver") updateRangingSettingsProtocol();
+    });
+    el.addEventListener("change", () => {
+      renderPosition();
+      if (id === "positionSolver") updateRangingSettingsProtocol();
+    });
   });
+  const updatePositionReferenceControls = () => {
+    const manual = document.getElementById("positionReferenceMode")?.value === "manual";
+    document.getElementById("positionReferenceX").disabled = !manual;
+    document.getElementById("positionReferenceY").disabled = !manual;
+  };
+  document.getElementById("positionReferenceMode")?.addEventListener(
+    "change", updatePositionReferenceControls);
+  updatePositionReferenceControls();
   document.getElementById("positionResetTrail").addEventListener("click", () => {
     state.positionTrail = {};
+    state.positionTrailTokens = {};
     state.positionAnchorTrail = {};
     renderPosition();
   });
-  document.getElementById("positionEnableRanging").addEventListener("click", enablePositionRanging);
+  document.getElementById("positionRestartAnchorSelfLocalization").addEventListener("click", restartAnchorSelfLocalization);
+  document.getElementById("positionFixAnchorGeometry").addEventListener("click", fixCurrentAnchorGeometry);
+  document.getElementById("positionEnableRanging").addEventListener("click", runPositionOverlayAction);
   document.getElementById("positionEnableRangingSide").addEventListener("click", enablePositionRanging);
   document.querySelectorAll(".cm-input").forEach(el => {
     el.addEventListener("change", () => {
@@ -7020,7 +9401,7 @@ function wireSettings() {
       }
     }, "telemetryPortToast");
   });
-  document.querySelectorAll(".profile-card input").forEach(el => {
+  document.querySelectorAll(".profile-card[data-profile] input").forEach(el => {
     el.addEventListener("input", () => {
       const profile = el.closest(".profile-card")?.dataset.profile;
       if (profile) updateRangingProfileSummary(profile);
@@ -7046,7 +9427,33 @@ function wireSettings() {
     }
     setToast("rangingProfileToast", "all profile defaults restored locally; press Apply to write ESP NVS", "");
   });
+  document.querySelectorAll(".flex-profile-card input").forEach(el => {
+    const update = () => {
+      const profile = el.closest(".flex-profile-card")?.dataset.flexProfile;
+      if (profile) updateFlexProfileSummary(profile);
+    };
+    el.addEventListener("input", update);
+    el.addEventListener("change", update);
+  });
+  document.querySelectorAll(".apply-flex-profile").forEach(button => {
+    button.addEventListener("click", () => applyFlexProfile(button.dataset.flexProfile));
+  });
+  document.querySelectorAll(".reset-flex-profile").forEach(button => {
+    button.addEventListener("click", () => {
+      const profile = button.dataset.flexProfile;
+      writeFlexProfile(profile, flexProfileDefaults[profile]);
+      setToast("flexProfileToast", "profile defaults restored locally; press Apply to write ESP NVS", "");
+    });
+  });
+  document.getElementById("resetAllFlexProfiles")?.addEventListener("click", () => {
+    for (const profile of Object.keys(flexProfileDefaults)) {
+      writeFlexProfile(profile, flexProfileDefaults[profile]);
+    }
+    setToast("flexProfileToast", "all FlexTDOA defaults restored locally; press Apply to write ESP NVS", "");
+  });
   updateAllRangingProfileSummaries();
+  updateAllFlexProfileSummaries();
+  updateRangingSettingsProtocol();
   document.getElementById("applyCalibrationSettings").addEventListener("click", () => {
     postConfig({
       target_modules: document.getElementById("runtimeTargets").value,
@@ -7062,17 +9469,33 @@ function wireSettings() {
   });
   document.getElementById("applyAccelSample").addEventListener("click", () => {
     const sampleHz = document.getElementById("accelSampleHz").value;
+    const enabled = document.getElementById("accelEnabled");
+    if (enabled.indeterminate) {
+      setToast("accelToast", "Choose enabled or disabled for the mixed target set", "bad");
+      return;
+    }
     postConfig({
       target_modules: document.getElementById("accelTargets").value,
       params: {
+        bno085: enabled.checked ? "1" : "0",
         bno085_sample_hz: sampleHz,
       }
     }, "accelToast");
+  });
+  document.getElementById("accelTargets").addEventListener("change", updateAccelEnabledControl);
+  document.getElementById("accelEnabled").addEventListener("change", event => {
+    event.currentTarget.indeterminate = false;
+    document.getElementById("accelEnabledLabel").textContent =
+      `BNO085 ${event.currentTarget.checked ? "enabled" : "disabled"}`;
   });
   document.getElementById("applyUwbSettings").addEventListener("click", () => {
     postConfig({
       target_modules: document.getElementById("uwbTargets").value,
       params: {
+        anchors: document.getElementById("uwbFlexAnchors").value,
+        flex_k: document.getElementById("uwbFlexK").value,
+        flex_slots: document.getElementById("uwbFlexSlots").value,
+        flex_masks: document.getElementById("uwbFlexMasks").value,
         radio_channel: document.getElementById("uwbRadioChannel").value,
         survey_rx_ms: document.getElementById("uwbSurveyRxMs").value,
         survey_delay_ms: document.getElementById("uwbSurveyDelayMs").value,
@@ -7242,9 +9665,10 @@ setCalibrationResult(loadCalibrationResult());
 fetchLogs();
 fetchAccel();
 fetchSnapshot();
+startPositionStream();
 setInterval(fetchLogs, 250);
 setInterval(fetchAccel, 50);
-setInterval(fetchSnapshot, 1500);
+scheduleSnapshotPoll();
 </script>
 </body>
 </html>
@@ -7253,6 +9677,7 @@ setInterval(fetchSnapshot, 1500);
 
 class HttpHandler(BaseHTTPRequestHandler):
     server: "DashboardHttpServer"
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         if not self.server.quiet:
@@ -7265,6 +9690,9 @@ class HttpHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/snapshot":
             self.send_json(self.server.state.snapshot())
+            return
+        if parsed.path == "/api/position-stream":
+            self.handle_position_stream(parsed)
             return
         if parsed.path == "/api/logs":
             query = urllib.parse.parse_qs(parsed.query)
@@ -7284,6 +9712,46 @@ class HttpHandler(BaseHTTPRequestHandler):
             self.send_json(self.server.calibration_job_status(job_id))
             return
         self.send_error(HTTPStatus.NOT_FOUND, "not found")
+
+    def handle_position_stream(self, parsed: urllib.parse.ParseResult) -> None:
+        query = urllib.parse.parse_qs(parsed.query)
+        header_after = self.headers.get("Last-Event-ID", "")
+        after_text = header_after or query.get("after", ["0"])[0] or "0"
+        try:
+            after = max(0, int(after_text))
+        except ValueError:
+            after = 0
+
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            self.wfile.write(b"retry: 500\n\n")
+            self.wfile.flush()
+
+            while True:
+                events = self.server.state.position_events_after(after, 512, 10.0)
+                if not events:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    continue
+                for item in events:
+                    event_id = int(item.get("position_event_id") or 0)
+                    payload = json.dumps(item, separators=(",", ":"))
+                    message = f"id: {event_id}\ndata: {payload}\n\n".encode("utf-8")
+                    self.wfile.write(message)
+                    # A restarted dashboard begins event IDs at 1, while the
+                    # browser may reconnect with a Last-Event-ID from the old
+                    # process. Adopt the current stream cursor so that case
+                    # cannot replay the newest event in a tight loop.
+                    after = event_id
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -8334,7 +10802,6 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 and status.get("target")
                 and bool(status.get("wifi_connected"))
                 and now - float(status.get("status_updated_at") or 0.0) <= max_age_sec
-                and str(status.get("target") or "") not in self.state.status_errors
             }
 
         if not module_ids:
@@ -8360,7 +10827,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
         return targets
 
     def send_runtime_config(self, target: str, params: dict[str, str]) -> dict[str, Any]:
-        query = urllib.parse.urlencode(params, safe=",")
+        query = urllib.parse.urlencode(params, safe=",:")
         request = urllib.request.Request(
             f"{runtime_url(target)}?{query}",
             data=b"",

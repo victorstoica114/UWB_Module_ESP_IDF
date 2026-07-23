@@ -30,10 +30,17 @@ uint32_t wireless_telemetry_service_get_dropped_count(void);
 uint32_t wireless_telemetry_service_get_drop_full_count(void);
 uint32_t wireless_telemetry_service_get_drop_mutex_count(void);
 uint32_t wireless_telemetry_service_get_drop_format_count(void);
+uint32_t wireless_telemetry_service_get_queue_depth(void);
 uint32_t wireless_telemetry_service_get_queue_high_water(void);
 uint32_t wireless_telemetry_service_get_binary_frame_count(void);
 uint32_t wireless_telemetry_service_get_binary_sample_count(void);
 uint32_t wireless_telemetry_service_get_text_frame_count(void);
+uint32_t wireless_telemetry_service_get_connect_count(void);
+uint32_t wireless_telemetry_service_get_send_failure_count(void);
+uint32_t wireless_telemetry_service_get_send_timeout_count(void);
+uint32_t wireless_telemetry_service_get_socket_close_count(void);
+uint32_t wireless_telemetry_service_get_last_send_ms(void);
+uint32_t wireless_telemetry_service_get_max_send_ms(void);
 int wireless_telemetry_service_get_last_error(void);
 bool wireless_telemetry_service_submit(const char *topic, const char *format,
                                        ...)
@@ -41,6 +48,17 @@ bool wireless_telemetry_service_submit(const char *topic, const char *format,
 bool wireless_telemetry_service_submit_bno085_accel(
     int32_t x_milli_mps2, int32_t y_milli_mps2, int32_t z_milli_mps2,
     uint8_t accuracy, uint32_t report_count);
+bool wireless_telemetry_service_submit_flex_tdoa_observation(
+    uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
+    uint8_t responder_index, uint16_t sequence, uint32_t slot_id,
+    int32_t diff_mm, int32_t raw_diff_mm, int32_t anchor_distance_mm);
+bool wireless_telemetry_service_submit_flex_anchor_range(
+    uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
+    uint32_t slot_id, int32_t distance_mm, int32_t raw_distance_mm);
+bool wireless_telemetry_service_submit_flex_position(
+    uint8_t tag_id, uint32_t slot_id, int32_t x_mm, int32_t y_mm,
+    int32_t sigma_mm, int32_t rms_mm, uint16_t observation_count,
+    uint8_t anchor_count, uint32_t geometry_version);
 
 #ifdef __cplusplus
 }

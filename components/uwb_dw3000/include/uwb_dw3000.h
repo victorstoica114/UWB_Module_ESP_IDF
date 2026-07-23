@@ -29,6 +29,7 @@ bool uwb_dw3000_is_ready(void);
 enum uwb_dw3000_status uwb_dw3000_get_status(void);
 const char *uwb_dw3000_status_to_string(enum uwb_dw3000_status status);
 uint32_t uwb_dw3000_get_device_id(void);
+uint32_t uwb_dw3000_get_spi_clock_hz(void);
 uint8_t uwb_dw3000_get_source_id(void);
 uint32_t uwb_dw3000_get_tx_count(void);
 uint32_t uwb_dw3000_get_tx_error_count(void);
