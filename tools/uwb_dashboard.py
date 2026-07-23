@@ -1637,14 +1637,22 @@ class StatusPoller(threading.Thread):
         self.stop_event = threading.Event()
 
     def run(self) -> None:
+        if not self.targets:
+            self.stop_event.wait(self.interval)
+            return
+
+        spacing = max(0.05, self.interval / len(self.targets))
+        pending: dict[str, Any] = {}
         with ThreadPoolExecutor(
             max_workers=max(1, len(self.targets)), thread_name_prefix="status"
         ) as executor:
             while not self.stop_event.is_set():
-                futures = [executor.submit(self.poll_target, target) for target in self.targets]
-                for future in futures:
-                    future.result()
-                self.stop_event.wait(self.interval)
+                for target in self.targets:
+                    previous = pending.get(target)
+                    if previous is None or previous.done():
+                        pending[target] = executor.submit(self.poll_target, target)
+                    if self.stop_event.wait(spacing):
+                        return
 
     def poll_target(self, target: str) -> None:
         try:
@@ -6281,7 +6289,26 @@ function renderPositionStreamFrame() {
     renderPosition();
     return;
   }
+  const now = Date.now() / 1000;
+  const needsRecoveryRender = Object.values(state.positionModel.tags || {}).some(tag => {
+    const item = state.tdoa?.local_positions?.[String(tag.tagId)];
+    const livePosition = item &&
+      localPositionAge(item, now) <= state.positionModel.settings.maxAge &&
+      Number.isFinite(Number(item.x_m)) &&
+      Number.isFinite(Number(item.y_m));
+    return livePosition && (
+      !tag.position ||
+      tag.solverSource !== "ESP32 AlgMin" ||
+      !document.getElementById(`positionTagSummary${tag.tagId}`) ||
+      !document.getElementById(`positionAccuracyRow${tag.tagId}`)
+    );
+  });
   applyStreamPositionToModel(state.positionModel);
+  if (needsRecoveryRender) {
+    renderPosition();
+    void fetchSnapshot();
+    return;
+  }
   drawPosition(state.positionModel);
   updatePositionLiveMetrics(state.positionModel);
   const nowMs = performance.now();
@@ -7467,7 +7494,10 @@ async function fetchSnapshot() {
   state.snapshotFetchPending = true;
   try {
     const res = await fetch("/api/snapshot", {cache: "no-store"});
+    if (!res.ok) throw new Error(`snapshot HTTP ${res.status}`);
     renderInfo(await res.json());
+  } catch (error) {
+    console.warn("snapshot refresh failed; retrying", error);
   } finally {
     state.snapshotFetchPending = false;
   }
@@ -7479,8 +7509,11 @@ function snapshotPollDelayMs() {
 
 function scheduleSnapshotPoll() {
   setTimeout(async () => {
-    await fetchSnapshot();
-    scheduleSnapshotPoll();
+    try {
+      await fetchSnapshot();
+    } finally {
+      scheduleSnapshotPoll();
+    }
   }, snapshotPollDelayMs());
 }
 
