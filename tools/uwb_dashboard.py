@@ -2845,7 +2845,7 @@ tr.status-stale td { color: #4f3b1d; }
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
             <div><b>Solver</b><span>FlexTDOA uses passive tag range differences from request/response anchor slots. DS-TWR uses active tag-anchor distances. Legacy hybrid is only for older dual-leg logs.</span></div>
-            <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
+            <div><b>Tags</b><span>Comma separated tag IDs. FlexTDOA tags only listen on UWB, may not also be anchors, and do not consume additional radio slots.</span></div>
             <div><b>Geometry</b><span>Paper-style anchor self-localization uses batched TWR ranges and an EKF. Fix the resulting coordinates once before positioning, and restart self-localization after moving an anchor.</span></div>
             <div><b>Known reference</b><span>Use the anchor centroid while the tag is physically centered. Manual coordinates support other surveyed test points.</span></div>
           </div>
@@ -4794,7 +4794,7 @@ function positionReferenceErrorStats(tagId, position, reference, windowSec) {
 }
 
 function selectedPositionModuleIds(settings = positionSettings()) {
-  const ids = [...settings.tagIds.slice(0, 1), ...settings.anchorIds];
+  const ids = [...settings.tagIds, ...settings.anchorIds];
   return [...new Set(ids)].filter(Boolean);
 }
 
@@ -5618,6 +5618,19 @@ function localPositionAge(item, now = Date.now() / 1000) {
   return Number(item?.age_sec);
 }
 
+function observedFlexTagIds(settings, now = Date.now() / 1000) {
+  if (!positionProtocolUsesTdoa(settings.solver)) return [];
+  const anchorIds = new Set(settings.anchorIds.map(Number));
+  return Object.values(state.tdoa?.local_positions || {})
+    .filter(item =>
+      Number.isFinite(Number(item?.tag_id)) &&
+      !anchorIds.has(Number(item.tag_id)) &&
+      localPositionAge(item, now) <= settings.maxAge)
+    .map(item => Number(item.tag_id))
+    .filter((value, index, values) => values.indexOf(value) === index)
+    .sort((left, right) => left - right);
+}
+
 function computePositionModel() {
   const settings = positionSettings();
   const selectedIds = selectedPositionModuleIds(settings);
@@ -5637,9 +5650,16 @@ function computePositionModel() {
 
   const tags = {};
   const now = Date.now() / 1000;
+  const observedTagIds = observedFlexTagIds(settings, now);
+  const configuredTagIds = settings.tagIds.filter(id => !settings.anchorIds.includes(id));
+  const effectiveTagIds = positionProtocolUsesTdoa(settings.solver)
+    ? [...new Set([...configuredTagIds, ...observedTagIds])]
+    : configuredTagIds;
+  const unexpectedTagIds = observedTagIds.filter(id => !settings.tagIds.includes(id));
+  const missingTagIds = settings.tagIds.filter(id => !observedTagIds.includes(id));
   updatePositionAnchorTrail(anchors, now);
   if (active && geometry.positionReady) {
-    for (const tagId of settings.tagIds) {
+    for (const tagId of effectiveTagIds) {
       const distances = {};
       const distanceItems = {};
       let observations = [];
@@ -5734,7 +5754,18 @@ function computePositionModel() {
 
   state.positionResults = tags;
   const reference = positionKnownReference(settings, anchors);
-  return {settings, active, anchors, tags, geometry, offlineModuleIds, reference};
+  return {
+    settings,
+    active,
+    anchors,
+    tags,
+    geometry,
+    offlineModuleIds,
+    reference,
+    observedTagIds,
+    unexpectedTagIds,
+    missingTagIds,
+  };
 }
 
 function positionBounds(model) {
@@ -5743,7 +5774,8 @@ function positionBounds(model) {
   for (const tag of Object.values(model.tags)) {
     if (tag.position) points.push(tag.position);
   }
-  for (const trail of Object.values(state.positionTrail)) {
+  for (const tagId of Object.keys(model.tags)) {
+    const trail = state.positionTrail[tagId] || [];
     for (const point of trail) points.push(point);
   }
   if (model.reference) points.push(model.reference);
@@ -5908,7 +5940,8 @@ function drawPosition(model) {
     }
   }
 
-  for (const [tagId, trail] of Object.entries(state.positionTrail)) {
+  for (const tagId of Object.keys(model.tags)) {
+    const trail = state.positionTrail[tagId] || [];
     if (trail.length < 2) continue;
     ctx.beginPath();
     ctx.strokeStyle = "rgba(43, 100, 216, 0.72)";
@@ -6065,6 +6098,17 @@ function renderPositionSolverStatus(model) {
     if (Number.isFinite(Number(coherence.frameId))) {
       pills.push(`<span class="position-pill">frame ${esc(coherence.frameId)} · span ${fmtFixed(coherence.spanMs, 1)} ms</span>`);
     }
+  }
+  if (model.unexpectedTagIds?.length || model.missingTagIds?.length) {
+    const requested = settings.tagIds?.length
+      ? settings.tagIds.map(id => `T${id}`).join(",")
+      : "none";
+    const observed = model.observedTagIds?.length
+      ? model.observedTagIds.map(id => `T${id}`).join(",")
+      : "none";
+    pills.push(
+      `<span class="position-pill warn">setup ${esc(requested)} · radio ${esc(observed)}</span>`
+    );
   }
   pills.push(`<span class="position-pill ${model.geometry?.status === "fixed" ? "good" : "warn"}">geometry ${esc(model.geometry?.status || "waiting")}</span>`);
 
@@ -9381,8 +9425,34 @@ function updatePdRawVisibility() {
 async function enablePositionRanging() {
   const settings = positionSettings();
   const tagId = settings.tagIds[0];
-  if (!tagId || settings.anchorIds.length < 3) {
-    setToast("positionToast", "Set one tag ID and at least 3 anchors first.", "bad");
+  if (settings.anchorIds.length !== settings.anchorCount) {
+    setToast(
+      "positionToast",
+      `Set exactly ${settings.anchorCount} unique anchor IDs first.`,
+      "bad"
+    );
+    return;
+  }
+  if (!tagId) {
+    setToast("positionToast", "Set at least one tag ID first.", "bad");
+    return;
+  }
+  const overlappingIds = settings.tagIds.filter(id => settings.anchorIds.includes(id));
+  if (overlappingIds.length) {
+    setToast(
+      "positionToast",
+      `Module${overlappingIds.length === 1 ? "" : "s"} ${overlappingIds.join(", ")} ` +
+      `${overlappingIds.length === 1 ? "is" : "are"} selected as both anchor and tag.`,
+      "bad"
+    );
+    return;
+  }
+  if (!positionProtocolUsesTdoa(settings.solver) && settings.tagIds.length > 1) {
+    setToast(
+      "positionToast",
+      "DS-TWR supports one active tag. Select FlexTDOA for multiple passive tags.",
+      "bad"
+    );
     return;
   }
   const anchors = settings.anchorIds.join(",");

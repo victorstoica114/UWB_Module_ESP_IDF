@@ -1000,6 +1000,17 @@ static uint32_t s_flex_tdoa_request_arm_max_us;
 static int64_t s_last_delayed_command_host_us;
 static uint32_t s_last_delayed_arm_us;
 
+static bool uwb_flex_tdoa_local_is_anchor(void)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    for (size_t i = 0; i < config->anchor_count; ++i) {
+        if (config->anchor_ids[i] == s_source_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void uwb_flex_tdoa_schedule_alarm_callback(void *arg)
 {
     (void)arg;
@@ -3616,7 +3627,7 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             }
             const bool flex_anchor_request =
                 flex_buffered_fast_path && read_err == ESP_OK &&
-                s_source_id != app_runtime_config_get()->tag_id &&
+                uwb_flex_tdoa_local_is_anchor() &&
                 uwb_dw3000_payload_is_distance_frame(frame->payload,
                                                      frame->payload_len) &&
                 frame->payload[5] == UWB_DISTANCE_FRAME_FLEX_TDOA_REQ;
@@ -5445,7 +5456,8 @@ static void uwb_flex_tdoa_accept_piggyback(
     const int32_t stored = uwb_flex_tdoa_store_anchor_distance(
         frame->source_id, previous_responder_id, frame->sequence,
         previous_slot_id, previous_distance_mm, previous_distance_mm);
-    if (stored > 0 && s_source_id == app_runtime_config_get()->tag_id) {
+    if (stored > 0 &&
+        !uwb_anchor_survey_id_in_set(anchor_ids, anchor_count, s_source_id)) {
         (void)flextdoa_solver_service_submit_anchor_range(
             frame->source_id, previous_responder_id, previous_slot_id,
             stored);
@@ -5706,7 +5718,7 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
     memset(s_flex_tdoa_tag_observations, 0,
            sizeof(s_flex_tdoa_tag_observations));
     const app_runtime_config_t *config = app_runtime_config_get();
-    const uint8_t tag_id = config->tag_id;
+    const uint8_t tag_id = s_source_id;
     const esp_err_t solver_err = flextdoa_solver_service_start();
     if (solver_err != ESP_OK) {
         ESP_LOGW(TAG, "FlexTDOA local solver unavailable: %s",
@@ -5714,8 +5726,8 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
     }
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
-             "FlexTDOA radio-passive tag active: source_id=%u tag_id=%u anchors=[%u,%u,%u,%u] rx_slice=%u ms",
-             (unsigned)s_source_id, (unsigned)tag_id, (unsigned)anchor_ids[0],
+             "FlexTDOA radio-passive tag active: tag_id=%u anchors=[%u,%u,%u,%u] rx_slice=%u ms",
+             (unsigned)tag_id, (unsigned)anchor_ids[0],
              (unsigned)anchor_ids[1], (unsigned)anchor_ids[2],
              (unsigned)anchor_ids[3],
              (unsigned)config->anchor_survey_rx_slice_ms);
@@ -6610,37 +6622,14 @@ static void uwb_dw3000_flex_tdoa_loop(void)
         vTaskDelete(NULL);
         return;
     }
-    if (uwb_anchor_survey_id_in_set(anchor_ids, anchor_count, tag_id)) {
-        s_status = UWB_DW3000_STATUS_FAILED;
-        ESP_LOGE(TAG,
-                 "FLEX_TDOA invalid role configuration: tag_id=%u is also in anchor list",
-                 (unsigned)tag_id);
-        vTaskDelete(NULL);
-        return;
-    }
-    if (s_source_id == tag_id) {
-        uwb_flex_tdoa_tag_loop(anchor_ids, anchor_count);
-        return;
-    }
-
     if (uwb_anchor_survey_id_in_set(anchor_ids, anchor_count, s_source_id)) {
         uwb_flex_tdoa_anchor_loop(coordinator_id, anchor_ids, anchor_count);
         return;
     }
 
-    s_status = UWB_DW3000_STATUS_READY;
-    ESP_LOGW(TAG,
-             "FLEX_TDOA idle: source_id=%u is neither tag nor configured anchor",
-             (unsigned)s_source_id);
-    while (true) {
-        struct uwb_distance_frame frame = {0};
-        const esp_err_t err = uwb_distance_receive_next(&frame, 1000U);
-        if (err == ESP_OK) {
-            (void)uwb_flex_tdoa_handle_runtime_config(&frame);
-        } else if (err != ESP_ERR_TIMEOUT) {
-            uwb_dw3000_delay_ms(20);
-        }
-    }
+    // FlexTDOA tags never transmit. Every node outside the anchor set can
+    // listen and solve independently without consuming a radio slot.
+    uwb_flex_tdoa_tag_loop(anchor_ids, anchor_count);
 }
 
 static void uwb_anchor_survey_anchor_loop(uint8_t coordinator_id,

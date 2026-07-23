@@ -345,6 +345,13 @@ The tag does not call any UWB TX function in this mode. It only receives anchor
 frames, records its own RX timestamps, feeds the local AlgMin solver, and sends
 compact binary range-difference and position telemetry to the dashboard.
 
+FlexTDOA roles are derived from the configured anchor list. Every module in
+that list is an anchor; every participating module outside it is a passive tag
+and labels telemetry with its own module ID. This permits multiple passive tags
+without adding radio slots. An ID must never appear in both `Anchor IDs` and
+`Tag IDs`; the dashboard rejects that configuration. For example, with five
+modules, anchors `2,3,4` can be combined with tags `1,5`.
+
 The current firmware is aligned with the FlexTDOA paper at the radio slot level:
 one anchor is the initiator in a slot, it broadcasts one request, and `K`
 responders answer in ordered response subslots. With four configured anchors,
