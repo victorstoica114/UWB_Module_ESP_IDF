@@ -5618,6 +5618,19 @@ function localPositionAge(item, now = Date.now() / 1000) {
   return Number(item?.age_sec);
 }
 
+function observedFlexTagIds(settings, now = Date.now() / 1000) {
+  if (!positionProtocolUsesTdoa(settings.solver)) return [];
+  const anchorIds = new Set(settings.anchorIds.map(Number));
+  return Object.values(state.tdoa?.local_positions || {})
+    .filter(item =>
+      Number.isFinite(Number(item?.tag_id)) &&
+      !anchorIds.has(Number(item.tag_id)) &&
+      localPositionAge(item, now) <= settings.maxAge)
+    .map(item => Number(item.tag_id))
+    .filter((value, index, values) => values.indexOf(value) === index)
+    .sort((left, right) => left - right);
+}
+
 function computePositionModel() {
   const settings = positionSettings();
   const selectedIds = selectedPositionModuleIds(settings);
@@ -5637,9 +5650,16 @@ function computePositionModel() {
 
   const tags = {};
   const now = Date.now() / 1000;
+  const observedTagIds = observedFlexTagIds(settings, now);
+  const configuredTagIds = settings.tagIds.filter(id => !settings.anchorIds.includes(id));
+  const effectiveTagIds = positionProtocolUsesTdoa(settings.solver)
+    ? [...new Set([...configuredTagIds, ...observedTagIds])]
+    : configuredTagIds;
+  const unexpectedTagIds = observedTagIds.filter(id => !settings.tagIds.includes(id));
+  const missingTagIds = settings.tagIds.filter(id => !observedTagIds.includes(id));
   updatePositionAnchorTrail(anchors, now);
   if (active && geometry.positionReady) {
-    for (const tagId of settings.tagIds) {
+    for (const tagId of effectiveTagIds) {
       const distances = {};
       const distanceItems = {};
       let observations = [];
@@ -5734,7 +5754,18 @@ function computePositionModel() {
 
   state.positionResults = tags;
   const reference = positionKnownReference(settings, anchors);
-  return {settings, active, anchors, tags, geometry, offlineModuleIds, reference};
+  return {
+    settings,
+    active,
+    anchors,
+    tags,
+    geometry,
+    offlineModuleIds,
+    reference,
+    observedTagIds,
+    unexpectedTagIds,
+    missingTagIds,
+  };
 }
 
 function positionBounds(model) {
@@ -5743,7 +5774,8 @@ function positionBounds(model) {
   for (const tag of Object.values(model.tags)) {
     if (tag.position) points.push(tag.position);
   }
-  for (const trail of Object.values(state.positionTrail)) {
+  for (const tagId of Object.keys(model.tags)) {
+    const trail = state.positionTrail[tagId] || [];
     for (const point of trail) points.push(point);
   }
   if (model.reference) points.push(model.reference);
@@ -5908,7 +5940,8 @@ function drawPosition(model) {
     }
   }
 
-  for (const [tagId, trail] of Object.entries(state.positionTrail)) {
+  for (const tagId of Object.keys(model.tags)) {
+    const trail = state.positionTrail[tagId] || [];
     if (trail.length < 2) continue;
     ctx.beginPath();
     ctx.strokeStyle = "rgba(43, 100, 216, 0.72)";
@@ -6065,6 +6098,17 @@ function renderPositionSolverStatus(model) {
     if (Number.isFinite(Number(coherence.frameId))) {
       pills.push(`<span class="position-pill">frame ${esc(coherence.frameId)} · span ${fmtFixed(coherence.spanMs, 1)} ms</span>`);
     }
+  }
+  if (model.unexpectedTagIds?.length || model.missingTagIds?.length) {
+    const requested = settings.tagIds?.length
+      ? settings.tagIds.map(id => `T${id}`).join(",")
+      : "none";
+    const observed = model.observedTagIds?.length
+      ? model.observedTagIds.map(id => `T${id}`).join(",")
+      : "none";
+    pills.push(
+      `<span class="position-pill warn">setup ${esc(requested)} · radio ${esc(observed)}</span>`
+    );
   }
   pills.push(`<span class="position-pill ${model.geometry?.status === "fixed" ? "good" : "warn"}">geometry ${esc(model.geometry?.status || "waiting")}</span>`);
 
