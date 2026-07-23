@@ -30,10 +30,17 @@ uint32_t wireless_telemetry_service_get_dropped_count(void);
 uint32_t wireless_telemetry_service_get_drop_full_count(void);
 uint32_t wireless_telemetry_service_get_drop_mutex_count(void);
 uint32_t wireless_telemetry_service_get_drop_format_count(void);
+uint32_t wireless_telemetry_service_get_queue_depth(void);
 uint32_t wireless_telemetry_service_get_queue_high_water(void);
 uint32_t wireless_telemetry_service_get_binary_frame_count(void);
 uint32_t wireless_telemetry_service_get_binary_sample_count(void);
 uint32_t wireless_telemetry_service_get_text_frame_count(void);
+uint32_t wireless_telemetry_service_get_connect_count(void);
+uint32_t wireless_telemetry_service_get_send_failure_count(void);
+uint32_t wireless_telemetry_service_get_send_timeout_count(void);
+uint32_t wireless_telemetry_service_get_socket_close_count(void);
+uint32_t wireless_telemetry_service_get_last_send_ms(void);
+uint32_t wireless_telemetry_service_get_max_send_ms(void);
 int wireless_telemetry_service_get_last_error(void);
 bool wireless_telemetry_service_submit(const char *topic, const char *format,
                                        ...)

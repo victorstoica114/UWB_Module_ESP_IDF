@@ -1224,10 +1224,17 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"wireless_telemetry_drop_full\":%lu,"
         "\"wireless_telemetry_drop_mutex\":%lu,"
         "\"wireless_telemetry_drop_format\":%lu,"
+        "\"wireless_telemetry_queue_depth\":%lu,"
         "\"wireless_telemetry_queue_high_water\":%lu,"
         "\"wireless_telemetry_binary_frames\":%lu,"
         "\"wireless_telemetry_binary_samples\":%lu,"
         "\"wireless_telemetry_text_frames\":%lu,"
+        "\"wireless_telemetry_connect_count\":%lu,"
+        "\"wireless_telemetry_send_failures\":%lu,"
+        "\"wireless_telemetry_send_timeouts\":%lu,"
+        "\"wireless_telemetry_socket_closes\":%lu,"
+        "\"wireless_telemetry_last_send_ms\":%lu,"
+        "\"wireless_telemetry_max_send_ms\":%lu,"
         "\"wireless_telemetry_last_error\":%d"
         "}\n",
         app->project_name, app->version, app->idf_ver,
@@ -1662,10 +1669,17 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)wireless_telemetry_service_get_drop_full_count(),
         (unsigned long)wireless_telemetry_service_get_drop_mutex_count(),
         (unsigned long)wireless_telemetry_service_get_drop_format_count(),
+        (unsigned long)wireless_telemetry_service_get_queue_depth(),
         (unsigned long)wireless_telemetry_service_get_queue_high_water(),
         (unsigned long)wireless_telemetry_service_get_binary_frame_count(),
         (unsigned long)wireless_telemetry_service_get_binary_sample_count(),
         (unsigned long)wireless_telemetry_service_get_text_frame_count(),
+        (unsigned long)wireless_telemetry_service_get_connect_count(),
+        (unsigned long)wireless_telemetry_service_get_send_failure_count(),
+        (unsigned long)wireless_telemetry_service_get_send_timeout_count(),
+        (unsigned long)wireless_telemetry_service_get_socket_close_count(),
+        (unsigned long)wireless_telemetry_service_get_last_send_ms(),
+        (unsigned long)wireless_telemetry_service_get_max_send_ms(),
         wireless_telemetry_service_get_last_error());
 
     if (len < 0 || len >= OTA_SERVICE_STATUS_RESPONSE_SIZE) {

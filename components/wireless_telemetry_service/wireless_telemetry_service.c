@@ -145,6 +145,12 @@ static volatile uint32_t s_ring_high_water;
 static volatile uint32_t s_binary_frame_count;
 static volatile uint32_t s_binary_sample_count;
 static volatile uint32_t s_text_frame_count;
+static volatile uint32_t s_connect_count;
+static volatile uint32_t s_send_failure_count;
+static volatile uint32_t s_send_timeout_count;
+static volatile uint32_t s_socket_close_count;
+static volatile uint32_t s_last_send_ms;
+static volatile uint32_t s_max_send_ms;
 static volatile int s_last_error;
 
 static bool wireless_telemetry_target_configured(void)
@@ -366,6 +372,11 @@ static bool wireless_telemetry_send_all(int sock, const uint8_t *payload,
             if ((xTaskGetTickCount() - start) >=
                 pdMS_TO_TICKS(WIRELESS_TELEMETRY_SEND_TIMEOUT_MS)) {
                 s_last_error = ETIMEDOUT;
+                s_last_send_ms = (uint32_t)(
+                    (xTaskGetTickCount() - start) * portTICK_PERIOD_MS);
+                if (s_last_send_ms > s_max_send_ms) {
+                    s_max_send_ms = s_last_send_ms;
+                }
                 return false;
             }
             vTaskDelay(1);
@@ -373,9 +384,19 @@ static bool wireless_telemetry_send_all(int sock, const uint8_t *payload,
         }
 
         s_last_error = errno;
+        s_last_send_ms = (uint32_t)(
+            (xTaskGetTickCount() - start) * portTICK_PERIOD_MS);
+        if (s_last_send_ms > s_max_send_ms) {
+            s_max_send_ms = s_last_send_ms;
+        }
         return false;
     }
 
+    s_last_send_ms = (uint32_t)(
+        (xTaskGetTickCount() - start) * portTICK_PERIOD_MS);
+    if (s_last_send_ms > s_max_send_ms) {
+        s_max_send_ms = s_last_send_ms;
+    }
     return true;
 }
 
@@ -389,10 +410,16 @@ static bool wireless_telemetry_socket_alive(int sock)
     }
 
     if (received == 0) {
+        s_last_error = 0;
         return false;
     }
 
-    return errno == EWOULDBLOCK || errno == EAGAIN;
+    if (errno == EWOULDBLOCK || errno == EAGAIN) {
+        return true;
+    }
+
+    s_last_error = errno;
+    return false;
 }
 
 static void wireless_telemetry_write_u16_le(uint8_t *dst, uint16_t value)
@@ -781,9 +808,12 @@ static void wireless_telemetry_task(void *arg)
             s_connected = true;
             connected_port = active_port;
             s_status = WIRELESS_TELEMETRY_STATUS_CONNECTED;
-            ESP_LOGI(TAG, "connected target=%s port=%u",
+            s_connect_count++;
+            ESP_LOGI(TAG, "connected target=%s port=%u count=%lu queue=%lu",
                      APP_WIRELESS_TELEMETRY_TARGET,
-                     (unsigned)active_port);
+                     (unsigned)active_port,
+                     (unsigned long)s_connect_count,
+                     (unsigned long)wireless_telemetry_service_get_queue_depth());
         }
 
         size_t batch_len = 0;
@@ -792,6 +822,11 @@ static void wireless_telemetry_task(void *arg)
                                            WIRELESS_TELEMETRY_BATCH_MAX,
                                            &batch_len, &batch_stats)) {
             if (!wireless_telemetry_socket_alive(sock)) {
+                s_socket_close_count++;
+                ESP_LOGW(TAG,
+                         "socket closed while idle err=%d closes=%lu queue=%lu",
+                         s_last_error, (unsigned long)s_socket_close_count,
+                         (unsigned long)wireless_telemetry_service_get_queue_depth());
                 wireless_telemetry_close_socket(&sock);
                 s_status = WIRELESS_TELEMETRY_STATUS_FAILED;
             }
@@ -799,6 +834,17 @@ static void wireless_telemetry_task(void *arg)
         }
 
         if (!wireless_telemetry_send_all(sock, s_batch_buffer, batch_len)) {
+            s_send_failure_count++;
+            if (s_last_error == ETIMEDOUT) {
+                s_send_timeout_count++;
+            }
+            ESP_LOGW(TAG,
+                     "send failed err=%d bytes=%u send_ms=%lu failures=%lu timeouts=%lu queue=%lu",
+                     s_last_error, (unsigned)batch_len,
+                     (unsigned long)s_last_send_ms,
+                     (unsigned long)s_send_failure_count,
+                     (unsigned long)s_send_timeout_count,
+                     (unsigned long)wireless_telemetry_service_get_queue_depth());
             wireless_telemetry_close_socket(&sock);
             connected_port = 0;
             s_status = WIRELESS_TELEMETRY_STATUS_FAILED;
@@ -930,6 +976,15 @@ uint32_t wireless_telemetry_service_get_drop_format_count(void)
     return s_drop_format_count;
 }
 
+uint32_t wireless_telemetry_service_get_queue_depth(void)
+{
+    uint32_t depth;
+    taskENTER_CRITICAL(&s_ring_lock);
+    depth = (uint32_t)s_ring_count;
+    taskEXIT_CRITICAL(&s_ring_lock);
+    return depth;
+}
+
 uint32_t wireless_telemetry_service_get_queue_high_water(void)
 {
     return s_ring_high_water;
@@ -948,6 +1003,36 @@ uint32_t wireless_telemetry_service_get_binary_sample_count(void)
 uint32_t wireless_telemetry_service_get_text_frame_count(void)
 {
     return s_text_frame_count;
+}
+
+uint32_t wireless_telemetry_service_get_connect_count(void)
+{
+    return s_connect_count;
+}
+
+uint32_t wireless_telemetry_service_get_send_failure_count(void)
+{
+    return s_send_failure_count;
+}
+
+uint32_t wireless_telemetry_service_get_send_timeout_count(void)
+{
+    return s_send_timeout_count;
+}
+
+uint32_t wireless_telemetry_service_get_socket_close_count(void)
+{
+    return s_socket_close_count;
+}
+
+uint32_t wireless_telemetry_service_get_last_send_ms(void)
+{
+    return s_last_send_ms;
+}
+
+uint32_t wireless_telemetry_service_get_max_send_ms(void)
+{
+    return s_max_send_ms;
 }
 
 int wireless_telemetry_service_get_last_error(void)
