@@ -2601,6 +2601,26 @@ tr.status-stale td { color: #4f3b1d; }
   color: var(--muted);
   font-size: 12px;
 }
+.position-metric-note {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.position-error-table {
+  table-layout: fixed;
+  font-size: 12px;
+}
+.position-error-table th,
+.position-error-table td {
+  padding: 6px 3px;
+  text-align: right;
+  white-space: nowrap;
+}
+.position-error-table th:first-child,
+.position-error-table td:first-child {
+  text-align: left;
+}
 .position-filter-card {
   border: 1px solid var(--line);
   background: #fff;
@@ -2750,12 +2770,25 @@ tr.status-stale td { color: #4f3b1d; }
             <input id="positionTags" value="1">
             <label for="positionMaxAgeSec">Fresh age s</label>
             <input id="positionMaxAgeSec" value="3" type="number" min="0.2" step="0.1">
+            <label for="positionReferenceMode">Known reference</label>
+            <select id="positionReferenceMode">
+              <option value="centroid" selected>anchor centroid</option>
+              <option value="manual">manual coordinates</option>
+              <option value="none">disabled</option>
+            </select>
+            <label for="positionReferenceX">Reference X m</label>
+            <input id="positionReferenceX" value="1.50" type="number" step="0.001">
+            <label for="positionReferenceY">Reference Y m</label>
+            <input id="positionReferenceY" value="1.50" type="number" step="0.001">
+            <label for="positionErrorWindowSec">Error window s</label>
+            <input id="positionErrorWindowSec" value="30" type="number" min="1" max="120" step="1">
           </div>
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
             <div><b>Solver</b><span>FlexTDOA uses passive tag range differences from request/response anchor slots. DS-TWR uses active tag-anchor distances. Legacy hybrid is only for older dual-leg logs.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
             <div><b>Geometry</b><span>Paper-style anchor self-localization uses batched TWR ranges and an EKF. Fix the resulting coordinates once before positioning, and restart self-localization after moving an anchor.</span></div>
+            <div><b>Known reference</b><span>Use the anchor centroid while the tag is physically centered. Manual coordinates support other surveyed test points.</span></div>
           </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
@@ -2774,11 +2807,17 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div class="section">
             <h2>Live Position</h2>
-            <div class="position-legend"><span style="color:#d7352a">tag</span><span style="color:#2b64d8">trail</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
+            <div class="position-legend"><span style="color:#d7352a">tag</span><span style="color:#2b64d8">trail</span><span style="color:#6d4c9f">known reference</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
             <div id="positionReadout" class="position-readout"></div>
             <table>
-              <thead><tr><th>Tag</th><th>est. 1σ</th><th>RMS</th><th>max</th></tr></thead>
+              <thead><tr><th>Tag</th><th>solver σaxis</th><th>TDOA RMS</th><th>TDOA max</th></tr></thead>
               <tbody id="positionAccuracyRows"></tbody>
+            </table>
+            <p class="position-metric-note">Solver diagnostics come from equation residuals. They are not measured position error.</p>
+            <div id="positionReferenceStatus" class="muted" style="margin:12px 0 5px;">Known position reference disabled.</div>
+            <table class="position-error-table">
+              <thead><tr><th>Tag</th><th>now</th><th>bias</th><th>RMSE</th><th>P95</th><th>max</th></tr></thead>
+              <tbody id="positionErrorRows"></tbody>
             </table>
           </div>
           <div class="section">
@@ -4587,12 +4626,83 @@ function positionSettings() {
   const anchorIds = parseIdList(document.getElementById("positionAnchors")?.value, anchorCount);
   const tagIds = parseIdList(document.getElementById("positionTags")?.value);
   const maxAge = Math.max(0.2, Number(document.getElementById("positionMaxAgeSec")?.value || 3));
+  const referenceMode = String(document.getElementById("positionReferenceMode")?.value || "none");
+  const referenceX = Number(document.getElementById("positionReferenceX")?.value);
+  const referenceY = Number(document.getElementById("positionReferenceY")?.value);
+  const errorWindowSec = Math.max(
+    1, Math.min(120, Number(document.getElementById("positionErrorWindowSec")?.value || 30)));
   return {
     anchorCount,
     solver,
     anchorIds,
     tagIds,
     maxAge,
+    referenceMode,
+    referenceX,
+    referenceY,
+    errorWindowSec,
+  };
+}
+
+function positionKnownReference(settings, anchors) {
+  if (settings.referenceMode === "centroid") {
+    const points = settings.anchorIds.map(id => anchors[id]).filter(Boolean);
+    if (points.length !== settings.anchorIds.length || !points.length) return null;
+    return {
+      x: points.reduce((sum, point) => sum + Number(point.x), 0) / points.length,
+      y: points.reduce((sum, point) => sum + Number(point.y), 0) / points.length,
+      label: "anchor centroid",
+    };
+  }
+  if (settings.referenceMode === "manual" &&
+      Number.isFinite(settings.referenceX) && Number.isFinite(settings.referenceY)) {
+    return {x: settings.referenceX, y: settings.referenceY, label: "manual"};
+  }
+  return null;
+}
+
+function percentile(values, fraction) {
+  if (!values.length) return NaN;
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = (sorted.length - 1) * fraction;
+  const lower = Math.floor(index);
+  const upper = Math.min(sorted.length - 1, lower + 1);
+  const blend = index - lower;
+  return sorted[lower] * (1 - blend) + sorted[upper] * blend;
+}
+
+function positionReferenceErrorStats(tagId, position, reference, windowSec) {
+  if (!position || !reference) return null;
+  const now = Date.now() / 1000;
+  const samples = (state.positionTrail[String(tagId)] || []).filter(point =>
+    Number.isFinite(Number(point.x)) &&
+    Number.isFinite(Number(point.y)) &&
+    now - Number(point.t) <= windowSec);
+  const currentErrorM = Math.hypot(
+    Number(position.x) - reference.x, Number(position.y) - reference.y);
+  if (!samples.length) {
+    return {
+      count: 1,
+      spanSec: 0,
+      currentErrorM,
+      biasM: currentErrorM,
+      rmseM: currentErrorM,
+      p95M: currentErrorM,
+      maxM: currentErrorM,
+    };
+  }
+  const errors = samples.map(point =>
+    Math.hypot(Number(point.x) - reference.x, Number(point.y) - reference.y));
+  const meanX = samples.reduce((sum, point) => sum + Number(point.x), 0) / samples.length;
+  const meanY = samples.reduce((sum, point) => sum + Number(point.y), 0) / samples.length;
+  return {
+    count: samples.length,
+    spanSec: Math.max(0, Number(samples[samples.length - 1].t) - Number(samples[0].t)),
+    currentErrorM,
+    biasM: Math.hypot(meanX - reference.x, meanY - reference.y),
+    rmseM: Math.sqrt(errors.reduce((sum, value) => sum + value * value, 0) / errors.length),
+    p95M: percentile(errors, 0.95),
+    maxM: Math.max(...errors),
   };
 }
 
@@ -5395,7 +5505,7 @@ function updatePositionAnchorTrail(anchors, now) {
   }
 }
 
-function recordPositionTrailPoint(tagId, position, receivedAt, token) {
+function recordPositionTrailPoint(tagId, position, receivedAt, token, metrics = null) {
   if (!position || !Number.isFinite(Number(position.x)) || !Number.isFinite(Number(position.y))) return;
   const key = String(tagId);
   const pointToken = String(token ?? `${receivedAt}:${position.x}:${position.y}`);
@@ -5403,10 +5513,16 @@ function recordPositionTrailPoint(tagId, position, receivedAt, token) {
   state.positionTrailTokens[key] = pointToken;
   const timestamp = Number.isFinite(Number(receivedAt)) ? Number(receivedAt) : Date.now() / 1000;
   const trail = state.positionTrail[key] || [];
-  trail.push({x: Number(position.x), y: Number(position.y), t: timestamp});
+  trail.push({
+    x: Number(position.x),
+    y: Number(position.y),
+    t: timestamp,
+    sigma_m: Number(metrics?.sigma_m),
+    rms_m: Number(metrics?.rms_m),
+  });
   state.positionTrail[key] = trail
     .filter(point => timestamp - point.t <= 120)
-    .slice(-2400);
+    .slice(-12000);
 }
 
 function localPositionAge(item, now = Date.now() / 1000) {
@@ -5482,9 +5598,11 @@ function computePositionModel() {
             y: Number(localPosition.y_m),
           };
           accuracy = {
-            ...(accuracy || {}),
+            count: Number(localPosition.observation_count),
             sigma_major_m: Number(localPosition.sigma_m),
             rms_m: Number(localPosition.rms_m),
+            max_abs_m: NaN,
+            gdop: NaN,
           };
         }
         if (position) state.positionSeeds[seedKey] = {x: position.x, y: position.y};
@@ -5520,14 +5638,16 @@ function computePositionModel() {
           tagId,
           position,
           localPosition?.received_at || now,
-          localPosition?.position_event_id ?? localPosition?.slot_id ?? `pc:${now}`
+          localPosition?.position_event_id ?? localPosition?.slot_id ?? `pc:${now}`,
+          localPosition
         );
       }
     }
   }
 
   state.positionResults = tags;
-  return {settings, active, anchors, tags, geometry, offlineModuleIds};
+  const reference = positionKnownReference(settings, anchors);
+  return {settings, active, anchors, tags, geometry, offlineModuleIds, reference};
 }
 
 function positionBounds(model) {
@@ -5539,6 +5659,7 @@ function positionBounds(model) {
   for (const trail of Object.values(state.positionTrail)) {
     for (const point of trail) points.push(point);
   }
+  if (model.reference) points.push(model.reference);
   if (!points.length) {
     points.push({x: 0, y: 0}, {x: 2, y: 2});
   }
@@ -5648,6 +5769,27 @@ function drawPosition(model) {
   const tx = positionTransform(model, width, height);
   drawPositionGrid(ctx, tx, width, height);
 
+  if (model.reference) {
+    const x = tx.x(model.reference.x);
+    const y = tx.y(model.reference.y);
+    ctx.save();
+    ctx.strokeStyle = "#6d4c9f";
+    ctx.fillStyle = "#6d4c9f";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.arc(x, y, 9, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(x - 6, y);
+    ctx.lineTo(x + 6, y);
+    ctx.moveTo(x, y - 6);
+    ctx.lineTo(x, y + 6);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   ctx.strokeStyle = "#98a2b3";
   ctx.lineWidth = 2;
   const anchorIds = model.settings.anchorIds.filter(id => model.anchors[id]);
@@ -5695,6 +5837,21 @@ function drawPosition(model) {
       else ctx.lineTo(x, y);
     });
     ctx.stroke();
+  }
+
+  if (model.reference) {
+    for (const tag of Object.values(model.tags)) {
+      if (!tag.position) continue;
+      ctx.save();
+      ctx.strokeStyle = "rgba(109, 76, 159, 0.68)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(tx.x(model.reference.x), tx.y(model.reference.y));
+      ctx.lineTo(tx.x(tag.position.x), tx.y(tag.position.y));
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   drawAnchorStabilityRings(ctx, tx, anchorIds, model.anchors);
@@ -5837,6 +5994,8 @@ function renderPositionSolverStatus(model) {
 function renderPositionReadout(model) {
   const readout = document.getElementById("positionReadout");
   const accuracyRows = document.getElementById("positionAccuracyRows");
+  const referenceStatus = document.getElementById("positionReferenceStatus");
+  const errorRows = document.getElementById("positionErrorRows");
   const rows = document.getElementById("positionDistanceRows");
   const head = document.getElementById("positionMeasurementHead");
   const title = document.getElementById("positionMeasurementTitle");
@@ -5865,6 +6024,10 @@ function renderPositionReadout(model) {
     }
     readout.innerHTML = `${renderPositionSolverStatus(model)}<div class="position-tag-card"><b>${esc(solverName)} inactive</b><span>No stored position is shown while the selected modules are not in the selected runtime.</span></div>`;
     accuracyRows.innerHTML = "";
+    referenceStatus.textContent = model.reference
+      ? `${model.reference.label}: x=${fmtFixed(model.reference.x, 3)} m, y=${fmtFixed(model.reference.y, 3)} m`
+      : "Known position reference disabled.";
+    errorRows.innerHTML = `<tr><td colspan="6"><span class="muted">position runtime inactive</span></td></tr>`;
     title.textContent = positionProtocolUsesTdoa(model.settings.solver) ? "TDOA Observations" : "Distances";
     rows.innerHTML = "";
     return;
@@ -5923,11 +6086,19 @@ function renderPositionReadout(model) {
       return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}</b><span>${freshCount}/${total} fresh ${usesTdoa ? "TDOA observations" : "distances"}</span></div>`;
     }
     const sigma = tag.accuracy?.sigma_major_m;
-    const accuracyText = Number.isFinite(Number(sigma)) ? ` · est. ${fmtPositionSigma(sigma, 1)}` : "";
-    const countText = usesTdoa
+    const accuracyText = Number.isFinite(Number(sigma)) ? ` · solver σaxis ${fmtPositionSigma(sigma, 1)}` : "";
+    const referenceStats = positionReferenceErrorStats(
+      tag.tagId, tag.position, model.reference, model.settings.errorWindowSec);
+    const referenceText = referenceStats
+      ? ` · actual ${fmtPositionCm(referenceStats.currentErrorM, 1)}`
+      : "";
+    const countText = tag.solverSource === "ESP32 AlgMin" &&
+      Number.isFinite(Number(tag.accuracy?.count))
+      ? `${tag.accuracy.count} raw obs`
+      : usesTdoa
       ? `${fitCount}/${total} fit · ${freshCount} fresh`
       : `${fitCount}/${total} fresh distances`;
-    return `<div class="position-tag-card"><b id="positionTagSummary${esc(tag.tagId)}">Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span id="positionTagMeta${esc(tag.tagId)}">${countText}${accuracyText}</span></div>`;
+    return `<div class="position-tag-card"><b id="positionTagSummary${esc(tag.tagId)}">Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span id="positionTagMeta${esc(tag.tagId)}">${countText}${accuracyText}${referenceText}</span></div>`;
   });
   const emptyTagCard = !model.geometry?.positionReady
     ? `<div class="position-tag-card"><b>waiting for fixed geometry</b><span>Fix the anchor geometry before tag positioning starts.</span></div>`
@@ -5938,14 +6109,34 @@ function renderPositionReadout(model) {
     if (!tag.position || !accuracy) {
       return `<tr><td>T${esc(tag.tagId)}</td><td colspan="3"><span class="muted">waiting</span></td></tr>`;
     }
-    return `<tr>
+    return `<tr id="positionAccuracyRow${esc(tag.tagId)}">
       <td>T${esc(tag.tagId)}<br><span class="muted">${esc(accuracy.count)} raw obs · GDOP ${esc(fmtFixed(accuracy.gdop, 2))}</span></td>
-      <td>${fmtPositionSigma(accuracy.sigma_major_m, 1)}</td>
-      <td>${fmtPositionCm(accuracy.rms_m, 1)}</td>
-      <td>${fmtPositionCm(accuracy.max_abs_m, 1)}</td>
+      <td id="positionSolverSigma${esc(tag.tagId)}">${fmtPositionSigma(accuracy.sigma_major_m, 1)}</td>
+      <td id="positionTdoaRms${esc(tag.tagId)}">${fmtPositionCm(accuracy.rms_m, 1)}</td>
+      <td id="positionTdoaMax${esc(tag.tagId)}">${fmtPositionCm(accuracy.max_abs_m, 1)}</td>
     </tr>`;
   });
   accuracyRows.innerHTML = accuracyTableRows.join("") || `<tr><td colspan="4"><span class="muted">waiting</span></td></tr>`;
+  if (model.reference) {
+    referenceStatus.textContent =
+      `${model.reference.label}: x=${fmtFixed(model.reference.x, 3)} m, y=${fmtFixed(model.reference.y, 3)} m · rolling ${fmtFixed(model.settings.errorWindowSec, 0)} s`;
+    errorRows.innerHTML = Object.values(model.tags).map(tag => {
+      const stats = positionReferenceErrorStats(
+        tag.tagId, tag.position, model.reference, model.settings.errorWindowSec);
+      if (!stats) return `<tr><td>T${esc(tag.tagId)}</td><td colspan="5">waiting</td></tr>`;
+      return `<tr id="positionErrorRow${esc(tag.tagId)}">
+        <td>T${esc(tag.tagId)}<br><span class="muted" id="positionErrorCount${esc(tag.tagId)}">${esc(stats.count)} pts · ${fmtFixed(stats.spanSec, 1)} s</span></td>
+        <td id="positionErrorNow${esc(tag.tagId)}">${fmtPositionCm(stats.currentErrorM, 1)}</td>
+        <td id="positionErrorBias${esc(tag.tagId)}">${fmtPositionCm(stats.biasM, 1)}</td>
+        <td id="positionErrorRmse${esc(tag.tagId)}">${fmtPositionCm(stats.rmseM, 1)}</td>
+        <td id="positionErrorP95${esc(tag.tagId)}">${fmtPositionCm(stats.p95M, 1)}</td>
+        <td id="positionErrorMax${esc(tag.tagId)}">${fmtPositionCm(stats.maxM, 1)}</td>
+      </tr>`;
+    }).join("");
+  } else {
+    referenceStatus.textContent = "Known position reference disabled.";
+    errorRows.innerHTML = `<tr><td colspan="6"><span class="muted">enable a known reference in Position Setup</span></td></tr>`;
+  }
 
   if (positionProtocolUsesTdoa(model.settings.solver)) {
     title.textContent = "TDOA Observations";
@@ -6028,10 +6219,58 @@ function applyStreamPositionToModel(model) {
     tag.position = {x, y};
     tag.solverSource = "ESP32 AlgMin";
     tag.accuracy = {
-      ...(tag.accuracy || {}),
+      count: Number(item.observation_count),
       sigma_major_m: Number(item.sigma_m),
       rms_m: Number(item.rms_m),
+      max_abs_m: NaN,
+      gdop: NaN,
     };
+  }
+}
+
+function updatePositionLiveMetrics(model) {
+  for (const tag of Object.values(model.tags || {})) {
+    const item = state.tdoa?.local_positions?.[String(tag.tagId)];
+    if (!item || !tag.position) continue;
+    const summary = document.getElementById(`positionTagSummary${tag.tagId}`);
+    const meta = document.getElementById(`positionTagMeta${tag.tagId}`);
+    const sigma = Number(item.sigma_m);
+    const referenceStats = positionReferenceErrorStats(
+      tag.tagId, tag.position, model.reference, model.settings.errorWindowSec);
+    if (summary) {
+      summary.textContent = `Tag ${tag.tagId}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m`;
+    }
+    if (meta) {
+      const sigmaText = Number.isFinite(sigma)
+        ? ` · solver σaxis ${fmtPositionSigma(sigma, 1)}`
+        : "";
+      const referenceText = referenceStats
+        ? ` · actual ${fmtPositionCm(referenceStats.currentErrorM, 1)}`
+        : "";
+      meta.textContent = `${item.observation_count || 0} raw obs${sigmaText}${referenceText} · live`;
+    }
+    const solverSigma = document.getElementById(`positionSolverSigma${tag.tagId}`);
+    const tdoaRms = document.getElementById(`positionTdoaRms${tag.tagId}`);
+    const tdoaMax = document.getElementById(`positionTdoaMax${tag.tagId}`);
+    if (solverSigma) solverSigma.textContent = fmtPositionSigma(item.sigma_m, 1);
+    if (tdoaRms) tdoaRms.textContent = fmtPositionCm(item.rms_m, 1);
+    if (tdoaMax) tdoaMax.textContent = "-";
+    if (referenceStats) {
+      const values = {
+        positionErrorNow: referenceStats.currentErrorM,
+        positionErrorBias: referenceStats.biasM,
+        positionErrorRmse: referenceStats.rmseM,
+        positionErrorP95: referenceStats.p95M,
+        positionErrorMax: referenceStats.maxM,
+      };
+      for (const [prefix, value] of Object.entries(values)) {
+        const element = document.getElementById(`${prefix}${tag.tagId}`);
+        if (element) element.textContent = fmtPositionCm(value, 1);
+      }
+      const count = document.getElementById(`positionErrorCount${tag.tagId}`);
+      if (count) count.textContent =
+        `${referenceStats.count} pts · ${fmtFixed(referenceStats.spanSec, 1)} s`;
+    }
   }
 }
 
@@ -6044,21 +6283,7 @@ function renderPositionStreamFrame() {
   }
   applyStreamPositionToModel(state.positionModel);
   drawPosition(state.positionModel);
-  for (const tag of Object.values(state.positionModel.tags || {})) {
-    const item = state.tdoa?.local_positions?.[String(tag.tagId)];
-    if (!item || !tag.position) continue;
-    const summary = document.getElementById(`positionTagSummary${tag.tagId}`);
-    const meta = document.getElementById(`positionTagMeta${tag.tagId}`);
-    if (summary) {
-      summary.textContent = `Tag ${tag.tagId}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m`;
-    }
-    if (meta) {
-      const sigmaText = Number.isFinite(Number(item.sigma_m))
-        ? ` · est. ${fmtPositionSigma(item.sigma_m, 1)}`
-        : "";
-      meta.textContent = `${item.observation_count || 0} raw obs${sigmaText} · live`;
-    }
-  }
+  updatePositionLiveMetrics(state.positionModel);
   const nowMs = performance.now();
   state.positionStreamRenderTimes.push(nowMs);
   updatePositionStreamMetrics();
@@ -6084,7 +6309,8 @@ function ingestPositionStreamSample(item) {
     tagId,
     {x: Number(item.x_m), y: Number(item.y_m)},
     item.received_at,
-    eventId
+    eventId,
+    item
   );
   const nowMs = performance.now();
   state.positionStreamRxTimes.push(nowMs);
@@ -8807,7 +9033,8 @@ function persistedSettingIds() {
     "runtimeUwb", "runtimeBno085", "runtimeGps", "runtimeTelemetryPort",
     "accelTimebase", "accelSampleHz", "accelTargets",
     "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
-    "positionMaxAgeSec",
+    "positionMaxAgeSec", "positionReferenceMode", "positionReferenceX",
+    "positionReferenceY", "positionErrorWindowSec",
     "uwbTargets", "uwbRadioChannel", "uwbFlexAnchors", "uwbFlexK",
     "uwbFlexSlots", "uwbFlexMasks", "uwbSurveyRxMs", "uwbSurveyDelayMs", "uwbSurveySlotMs",
     "uwbSurveyGapMs", "uwbSurveyLogEvery", "uwbRangingSlotMs",
@@ -9080,7 +9307,8 @@ function wireSettings() {
   }
   [
     "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
-    "positionMaxAgeSec",
+    "positionMaxAgeSec", "positionReferenceMode", "positionReferenceX",
+    "positionReferenceY", "positionErrorWindowSec",
   ].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -9093,6 +9321,14 @@ function wireSettings() {
       if (id === "positionSolver") updateRangingSettingsProtocol();
     });
   });
+  const updatePositionReferenceControls = () => {
+    const manual = document.getElementById("positionReferenceMode")?.value === "manual";
+    document.getElementById("positionReferenceX").disabled = !manual;
+    document.getElementById("positionReferenceY").disabled = !manual;
+  };
+  document.getElementById("positionReferenceMode")?.addEventListener(
+    "change", updatePositionReferenceControls);
+  updatePositionReferenceControls();
   document.getElementById("positionResetTrail").addEventListener("click", () => {
     state.positionTrail = {};
     state.positionTrailTokens = {};
