@@ -1690,7 +1690,7 @@ INDEX_HTML = r"""<!doctype html>
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink); }
-.app { min-height: 100vh; display: grid; grid-template-rows: auto auto 1fr; }
+.app { min-width: 0; min-height: 100vh; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto 1fr; }
 header {
   padding: 14px 18px 10px;
   display: flex;
@@ -1735,7 +1735,7 @@ h1 { margin: 0; font-size: 18px; letter-spacing: 0; }
 main { padding: 14px 18px 18px; min-height: 0; }
 .page { display: none; height: calc(100vh - 116px); min-height: 520px; }
 .page.active { display: block; }
-#graphs { overflow: auto; }
+#graphs, #gps { overflow: auto; }
 .terminal-grid { height: 100%; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .terminal-grid.single { grid-template-columns: minmax(360px, 1fr); max-width: 920px; }
 .terminal-grid.all { grid-template-columns: 1fr; }
@@ -1856,6 +1856,53 @@ th { color: var(--muted); font-weight: 700; }
 .pd-status-table .col-ops { width: 21%; }
 .pd-pdo-list { margin: 4px 0 0; padding-left: 18px; }
 .pd-pdo-list li { margin: 2px 0; }
+.gps-dashboard {
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+.gps-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(130px, 190px)) minmax(280px, 1fr);
+  align-items: stretch;
+  border-bottom: 1px solid var(--line);
+}
+.gps-stat {
+  padding: 14px 16px;
+  border-right: 1px solid var(--line);
+}
+.gps-stat span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.gps-stat b { font-size: 20px; }
+.gps-overview-note {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.gps-table-wrap { width: 100%; max-width: 100%; overflow-x: auto; padding: 0 12px 12px; }
+.gps-status-table { table-layout: fixed; min-width: 1180px; }
+.gps-status-table th,
+.gps-status-table td { overflow-wrap: anywhere; }
+.gps-status-table .col-module { width: 13%; }
+.gps-status-table .col-receiver { width: 14%; }
+.gps-status-table .col-fix { width: 13%; }
+.gps-status-table .col-satellites { width: 10%; }
+.gps-status-table .col-position { width: 19%; }
+.gps-status-table .col-navigation { width: 14%; }
+.gps-status-table .col-stream { width: 17%; }
+.gps-primary-value { font-weight: 700; font-size: 14px; }
+.gps-detail { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.gps-coordinates { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .resource-cell {
   min-width: 190px;
   max-width: 260px;
@@ -2704,6 +2751,9 @@ tr.status-stale td { color: #4f3b1d; }
   .flex-timing-metric:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
   .flex-timing-detail-grid { grid-template-columns: 1fr; }
   .flex-host-window { grid-template-columns: 120px minmax(300px, 1fr) 220px; }
+  .gps-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .gps-stat:nth-child(2n) { border-right: 0; }
+  .gps-overview-note { grid-column: 1 / -1; border-top: 1px solid var(--line); }
   .page { height: auto; }
   .terminal { height: 520px; }
   .chart-stack { grid-template-rows: none; }
@@ -2731,6 +2781,7 @@ tr.status-stale td { color: #4f3b1d; }
     <button class="tab" data-tab="logsAll">All Logs</button>
     <button class="tab" data-tab="position">Position</button>
     <button class="tab" data-tab="graphs">Graphs</button>
+    <button class="tab" data-tab="gps">GPS</button>
     <button class="tab" data-tab="info">Info</button>
     <button class="tab" data-tab="batteryCharger">Battery Charger</button>
     <button class="tab" data-tab="usbPd">USB-C PD</button>
@@ -2875,6 +2926,34 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div id="accelLatestRows"></div>
         </aside>
+      </div>
+    </section>
+    <section id="gps" class="page">
+      <div class="gps-dashboard">
+        <div class="gps-overview">
+          <div class="gps-stat"><span>Receivers enabled</span><b id="gpsEnabledCount">0 / 5</b></div>
+          <div class="gps-stat"><span>NMEA streaming</span><b id="gpsStreamingCount">0 / 5</b></div>
+          <div class="gps-stat"><span>Valid fixes</span><b id="gpsFixCount">0 / 5</b></div>
+          <div class="gps-stat"><span>Satellites used</span><b id="gpsSatelliteCount">0</b></div>
+          <div id="gpsOverviewNote" class="gps-overview-note">Waiting for module status...</div>
+        </div>
+        <div class="gps-table-wrap">
+          <table class="gps-status-table">
+            <colgroup>
+              <col class="col-module">
+              <col class="col-receiver">
+              <col class="col-fix">
+              <col class="col-satellites">
+              <col class="col-position">
+              <col class="col-navigation">
+              <col class="col-stream">
+            </colgroup>
+            <thead>
+              <tr><th>Module</th><th>Receiver</th><th>Fix</th><th>Satellites</th><th>Position</th><th>Navigation</th><th>NMEA stream</th></tr>
+            </thead>
+            <tbody id="gpsRows"></tbody>
+          </table>
+        </div>
       </div>
     </section>
     <section id="info" class="page">
@@ -6654,6 +6733,111 @@ function renderGpsCell(item) {
 	    <span class="muted">rx ${fmtAgeMs(item.gps_last_rx_age_ms)} · sent ${esc(sentences)} · err ${esc(item.gps_checksum_errors ?? "-")}/${esc(item.gps_parse_errors ?? "-")}</span>`;
 }
 
+function gpsRxIsFresh(item) {
+  const ageMs = Number(item?.gps_last_rx_age_ms);
+  return Boolean(
+    item?.runtime_gps_enabled &&
+    item?.gps_powered &&
+    item?.gps_task_running &&
+    item?.gps_uart_ready &&
+    Number.isFinite(ageMs) &&
+    ageMs >= 0 &&
+    ageMs < 3000
+  );
+}
+
+function gpsFixTypeText(value) {
+  const fixType = Number(value);
+  if (fixType === 2) return "2D";
+  if (fixType === 3) return "3D";
+  if (fixType === 1) return "no fix";
+  return "unknown";
+}
+
+function formatGpsUtcTime(value) {
+  const raw = String(value || "");
+  if (raw.length < 6) return "-";
+  const fraction = raw.slice(6).replace(/^\./, "");
+  return `${raw.slice(0, 2)}:${raw.slice(2, 4)}:${raw.slice(4, 6)}${fraction ? `.${fraction}` : ""}`;
+}
+
+function formatGpsUtcDate(value) {
+  const raw = String(value || "");
+  if (raw.length < 6) return "-";
+  return `${raw.slice(0, 2)}/${raw.slice(2, 4)}/${raw.slice(4, 6)}`;
+}
+
+function renderGps(statuses) {
+  const rows = document.getElementById("gpsRows");
+  if (!rows) return;
+
+  const enabledCount = statuses.filter(item => item.runtime_gps_enabled).length;
+  const streamingCount = statuses.filter(gpsRxIsFresh).length;
+  const fixCount = statuses.filter(item => item.gps_fix_valid && gpsRxIsFresh(item)).length;
+  const satellites = statuses.reduce((sum, item) => sum + Math.max(0, Number(item.gps_satellites || 0)), 0);
+  const expected = Math.max(5, statuses.length);
+
+  document.getElementById("gpsEnabledCount").textContent = `${enabledCount} / ${expected}`;
+  document.getElementById("gpsStreamingCount").textContent = `${streamingCount} / ${expected}`;
+  document.getElementById("gpsFixCount").textContent = `${fixCount} / ${expected}`;
+  document.getElementById("gpsSatelliteCount").textContent = String(satellites);
+
+  const overview = document.getElementById("gpsOverviewNote");
+  if (overview) {
+    if (fixCount > 0) {
+      overview.innerHTML = `<span class="ok">${fixCount} receiver${fixCount === 1 ? " has" : "s have"} a valid position fix.</span>`;
+    } else if (streamingCount > 0) {
+      overview.innerHTML = `<span class="warn">NMEA is healthy on ${streamingCount} receiver${streamingCount === 1 ? "" : "s"}, but no valid satellite fix is available yet.</span>`;
+    } else if (enabledCount > 0) {
+      overview.innerHTML = `<span class="bad">GPS is enabled, but no recent NMEA stream is reaching the dashboard.</span>`;
+    } else {
+      overview.textContent = "GPS is disabled on all modules. Enable selected receivers from Settings when needed.";
+    }
+  }
+
+  rows.innerHTML = statuses.map(item => {
+    const enabled = Boolean(item.runtime_gps_enabled);
+    const streaming = gpsRxIsFresh(item);
+    const fixed = Boolean(item.gps_fix_valid && streaming);
+    const receiverClass = !enabled ? "muted" : (streaming ? "ok" : "bad");
+    const receiverText = !enabled ? "disabled" : (streaming ? "NMEA streaming" : "no recent NMEA");
+    const fixClass = fixed ? "ok" : (streaming ? "warn" : "muted");
+    const fixText = fixed ? (item.gps_fix_quality_text || "valid fix") : (streaming ? "searching" : "no fix");
+    const lastError = item.gps_last_error_name || item.gps_last_error || "-";
+    const position = fixed
+      ? `<div class="gps-primary-value gps-coordinates">${fmtMaybeCoord(item.gps_latitude_deg)}, ${fmtMaybeCoord(item.gps_longitude_deg)}</div>
+         <div class="gps-detail">altitude ${fmtMaybeNumber(item.gps_altitude_m, 2)} m</div>`
+      : `<span class="muted">waiting for valid coordinates</span>`;
+    const rtkAge = Number(item.gps_rtk_age_s);
+    const rtkRatio = Number(item.gps_rtk_ratio);
+    const rtkText = (Number.isFinite(rtkAge) && rtkAge > 0) || (Number.isFinite(rtkRatio) && rtkRatio > 0)
+      ? `RTK age ${fmtMaybeNumber(rtkAge, 1)} s · ratio ${fmtMaybeNumber(rtkRatio, 2)}`
+      : "RTK corrections unavailable";
+
+    return `<tr class="${statusIsFresh(item) ? "" : "status-stale"}">
+      <td>${renderModuleCell(item)}</td>
+      <td><div class="gps-primary-value ${receiverClass}">${receiverText}</div>
+        <div class="gps-detail">power ${item.gps_powered ? "on" : "off"} · task ${item.gps_task_running ? "running" : "stopped"}<br>
+        UART ${item.gps_uart_ready ? "ready" : "not ready"} · error ${esc(lastError)}</div></td>
+      <td><div class="gps-primary-value ${fixClass}">${esc(fixText)}</div>
+        <div class="gps-detail">quality ${esc(item.gps_fix_quality ?? "-")} · ${gpsFixTypeText(item.gps_fix_type)}<br>
+        RMC ${esc(item.gps_rmc_status || "-")} · mode ${esc(item.gps_rmc_mode || "-")}<br>
+        fix age ${fmtAgeMs(item.gps_last_fix_age_ms)}</div></td>
+      <td><div class="gps-primary-value">${esc(item.gps_satellites ?? "-")} used</div>
+        <div class="gps-detail">${esc(item.gps_satellites_in_view ?? "-")} in view<br>HDOP ${fmtMaybeNumber(item.gps_hdop, 2)}</div></td>
+      <td>${position}</td>
+      <td><div>speed ${fmtMaybeNumber(item.gps_speed_mps, 2)} m/s<br>course ${fmtMaybeNumber(item.gps_course_deg, 1)} deg</div>
+        <div class="gps-detail">UTC ${formatGpsUtcTime(item.gps_utc_time)}<br>date ${formatGpsUtcDate(item.gps_utc_date)}<br>${rtkText}</div></td>
+      <td><div class="gps-primary-value">${esc(item.gps_sentence_count ?? 0)} sentences</div>
+        <div class="gps-detail">${fmtBytes(item.gps_byte_count)} · RX age ${fmtAgeMs(item.gps_last_rx_age_ms)}<br>
+        GGA ${esc(item.gps_gga_count ?? 0)} · RMC ${esc(item.gps_rmc_count ?? 0)} · GSA ${esc(item.gps_gsa_count ?? 0)}<br>
+        GSV ${esc(item.gps_gsv_count ?? 0)} · PSTI ${esc(item.gps_psti030_count ?? 0)}<br>
+        checksum / parse errors ${esc(item.gps_checksum_errors ?? 0)} / ${esc(item.gps_parse_errors ?? 0)}<br>
+        last sentence ${esc(item.gps_last_sentence || "-")}</div></td>
+    </tr>`;
+  }).join("");
+}
+
 function chargerChargeStatus(item) {
   if (item.charger_charge_enabled === true) {
     return {className: "ok", text: "CHG enabled"};
@@ -7392,6 +7576,7 @@ function renderInfo(snapshot) {
     </tr>`).join("");
   const freshStatus = state.statuses.find(statusIsFresh) || {};
   renderUwbRadio(freshStatus);
+  renderGps(state.statuses);
   renderCharger(state.statuses);
   renderPd(state.statuses);
   renderPosition();
