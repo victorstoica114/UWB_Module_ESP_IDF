@@ -2322,6 +2322,24 @@ accelerometer telemetry uses `6060/tcp`:
 sudo ufw allow in on wlp0s20f3 from 192.168.139.0/24 to any port 6060 proto tcp
 ```
 
+Disable Wi-Fi power saving on the PC that receives high-rate telemetry. With
+power saving enabled, a packet capture showed occasional pauses of about
+`1.0 s` followed by a burst of already queued TCP segments. The ESP32 send
+timeout then closed an otherwise healthy connection and temporarily removed
+all fresh position observations from the dashboard. Apply the setting
+immediately and persist it for the active NetworkManager connection:
+
+```sh
+sudo iw dev wlp0s20f3 set power_save off
+nmcli connection modify ED313 802-11-wireless.powersave 2
+iw dev wlp0s20f3 get power_save
+```
+
+Replace `wlp0s20f3` and `ED313` with the local interface and connection names.
+The final command must report `Power save: off`. A two-minute five-module
+FlexTDOA run after this change completed without a telemetry timeout,
+reconnection, or queue increase.
+
 The same wireless-log stream can drive a first live 2D view of the tag. The
 viewer has no Python package dependencies; it listens on the wireless-log TCP
 port and serves a browser UI locally:

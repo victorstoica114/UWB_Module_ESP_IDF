@@ -9743,7 +9743,11 @@ class HttpHandler(BaseHTTPRequestHandler):
                     payload = json.dumps(item, separators=(",", ":"))
                     message = f"id: {event_id}\ndata: {payload}\n\n".encode("utf-8")
                     self.wfile.write(message)
-                    after = max(after, event_id)
+                    # A restarted dashboard begins event IDs at 1, while the
+                    # browser may reconnect with a Last-Event-ID from the old
+                    # process. Adopt the current stream cursor so that case
+                    # cannot replay the newest event in a tight loop.
+                    after = event_id
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             return
