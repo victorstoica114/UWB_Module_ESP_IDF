@@ -2845,7 +2845,7 @@ tr.status-stale td { color: #4f3b1d; }
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
             <div><b>Solver</b><span>FlexTDOA uses passive tag range differences from request/response anchor slots. DS-TWR uses active tag-anchor distances. Legacy hybrid is only for older dual-leg logs.</span></div>
-            <div><b>Tags</b><span>Comma separated tag IDs. In FlexTDOA mode, tags only listen on UWB and the dashboard solves from range differences.</span></div>
+            <div><b>Tags</b><span>Comma separated tag IDs. FlexTDOA tags only listen on UWB, may not also be anchors, and do not consume additional radio slots.</span></div>
             <div><b>Geometry</b><span>Paper-style anchor self-localization uses batched TWR ranges and an EKF. Fix the resulting coordinates once before positioning, and restart self-localization after moving an anchor.</span></div>
             <div><b>Known reference</b><span>Use the anchor centroid while the tag is physically centered. Manual coordinates support other surveyed test points.</span></div>
           </div>
@@ -4794,7 +4794,7 @@ function positionReferenceErrorStats(tagId, position, reference, windowSec) {
 }
 
 function selectedPositionModuleIds(settings = positionSettings()) {
-  const ids = [...settings.tagIds.slice(0, 1), ...settings.anchorIds];
+  const ids = [...settings.tagIds, ...settings.anchorIds];
   return [...new Set(ids)].filter(Boolean);
 }
 
@@ -9381,8 +9381,34 @@ function updatePdRawVisibility() {
 async function enablePositionRanging() {
   const settings = positionSettings();
   const tagId = settings.tagIds[0];
-  if (!tagId || settings.anchorIds.length < 3) {
-    setToast("positionToast", "Set one tag ID and at least 3 anchors first.", "bad");
+  if (settings.anchorIds.length !== settings.anchorCount) {
+    setToast(
+      "positionToast",
+      `Set exactly ${settings.anchorCount} unique anchor IDs first.`,
+      "bad"
+    );
+    return;
+  }
+  if (!tagId) {
+    setToast("positionToast", "Set at least one tag ID first.", "bad");
+    return;
+  }
+  const overlappingIds = settings.tagIds.filter(id => settings.anchorIds.includes(id));
+  if (overlappingIds.length) {
+    setToast(
+      "positionToast",
+      `Module${overlappingIds.length === 1 ? "" : "s"} ${overlappingIds.join(", ")} ` +
+      `${overlappingIds.length === 1 ? "is" : "are"} selected as both anchor and tag.`,
+      "bad"
+    );
+    return;
+  }
+  if (!positionProtocolUsesTdoa(settings.solver) && settings.tagIds.length > 1) {
+    setToast(
+      "positionToast",
+      "DS-TWR supports one active tag. Select FlexTDOA for multiple passive tags.",
+      "bad"
+    );
     return;
   }
   const anchors = settings.anchorIds.join(",");
