@@ -5831,14 +5831,10 @@ function drawPosition(model) {
 
   for (const [tagId, trail] of Object.entries(state.positionTrail)) {
     if (trail.length < 2) continue;
-    const stride = Math.max(1, Math.ceil(trail.length / 1200));
-    const visibleTrail = trail.filter((_, index) =>
-      index % stride === 0 || index === trail.length - 1
-    );
     ctx.beginPath();
     ctx.strokeStyle = "rgba(43, 100, 216, 0.72)";
     ctx.lineWidth = 1.5;
-    visibleTrail.forEach((point, index) => {
+    trail.forEach((point, index) => {
       const x = tx.x(point.x);
       const y = tx.y(point.y);
       if (index === 0) ctx.moveTo(x, y);
