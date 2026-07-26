@@ -1902,6 +1902,8 @@ th { color: var(--muted); font-weight: 700; }
 .gps-status-table .col-stream { width: 17%; }
 .gps-primary-value { font-weight: 700; font-size: 14px; }
 .gps-detail { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.gps-fix-message { display: inline-block; margin-top: 2px; font-weight: 700; }
+.gps-fix-explanation { display: inline-block; margin: 2px 0; font-size: 12px; line-height: 1.35; }
 .gps-coordinates { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .resource-cell {
   min-width: 190px;
@@ -6758,8 +6760,8 @@ function renderGpsCell(item) {
   const powered = Boolean(item.gps_powered);
   const uart = Boolean(item.gps_uart_ready);
   const sentences = Number(item.gps_sentence_count || 0);
+  const fixState = gpsFixState(item);
   const fixText = item.gps_fix_quality_text || "unknown";
-  const fixClass = item.gps_fix_valid ? "ok" : (enabled ? "warn" : "muted");
   const statusText = enabled
     ? `${powered ? "powered" : "off"} / ${uart ? "uart" : "no uart"}`
     : "disabled";
@@ -6770,8 +6772,9 @@ function renderGpsCell(item) {
     : `<span class="muted">no fix</span>`;
   return `
     <span class="${enabled ? "ok" : "muted"}">${esc(statusText)}</span><br>
-    <span class="${fixClass}">${esc(fixText)}</span>
-    <span class="muted">q${esc(item.gps_fix_quality ?? "-")} type ${esc(item.gps_fix_type ?? "-")}</span><br>
+    <span class="gps-fix-message ${fixState.className}">${esc(fixState.label)}</span><br>
+    <span class="muted">${esc(fixText)} · q${esc(item.gps_fix_quality ?? "-")} · ${gpsFixTypeText(item.gps_fix_type)}</span><br>
+    <span class="gps-fix-explanation ${fixState.className}">${esc(fixState.explanation)}</span><br>
     sats ${esc(satsUsed)}/${esc(satsView)} · hdop ${fmtMaybeNumber(item.gps_hdop, 2)}<br>
 	    ${location}<br>
 	    <span class="muted">rx ${fmtAgeMs(item.gps_last_rx_age_ms)} · sent ${esc(sentences)} · err ${esc(item.gps_checksum_errors ?? "-")}/${esc(item.gps_parse_errors ?? "-")}</span>`;
@@ -6796,6 +6799,112 @@ function gpsFixTypeText(value) {
   if (fixType === 3) return "3D";
   if (fixType === 1) return "no fix";
   return "unknown";
+}
+
+function gpsFixState(item) {
+  if (!item?.runtime_gps_enabled) {
+    return {
+      className: "muted",
+      label: "GPS disabled",
+      explanation: "The receiver is disabled in the runtime configuration.",
+    };
+  }
+  if (!item?.gps_powered) {
+    return {
+      className: "bad",
+      label: "GPS not powered",
+      explanation: "The receiver is enabled, but its power rail is off.",
+    };
+  }
+  if (!item?.gps_task_running) {
+    return {
+      className: "bad",
+      label: "GPS task stopped",
+      explanation: "The receiver task is not running.",
+    };
+  }
+  if (!item?.gps_uart_ready) {
+    return {
+      className: "bad",
+      label: "GPS UART unavailable",
+      explanation: "The receiver is powered, but the UART is not ready.",
+    };
+  }
+  if (!gpsRxIsFresh(item)) {
+    return {
+      className: "bad",
+      label: "No recent GPS data",
+      explanation: "No fresh NMEA sentence was received in the last 3 seconds.",
+    };
+  }
+
+  const quality = Number(item.gps_fix_quality);
+  const fixType = Number(item.gps_fix_type);
+  const dimension = fixType === 3 ? "3D" : (fixType === 2 ? "2D" : "Position");
+  if (!item.gps_fix_valid || !Number.isFinite(quality) || quality === 0) {
+    return {
+      className: "warn",
+      label: "Searching for a fix",
+      explanation: "NMEA data is healthy, but no valid position fix is available yet.",
+    };
+  }
+
+  switch (quality) {
+    case 1:
+      return {
+        className: "ok",
+        label: `${dimension} standalone fix`,
+        explanation: "Valid GNSS position; RTK corrections are not active.",
+      };
+    case 2:
+      return {
+        className: "ok",
+        label: `${dimension} differential fix`,
+        explanation: "Differential corrections are active; this is not an RTK solution.",
+      };
+    case 3:
+      return {
+        className: "ok",
+        label: `${dimension} PPS fix`,
+        explanation: "A valid PPS-quality position fix is available.",
+      };
+    case 4:
+      return {
+        className: "ok",
+        label: `${dimension} RTK fixed`,
+        explanation: "RTK integer solution acquired.",
+      };
+    case 5:
+      return {
+        className: "warn",
+        label: `${dimension} RTK float`,
+        explanation: "RTK corrections are active; waiting for an integer-fixed solution.",
+      };
+    case 6:
+      return {
+        className: "warn",
+        label: "Estimated position",
+        explanation: "The reported position is estimated, not a live satellite fix.",
+      };
+    case 7:
+      return {
+        className: "warn",
+        label: "Manual position",
+        explanation: "The reported coordinates were entered manually.",
+      };
+    case 8:
+      return {
+        className: "warn",
+        label: "Simulated position",
+        explanation: "The reported coordinates come from simulation mode.",
+      };
+    default:
+      return {
+        className: "ok",
+        label: `${dimension} valid fix`,
+        explanation: "A valid position is available with an unrecognized quality code.",
+      };
+  }
 }
 
 function formatGpsUtcTime(value) {
@@ -6843,10 +6952,9 @@ function renderGps(statuses) {
     const enabled = Boolean(item.runtime_gps_enabled);
     const streaming = gpsRxIsFresh(item);
     const fixed = Boolean(item.gps_fix_valid && streaming);
+    const fixState = gpsFixState(item);
     const receiverClass = !enabled ? "muted" : (streaming ? "ok" : "bad");
     const receiverText = !enabled ? "disabled" : (streaming ? "NMEA streaming" : "no recent NMEA");
-    const fixClass = fixed ? "ok" : (streaming ? "warn" : "muted");
-    const fixText = fixed ? (item.gps_fix_quality_text || "valid fix") : (streaming ? "searching" : "no fix");
     const lastError = item.gps_last_error_name || item.gps_last_error || "-";
     const position = fixed
       ? `<div class="gps-primary-value gps-coordinates">${fmtMaybeCoord(item.gps_latitude_deg)}, ${fmtMaybeCoord(item.gps_longitude_deg)}</div>
@@ -6863,10 +6971,11 @@ function renderGps(statuses) {
       <td><div class="gps-primary-value ${receiverClass}">${receiverText}</div>
         <div class="gps-detail">power ${item.gps_powered ? "on" : "off"} · task ${item.gps_task_running ? "running" : "stopped"}<br>
         UART ${item.gps_uart_ready ? "ready" : "not ready"} · error ${esc(lastError)}</div></td>
-      <td><div class="gps-primary-value ${fixClass}">${esc(fixText)}</div>
+      <td><div class="gps-primary-value ${fixState.className}">${esc(fixState.label)}</div>
         <div class="gps-detail">quality ${esc(item.gps_fix_quality ?? "-")} · ${gpsFixTypeText(item.gps_fix_type)}<br>
         RMC ${esc(item.gps_rmc_status || "-")} · mode ${esc(item.gps_rmc_mode || "-")}<br>
-        fix age ${fmtAgeMs(item.gps_last_fix_age_ms)}</div></td>
+        fix age ${fmtAgeMs(item.gps_last_fix_age_ms)}<br>
+        <span class="${fixState.className}">${esc(fixState.explanation)}</span></div></td>
       <td><div class="gps-primary-value">${esc(item.gps_satellites ?? "-")} used</div>
         <div class="gps-detail">${esc(item.gps_satellites_in_view ?? "-")} in view<br>HDOP ${fmtMaybeNumber(item.gps_hdop, 2)}</div></td>
       <td>${position}</td>
