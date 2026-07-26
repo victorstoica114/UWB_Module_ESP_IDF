@@ -16,7 +16,7 @@ Current step:
 - DW3000 hardware RXOK/SFD/RX/TX LED blink configured once at radio init
 - first DS-TWR two-module distance test runtime
 - antenna delay calibration runtime for two-module and three-module setups
-- anchor-initiated 1-tag/4-anchor DS-TWR ranging runtime with dashboard
+- native three-frame, tag-initiated 1-tag/4-anchor DS-TWR ranging runtime with dashboard
   position view
 - optional BNO085 accelerometer hardware test via `components/bno085_service`
 
@@ -257,21 +257,20 @@ authenticated `/config/runtime` HTTP endpoint.
 ## UWB Ranging Protocol
 
 The active ranging implementation is based on Double-Sided Two-Way Ranging
-(DS-TWR). Classic DS-TWR needs three UWB frames: `POLL`, `RESP`, and `FINAL`.
-This firmware adds two report frames:
+(DS-TWR). Position ranging uses exactly the three native UWB frames: `POLL`,
+`RESP`, and `FINAL`.
 
 | Frame | Direction | Purpose |
 | --- | --- | --- |
-| `POLL` | initiator -> responder | Starts one ranging exchange. |
-| `RESP` | responder -> initiator | Confirms `POLL` and carries responder timing. |
-| `FINAL` | initiator -> responder | Completes the DS-TWR timing triangle. |
-| `REPORT` | initiator -> responder | Carries initiator timestamps so the responder can calculate distance. |
-| `REPORT2` | responder -> initiator | Carries responder timestamps and responder-calculated distance so the initiator can verify locally. |
+| `POLL` | tag -> anchor | 10-byte protocol header that starts one ranging exchange. |
+| `RESP` | anchor -> tag | 10-byte protocol header that provides the responder turnaround. |
+| `FINAL` | tag -> anchor | 35 bytes: header plus the tag's `POLL TX`, `RESP RX`, and scheduled `FINAL TX` timestamps. |
 
-When looking only at the responder-calculated result, the useful exchange is
-`POLL`, `RESP`, `FINAL`, and `REPORT`. `REPORT2` is a firmware verification
-frame; it lets the initiator run the same calculation and compare the two
-answers.
+The anchor combines the timestamps carried in `FINAL` with its own `POLL RX`,
+`RESP TX`, and `FINAL RX` hardware timestamps and calculates the distance
+locally. It reports the result through Wi-Fi, not through an additional UWB
+frame. The separate distance-test and calibration runtimes retain their
+five-frame diagnostic exchange for bidirectional verification.
 
 ### Runtime Shape
 
@@ -280,35 +279,34 @@ persistent module ID and runtime config from NVS.
 
 | Module ID | Normal ranging behavior |
 | --- | --- |
-| `1` | Tag / responder; waits for anchor-initiated DS-TWR and logs results |
-| `2` | Anchor / coordinator by default when anchors are `2,3,4,5` |
-| `3` | Anchor / follower |
-| `4` | Anchor / follower |
-| `5` | Anchor / follower |
+| `1` | Tag / initiator; ranges each configured anchor in order |
+| `2` | Anchor / responder |
+| `3` | Anchor / responder |
+| `4` | Anchor / responder |
+| `5` | Anchor / responder |
 
-`APP_RUNTIME_MODE_UWB_RANGING` is anchor-initiated. The tag no longer starts
-each exchange. Instead, the first configured anchor ID is the ranging
-coordinator. It walks the configured anchors in order and gives each anchor one
-slot to initiate DS-TWR against the tag. The tag stays in RX, responds to
-`POLL`, calculates the responder-side distance after `REPORT`, and emits the
-dashboard-compatible log line:
+`APP_RUNTIME_MODE_UWB_RANGING` is tag-initiated. The tag owns the complete
+frame schedule and starts one native DS-TWR exchange in every anchor slot.
+There is no coordinator, `RANGING_CMD`, `REPORT`, or `REPORT2`. Each responding
+anchor calculates the range after `FINAL` and emits the dashboard-compatible
+Wi-Fi log line:
 
 ```text
 UWB_RANGING result tag=<tag_id> anchor=<anchor_id> seq=<seq> distance=<m> m ...
 ```
 
-This keeps the PC/dashboard as the place where tag position is solved, while
-the ESP32 tag only does the per-anchor DS-TWR calculation and reporting.
+The PC/dashboard remains the place where the position is solved from the four
+independent tag-anchor distances.
 
-The anchor coordinator schedules anchors sequentially:
+The tag schedules anchors sequentially:
 
 ```text
 round N
 
-anchor 2 -> tag 1
-anchor 3 -> tag 1
-anchor 4 -> tag 1
-anchor 5 -> tag 1
+tag 1 -> anchor 2
+tag 1 -> anchor 3
+tag 1 -> anchor 4
+tag 1 -> anchor 5
 
 wait ranging_round_gap_ms
 round N + 1
@@ -320,22 +318,28 @@ The important timing parameters are exposed by `/status`, can be changed with
 
 | Name | Default / lab value | Meaning |
 | --- | ---: | --- |
-| `ranging_slot_ms` | `350 ms` | Time budget for one anchor-initiated DS-TWR exchange. |
-| `ranging_round_gap_ms` | `500 ms` | Delay after all anchors in one ranging round. |
-| `ranging_rx_slice_ms` | `100 ms` | RX window used by the tag and follower anchors while waiting for UWB frames. |
-| `dt_rx_timeout_ms` | `100 ms` | Max wait for expected DS-TWR frames. |
-| `dt_resp_delay_ms` | `20 ms` | Scheduled delay from `POLL RX` to `RESP TX`. |
-| `dt_final_delay_ms` | `20 ms` | Scheduled delay from `RESP RX` to `FINAL TX`. |
-| `dt_report_delay_ms` | `10 ms` | Software delay before `REPORT` and `REPORT2`. |
-| `dt_auto_rx_delay_uus` | `500 UUS` | DW3000 hardware delay after TX before auto-RX opens. |
+| `ranging_slot_ms` | `30 ms` | Time budget for one native three-frame exchange. |
+| `ranging_round_gap_ms` | `4 ms` | Gap after all anchor slots in one frame. |
+| `ranging_rx_slice_ms` | `10 ms` | RX window used by idle anchor responders. |
+| `ranging_rx_timeout_ms` | `12 ms` | Maximum wait for the expected `RESP` or `FINAL`. |
+| `ranging_resp_delay_ms` | `5 ms` | Delayed TX offset from `POLL RX` to `RESP TX`. |
+| `ranging_final_delay_ms` | `5 ms` | Delayed TX offset from `RESP RX` to `FINAL TX`. |
+| `ranging_auto_rx_delay_uus` | `500 UUS` | DW3000 hardware delay before auto-RX opens after TX. |
 
-Remote anchors receive a short `RANGING_CMD` from the coordinator and wait a
-fixed `5 ms` guard before starting their DS-TWR exchange. The coordinator uses
-the first anchor ID from the configured anchor list, so the order of `anchors`
-matters.
+These values have their own NVS keys and dashboard profiles. Changing them does
+not modify FlexTDOA, distance-test, calibration, or anchor-survey timing. The
+tag uses a high-resolution host timer for slot and frame-gap boundaries, so
+profiles are not rounded to the 10 ms FreeRTOS tick. For four anchors, the
+default conservative frame is `4 * 30 + 4 = 124 ms`.
 
-The `dt_*` names come from the older distance-test runtime, but the current
-multi-anchor ranging mode reuses the same DS-TWR implementation.
+The validated fast lab profile is a 15 ms slot, 4 ms frame gap, 100 ms idle
+anchor RX slice, 8 ms expected-frame timeout, and 2 ms for each delayed
+`RESP`/`FINAL` transmission. Its complete frame is `4 * 15 + 4 = 64 ms`. A
+20-second five-module run produced 1,245 ranges distributed evenly across the
+four anchors, with zero failed exchanges and zero slot overruns: approximately
+62.2 ranges/s total or 15.55 complete four-anchor frames/s. The 52, 56, and
+60 ms lab candidates showed periodic host-runtime alignment losses and are not
+presented as stable dashboard profiles.
 
 ### FlexTDOA Runtime
 
@@ -907,8 +911,17 @@ are then sent to all modules, persisted in each ESP32 NVS, rebroadcast as
 versioned one-anchor UWB geometry frames, and loaded by the tag's local solver.
 The solver stops modifying anchor coordinates while this fixed generation is
 active. `Restart Anchor Self-Localization` clears the persisted generation on
-all modules after an anchor is physically moved. There is no median window,
-stability threshold, or automatic freeze in this path.
+all modules after an anchor is physically moved. The dashboard enables this
+destructive action only while FlexTDOA is selected and asks for confirmation.
+Reapplying an unchanged anchor ID list no longer resets the fixed geometry;
+only an actual topology change starts a new self-localization generation.
+The module status also publishes the fixed X/Y coordinate vectors from NVS.
+The dashboard accepts them only when every HTTP-live module with the selected
+topology reports the same generation and coordinates. A new browser, a cleared
+`localStorage`, or a dashboard reload can therefore recover the authoritative
+geometry from the modules instead of requiring another FlexTDOA survey.
+There is no median window, stability threshold, or automatic freeze in this
+path.
 
 Each new least-squares tag solve is seeded from the previous valid tag position,
 as described for AlgMin in the paper. This selects the same physical solution
@@ -1201,8 +1214,9 @@ Useful conversions:
 | `20 ms` | `1,277,952,000 DTU` |
 | `10 ms` | `638,976,000 DTU` |
 
-`UUS` is used for DW3000 automatic TX-to-RX wait. The larger `20 ms` DS-TWR
-turnaround delays are converted to DTU and programmed as delayed TX timestamps.
+`UUS` is used for DW3000 automatic TX-to-RX wait. Native ranging turnaround
+delays (for example `5 ms`) are converted to DTU and programmed as delayed TX
+timestamps.
 
 ### Message Sequence
 
@@ -1215,35 +1229,20 @@ T1: POLL TX  ------------------------------------>
                                                    T2: POLL RX
 
                                                    schedule RESP at:
-                                                   T3 = T2 + dt_resp_delay_ms
+                                                   T3 = T2 + ranging_resp_delay_ms
 
                                                    T3: RESP TX
      auto RX opens after 500 UUS  <---------------
 T4: RESP RX
 
 schedule FINAL at:
-T5 = T4 + dt_final_delay_ms
+T5 = T4 + ranging_final_delay_ms
 
 T5: FINAL TX  ----------------------------------->
-                                                   auto RX opens after 500 UUS
                                                    T6: FINAL RX
-
-wait dt_report_delay_ms
-
-REPORT TX: T1, T4, T5 --------------------------->
-                                                   REPORT RX
+     FINAL carries T1, T4, T5
                                                    calculate distance
                                                    log UWB_RANGING result
-
-                                                   wait dt_report_delay_ms
-
-                                 <---------------- REPORT2 TX:
-                                                   T2, T3, T6,
-                                                   anchor distance
-
-REPORT2 RX
-calculate distance on tag
-compare tag vs anchor result
 ```
 
 The critical `RESP` and `FINAL` instants are owned by the DW3000 radio through
@@ -1426,16 +1425,10 @@ round_b = T6 - T3
 ```
 
 At this point all pieces needed for DS-TWR exist, but they are split between
-the two modules. `REPORT` moves `T1`, `T4`, and `T5` to the anchor. The anchor
-already has `T2`, `T3`, and `T6`, so after `REPORT` it can calculate distance.
-
-`REPORT2` then moves `T2`, `T3`, `T6`, and the anchor-calculated distance back
-to the tag. The tag still has its own `T1`, `T4`, and `T5`, so it can calculate
-the same distance locally and log a verification line:
-
-```text
-DS-TWR tag verify ... tag=<distance> anchor=<distance> diff=<cm>
-```
+the two modules. Native ranging places `T1`, `T4`, and the precomputed delayed
+TX timestamp `T5` directly in `FINAL`. The anchor already owns `T2`, `T3`, and
+`T6`, so it can calculate distance immediately after receiving the third
+frame. No fourth UWB message is required.
 
 ### Distance Formula
 
@@ -1543,26 +1536,30 @@ The two most common timing questions are:
 | Question | Current answer |
 | --- | --- |
 | How long after TX until RX opens? | `500 UUS`, about `0.513 ms` |
-| How long after RX until the next TX? | `20 ms` for `RESP`, `20 ms` for `FINAL` |
+| How long after RX until the next native ranging TX? | `5 ms` for `RESP`, `5 ms` for `FINAL` by default |
 
 The TX-to-RX delay is a DW3000 auto-receive setting. It applies after:
 
 ```text
 POLL TX  -> tag opens RX for RESP
 RESP TX  -> anchor opens RX for FINAL
-REPORT TX -> tag opens RX for REPORT2
 ```
+
+The five-frame distance-test and calibration workflows also open RX after
+`REPORT` while waiting for their diagnostic `REPORT2`.
 
 The RX-to-TX delays are delayed-TX timestamps. They apply after:
 
 ```text
-POLL RX  -> anchor schedules RESP TX at +20 ms
-RESP RX  -> tag schedules FINAL TX at +20 ms
+POLL RX  -> anchor schedules RESP TX at +5 ms
+RESP RX  -> tag schedules FINAL TX at +5 ms
 ```
 
 So the system is not trying to turn around instantly. The radio has about half
-a millisecond before RX opens after a TX, and about 20 ms between receiving one
-DS-TWR frame and transmitting the next scheduled DS-TWR frame.
+a millisecond before RX opens after a TX, and the default native profile leaves
+about `5 ms` between receiving one DS-TWR frame and transmitting the next
+scheduled frame. Distance-test and calibration retain their independent,
+longer timing defaults.
 
 ### Antenna Delay
 
@@ -1591,7 +1588,7 @@ uwb_antenna_delay_from_nvs
 | `DS-TWR REPORT wait failed` | Responder received `FINAL` but did not receive the timestamp report. |
 | `DS-TWR REPORT2 wait failed` | Responder calculated distance, but initiator did not receive verification report. |
 | `UWB distance RX error` | DW3000 reported PHY/RX error instead of a valid frame. |
-| `UWB_RANGING result` | Full exchange completed; in ranging mode the tag calculated the responder-side distance for the initiating anchor. |
+| `UWB_RANGING result` | Native three-frame exchange completed; the responding anchor calculated and published its tag distance. |
 | `DS-TWR tag verify` | Initiator recalculated the same exchange and compared against anchor result. |
 | `UWB CAL slot skipped due to sync fail` | Calibration slot synchronization failed; dashboard marks the run invalid. |
 
@@ -1603,8 +1600,10 @@ Useful code entry points:
 | Runtime config defaults/NVS | `components/config/app_runtime_config.c` |
 | Ranging service entry point | `components/uwb_ranging_service/uwb_ranging_service.c` |
 | Tag/anchor loops | `components/uwb_dw3000/uwb_dw3000.c` |
-| DS-TWR initiator | `uwb_distance_initiate_once()` |
-| DS-TWR responder | `uwb_distance_respond_to_poll()` |
+| Native ranging initiator | `uwb_ranging_native_initiate_once()` |
+| Native ranging responder | `uwb_ranging_native_respond_to_poll()` |
+| Five-frame diagnostic initiator | `uwb_distance_initiate_once()` |
+| Five-frame diagnostic responder | `uwb_distance_respond_to_poll()` |
 | Delayed TX helpers | `uwb_dw3000_send_payload_delayed*()` |
 | Antenna-delay calibration | `components/uwb_dw3000/uwb_dw3000_calibration.inc` |
 

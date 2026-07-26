@@ -67,7 +67,10 @@ def get_runtime_url(target: str) -> str:
 def send_runtime_config(
     target: str, params: dict[str, str], token: str, timeout_sec: int
 ) -> tuple[str, bool, str, float]:
-    query = urllib.parse.urlencode(params, safe=",")
+    # Runtime geometry values use "id:x_mm:y_mm" tuples. Keep the tuple
+    # separators literal because ESP-IDF's query helper does not URL-decode
+    # percent-encoded values before the endpoint-specific parser sees them.
+    query = urllib.parse.urlencode(params, safe=",:")
     url = f"{get_runtime_url(target)}?{query}"
     request = urllib.request.Request(
         url,
@@ -156,6 +159,12 @@ def collect_params(args: argparse.Namespace) -> dict[str, str]:
     add_optional(params, "ranging_slot_ms", args.ranging_slot_ms)
     add_optional(params, "ranging_gap_ms", args.ranging_gap_ms)
     add_optional(params, "ranging_rx_ms", args.ranging_rx_ms)
+    add_optional(params, "ranging_timeout_ms", args.ranging_timeout_ms)
+    add_optional(params, "ranging_resp_delay_ms", args.ranging_resp_delay_ms)
+    add_optional(params, "ranging_final_delay_ms", args.ranging_final_delay_ms)
+    add_optional(
+        params, "ranging_auto_rx_delay_uus", args.ranging_auto_rx_delay_uus
+    )
     add_optional(params, "dt_peer", args.dt_peer)
     add_optional(params, "dt_initiator", args.dt_initiator)
     add_optional(params, "dt_responder", args.dt_responder)
@@ -239,6 +248,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ranging-slot-ms", dest="ranging_slot_ms")
     parser.add_argument("--ranging-gap-ms", dest="ranging_gap_ms")
     parser.add_argument("--ranging-rx-ms", dest="ranging_rx_ms")
+    parser.add_argument("--ranging-timeout-ms", dest="ranging_timeout_ms")
+    parser.add_argument(
+        "--ranging-resp-delay-ms", dest="ranging_resp_delay_ms"
+    )
+    parser.add_argument(
+        "--ranging-final-delay-ms", dest="ranging_final_delay_ms"
+    )
+    parser.add_argument(
+        "--ranging-auto-rx-delay-uus", dest="ranging_auto_rx_delay_uus"
+    )
     parser.add_argument("--dt-peer", dest="dt_peer")
     parser.add_argument("--dt-initiator", dest="dt_initiator")
     parser.add_argument("--dt-responder", dest="dt_responder")
@@ -273,7 +292,7 @@ def main() -> int:
     params = collect_params(args)
     parallel = max(1, args.parallel)
 
-    query = urllib.parse.urlencode(params, safe=",")
+    query = urllib.parse.urlencode(params, safe=",:")
     print(
         f"Applying runtime config to {len(targets)} target(s), "
         f"parallel={parallel}"

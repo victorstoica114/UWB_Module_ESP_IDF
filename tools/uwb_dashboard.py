@@ -2824,7 +2824,7 @@ tr.status-stale td { color: #4f3b1d; }
             <label for="positionAnchorCount">Anchors used</label>
             <select id="positionAnchorCount"><option value="4">4 anchors</option><option value="3">3 anchors</option></select>
             <label for="positionSolver">Solver</label>
-            <select id="positionSolver"><option value="flextdoa" selected>FlexTDOA</option><option value="ranging">DS-TWR ranges</option><option value="hybrid">Legacy hybrid logs</option></select>
+            <select id="positionSolver"><option value="flextdoa" selected>FlexTDOA</option><option value="ranging">Native DS-TWR</option><option value="hybrid">Legacy hybrid logs</option></select>
             <label for="positionAnchors">Anchor IDs</label>
             <input id="positionAnchors" value="2,3,4,5">
             <label for="positionTags">Tag IDs</label>
@@ -2846,7 +2846,7 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
-            <div><b>Solver</b><span>FlexTDOA uses passive tag range differences from request/response anchor slots. DS-TWR uses active tag-anchor distances. Legacy hybrid is only for older dual-leg logs.</span></div>
+            <div><b>Solver</b><span>FlexTDOA uses passive tag range differences. Native DS-TWR uses only POLL, RESP and FINAL for each active tag-anchor distance. Each protocol keeps independent timing profiles.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. FlexTDOA tags only listen on UWB, may not also be anchors, and do not consume additional radio slots.</span></div>
             <div><b>Geometry</b><span>Paper-style anchor self-localization uses batched TWR ranges and an EKF. Fix the resulting coordinates once before positioning, and restart self-localization after moving an anchor.</span></div>
             <div><b>Known reference</b><span>Use the anchor centroid while the tag is physically centered. Manual coordinates support other surveyed test points.</span></div>
@@ -3579,7 +3579,7 @@ tr.status-stale td { color: #4f3b1d; }
           <p class="ranging-protocol-empty">This solver interprets captures produced by the former dual-leg hybrid protocol. It has no active radio timing controls; use it only for comparisons with previously recorded data.</p>
         </div>
         <div id="rangingProfilesSection" class="section">
-          <h2>DS-TWR Profiles</h2>
+          <h2>Native DS-TWR Frame Profiles</h2>
           <div class="form-grid">
             <label for="rangingProfileTargets">Targets</label>
             <select id="rangingProfileTargets">
@@ -3591,132 +3591,109 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p id="rangingProfileNote" class="muted profile-note">FlexTDOA radio timing is fixed to the hardware-validated 4.80 ms CI-CR slot shown above. Profiles change only observation freshness and the host RX slice.</p>
+          <p id="rangingProfileNote" class="muted profile-note">Each slot contains exactly POLL, RESP and FINAL. A complete frame ranges the tag to every configured anchor, then applies the frame gap.</p>
           <div class="profile-grid">
             <div class="profile-card" data-profile="static3">
-              <h3>Stable Profile</h3>
-              <p id="profileStatic3Description" class="muted">Long 3.0 s FlexTDOA observation freshness and a conservative host RX window.</p>
+              <h3>404 ms Compatibility Frame</h3>
+              <p id="profileStatic3Description" class="muted">Legacy-size slot baseline for initial native three-frame validation.</p>
               <div class="form-grid compact">
-                <label for="profileStatic3FreshAgeSec">Observation freshness s</label>
-                <input id="profileStatic3FreshAgeSec" value="3" type="number" min="0.1" step="0.1">
-                <label class="hidden" for="profileStatic3DsFreshAgeSec">Distance freshness s</label>
-                <input class="hidden" id="profileStatic3DsFreshAgeSec" value="3" type="number" min="0.1" step="0.1">
-                <label for="profileStatic3SlotMs">DS-TWR slot ms</label>
+                <label for="profileStatic3DsFreshAgeSec">Distance freshness s</label>
+                <input id="profileStatic3DsFreshAgeSec" value="1" type="number" min="0.1" step="0.1">
+                <label for="profileStatic3SlotMs">Slot ms</label>
                 <input id="profileStatic3SlotMs" value="100" type="number" min="1" step="1">
-                <label for="profileStatic3RoundGapMs">DS-TWR gap ms</label>
-                <input id="profileStatic3RoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileStatic3RxSliceMs">Host RX slice ms</label>
-                <input id="profileStatic3RxSliceMs" value="100" type="number" min="1" step="1">
-                <label class="hidden" for="profileStatic3DsRxSliceMs">DS-TWR RX slice ms</label>
-                <input class="hidden" id="profileStatic3DsRxSliceMs" value="100" type="number" min="1" step="1">
-                <label for="profileStatic3TimeoutMs">DS-TWR timeout ms</label>
-                <input id="profileStatic3TimeoutMs" value="90" type="number" min="1" step="1">
-                <label for="profileStatic3RespDelayMs">DS-TWR RESP delay ms</label>
-                <input id="profileStatic3RespDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileStatic3FinalDelayMs">DS-TWR FINAL delay ms</label>
-                <input id="profileStatic3FinalDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileStatic3ReportDelayMs">DS-TWR REPORT delay ms</label>
-                <input id="profileStatic3ReportDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileStatic3AutoRxDelayUus">DS-TWR Auto RX delay UUS</label>
+                <label for="profileStatic3RoundGapMs">Frame gap ms</label>
+                <input id="profileStatic3RoundGapMs" value="4" type="number" min="1" step="1">
+                <label for="profileStatic3DsRxSliceMs">Anchor RX slice ms</label>
+                <input id="profileStatic3DsRxSliceMs" value="10" type="number" min="1" step="1">
+                <label for="profileStatic3TimeoutMs">RX timeout ms</label>
+                <input id="profileStatic3TimeoutMs" value="20" type="number" min="1" step="1">
+                <label for="profileStatic3RespDelayMs">RESP delay ms</label>
+                <input id="profileStatic3RespDelayMs" value="10" type="number" min="1" step="1">
+                <label for="profileStatic3FinalDelayMs">FINAL delay ms</label>
+                <input id="profileStatic3FinalDelayMs" value="10" type="number" min="1" step="1">
+                <label for="profileStatic3AutoRxDelayUus">Auto RX delay UUS</label>
                 <input id="profileStatic3AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
               <div class="profile-summary" id="profileStatic3Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="static3">Apply Stable</button>
+                <button class="primary apply-ranging-profile" data-profile="static3">Apply Compatibility</button>
                 <button class="reset-ranging-profile" data-profile="static3">Reset Defaults</button>
               </div>
             </div>
             <div class="profile-card" data-profile="dynamic15">
-              <h3>Balanced Profile</h3>
-              <p id="profileDynamic15Description" class="muted">Balanced 1.5 s FlexTDOA observation freshness and a conservative host RX window.</p>
+              <h3>124 ms Conservative Frame</h3>
+              <p id="profileDynamic15Description" class="muted">First performance target with generous native DS-TWR timing margin.</p>
               <div class="form-grid compact">
-                <label for="profileDynamic15FreshAgeSec">Observation freshness s</label>
-                <input id="profileDynamic15FreshAgeSec" value="1.5" type="number" min="0.1" step="0.1">
-                <label class="hidden" for="profileDynamic15DsFreshAgeSec">Distance freshness s</label>
-                <input class="hidden" id="profileDynamic15DsFreshAgeSec" value="1.5" type="number" min="0.1" step="0.1">
-                <label for="profileDynamic15SlotMs">DS-TWR slot ms</label>
-                <input id="profileDynamic15SlotMs" value="100" type="number" min="1" step="1">
-                <label for="profileDynamic15RoundGapMs">DS-TWR gap ms</label>
-                <input id="profileDynamic15RoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileDynamic15RxSliceMs">Host RX slice ms</label>
-                <input id="profileDynamic15RxSliceMs" value="100" type="number" min="1" step="1">
-                <label class="hidden" for="profileDynamic15DsRxSliceMs">DS-TWR RX slice ms</label>
-                <input class="hidden" id="profileDynamic15DsRxSliceMs" value="100" type="number" min="1" step="1">
-                <label for="profileDynamic15TimeoutMs">DS-TWR timeout ms</label>
-                <input id="profileDynamic15TimeoutMs" value="90" type="number" min="1" step="1">
-                <label for="profileDynamic15RespDelayMs">DS-TWR RESP delay ms</label>
-                <input id="profileDynamic15RespDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileDynamic15FinalDelayMs">DS-TWR FINAL delay ms</label>
-                <input id="profileDynamic15FinalDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileDynamic15ReportDelayMs">DS-TWR REPORT delay ms</label>
-                <input id="profileDynamic15ReportDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileDynamic15AutoRxDelayUus">DS-TWR Auto RX delay UUS</label>
+                <label for="profileDynamic15DsFreshAgeSec">Distance freshness s</label>
+                <input id="profileDynamic15DsFreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+                <label for="profileDynamic15SlotMs">Slot ms</label>
+                <input id="profileDynamic15SlotMs" value="30" type="number" min="1" step="1">
+                <label for="profileDynamic15RoundGapMs">Frame gap ms</label>
+                <input id="profileDynamic15RoundGapMs" value="4" type="number" min="1" step="1">
+                <label for="profileDynamic15DsRxSliceMs">Anchor RX slice ms</label>
+                <input id="profileDynamic15DsRxSliceMs" value="10" type="number" min="1" step="1">
+                <label for="profileDynamic15TimeoutMs">RX timeout ms</label>
+                <input id="profileDynamic15TimeoutMs" value="12" type="number" min="1" step="1">
+                <label for="profileDynamic15RespDelayMs">RESP delay ms</label>
+                <input id="profileDynamic15RespDelayMs" value="5" type="number" min="1" step="1">
+                <label for="profileDynamic15FinalDelayMs">FINAL delay ms</label>
+                <input id="profileDynamic15FinalDelayMs" value="5" type="number" min="1" step="1">
+                <label for="profileDynamic15AutoRxDelayUus">Auto RX delay UUS</label>
                 <input id="profileDynamic15AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
               <div class="profile-summary" id="profileDynamic15Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="dynamic15">Apply Balanced</button>
+                <button class="primary apply-ranging-profile" data-profile="dynamic15">Apply Conservative</button>
                 <button class="reset-ranging-profile" data-profile="dynamic15">Reset Defaults</button>
               </div>
             </div>
             <div class="profile-card" data-profile="dynamic12">
-              <h3>Reactive Profile</h3>
-              <p id="profileDynamic12Description" class="muted">Reactive 1.2 s FlexTDOA observation freshness and a conservative host RX window.</p>
+              <h3>76 ms Balanced Frame</h3>
+              <p id="profileDynamic12Description" class="muted">Balanced native target for approximately 13 complete position frames per second.</p>
               <div class="form-grid compact">
-                <label for="profileDynamic12FreshAgeSec">Observation freshness s</label>
-                <input id="profileDynamic12FreshAgeSec" value="1.2" type="number" min="0.1" step="0.1">
-                <label class="hidden" for="profileDynamic12DsFreshAgeSec">Distance freshness s</label>
-                <input class="hidden" id="profileDynamic12DsFreshAgeSec" value="1.2" type="number" min="0.1" step="0.1">
-                <label for="profileDynamic12SlotMs">DS-TWR slot ms</label>
-                <input id="profileDynamic12SlotMs" value="100" type="number" min="1" step="1">
-                <label for="profileDynamic12RoundGapMs">DS-TWR gap ms</label>
-                <input id="profileDynamic12RoundGapMs" value="10" type="number" min="1" step="1">
-                <label for="profileDynamic12RxSliceMs">Host RX slice ms</label>
-                <input id="profileDynamic12RxSliceMs" value="100" type="number" min="1" step="1">
-                <label class="hidden" for="profileDynamic12DsRxSliceMs">DS-TWR RX slice ms</label>
-                <input class="hidden" id="profileDynamic12DsRxSliceMs" value="100" type="number" min="1" step="1">
-                <label for="profileDynamic12TimeoutMs">DS-TWR timeout ms</label>
-                <input id="profileDynamic12TimeoutMs" value="90" type="number" min="1" step="1">
-                <label for="profileDynamic12RespDelayMs">DS-TWR RESP delay ms</label>
-                <input id="profileDynamic12RespDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileDynamic12FinalDelayMs">DS-TWR FINAL delay ms</label>
-                <input id="profileDynamic12FinalDelayMs" value="20" type="number" min="1" step="1">
-                <label for="profileDynamic12ReportDelayMs">DS-TWR REPORT delay ms</label>
-                <input id="profileDynamic12ReportDelayMs" value="10" type="number" min="1" step="1">
-                <label for="profileDynamic12AutoRxDelayUus">DS-TWR Auto RX delay UUS</label>
+                <label for="profileDynamic12DsFreshAgeSec">Distance freshness s</label>
+                <input id="profileDynamic12DsFreshAgeSec" value="0.3" type="number" min="0.1" step="0.1">
+                <label for="profileDynamic12SlotMs">Slot ms</label>
+                <input id="profileDynamic12SlotMs" value="18" type="number" min="1" step="1">
+                <label for="profileDynamic12RoundGapMs">Frame gap ms</label>
+                <input id="profileDynamic12RoundGapMs" value="4" type="number" min="1" step="1">
+                <label for="profileDynamic12DsRxSliceMs">Anchor RX slice ms</label>
+                <input id="profileDynamic12DsRxSliceMs" value="8" type="number" min="1" step="1">
+                <label for="profileDynamic12TimeoutMs">RX timeout ms</label>
+                <input id="profileDynamic12TimeoutMs" value="8" type="number" min="1" step="1">
+                <label for="profileDynamic12RespDelayMs">RESP delay ms</label>
+                <input id="profileDynamic12RespDelayMs" value="3" type="number" min="1" step="1">
+                <label for="profileDynamic12FinalDelayMs">FINAL delay ms</label>
+                <input id="profileDynamic12FinalDelayMs" value="3" type="number" min="1" step="1">
+                <label for="profileDynamic12AutoRxDelayUus">Auto RX delay UUS</label>
                 <input id="profileDynamic12AutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
               <div class="profile-summary" id="profileDynamic12Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-ranging-profile" data-profile="dynamic12">Apply Reactive</button>
+                <button class="primary apply-ranging-profile" data-profile="dynamic12">Apply Balanced</button>
                 <button class="reset-ranging-profile" data-profile="dynamic12">Reset Defaults</button>
               </div>
             </div>
             <div class="profile-card" data-profile="fastRaw">
-              <h3>Fast Profile</h3>
-              <p id="profileFastRawDescription" class="muted">Short 0.5 s FlexTDOA observation freshness and 5 ms host RX slices.</p>
+              <h3>64 ms Fast Frame</h3>
+              <p id="profileFastRawDescription" class="muted">Validated native profile: approximately 15.6 complete four-anchor position frames per second.</p>
+              <div class="profile-validation good">validated · 0 failures / 20 s · 62.2 ranges/s</div>
               <div class="form-grid compact">
-                <label for="profileFastRawFreshAgeSec">Observation freshness s</label>
-                <input id="profileFastRawFreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
-                <label class="hidden" for="profileFastRawDsFreshAgeSec">Distance freshness s</label>
-                <input class="hidden" id="profileFastRawDsFreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
-                <label for="profileFastRawSlotMs">DS-TWR slot ms</label>
-                <input id="profileFastRawSlotMs" value="7" type="number" min="1" step="1">
-                <label for="profileFastRawRoundGapMs">DS-TWR gap ms</label>
-                <input id="profileFastRawRoundGapMs" value="1" type="number" min="1" step="1">
-                <label for="profileFastRawRxSliceMs">Host RX slice ms</label>
-                <input id="profileFastRawRxSliceMs" value="5" type="number" min="1" step="1">
-                <label class="hidden" for="profileFastRawDsRxSliceMs">DS-TWR RX slice ms</label>
-                <input class="hidden" id="profileFastRawDsRxSliceMs" value="5" type="number" min="1" step="1">
-                <label for="profileFastRawTimeoutMs">DS-TWR timeout ms</label>
-                <input id="profileFastRawTimeoutMs" value="12" type="number" min="1" step="1">
-                <label for="profileFastRawRespDelayMs">DS-TWR RESP delay ms</label>
-                <input id="profileFastRawRespDelayMs" value="8" type="number" min="1" step="1">
-                <label for="profileFastRawFinalDelayMs">DS-TWR FINAL delay ms</label>
-                <input id="profileFastRawFinalDelayMs" value="8" type="number" min="1" step="1">
-                <label for="profileFastRawReportDelayMs">DS-TWR REPORT delay ms</label>
-                <input id="profileFastRawReportDelayMs" value="3" type="number" min="1" step="1">
-                <label for="profileFastRawAutoRxDelayUus">DS-TWR Auto RX delay UUS</label>
+                <label for="profileFastRawDsFreshAgeSec">Distance freshness s</label>
+                <input id="profileFastRawDsFreshAgeSec" value="0.2" type="number" min="0.1" step="0.1">
+                <label for="profileFastRawSlotMs">Slot ms</label>
+                <input id="profileFastRawSlotMs" value="15" type="number" min="1" step="1">
+                <label for="profileFastRawRoundGapMs">Frame gap ms</label>
+                <input id="profileFastRawRoundGapMs" value="4" type="number" min="1" step="1">
+                <label for="profileFastRawDsRxSliceMs">Anchor RX slice ms</label>
+                <input id="profileFastRawDsRxSliceMs" value="100" type="number" min="1" step="1">
+                <label for="profileFastRawTimeoutMs">RX timeout ms</label>
+                <input id="profileFastRawTimeoutMs" value="8" type="number" min="1" step="1">
+                <label for="profileFastRawRespDelayMs">RESP delay ms</label>
+                <input id="profileFastRawRespDelayMs" value="2" type="number" min="1" step="1">
+                <label for="profileFastRawFinalDelayMs">FINAL delay ms</label>
+                <input id="profileFastRawFinalDelayMs" value="2" type="number" min="1" step="1">
+                <label for="profileFastRawAutoRxDelayUus">Auto RX delay UUS</label>
                 <input id="profileFastRawAutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
               <div class="profile-summary" id="profileFastRawSummary"></div>
@@ -3789,14 +3766,26 @@ tr.status-stale td { color: #4f3b1d; }
               </div>
             </div>
             <div class="section">
-              <h2>Ranging Timing</h2>
+              <h2>Native DS-TWR Ranging Timing</h2>
               <div class="form-grid">
                 <label for="uwbRangingSlotMs">Slot ms</label>
-                <input id="uwbRangingSlotMs" value="350" type="number" min="1" step="1">
-                <label for="uwbRangingGapMs">Round gap ms</label>
-                <input id="uwbRangingGapMs" value="500" type="number" min="1" step="1">
-                <label for="uwbRangingRxMs">RX slice ms</label>
-                <input id="uwbRangingRxMs" value="100" type="number" min="1" step="1">
+                <input id="uwbRangingSlotMs" value="30" type="number" min="1" step="1">
+                <label for="uwbRangingGapMs">Frame gap ms</label>
+                <input id="uwbRangingGapMs" value="4" type="number" min="1" step="1">
+                <label for="uwbRangingRxMs">Anchor RX slice ms</label>
+                <input id="uwbRangingRxMs" value="10" type="number" min="1" step="1">
+                <label for="uwbRangingTimeoutMs">RX timeout ms</label>
+                <input id="uwbRangingTimeoutMs" value="12" type="number" min="1" step="1">
+                <label for="uwbRangingRespDelayMs">RESP delay ms</label>
+                <input id="uwbRangingRespDelayMs" value="5" type="number" min="1" step="1">
+                <label for="uwbRangingFinalDelayMs">FINAL delay ms</label>
+                <input id="uwbRangingFinalDelayMs" value="5" type="number" min="1" step="1">
+                <label for="uwbRangingAutoRxDelayUus">Auto RX delay UUS</label>
+                <input id="uwbRangingAutoRxDelayUus" value="500" type="number" min="1" step="1">
+              </div>
+              <div class="param-legend">
+                <div><b>Native exchange</b><span>Position ranging transmits only POLL, RESP and FINAL. It does not use REPORT, REPORT2 or RANGING_CMD.</span></div>
+                <div><b>Frame</b><span>For N anchors, frame duration is N × Slot + Frame gap.</span></div>
               </div>
             </div>
             <div class="section">
@@ -4022,6 +4011,7 @@ const state = {
   positionStreamRenderPending: false,
   positionStreamRxTimes: [],
   positionStreamRenderTimes: [],
+  positionSettingsSolver: null,
   flexTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.flexTimingSlotSelect") || 0),
 };
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
@@ -4033,77 +4023,62 @@ const toastTimers = new Map();
 let calibrationPollTimer = null;
 let calibrationJobId = null;
 const rangingProfileFields = [
-  {key: "positionMaxAgeSec", suffix: "FreshAgeSec"},
   {key: "dsPositionMaxAgeSec", suffix: "DsFreshAgeSec"},
   {key: "slotMs", suffix: "SlotMs"},
   {key: "roundGapMs", suffix: "RoundGapMs"},
-  {key: "rxSliceMs", suffix: "RxSliceMs"},
   {key: "dsRxSliceMs", suffix: "DsRxSliceMs"},
   {key: "timeoutMs", suffix: "TimeoutMs"},
   {key: "respDelayMs", suffix: "RespDelayMs"},
   {key: "finalDelayMs", suffix: "FinalDelayMs"},
-  {key: "reportDelayMs", suffix: "ReportDelayMs"},
   {key: "autoRxDelayUus", suffix: "AutoRxDelayUus"},
 ];
 const rangingProfileDefaults = {
   static3: {
     prefix: "profileStatic3",
-    label: "Stable Profile",
-    positionMaxAgeSec: 3,
-    dsPositionMaxAgeSec: 3,
+    label: "404 ms Compatibility Frame",
+    dsPositionMaxAgeSec: 1,
     slotMs: 100,
-    roundGapMs: 10,
-    rxSliceMs: 100,
-    dsRxSliceMs: 100,
-    timeoutMs: 90,
-    respDelayMs: 20,
-    finalDelayMs: 20,
-    reportDelayMs: 10,
+    roundGapMs: 4,
+    dsRxSliceMs: 10,
+    timeoutMs: 20,
+    respDelayMs: 10,
+    finalDelayMs: 10,
     autoRxDelayUus: 500,
   },
   dynamic15: {
     prefix: "profileDynamic15",
-    label: "Balanced Profile",
-    positionMaxAgeSec: 1.5,
-    dsPositionMaxAgeSec: 1.5,
-    slotMs: 100,
-    roundGapMs: 10,
-    rxSliceMs: 100,
-    dsRxSliceMs: 100,
-    timeoutMs: 90,
-    respDelayMs: 20,
-    finalDelayMs: 20,
-    reportDelayMs: 10,
+    label: "124 ms Conservative Frame",
+    dsPositionMaxAgeSec: 0.5,
+    slotMs: 30,
+    roundGapMs: 4,
+    dsRxSliceMs: 10,
+    timeoutMs: 12,
+    respDelayMs: 5,
+    finalDelayMs: 5,
     autoRxDelayUus: 500,
   },
   dynamic12: {
     prefix: "profileDynamic12",
-    label: "Reactive Profile",
-    positionMaxAgeSec: 1.2,
-    dsPositionMaxAgeSec: 1.2,
-    slotMs: 100,
-    roundGapMs: 10,
-    rxSliceMs: 100,
-    dsRxSliceMs: 100,
-    timeoutMs: 90,
-    respDelayMs: 20,
-    finalDelayMs: 20,
-    reportDelayMs: 10,
+    label: "76 ms Balanced Frame",
+    dsPositionMaxAgeSec: 0.3,
+    slotMs: 18,
+    roundGapMs: 4,
+    dsRxSliceMs: 8,
+    timeoutMs: 8,
+    respDelayMs: 3,
+    finalDelayMs: 3,
     autoRxDelayUus: 500,
   },
   fastRaw: {
     prefix: "profileFastRaw",
-    label: "Fast Profile",
-    positionMaxAgeSec: 0.5,
-    dsPositionMaxAgeSec: 0.5,
-    slotMs: 7,
-    roundGapMs: 1,
-    rxSliceMs: 5,
-    dsRxSliceMs: 5,
-    timeoutMs: 12,
-    respDelayMs: 8,
-    finalDelayMs: 8,
-    reportDelayMs: 3,
+    label: "64 ms Fast Frame",
+    dsPositionMaxAgeSec: 0.2,
+    slotMs: 15,
+    roundGapMs: 4,
+    dsRxSliceMs: 100,
+    timeoutMs: 8,
+    respDelayMs: 2,
+    finalDelayMs: 2,
     autoRxDelayUus: 500,
   },
 };
@@ -4185,14 +4160,14 @@ const flexProfileDefaults = {
   },
 };
 const rangingProtocolProfileFields = {
-  flextdoa: new Set(["positionMaxAgeSec", "rxSliceMs"]),
+  flextdoa: new Set(),
   ranging: new Set([
     "dsPositionMaxAgeSec", "slotMs", "roundGapMs", "dsRxSliceMs", "timeoutMs",
-    "respDelayMs", "finalDelayMs", "reportDelayMs", "autoRxDelayUus",
+    "respDelayMs", "finalDelayMs", "autoRxDelayUus",
   ]),
   hybrid: new Set(),
 };
-const rangingProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v5";
+const rangingProfileDefaultsVersion = "2026-07-26-native-ds-twr-v2";
 const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
@@ -4706,7 +4681,57 @@ function positionGeometryMaxAge(settings) {
 function positionSolverLabel(solver) {
   if (solver === "hybrid") return "Legacy hybrid logs";
   if (solver === "flextdoa") return "FlexTDOA";
-  return "DS-TWR ranges";
+  return "Native DS-TWR";
+}
+
+const positionProtocolDefaults = {
+  flextdoa: {maxAgeSec: 0.5},
+  ranging: {maxAgeSec: 0.5},
+  hybrid: {maxAgeSec: 3},
+};
+
+function positionProtocolMaxAgeKey(solver) {
+  return `uwbDash.position.${normalizePositionSolver(solver)}.maxAgeSec`;
+}
+
+function savePositionProtocolSettings(solver = null) {
+  const selected = normalizePositionSolver(
+    solver || state.positionSettingsSolver ||
+    document.getElementById("positionSolver")?.value || "flextdoa"
+  );
+  const value = Number(document.getElementById("positionMaxAgeSec")?.value);
+  if (Number.isFinite(value) && value >= 0.2) {
+    localStorage.setItem(positionProtocolMaxAgeKey(selected), String(value));
+  }
+}
+
+function switchPositionProtocolSettings() {
+  const solver = normalizePositionSolver(
+    document.getElementById("positionSolver")?.value || "flextdoa"
+  );
+  if (state.positionSettingsSolver &&
+      state.positionSettingsSolver !== solver) {
+    savePositionProtocolSettings(state.positionSettingsSolver);
+  }
+  const maxAge = document.getElementById("positionMaxAgeSec");
+  const saved = Number(localStorage.getItem(positionProtocolMaxAgeKey(solver)));
+  if (maxAge) {
+    maxAge.value = String(
+      Number.isFinite(saved) && saved >= 0.2
+        ? saved
+        : positionProtocolDefaults[solver].maxAgeSec
+    );
+  }
+  state.positionSettingsSolver = solver;
+  const restartGeometry =
+    document.getElementById("positionRestartAnchorSelfLocalization");
+  if (restartGeometry) {
+    const available = solver === "flextdoa";
+    restartGeometry.disabled = !available;
+    restartGeometry.title = available
+      ? "Clear the fixed geometry on every module and restart FlexTDOA self-localization."
+      : "Anchor self-localization is available only with the FlexTDOA solver selected.";
+  }
 }
 
 function positionSettings() {
@@ -5188,6 +5213,78 @@ function loadFixedPaperAnchorGeometry(anchorIds) {
   }
 }
 
+function fixedPaperAnchorGeometryFromModules(anchorIds) {
+  const ids = anchorIds.map(Number);
+  const topologyStatuses = (state.statuses || []).filter(item => {
+    if (!moduleHttpOnline(item)) return false;
+    const configuredIds = Array.isArray(item.runtime_anchor_ids)
+      ? item.runtime_anchor_ids.map(Number)
+      : [];
+    return configuredIds.length === ids.length &&
+      configuredIds.every((id, index) => id === ids[index]);
+  });
+  if (!topologyStatuses.length) return null;
+
+  const candidates = topologyStatuses.map(item => {
+    const xMm = Array.isArray(item.runtime_flex_tdoa_anchor_x_mm)
+      ? item.runtime_flex_tdoa_anchor_x_mm.map(Number)
+      : [];
+    const yMm = Array.isArray(item.runtime_flex_tdoa_anchor_y_mm)
+      ? item.runtime_flex_tdoa_anchor_y_mm.map(Number)
+      : [];
+    const generation = Number(item.runtime_flex_tdoa_geometry_generation);
+    if (item.runtime_flex_tdoa_geometry_fixed !== true ||
+        xMm.length !== ids.length || yMm.length !== ids.length ||
+        !xMm.every(Number.isFinite) || !yMm.every(Number.isFinite) ||
+        !Number.isInteger(generation) || generation < 1) {
+      return null;
+    }
+    return {generation, xMm, yMm};
+  });
+  if (candidates.some(item => item === null)) return null;
+
+  const first = candidates[0];
+  const consistent = candidates.every(candidate =>
+    candidate.generation === first.generation &&
+    candidate.xMm.every((value, index) => value === first.xMm[index]) &&
+    candidate.yMm.every((value, index) => value === first.yMm[index]));
+  if (!consistent) return null;
+
+  const anchors = {};
+  ids.forEach((id, index) => {
+    anchors[id] = {
+      x: first.xMm[index] / 1000,
+      y: first.yMm[index] / 1000,
+    };
+  });
+  return {
+    anchorIds: ids,
+    anchors,
+    fixedAt: Date.now() / 1000,
+    updates: 0,
+    geometryGeneration: first.generation,
+    source: "module_nvs",
+  };
+}
+
+function sameFixedPaperAnchorGeometry(left, right) {
+  if (!left || !right) return false;
+  if (Number(left.geometryGeneration) !== Number(right.geometryGeneration)) return false;
+  const leftIds = (left.anchorIds || []).map(Number);
+  const rightIds = (right.anchorIds || []).map(Number);
+  if (positionGeometryKey(leftIds) !== positionGeometryKey(rightIds)) return false;
+  return rightIds.every(id => {
+    const a = left.anchors?.[id];
+    const b = right.anchors?.[id];
+    return a && b && Number(a.x) === Number(b.x) && Number(a.y) === Number(b.y);
+  });
+}
+
+function persistFixedPaperAnchorGeometry(anchorIds, fixed) {
+  localStorage.setItem(
+    positionGeometryStorageKey(anchorIds), JSON.stringify(fixed));
+}
+
 function resetPaperAnchorSelfLocalization(anchorIds, forgetStored = true) {
   if (forgetStored) localStorage.removeItem(positionGeometryStorageKey(anchorIds));
   state.positionGeometry = {
@@ -5201,17 +5298,29 @@ function resetPaperAnchorSelfLocalization(anchorIds, forgetStored = true) {
 
 function paperAnchorGeometry(anchorIds, maxAge) {
   const key = positionGeometryKey(anchorIds);
+  const moduleFixed = fixedPaperAnchorGeometryFromModules(anchorIds);
   if (state.positionGeometry.key !== key) {
+    const fixed = moduleFixed || loadFixedPaperAnchorGeometry(anchorIds);
     state.positionGeometry = {
       key,
-      fixed: loadFixedPaperAnchorGeometry(anchorIds),
+      fixed,
       ekf: null,
     };
+    if (moduleFixed) {
+      persistFixedPaperAnchorGeometry(anchorIds, moduleFixed);
+    }
     state.positionSeeds = {};
   }
 
   const batch = currentAnchorDistanceBatch(anchorIds, maxAge);
   const session = state.positionGeometry;
+  if (moduleFixed &&
+      !sameFixedPaperAnchorGeometry(session.fixed, moduleFixed)) {
+    session.fixed = moduleFixed;
+    session.ekf = null;
+    persistFixedPaperAnchorGeometry(anchorIds, moduleFixed);
+    state.positionSeeds = {};
+  }
   if (session.fixed) {
     const anchors = cloneAnchorCoordinates(session.fixed.anchors);
     const residuals = anchorGeometryResiduals(anchors, batch.distanceItems);
@@ -7785,6 +7894,10 @@ function hydrateSettingsFromStatus(item) {
   setSettingIfFresh("uwbRangingSlotMs", item.runtime_ranging_slot_ms);
   setSettingIfFresh("uwbRangingGapMs", item.runtime_ranging_round_gap_ms);
   setSettingIfFresh("uwbRangingRxMs", item.runtime_ranging_rx_slice_ms);
+  setSettingIfFresh("uwbRangingTimeoutMs", item.runtime_ranging_rx_timeout_ms);
+  setSettingIfFresh("uwbRangingRespDelayMs", item.runtime_ranging_resp_delay_ms);
+  setSettingIfFresh("uwbRangingFinalDelayMs", item.runtime_ranging_final_delay_ms);
+  setSettingIfFresh("uwbRangingAutoRxDelayUus", item.runtime_ranging_auto_rx_delay_uus);
   setSettingIfFresh("uwbDtInitiator", item.runtime_distance_test_initiator_id);
   setSettingIfFresh("uwbDtResponder", item.runtime_distance_test_responder_id);
   setSettingIfFresh("uwbDtIntervalMs", item.runtime_distance_test_interval_ms);
@@ -8847,7 +8960,9 @@ async function applyFlexProfile(profileKey) {
     const freshAge = document.getElementById("positionMaxAgeSec");
     if (freshAge) {
       freshAge.value = String(values.positionMaxAgeSec);
-      localStorage.setItem(settingKey("positionMaxAgeSec"), freshAge.value);
+      localStorage.setItem(
+        positionProtocolMaxAgeKey("flextdoa"), freshAge.value
+      );
     }
     setTimeout(fetchSnapshot, 1800);
   }
@@ -8880,57 +8995,55 @@ function rangingSettingsSolver() {
 }
 
 function rangingProfileRuntimeParams(values, solver) {
-  if (solver === "flextdoa") {
-    // Pure FlexTDOA has fixed on-air timing. This is only the host RX call ceiling.
-    return {survey_rx_ms: String(values.rxSliceMs)};
-  }
   if (solver === "ranging") {
     return {
       ranging_slot_ms: String(values.slotMs),
       ranging_gap_ms: String(values.roundGapMs),
       ranging_rx_ms: String(values.dsRxSliceMs),
-      dt_rx_timeout_ms: String(values.timeoutMs),
-      dt_resp_delay_ms: String(values.respDelayMs),
-      dt_final_delay_ms: String(values.finalDelayMs),
-      dt_report_delay_ms: String(values.reportDelayMs),
-      dt_auto_rx_delay_uus: String(values.autoRxDelayUus),
+      ranging_timeout_ms: String(values.timeoutMs),
+      ranging_resp_delay_ms: String(values.respDelayMs),
+      ranging_final_delay_ms: String(values.finalDelayMs),
+      ranging_auto_rx_delay_uus: String(values.autoRxDelayUus),
     };
   }
   return {};
 }
 
 function mirrorRangingProfileToUwbFields(values, solver) {
-  const fields = solver === "flextdoa" ? {
-    uwbSurveyRxMs: values.rxSliceMs,
-  } : {
+  const fields = solver === "ranging" ? {
     uwbRangingSlotMs: values.slotMs,
     uwbRangingGapMs: values.roundGapMs,
     uwbRangingRxMs: values.dsRxSliceMs,
-    uwbDtRxTimeoutMs: values.timeoutMs,
-    uwbDtRespDelayMs: values.respDelayMs,
-    uwbDtFinalDelayMs: values.finalDelayMs,
-    uwbDtReportDelayMs: values.reportDelayMs,
-    uwbDtAutoRxDelayUus: values.autoRxDelayUus,
-  };
+    uwbRangingTimeoutMs: values.timeoutMs,
+    uwbRangingRespDelayMs: values.respDelayMs,
+    uwbRangingFinalDelayMs: values.finalDelayMs,
+    uwbRangingAutoRxDelayUus: values.autoRxDelayUus,
+  } : {};
   for (const [id, value] of Object.entries(fields)) {
     const el = document.getElementById(id);
     if (!el || value === undefined || !Number.isFinite(Number(value))) continue;
     el.value = String(value);
-    localStorage.setItem(settingKey(id), el.value);
+    if (id === "positionMaxAgeSec") {
+      localStorage.setItem(positionProtocolMaxAgeKey(solver), el.value);
+    } else {
+      localStorage.setItem(settingKey(id), el.value);
+    }
   }
 }
 
 function applyRangingProfilePositionSettings(values, solver) {
   const fields = {
-    positionMaxAgeSec: solver === "ranging"
-      ? values.dsPositionMaxAgeSec
-      : values.positionMaxAgeSec,
+    positionMaxAgeSec: values.dsPositionMaxAgeSec,
   };
   for (const [id, value] of Object.entries(fields)) {
     const el = document.getElementById(id);
     if (!el || value === undefined || value === null) continue;
     el.value = String(value);
-    localStorage.setItem(settingKey(id), el.value);
+    if (id === "positionMaxAgeSec") {
+      localStorage.setItem(positionProtocolMaxAgeKey(solver), el.value);
+    } else {
+      localStorage.setItem(settingKey(id), el.value);
+    }
   }
 }
 
@@ -8943,10 +9056,9 @@ function setRangingProfileFieldVisible(profileKey, field, visible) {
 }
 
 function rangingProfileDescription(values, solver) {
-  if (solver === "flextdoa") {
-    return `${fmtFixed(values.positionMaxAgeSec, 1)} s observation freshness and ${fmtFixed(values.rxSliceMs, 0)} ms host RX slices; radio timing uses the fixed compact slot.`;
-  }
-  return `${fmtFixed(values.dsPositionMaxAgeSec, 1)} s distance freshness with a ${fmtFixed(values.slotMs, 0)} ms DS-TWR slot and ${fmtFixed(values.roundGapMs, 0)} ms cycle gap.`;
+  if (solver !== "ranging") return "";
+  const frameMs = 4 * values.slotMs + values.roundGapMs;
+  return `${fmtFixed(values.dsPositionMaxAgeSec, 1)} s distance freshness; native POLL → RESP → FINAL frame is ${fmtFixed(frameMs, 0)} ms for four anchors.`;
 }
 
 function updateRangingSettingsProtocol() {
@@ -8955,14 +9067,14 @@ function updateRangingSettingsProtocol() {
     flextdoa: {
       title: "FlexTDOA Settings",
       label: "FlexTDOA",
-      hint: "Selected in Position Setup. Only controls used by pure FlexTDOA are shown.",
-      note: "FlexTDOA radio timing is fixed to the hardware-validated 4.80 ms CI-CR slot shown above. Profiles change only observation freshness and the host RX slice.",
+      hint: "Selected in Position Setup. Only native FlexTDOA CI-CR timing and frame profiles are shown.",
+      note: "FlexTDOA frame profiles are stored and applied independently from native DS-TWR profiles.",
     },
     ranging: {
       title: "DS-TWR Settings",
-      label: "DS-TWR ranges",
-      hint: "Selected in Position Setup. These controls configure the complete POLL, RESP, FINAL, REPORT and REPORT2 exchange.",
-      note: "Profiles below change only DS-TWR scheduling, receive waits and delayed-TX timing. FlexTDOA and anchor-survey settings are left untouched.",
+      label: "Native DS-TWR",
+      hint: "Selected in Position Setup. The tag initiates one native POLL, RESP, FINAL exchange with each anchor.",
+      note: "Each slot contains exactly POLL, RESP and FINAL. A complete frame ranges the tag to every configured anchor, then applies the frame gap. FlexTDOA, distance-test and calibration timing remain untouched.",
     },
     hybrid: {
       title: "Legacy Hybrid Settings",
@@ -9323,27 +9435,17 @@ function renderFlexTdoaTimingDiagram() {
 }
 
 function profileSummaryText(values, solver, anchorCount = 4) {
-  if (solver === "flextdoa") {
-    const slotMs = profileFlexTdoaSlotMs(anchorCount);
-    const flexFrameMs = anchorCount * slotMs;
-    return `fresh ${fmtFixed(values.positionMaxAgeSec, 1)} s · fixed ${fmtFixed(slotMs, 2)} ms radio slot · ${fmtFixed(flexFrameMs, 2)} ms frame · RX slice ${fmtFixed(values.rxSliceMs, 0)} ms`;
-  }
+  if (solver !== "ranging") return "";
   const dsCycleMs = anchorCount * values.slotMs + values.roundGapMs;
+  const frameHz = dsCycleMs > 0 ? 1000 / dsCycleMs : NaN;
   const warnings = [];
   if (values.timeoutMs >= values.slotMs) warnings.push("timeout >= slot");
   if (values.dsRxSliceMs > values.slotMs) warnings.push("RX slice > slot");
+  if (values.respDelayMs + values.finalDelayMs >= values.slotMs) {
+    warnings.push("RESP + FINAL >= slot");
+  }
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `fresh ${fmtFixed(values.dsPositionMaxAgeSec, 1)} s · ${fmtFixed(values.slotMs, 0)} ms slot · ${fmtFixed(values.roundGapMs, 0)} ms gap · RX slice ${fmtFixed(values.dsRxSliceMs, 0)} ms · ~${fmtFixed(dsCycleMs, 0)} ms cycle${warnText}`;
-}
-
-function profileFlexTdoaSlotMs(anchorCount = 4) {
-  const responderCount = Math.max(1, anchorCount - 1);
-  const timing = flexTimingRuntimeConfig().timing;
-  return (
-    timing.guardUs + timing.requestUs + timing.requestProcessUs +
-    responderCount * timing.responseUs +
-    responderCount * timing.responseProcessUs
-  ) / 1000;
+  return `fresh ${fmtFixed(values.dsPositionMaxAgeSec, 1)} s · POLL → RESP → FINAL · ${fmtFixed(values.slotMs, 0)} ms slot · ${fmtFixed(values.roundGapMs, 0)} ms gap · ${fmtFixed(dsCycleMs, 0)} ms frame · ${fmtFixed(frameHz, 2)} Hz${warnText}`;
 }
 
 function updateRangingProfileSummary(profileKey) {
@@ -9363,7 +9465,9 @@ function updateRangingProfileSummary(profileKey) {
     ? `${positionSolverLabel(solver)} · ${profileSummaryText(values, solver, 4)}`
     : "incomplete profile";
   const warn = solver === "ranging" && (
-    values.timeoutMs >= values.slotMs || values.dsRxSliceMs > values.slotMs
+    values.timeoutMs >= values.slotMs ||
+    values.dsRxSliceMs > values.slotMs ||
+    values.respDelayMs + values.finalDelayMs >= values.slotMs
   );
   summary.className = `profile-summary ${valid && warn ? "warn" : ""}`.trim();
 }
@@ -9376,7 +9480,7 @@ async function applyRangingProfile(profileKey) {
   const profile = rangingProfileDefaults[profileKey];
   if (!profile) return;
   const solver = rangingSettingsSolver();
-  if (solver === "hybrid") return;
+  if (solver !== "ranging") return;
   const values = readRangingProfile(profileKey);
   const visibleFields = rangingProtocolProfileFields[solver];
   if (![...visibleFields].every(key => Number.isFinite(values[key]) && values[key] > 0)) {
@@ -9401,12 +9505,14 @@ function persistedSettingIds() {
     "runtimeUwb", "runtimeBno085", "runtimeGps", "runtimeTelemetryPort",
     "accelTimebase", "accelSampleHz", "accelTargets",
     "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
-    "positionMaxAgeSec", "positionReferenceMode", "positionReferenceX",
+    "positionReferenceMode", "positionReferenceX",
     "positionReferenceY", "positionErrorWindowSec",
     "uwbTargets", "uwbRadioChannel", "uwbFlexAnchors", "uwbFlexK",
     "uwbFlexSlots", "uwbFlexMasks", "uwbSurveyRxMs", "uwbSurveyDelayMs", "uwbSurveySlotMs",
     "uwbSurveyGapMs", "uwbSurveyLogEvery", "uwbRangingSlotMs",
-    "uwbRangingGapMs", "uwbRangingRxMs", "uwbDtInitiator", "uwbDtResponder",
+    "uwbRangingGapMs", "uwbRangingRxMs", "uwbRangingTimeoutMs",
+    "uwbRangingRespDelayMs", "uwbRangingFinalDelayMs",
+    "uwbRangingAutoRxDelayUus", "uwbDtInitiator", "uwbDtResponder",
     "uwbDtIntervalMs", "uwbDtRxTimeoutMs", "uwbDtRespDelayMs",
     "uwbDtFinalDelayMs", "uwbDtReportDelayMs", "uwbDtAutoRxDelayUus",
     "uwbCalSummary", "uwbCalMinMs", "uwbCalGuardUs", "uwbCalMaxMs", "uwbCalRxMs",
@@ -9498,6 +9604,23 @@ function migratePositionSolverSetting() {
     solverEl.value = normalizePositionSolver(savedSolver);
     localStorage.setItem(solverKey, solverEl.value);
   }
+
+  const selectedSolver = normalizePositionSolver(
+    solverEl?.value || "flextdoa"
+  );
+  const legacyMaxAgeKey = settingKey("positionMaxAgeSec");
+  const legacyMaxAge = Number(localStorage.getItem(legacyMaxAgeKey));
+  for (const [solver, defaults] of Object.entries(positionProtocolDefaults)) {
+    const key = positionProtocolMaxAgeKey(solver);
+    if (localStorage.getItem(key) !== null) continue;
+    const initial = solver === selectedSolver &&
+      Number.isFinite(legacyMaxAge) && legacyMaxAge >= 0.2
+      ? legacyMaxAge
+      : defaults.maxAgeSec;
+    localStorage.setItem(key, String(initial));
+  }
+  localStorage.removeItem(legacyMaxAgeKey);
+  switchPositionProtocolSettings();
 }
 
 function wireSettingPersistence() {
@@ -9604,6 +9727,21 @@ function runPositionOverlayAction(event) {
 
 async function restartAnchorSelfLocalization() {
     const settings = positionSettings();
+    if (settings.solver !== "flextdoa") {
+      setToast(
+        "positionToast",
+        "Select FlexTDOA before restarting anchor self-localization.",
+        "bad"
+      );
+      return;
+    }
+    if (!window.confirm(
+      "Clear the fixed anchor geometry from this browser and every module? " +
+      "Positioning will remain unavailable until FlexTDOA learns a new " +
+      "geometry and you press Fix Anchor Geometry."
+    )) {
+      return;
+    }
     const result = await postConfig({
       target_modules: "all",
       params: {flex_geometry_clear: "1"},
@@ -9656,7 +9794,7 @@ async function fixCurrentAnchorGeometry() {
   }, "positionToast");
   if (!apiResponseOk(result)) return;
   session.fixed = fixed;
-  localStorage.setItem(positionGeometryStorageKey(settings.anchorIds), JSON.stringify(fixed));
+  persistFixedPaperAnchorGeometry(settings.anchorIds, fixed);
   state.positionSeeds = {};
   state.positionTrail = {};
   state.positionTrailTokens = {};
@@ -9706,14 +9844,14 @@ function wireSettings() {
   ].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
-    el.addEventListener("input", () => {
+    const update = () => {
+      if (id === "positionSolver") switchPositionProtocolSettings();
+      if (id === "positionMaxAgeSec") savePositionProtocolSettings();
       renderPosition();
       if (id === "positionSolver") updateRangingSettingsProtocol();
-    });
-    el.addEventListener("change", () => {
-      renderPosition();
-      if (id === "positionSolver") updateRangingSettingsProtocol();
-    });
+    };
+    el.addEventListener("input", update);
+    el.addEventListener("change", update);
   });
   const updatePositionReferenceControls = () => {
     const manual = document.getElementById("positionReferenceMode")?.value === "manual";
@@ -9869,6 +10007,10 @@ function wireSettings() {
         ranging_slot_ms: document.getElementById("uwbRangingSlotMs").value,
         ranging_gap_ms: document.getElementById("uwbRangingGapMs").value,
         ranging_rx_ms: document.getElementById("uwbRangingRxMs").value,
+        ranging_timeout_ms: document.getElementById("uwbRangingTimeoutMs").value,
+        ranging_resp_delay_ms: document.getElementById("uwbRangingRespDelayMs").value,
+        ranging_final_delay_ms: document.getElementById("uwbRangingFinalDelayMs").value,
+        ranging_auto_rx_delay_uus: document.getElementById("uwbRangingAutoRxDelayUus").value,
         dt_initiator: document.getElementById("uwbDtInitiator").value,
         dt_responder: document.getElementById("uwbDtResponder").value,
         dt_interval_ms: document.getElementById("uwbDtIntervalMs").value,

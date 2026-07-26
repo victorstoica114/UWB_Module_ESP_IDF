@@ -45,6 +45,10 @@ static const char *TAG = "app_runtime_config";
 #define KEY_RNG_SLOT "rng_slot"
 #define KEY_RNG_GAP "rng_gap"
 #define KEY_RNG_RX "rng_rx"
+#define KEY_RNG_TIMEOUT "rng_timeout"
+#define KEY_RNG_RESP "rng_resp"
+#define KEY_RNG_FINAL "rng_final"
+#define KEY_RNG_ARX "rng_arx"
 #define KEY_DT_PEER "dt_peer"
 #define KEY_DT_INIT "dt_init"
 #define KEY_DT_RESP "dt_resp"
@@ -350,6 +354,11 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->ranging_slot_ms = APP_UWB_RANGING_SLOT_MS;
     config->ranging_round_gap_ms = APP_UWB_RANGING_ROUND_GAP_MS;
     config->ranging_rx_slice_ms = APP_UWB_RANGING_RX_SLICE_MS;
+    config->ranging_rx_timeout_ms = APP_UWB_RANGING_RX_TIMEOUT_MS;
+    config->ranging_resp_delay_ms = APP_UWB_RANGING_RESP_DELAY_MS;
+    config->ranging_final_delay_ms = APP_UWB_RANGING_FINAL_DELAY_MS;
+    config->ranging_auto_rx_delay_uus =
+        APP_UWB_RANGING_AUTO_RX_DELAY_UUS;
     config->distance_test_peer_id = (uint8_t)APP_UWB_DISTANCE_TEST_PEER_ID;
     config->distance_test_initiator_id =
         (uint8_t)APP_UWB_DISTANCE_TEST_INITIATOR_ID;
@@ -446,6 +455,10 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         !ms_valid(config->ranging_slot_ms) ||
         !ms_valid(config->ranging_round_gap_ms) ||
         !ms_valid(config->ranging_rx_slice_ms) ||
+        !ms_valid(config->ranging_rx_timeout_ms) ||
+        !ms_valid(config->ranging_resp_delay_ms) ||
+        !ms_valid(config->ranging_final_delay_ms) ||
+        config->ranging_auto_rx_delay_uus == 0 ||
         !id_valid(config->distance_test_initiator_id) ||
         !id_valid(config->distance_test_responder_id) ||
         config->distance_test_initiator_id ==
@@ -600,6 +613,14 @@ static void read_config_from_nvs(app_runtime_config_t *config)
     found |= read_u32(handle, KEY_RNG_SLOT, &config->ranging_slot_ms);
     found |= read_u32(handle, KEY_RNG_GAP, &config->ranging_round_gap_ms);
     found |= read_u32(handle, KEY_RNG_RX, &config->ranging_rx_slice_ms);
+    found |= read_u32(handle, KEY_RNG_TIMEOUT,
+                      &config->ranging_rx_timeout_ms);
+    found |= read_u32(handle, KEY_RNG_RESP,
+                      &config->ranging_resp_delay_ms);
+    found |= read_u32(handle, KEY_RNG_FINAL,
+                      &config->ranging_final_delay_ms);
+    found |= read_u32(handle, KEY_RNG_ARX,
+                      &config->ranging_auto_rx_delay_uus);
     found |= read_u8(handle, KEY_DT_PEER, &config->distance_test_peer_id);
     found |= read_u8(handle, KEY_DT_INIT, &config->distance_test_initiator_id);
     found |= read_u8(handle, KEY_DT_RESP, &config->distance_test_responder_id);
@@ -796,6 +817,14 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
     WRITE_OR_GOTO(write_u32(handle, KEY_RNG_GAP,
                             config->ranging_round_gap_ms));
     WRITE_OR_GOTO(write_u32(handle, KEY_RNG_RX, config->ranging_rx_slice_ms));
+    WRITE_OR_GOTO(write_u32(handle, KEY_RNG_TIMEOUT,
+                            config->ranging_rx_timeout_ms));
+    WRITE_OR_GOTO(write_u32(handle, KEY_RNG_RESP,
+                            config->ranging_resp_delay_ms));
+    WRITE_OR_GOTO(write_u32(handle, KEY_RNG_FINAL,
+                            config->ranging_final_delay_ms));
+    WRITE_OR_GOTO(write_u32(handle, KEY_RNG_ARX,
+                            config->ranging_auto_rx_delay_uus));
     WRITE_OR_GOTO(write_u8(handle, KEY_DT_PEER,
                            config->distance_test_peer_id));
     WRITE_OR_GOTO(write_u8(handle, KEY_DT_INIT,

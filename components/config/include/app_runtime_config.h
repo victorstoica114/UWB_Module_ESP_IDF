@@ -43,6 +43,10 @@ typedef struct {
     uint32_t ranging_slot_ms;
     uint32_t ranging_round_gap_ms;
     uint32_t ranging_rx_slice_ms;
+    uint32_t ranging_rx_timeout_ms;
+    uint32_t ranging_resp_delay_ms;
+    uint32_t ranging_final_delay_ms;
+    uint32_t ranging_auto_rx_delay_uus;
     uint8_t distance_test_peer_id;
     uint8_t distance_test_initiator_id;
     uint8_t distance_test_responder_id;

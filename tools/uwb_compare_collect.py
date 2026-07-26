@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""Collect deduplicated field data for native DS-TWR/FlexTDOA comparison."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import pathlib
+import sys
+import time
+import urllib.error
+import urllib.request
+from typing import Any
+
+
+PROTOCOL_MODES = {
+    "ds_twr": "uwb_ranging",
+    "flextdoa": "uwb_flex_tdoa",
+}
+
+STATUS_KEYS = (
+    "module_id",
+    "hostname",
+    "version",
+    "http_status_online",
+    "wifi_connected",
+    "wifi_connected_rssi",
+    "runtime_mode_name",
+    "runtime_tag_id",
+    "runtime_anchor_ids",
+    "runtime_flex_tdoa_geometry_fixed",
+    "runtime_flex_tdoa_geometry_generation",
+    "runtime_flex_tdoa_anchor_x_mm",
+    "runtime_flex_tdoa_anchor_y_mm",
+    "runtime_ranging_slot_ms",
+    "runtime_ranging_round_gap_ms",
+    "runtime_ranging_rx_slice_ms",
+    "runtime_ranging_rx_timeout_ms",
+    "runtime_ranging_resp_delay_ms",
+    "runtime_ranging_final_delay_ms",
+    "runtime_ranging_auto_rx_delay_uus",
+    "runtime_flex_tdoa_guard_us",
+    "runtime_flex_tdoa_request_subslot_us",
+    "runtime_flex_tdoa_request_process_us",
+    "runtime_flex_tdoa_response_subslot_us",
+    "runtime_flex_tdoa_response_process_us",
+    "runtime_radio_channel",
+    "uwb_active_antenna_delay",
+    "resource_temperature_c",
+    "boot_guard_boot_count",
+    "boot_guard_validated",
+)
+
+
+def fetch_json(url: str, timeout: float = 3.0) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers={"Cache-Control": "no-store"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.load(response)
+
+
+def finite_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def received_at(item: dict[str, Any], captured_at: float) -> float:
+    explicit = finite_float(item.get("received_at"))
+    if explicit is not None:
+        return explicit
+    age_sec = finite_float(item.get("age_sec"))
+    return captured_at - max(0.0, age_sec or 0.0)
+
+
+def clean_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in item.items()
+        if key not in {"raw", "stats"} and value is not None
+    }
+
+
+def status_summary(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {key: item.get(key) for key in STATUS_KEYS if key in item}
+        for item in sorted(
+            snapshot.get("statuses", []),
+            key=lambda status: int(status.get("module_id") or 0),
+        )
+    ]
+
+
+def ready_modules(snapshot: dict[str, Any], runtime_mode: str) -> int:
+    return sum(
+        1
+        for item in snapshot.get("statuses", [])
+        if item.get("http_status_online")
+        and item.get("wifi_connected")
+        and item.get("runtime_mode_name") == runtime_mode
+    )
+
+
+def wait_for_runtime(
+    snapshot_url: str,
+    runtime_mode: str,
+    expected_modules: int,
+    timeout_sec: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_sec
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            snapshot = fetch_json(snapshot_url)
+            ready = ready_modules(snapshot, runtime_mode)
+            if (
+                ready >= expected_modules
+                and int(snapshot.get("telemetry_client_count") or 0)
+                >= expected_modules
+            ):
+                return snapshot
+            last_error = (
+                f"{ready}/{expected_modules} modules in {runtime_mode}, "
+                f"{snapshot.get('telemetry_client_count', 0)} telemetry clients"
+            )
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            last_error = str(exc)
+        time.sleep(1.0)
+    raise RuntimeError(f"runtime did not become ready: {last_error}")
+
+
+def write_event(
+    handle: Any,
+    *,
+    kind: str,
+    protocol: str,
+    block: str,
+    captured_at: float,
+    event_received_at: float,
+    payload: dict[str, Any],
+) -> None:
+    record = {
+        "kind": kind,
+        "protocol": protocol,
+        "block": block,
+        "captured_at": captured_at,
+        "received_at": event_received_at,
+        **payload,
+    }
+    handle.write(json.dumps(record, separators=(",", ":"), sort_keys=True))
+    handle.write("\n")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Collect one controlled UWB comparison block."
+    )
+    parser.add_argument("--protocol", choices=sorted(PROTOCOL_MODES), required=True)
+    parser.add_argument("--block", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--dashboard", default="http://127.0.0.1:8780")
+    parser.add_argument("--duration-sec", type=float, default=120.0)
+    parser.add_argument("--warmup-sec", type=float, default=15.0)
+    parser.add_argument("--poll-hz", type=float, default=50.0)
+    parser.add_argument("--expected-modules", type=int, default=5)
+    parser.add_argument("--ready-timeout-sec", type=float, default=90.0)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    output_dir = pathlib.Path(args.output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    events_path = output_dir / f"{args.block}.jsonl"
+    metadata_path = output_dir / f"{args.block}.metadata.json"
+    snapshot_url = args.dashboard.rstrip("/") + "/api/snapshot"
+    runtime_mode = PROTOCOL_MODES[args.protocol]
+
+    initial = wait_for_runtime(
+        snapshot_url,
+        runtime_mode,
+        max(1, args.expected_modules),
+        max(1.0, args.ready_timeout_sec),
+    )
+    print(
+        f"{args.block}: runtime ready, warmup {args.warmup_sec:.1f}s",
+        flush=True,
+    )
+    warmup_deadline = time.monotonic() + max(0.0, args.warmup_sec)
+    while time.monotonic() < warmup_deadline:
+        time.sleep(min(0.25, warmup_deadline - time.monotonic()))
+
+    started_at = time.time()
+    started_monotonic = time.monotonic()
+    deadline = started_monotonic + max(1.0, args.duration_sec)
+    interval = 1.0 / max(1.0, args.poll_hz)
+    next_poll = started_monotonic
+    next_status = started_monotonic
+    last_snapshot = initial
+    seen_ds: set[tuple[int, int, int]] = set()
+    seen_tdoa: set[tuple[int, int, int, int, int]] = set()
+    seen_anchor: set[tuple[int, int, int, int]] = set()
+    seen_position: set[tuple[int, int]] = set()
+    counters = {
+        "ds_range": 0,
+        "tdoa_observation": 0,
+        "anchor_range": 0,
+        "local_position": 0,
+        "status": 0,
+        "poll_error": 0,
+    }
+
+    with events_path.open("w", encoding="utf-8", buffering=1) as handle:
+        while time.monotonic() < deadline:
+            now_monotonic = time.monotonic()
+            if now_monotonic < next_poll:
+                time.sleep(next_poll - now_monotonic)
+            captured_at = time.time()
+            next_poll += interval
+            if next_poll < time.monotonic() - interval:
+                next_poll = time.monotonic()
+
+            try:
+                snapshot = fetch_json(snapshot_url)
+                last_snapshot = snapshot
+            except (OSError, ValueError, urllib.error.URLError) as exc:
+                counters["poll_error"] += 1
+                if counters["poll_error"] <= 5:
+                    print(f"{args.block}: snapshot error: {exc}", file=sys.stderr)
+                continue
+
+            for item in snapshot.get("ranging", {}).get("distances", {}).values():
+                event_time = received_at(item, captured_at)
+                if event_time + 0.05 < started_at:
+                    continue
+                key = (
+                    int(item.get("tag_id") or 0),
+                    int(item.get("anchor_id") or 0),
+                    int(item.get("seq") or 0),
+                )
+                if key in seen_ds:
+                    continue
+                seen_ds.add(key)
+                write_event(
+                    handle,
+                    kind="ds_range",
+                    protocol=args.protocol,
+                    block=args.block,
+                    captured_at=captured_at,
+                    event_received_at=event_time,
+                    payload=clean_item(item),
+                )
+                counters["ds_range"] += 1
+
+            tdoa = snapshot.get("tdoa", {})
+            for item in tdoa.get("recent_observations", []):
+                event_time = received_at(item, captured_at)
+                if event_time + 0.05 < started_at:
+                    continue
+                key = (
+                    int(item.get("tag_id") or 0),
+                    int(item.get("initiator_id") or 0),
+                    int(item.get("responder_id") or 0),
+                    int(item.get("slot_id") or 0),
+                    int(item.get("responder_index") or 0),
+                )
+                if key in seen_tdoa:
+                    continue
+                seen_tdoa.add(key)
+                write_event(
+                    handle,
+                    kind="tdoa_observation",
+                    protocol=args.protocol,
+                    block=args.block,
+                    captured_at=captured_at,
+                    event_received_at=event_time,
+                    payload=clean_item(item),
+                )
+                counters["tdoa_observation"] += 1
+
+            for item in tdoa.get("recent_anchor_ranges", []):
+                event_time = received_at(item, captured_at)
+                if event_time + 0.05 < started_at:
+                    continue
+                key = (
+                    int(item.get("initiator_id") or 0),
+                    int(item.get("responder_id") or 0),
+                    int(item.get("slot_id") or 0),
+                    int(item.get("seq") or 0),
+                )
+                if key in seen_anchor:
+                    continue
+                seen_anchor.add(key)
+                write_event(
+                    handle,
+                    kind="anchor_range",
+                    protocol=args.protocol,
+                    block=args.block,
+                    captured_at=captured_at,
+                    event_received_at=event_time,
+                    payload=clean_item(item),
+                )
+                counters["anchor_range"] += 1
+
+            for item in tdoa.get("local_positions", {}).values():
+                event_time = received_at(item, captured_at)
+                if event_time + 0.05 < started_at:
+                    continue
+                key = (
+                    int(item.get("module_id") or 0),
+                    int(
+                        item.get("position_event_id")
+                        or item.get("slot_id")
+                        or item.get("uptime_ms")
+                        or 0
+                    ),
+                )
+                if key in seen_position:
+                    continue
+                seen_position.add(key)
+                write_event(
+                    handle,
+                    kind="local_position",
+                    protocol=args.protocol,
+                    block=args.block,
+                    captured_at=captured_at,
+                    event_received_at=event_time,
+                    payload=clean_item(item),
+                )
+                counters["local_position"] += 1
+
+            if time.monotonic() >= next_status:
+                write_event(
+                    handle,
+                    kind="status",
+                    protocol=args.protocol,
+                    block=args.block,
+                    captured_at=captured_at,
+                    event_received_at=captured_at,
+                    payload={
+                        "client_count": snapshot.get("client_count"),
+                        "telemetry_client_count": snapshot.get(
+                            "telemetry_client_count"
+                        ),
+                        "modules": status_summary(snapshot),
+                    },
+                )
+                counters["status"] += 1
+                next_status += 1.0
+
+            elapsed = time.monotonic() - started_monotonic
+            if int(elapsed) > 0 and int(elapsed) % 10 == 0:
+                marker = int(elapsed)
+                if counters.get("_last_marker") != marker:
+                    counters["_last_marker"] = marker
+                    print(
+                        f"{args.block}: {elapsed:5.1f}/{args.duration_sec:.1f}s "
+                        f"ds={counters['ds_range']} "
+                        f"tdoa={counters['tdoa_observation']} "
+                        f"pos={counters['local_position']}",
+                        flush=True,
+                    )
+
+    ended_at = time.time()
+    counters.pop("_last_marker", None)
+    metadata = {
+        "schema_version": 1,
+        "block": args.block,
+        "protocol": args.protocol,
+        "runtime_mode": runtime_mode,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration_sec": ended_at - started_at,
+        "warmup_sec": args.warmup_sec,
+        "poll_hz": args.poll_hz,
+        "expected_modules": args.expected_modules,
+        "events_file": events_path.name,
+        "event_counts": counters,
+        "ground_truth": {
+            "coordinate_convention": "A2=(0,0), A3=(0,3), A4=(3,0), A5=(3,3)",
+            "anchors_m": {
+                "2": [0.0, 0.0],
+                "3": [0.0, 3.0],
+                "4": [3.0, 0.0],
+                "5": [3.0, 3.0],
+            },
+            "tag_m": [1.5, 1.5],
+            "survey_tolerance_m": 0.002,
+        },
+        "initial_status": status_summary(initial),
+        "final_status": status_summary(last_snapshot),
+    }
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(
+        f"{args.block}: complete, events={events_path}, counts={counters}",
+        flush=True,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

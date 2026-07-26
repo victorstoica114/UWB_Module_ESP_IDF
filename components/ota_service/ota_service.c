@@ -85,6 +85,8 @@ typedef struct {
     char runtime_anchor_ids_json[48];
     char runtime_flex_slots_json[48];
     char runtime_flex_masks_json[72];
+    char runtime_flex_anchor_x_json[128];
+    char runtime_flex_anchor_y_json[128];
     char response[OTA_SERVICE_STATUS_RESPONSE_SIZE];
 } ota_status_context_t;
 
@@ -184,6 +186,37 @@ static void format_u16_array_json(const uint16_t *values, size_t count,
         expanded[i] = values[i];
     }
     format_u32_array_json(expanded, limit, buffer, buffer_size);
+}
+
+static void format_i32_array_json(const int32_t *values, size_t count,
+                                  char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return;
+    }
+    const size_t limit = count < APP_RUNTIME_CONFIG_MAX_ANCHORS
+                             ? count
+                             : APP_RUNTIME_CONFIG_MAX_ANCHORS;
+    size_t offset = 0;
+    int written = snprintf(buffer, buffer_size, "[");
+    if (written < 0 || (size_t)written >= buffer_size) {
+        buffer[0] = '\0';
+        return;
+    }
+    offset = (size_t)written;
+    for (size_t i = 0; i < limit; ++i) {
+        written = snprintf(&buffer[offset], buffer_size - offset,
+                           "%s%ld", i == 0 ? "" : ",",
+                           (long)values[i]);
+        if (written < 0 || (size_t)written >= buffer_size - offset) {
+            buffer[0] = '\0';
+            return;
+        }
+        offset += (size_t)written;
+    }
+    if (offset + 2U <= buffer_size) {
+        (void)snprintf(&buffer[offset], buffer_size - offset, "]");
+    }
 }
 
 static void format_json_string(const char *value, char *buffer,
@@ -756,6 +789,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #define runtime_anchor_ids_json (ctx->runtime_anchor_ids_json)
 #define runtime_flex_slots_json (ctx->runtime_flex_slots_json)
 #define runtime_flex_masks_json (ctx->runtime_flex_masks_json)
+#define runtime_flex_anchor_x_json (ctx->runtime_flex_anchor_x_json)
+#define runtime_flex_anchor_y_json (ctx->runtime_flex_anchor_y_json)
 
     const esp_app_desc_t *app = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -799,6 +834,14 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                           runtime_config->flex_tdoa_slot_count,
                           runtime_flex_masks_json,
                           sizeof(runtime_flex_masks_json));
+    format_i32_array_json(runtime_config->flex_tdoa_anchor_x_mm,
+                          runtime_config->anchor_count,
+                          runtime_flex_anchor_x_json,
+                          sizeof(runtime_flex_anchor_x_json));
+    format_i32_array_json(runtime_config->flex_tdoa_anchor_y_mm,
+                          runtime_config->anchor_count,
+                          runtime_flex_anchor_y_json,
+                          sizeof(runtime_flex_anchor_y_json));
 
     char *response = ctx->response;
 
@@ -863,6 +906,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_flex_tdoa_response_process_us\":%lu,"
         "\"runtime_flex_tdoa_geometry_fixed\":%s,"
         "\"runtime_flex_tdoa_geometry_generation\":%lu,"
+        "\"runtime_flex_tdoa_anchor_x_mm\":%s,"
+        "\"runtime_flex_tdoa_anchor_y_mm\":%s,"
         "\"runtime_anchor_survey_coordinator_id\":%u,"
         "\"runtime_anchor_survey_rx_slice_ms\":%lu,"
         "\"runtime_anchor_survey_command_delay_ms\":%lu,"
@@ -872,6 +917,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_ranging_slot_ms\":%lu,"
         "\"runtime_ranging_round_gap_ms\":%lu,"
         "\"runtime_ranging_rx_slice_ms\":%lu,"
+        "\"runtime_ranging_rx_timeout_ms\":%lu,"
+        "\"runtime_ranging_resp_delay_ms\":%lu,"
+        "\"runtime_ranging_final_delay_ms\":%lu,"
+        "\"runtime_ranging_auto_rx_delay_uus\":%lu,"
         "\"runtime_distance_test_peer_id\":%u,"
         "\"runtime_distance_test_initiator_id\":%u,"
         "\"runtime_distance_test_responder_id\":%u,"
@@ -1347,6 +1396,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)runtime_config->flex_tdoa_response_process_us,
         runtime_config->flex_tdoa_geometry_fixed ? "true" : "false",
         (unsigned long)runtime_config->flex_tdoa_geometry_generation,
+        runtime_flex_anchor_x_json,
+        runtime_flex_anchor_y_json,
         (unsigned)runtime_config->anchor_survey_coordinator_id,
         (unsigned long)runtime_config->anchor_survey_rx_slice_ms,
         (unsigned long)runtime_config->anchor_survey_command_delay_ms,
@@ -1356,6 +1407,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)runtime_config->ranging_slot_ms,
         (unsigned long)runtime_config->ranging_round_gap_ms,
         (unsigned long)runtime_config->ranging_rx_slice_ms,
+        (unsigned long)runtime_config->ranging_rx_timeout_ms,
+        (unsigned long)runtime_config->ranging_resp_delay_ms,
+        (unsigned long)runtime_config->ranging_final_delay_ms,
+        (unsigned long)runtime_config->ranging_auto_rx_delay_uus,
         (unsigned)runtime_config->distance_test_peer_id,
         (unsigned)runtime_config->distance_test_initiator_id,
         (unsigned)runtime_config->distance_test_responder_id,
@@ -1813,6 +1868,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #undef runtime_anchor_ids_json
 #undef runtime_flex_slots_json
 #undef runtime_flex_masks_json
+#undef runtime_flex_anchor_x_json
+#undef runtime_flex_anchor_y_json
     return response_err;
 }
 
@@ -3091,11 +3148,15 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
                 return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                            "Invalid anchors");
             }
-            memset(config.anchor_ids, 0, sizeof(config.anchor_ids));
-            memcpy(config.anchor_ids, ids, count);
-            config.anchor_count = count;
-            app_runtime_config_reset_flex_tdoa(&config);
-            changed = true;
+            const bool anchors_changed =
+                count != config.anchor_count ||
+                memcmp(config.anchor_ids, ids, sizeof(config.anchor_ids)) != 0;
+            if (anchors_changed) {
+                memcpy(config.anchor_ids, ids, sizeof(config.anchor_ids));
+                config.anchor_count = count;
+                app_runtime_config_reset_flex_tdoa(&config);
+                changed = true;
+            }
         } else if (query_err != ESP_ERR_NOT_FOUND) {
             return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                        "Invalid anchors");
@@ -3311,6 +3372,11 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         APPLY_U32_PARAM("ranging_slot_ms", ranging_slot_ms);
         APPLY_U32_PARAM("ranging_gap_ms", ranging_round_gap_ms);
         APPLY_U32_PARAM("ranging_rx_ms", ranging_rx_slice_ms);
+        APPLY_U32_PARAM("ranging_timeout_ms", ranging_rx_timeout_ms);
+        APPLY_U32_PARAM("ranging_resp_delay_ms", ranging_resp_delay_ms);
+        APPLY_U32_PARAM("ranging_final_delay_ms", ranging_final_delay_ms);
+        APPLY_U32_PARAM("ranging_auto_rx_delay_uus",
+                        ranging_auto_rx_delay_uus);
         APPLY_U8_PARAM("dt_peer", distance_test_peer_id);
         APPLY_U8_PARAM("dt_initiator", distance_test_initiator_id);
         APPLY_U8_PARAM("dt_responder", distance_test_responder_id);
@@ -3490,7 +3556,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
              reboot_recommended ? "true" : "false",
              reboot_requested ? "true" : "false");
 
-    char response[1600];
+    char response[2048];
     const int len = snprintf(
         response, sizeof(response),
         "{"
@@ -3518,6 +3584,11 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         "\"runtime_anchor_survey_coordinator_id\":%u,"
         "\"runtime_ranging_slot_ms\":%lu,"
         "\"runtime_ranging_round_gap_ms\":%lu,"
+        "\"runtime_ranging_rx_slice_ms\":%lu,"
+        "\"runtime_ranging_rx_timeout_ms\":%lu,"
+        "\"runtime_ranging_resp_delay_ms\":%lu,"
+        "\"runtime_ranging_final_delay_ms\":%lu,"
+        "\"runtime_ranging_auto_rx_delay_uus\":%lu,"
         "\"runtime_anchor_survey_slot_ms\":%lu,"
         "\"runtime_anchor_survey_round_gap_ms\":%lu,"
         "\"runtime_calibration_method\":%u,"
@@ -3555,6 +3626,11 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         (unsigned)active_config->anchor_survey_coordinator_id,
         (unsigned long)active_config->ranging_slot_ms,
         (unsigned long)active_config->ranging_round_gap_ms,
+        (unsigned long)active_config->ranging_rx_slice_ms,
+        (unsigned long)active_config->ranging_rx_timeout_ms,
+        (unsigned long)active_config->ranging_resp_delay_ms,
+        (unsigned long)active_config->ranging_final_delay_ms,
+        (unsigned long)active_config->ranging_auto_rx_delay_uus,
         (unsigned long)active_config->anchor_survey_slot_ms,
         (unsigned long)active_config->anchor_survey_round_gap_ms,
         (unsigned)active_config->calibration_method,

@@ -13,9 +13,10 @@ esp_err_t uwb_ranging_service_start(void)
     const uint8_t runtime_role = app_identity_get_uwb_role();
     const app_runtime_config_t *config = app_runtime_config_get();
     ESP_LOGI(TAG,
-             "Ranging mode selected: "
+             "Native three-frame DS-TWR ranging selected: "
              "role=%s(%u) source_id=%u tag_id=%u anchor_count=%u "
-             "anchors=[%u,%u,%u,%u] slot=%u ms round_gap=%u ms antenna_delay=0x%04x",
+             "anchors=[%u,%u,%u,%u] slot=%u ms frame=%lu ms "
+             "timeout=%u ms resp=%u ms final=%u ms antenna_delay=0x%04x",
              app_identity_uwb_role_to_string(runtime_role),
              (unsigned)runtime_role,
              (unsigned)APP_UWB_SOURCE_ID,
@@ -26,7 +27,11 @@ esp_err_t uwb_ranging_service_start(void)
              (unsigned)config->anchor_ids[2],
              (unsigned)config->anchor_ids[3],
              (unsigned)config->ranging_slot_ms,
-             (unsigned)config->ranging_round_gap_ms,
+             (unsigned long)(config->anchor_count * config->ranging_slot_ms +
+                             config->ranging_round_gap_ms),
+             (unsigned)config->ranging_rx_timeout_ms,
+             (unsigned)config->ranging_resp_delay_ms,
+             (unsigned)config->ranging_final_delay_ms,
              (unsigned)uwb_dw3000_get_antenna_delay());
     return uwb_dw3000_start_ranging();
 }

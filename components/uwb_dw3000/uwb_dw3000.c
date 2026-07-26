@@ -58,7 +58,6 @@ enum {
     UWB_FLEX_TDOA_TX_TIMEOUT_MS = 10,
     UWB_DW3000_TX_POLL_MS = 2,
     UWB_DW3000_PAYLOAD_LEN = 64,
-    UWB_RANGING_COMMAND_DELAY_MS = 5,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -287,6 +286,10 @@ enum {
 #define UWB_DISTANCE_FRAME_FINAL_RX_TS_OFFSET 35U
 #define UWB_DISTANCE_FRAME_DISTANCE_MM_OFFSET 40U
 #define UWB_DISTANCE_FRAME_RAW_DISTANCE_MM_OFFSET 44U
+#define UWB_DISTANCE_FRAME_NATIVE_POLL_LEN UWB_DISTANCE_FRAME_HEADER_LEN
+#define UWB_DISTANCE_FRAME_NATIVE_RESP_LEN UWB_DISTANCE_FRAME_HEADER_LEN
+#define UWB_DISTANCE_FRAME_NATIVE_FINAL_LEN \
+    (UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET + 5U)
 #define UWB_DISTANCE_FRAME_BROADCAST_ID 255U
 
 #define UWB_ANCHOR_SURVEY_MAX_ANCHORS APP_RUNTIME_CONFIG_MAX_ANCHORS
@@ -361,7 +364,6 @@ enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_REPORT2 = 6,
     UWB_DISTANCE_FRAME_CAL_CMD = 7,
     UWB_DISTANCE_FRAME_CAL_SYNC = 8,
-    UWB_DISTANCE_FRAME_RANGING_CMD = 9,
     UWB_DISTANCE_FRAME_FLEX_TDOA_REQ = 11,
     UWB_DISTANCE_FRAME_FLEX_TDOA_RESP = 12,
     UWB_DISTANCE_FRAME_FLEX_TDOA_CONFIG = 13,
@@ -966,6 +968,7 @@ static struct uwb_flex_tdoa_observation
 static struct uwb_flex_tdoa_local_request s_flex_tdoa_local_request;
 static esp_timer_handle_t s_flex_tdoa_schedule_timer;
 static volatile bool s_flex_tdoa_schedule_alarm_fired;
+static esp_timer_handle_t s_ranging_slot_timer;
 static uint32_t s_flex_tdoa_observations_since_summary;
 static uint32_t s_flex_tdoa_observation_drops_since_summary;
 static uint32_t s_flex_tdoa_observation_invalid_since_summary;
@@ -1015,6 +1018,14 @@ static void uwb_flex_tdoa_schedule_alarm_callback(void *arg)
 {
     (void)arg;
     s_flex_tdoa_schedule_alarm_fired = true;
+    if (s_task_handle != NULL) {
+        xTaskNotifyGive(s_task_handle);
+    }
+}
+
+static void uwb_ranging_slot_alarm_callback(void *arg)
+{
+    (void)arg;
     if (s_task_handle != NULL) {
         xTaskNotifyGive(s_task_handle);
     }
@@ -1104,6 +1115,59 @@ static void uwb_dw3000_delay_ms(uint32_t delay_ms)
         ticks = 1;
     }
     vTaskDelay(ticks);
+}
+
+static esp_err_t uwb_ranging_slot_timer_init(void)
+{
+    if (s_ranging_slot_timer != NULL) {
+        return ESP_OK;
+    }
+
+    const esp_timer_create_args_t args = {
+        .callback = uwb_ranging_slot_alarm_callback,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "ranging_slot",
+        .skip_unhandled_events = true,
+    };
+    return esp_timer_create(&args, &s_ranging_slot_timer);
+}
+
+static void uwb_ranging_wait_until_host_us(int64_t target_us)
+{
+    int64_t remaining_us = target_us - esp_timer_get_time();
+    if (remaining_us <= 0) {
+        return;
+    }
+
+    if (uwb_ranging_slot_timer_init() != ESP_OK) {
+        while ((remaining_us = target_us - esp_timer_get_time()) > 0) {
+            uwb_dw3000_delay_ms(
+                (uint32_t)((remaining_us + 999LL) / 1000LL));
+        }
+        return;
+    }
+
+    (void)esp_timer_stop(s_ranging_slot_timer);
+    if (esp_timer_start_once(s_ranging_slot_timer, (uint64_t)remaining_us) !=
+        ESP_OK) {
+        while ((remaining_us = target_us - esp_timer_get_time()) > 0) {
+            uwb_dw3000_delay_ms(
+                (uint32_t)((remaining_us + 999LL) / 1000LL));
+        }
+        return;
+    }
+
+    while ((remaining_us = target_us - esp_timer_get_time()) > 0) {
+        const uint32_t remaining_ms =
+            (uint32_t)((remaining_us + 999LL) / 1000LL);
+        TickType_t wait_ticks = pdMS_TO_TICKS(remaining_ms) + 1U;
+        if (wait_ticks == 0) {
+            wait_ticks = 1;
+        }
+        (void)ulTaskNotifyTake(pdTRUE, wait_ticks);
+    }
+    (void)esp_timer_stop(s_ranging_slot_timer);
 }
 
 static esp_err_t uwb_calibration_timer_init(void)
@@ -3914,8 +3978,6 @@ static const char *uwb_distance_type_name(uint8_t type)
         return "CAL_CMD";
     case UWB_DISTANCE_FRAME_CAL_SYNC:
         return "CAL_SYNC";
-    case UWB_DISTANCE_FRAME_RANGING_CMD:
-        return "RANGING_CMD";
     case UWB_DISTANCE_FRAME_FLEX_TDOA_REQ:
         return "FLEX_TDOA_REQ";
     case UWB_DISTANCE_FRAME_FLEX_TDOA_RESP:
@@ -4274,6 +4336,99 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
     return ESP_OK;
 }
 
+/*
+ * Native three-frame DS-TWR initiator used by positioning:
+ *
+ *   POLL -> RESP -> FINAL
+ *
+ * FINAL carries the three initiator timestamps. The responder already owns
+ * the complementary RX/TX timestamps, so it can calculate the range without
+ * REPORT or REPORT2.
+ */
+static esp_err_t uwb_ranging_native_initiate_once(uint8_t peer_id,
+                                                  uint16_t sequence)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint32_t rx_timeout_ms = config->ranging_rx_timeout_ms;
+    const uint32_t final_delay_ms = config->ranging_final_delay_ms;
+    const uint32_t auto_rx_delay_uus =
+        config->ranging_auto_rx_delay_uus;
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+    uint64_t poll_tx_ts = 0;
+
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_POLL, peer_id, sequence,
+                             payload);
+    esp_err_t err = uwb_dw3000_send_payload_expect_rx(
+        payload, UWB_DISTANCE_FRAME_NATIVE_POLL_LEN, auto_rx_delay_uus,
+        rx_timeout_ms, &poll_tx_ts);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "Native DS-TWR POLL TX failed seq=%u anchor=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id,
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    struct uwb_distance_frame response = {0};
+    err = uwb_distance_receive_matching(UWB_DISTANCE_FRAME_RESP, peer_id, true,
+                                        sequence, &response, rx_timeout_ms);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "Native DS-TWR RESP wait failed seq=%u anchor=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id,
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    const uint64_t final_tx_due = uwb_dw3000_add_timestamp_delta(
+        response.rx_timestamp, uwb_dw3000_ms_to_dtu(final_delay_ms));
+    const uint32_t final_delay_word =
+        uwb_dw3000_delayed_time_word(final_tx_due);
+    const uint64_t expected_final_tx_ts =
+        uwb_dw3000_programmed_tx_timestamp(final_delay_word);
+
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_FINAL, peer_id, sequence,
+                             payload);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_POLL_TX_TS_OFFSET,
+                          poll_tx_ts);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_RESP_RX_TS_OFFSET,
+                          response.rx_timestamp);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET,
+                          expected_final_tx_ts);
+
+    uint64_t programmed_final_tx_ts = 0;
+    uint64_t actual_final_tx_ts = 0;
+    err = uwb_dw3000_send_payload_delayed(
+        payload, UWB_DISTANCE_FRAME_NATIVE_FINAL_LEN, final_tx_due,
+        &programmed_final_tx_ts, &actual_final_tx_ts);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "Native DS-TWR FINAL TX failed seq=%u anchor=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id,
+                 esp_err_to_name(err));
+        return err;
+    }
+    if (programmed_final_tx_ts != expected_final_tx_ts) {
+        ESP_LOGW(TAG,
+                 "Native DS-TWR FINAL timestamp mismatch seq=%u "
+                 "expected=0x%010llx programmed=0x%010llx",
+                 (unsigned)sequence,
+                 (unsigned long long)expected_final_tx_ts,
+                 (unsigned long long)programmed_final_tx_ts);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGD(TAG,
+             "Native DS-TWR complete seq=%u anchor=%u poll=0x%010llx "
+             "resp=0x%010llx final=0x%010llx actual=0x%010llx",
+             (unsigned)sequence, (unsigned)peer_id,
+             (unsigned long long)poll_tx_ts,
+             (unsigned long long)response.rx_timestamp,
+             (unsigned long long)programmed_final_tx_ts,
+             (unsigned long long)actual_final_tx_ts);
+    return ESP_OK;
+}
+
 static void uwb_distance_fill_measurement_from_timestamps(
     uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
     uint64_t poll_tx_ts, uint64_t poll_rx_ts, uint64_t resp_tx_ts,
@@ -4338,6 +4493,81 @@ static void uwb_distance_fill_measurement(
     measurement->poll_rx_diagnostics = poll->diagnostics;
     measurement->final_rx_diagnostics = final->diagnostics;
     measurement->report_rx_diagnostics = report->diagnostics;
+}
+
+static esp_err_t uwb_ranging_native_respond_to_poll(
+    const struct uwb_distance_frame *poll,
+    struct uwb_distance_measurement *measurement)
+{
+    if (poll == NULL || measurement == NULL ||
+        poll->type != UWB_DISTANCE_FRAME_POLL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint32_t rx_timeout_ms = config->ranging_rx_timeout_ms;
+    const uint32_t resp_delay_ms = config->ranging_resp_delay_ms;
+    const uint32_t auto_rx_delay_uus =
+        config->ranging_auto_rx_delay_uus;
+    const uint8_t peer_id = poll->source_id;
+    const uint16_t sequence = poll->sequence;
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_RESP, peer_id, sequence,
+                             payload);
+    const uint64_t resp_tx_due = uwb_dw3000_add_timestamp_delta(
+        poll->rx_timestamp, uwb_dw3000_ms_to_dtu(resp_delay_ms));
+    uint64_t resp_tx_ts = 0;
+    uint64_t resp_tx_actual_ts = 0;
+    esp_err_t err = uwb_dw3000_send_payload_delayed_expect_rx(
+        payload, UWB_DISTANCE_FRAME_NATIVE_RESP_LEN, resp_tx_due,
+        auto_rx_delay_uus, rx_timeout_ms, &resp_tx_ts, &resp_tx_actual_ts);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "Native DS-TWR RESP TX failed seq=%u tag=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id,
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    struct uwb_distance_frame final = {0};
+    err = uwb_distance_receive_matching(UWB_DISTANCE_FRAME_FINAL, peer_id, true,
+                                        sequence, &final, rx_timeout_ms);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "Native DS-TWR FINAL wait failed seq=%u tag=%u: %s",
+                 (unsigned)sequence, (unsigned)peer_id,
+                 esp_err_to_name(err));
+        return err;
+    }
+    if (final.payload_len < UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET + 5U) {
+        ESP_LOGW(TAG,
+                 "Native DS-TWR FINAL payload too short seq=%u tag=%u len=%u",
+                 (unsigned)sequence, (unsigned)peer_id,
+                 (unsigned)final.payload_len);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    const uint64_t poll_tx_ts = uwb_distance_get_ts40(
+        final.payload, UWB_DISTANCE_FRAME_POLL_TX_TS_OFFSET);
+    const uint64_t resp_rx_ts = uwb_distance_get_ts40(
+        final.payload, UWB_DISTANCE_FRAME_RESP_RX_TS_OFFSET);
+    const uint64_t final_tx_ts = uwb_distance_get_ts40(
+        final.payload, UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET);
+    uwb_distance_fill_measurement_from_timestamps(
+        peer_id, s_source_id, sequence, poll_tx_ts, poll->rx_timestamp,
+        resp_tx_ts, resp_rx_ts, final_tx_ts, final.rx_timestamp,
+        final.clock_offset_valid, final.clock_offset_raw, measurement);
+    measurement->poll_rx_diagnostics = poll->diagnostics;
+    measurement->final_rx_diagnostics = final.diagnostics;
+
+    ESP_LOGD(TAG,
+             "Native DS-TWR responder complete seq=%u tag=%u "
+             "resp_programmed=0x%010llx resp_actual=0x%010llx",
+             (unsigned)sequence, (unsigned)peer_id,
+             (unsigned long long)resp_tx_ts,
+             (unsigned long long)resp_tx_actual_ts);
+    return ESP_OK;
 }
 
 static void uwb_distance_build_report2(
@@ -4728,8 +4958,7 @@ static bool uwb_anchor_survey_parse_command(
     struct uwb_anchor_survey_pair *pair, uint8_t *slot_index)
 {
     if (frame == NULL || pair == NULL || slot_index == NULL ||
-        (frame->type != UWB_DISTANCE_FRAME_SURVEY_CMD &&
-         frame->type != UWB_DISTANCE_FRAME_RANGING_CMD) ||
+        frame->type != UWB_DISTANCE_FRAME_SURVEY_CMD ||
         frame->payload_len <= UWB_ANCHOR_SURVEY_CMD_SLOT_OFFSET) {
         return false;
     }
@@ -6761,16 +6990,17 @@ static void uwb_dw3000_anchor_survey_loop(void)
 }
 
 static void
-uwb_ranging_log_tag_result(const struct uwb_distance_measurement *measurement)
+uwb_ranging_log_result(const struct uwb_distance_measurement *measurement)
 {
     if (measurement == NULL) {
         return;
     }
 
+    const uint8_t tag_id = app_runtime_config_get()->tag_id;
     ESP_LOGI(TAG,
              "UWB_RANGING result tag=%u anchor=%u seq=%u distance=%.3f m %.1f cm raw=%.3f m clk_valid=%u",
+             (unsigned)tag_id,
              (unsigned)measurement->responder_id,
-             (unsigned)measurement->initiator_id,
              (unsigned)measurement->sequence, measurement->distance_m,
              measurement->distance_m * 100.0, measurement->raw_distance_m,
              measurement->clock_offset_valid ? 1U : 0U);
@@ -6779,13 +7009,100 @@ uwb_ranging_log_tag_result(const struct uwb_distance_measurement *measurement)
 static void uwb_ranging_tag_loop(const uint8_t *anchor_ids, size_t anchor_count)
 {
     const app_runtime_config_t *config = app_runtime_config_get();
+    uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
+    uint32_t round = 0;
+    uint32_t successful_exchanges = 0;
+    uint32_t failed_exchanges = 0;
+    uint32_t slot_overruns = 0;
+    uint32_t exchange_max_us = 0;
+    int64_t summary_started_us = esp_timer_get_time();
 
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
-             "UWB_RANGING passive tag active: source_id=%u anchors=[%u,%u,%u,%u] rx_slice=%u ms",
+             "UWB_RANGING native tag initiator active: source_id=%u "
+             "anchors=[%u,%u,%u,%u] slot=%u ms frame=%lu ms "
+             "timeout=%u ms resp=%u ms final=%u ms",
              (unsigned)s_source_id, (unsigned)anchor_ids[0],
              (unsigned)anchor_ids[1], (unsigned)anchor_ids[2],
-             (unsigned)anchor_ids[3], (unsigned)config->ranging_rx_slice_ms);
+             (unsigned)anchor_ids[3], (unsigned)config->ranging_slot_ms,
+             (unsigned long)(anchor_count * config->ranging_slot_ms +
+                             config->ranging_round_gap_ms),
+             (unsigned)config->ranging_rx_timeout_ms,
+             (unsigned)config->ranging_resp_delay_ms,
+             (unsigned)config->ranging_final_delay_ms);
+
+    while (true) {
+        for (size_t i = 0; i < anchor_count; ++i) {
+            config = app_runtime_config_get();
+            const uint8_t anchor_id = anchor_ids[i];
+            const int64_t exchange_started_us = esp_timer_get_time();
+            const int64_t slot_end_us =
+                exchange_started_us +
+                (int64_t)config->ranging_slot_ms * 1000LL;
+            const esp_err_t err =
+                uwb_ranging_native_initiate_once(anchor_id, sequence);
+            if (err == ESP_OK) {
+                successful_exchanges++;
+            } else {
+                failed_exchanges++;
+            }
+            sequence++;
+
+            const uint32_t exchange_us =
+                (uint32_t)(esp_timer_get_time() - exchange_started_us);
+            if (exchange_us > exchange_max_us) {
+                exchange_max_us = exchange_us;
+            }
+            if (esp_timer_get_time() < slot_end_us) {
+                uwb_ranging_wait_until_host_us(slot_end_us);
+            } else {
+                slot_overruns++;
+            }
+        }
+
+        round++;
+        config = app_runtime_config_get();
+        uwb_ranging_wait_until_host_us(
+            esp_timer_get_time() +
+            (int64_t)config->ranging_round_gap_ms * 1000LL);
+
+        const int64_t now_us = esp_timer_get_time();
+        if (now_us - summary_started_us >= 1000000LL) {
+            const double elapsed_s =
+                (double)(now_us - summary_started_us) / 1000000.0;
+            const uint32_t attempts =
+                successful_exchanges + failed_exchanges;
+            ESP_LOGI(TAG,
+                     "UWB_RANGING native summary round=%lu frame=%lu ms "
+                     "ok=%lu fail=%lu rate=%.2f/s overrun=%lu max=%lu us",
+                     (unsigned long)round,
+                     (unsigned long)(anchor_count * config->ranging_slot_ms +
+                                     config->ranging_round_gap_ms),
+                     (unsigned long)successful_exchanges,
+                     (unsigned long)failed_exchanges,
+                     elapsed_s > 0.0 ? (double)attempts / elapsed_s : 0.0,
+                     (unsigned long)slot_overruns,
+                     (unsigned long)exchange_max_us);
+            successful_exchanges = 0;
+            failed_exchanges = 0;
+            slot_overruns = 0;
+            exchange_max_us = 0;
+            summary_started_us = now_us;
+        }
+    }
+}
+
+static void uwb_ranging_anchor_loop(uint8_t tag_id)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    s_status = UWB_DW3000_STATUS_READY;
+    ESP_LOGI(TAG,
+             "UWB_RANGING native anchor responder active: source_id=%u "
+             "tag_id=%u rx_slice=%u ms timeout=%u ms resp=%u ms",
+             (unsigned)s_source_id, (unsigned)tag_id,
+             (unsigned)config->ranging_rx_slice_ms,
+             (unsigned)config->ranging_rx_timeout_ms,
+             (unsigned)config->ranging_resp_delay_ms);
 
     while (true) {
         config = app_runtime_config_get();
@@ -6796,221 +7113,31 @@ static void uwb_ranging_tag_loop(const uint8_t *anchor_ids, size_t anchor_count)
             continue;
         }
         if (rx_err != ESP_OK) {
-            ESP_LOGW(TAG, "UWB_RANGING passive tag RX failed: %s",
+            ESP_LOGW(TAG, "UWB_RANGING native anchor RX failed: %s",
                      esp_err_to_name(rx_err));
-            uwb_dw3000_delay_ms(20);
+            uwb_dw3000_delay_ms(5);
             continue;
         }
         if (frame.type != UWB_DISTANCE_FRAME_POLL ||
-            !uwb_anchor_survey_id_in_set(anchor_ids, anchor_count,
-                                         frame.source_id) ||
+            frame.source_id != tag_id ||
             !uwb_distance_destination_matches(frame.destination_id)) {
             continue;
         }
 
         struct uwb_distance_measurement measurement = {0};
         const esp_err_t err =
-            uwb_distance_respond_to_poll(&frame, &measurement);
+            uwb_ranging_native_respond_to_poll(&frame, &measurement);
         if (err != ESP_OK) {
             ESP_LOGW(TAG,
-                     "UWB_RANGING passive tag respond failed anchor=%u seq=%u: %s",
-                     (unsigned)frame.source_id, (unsigned)frame.sequence,
+                     "UWB_RANGING native anchor respond failed tag=%u "
+                     "seq=%u: %s",
+                     (unsigned)tag_id, (unsigned)frame.sequence,
                      esp_err_to_name(err));
             continue;
         }
 
         uwb_distance_log_measurement(&measurement);
-        uwb_ranging_log_tag_result(&measurement);
-    }
-}
-
-static esp_err_t uwb_ranging_send_command(
-    const struct uwb_anchor_survey_pair *pair, uint8_t slot_index,
-    uint16_t sequence)
-{
-    if (pair == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
-    uwb_anchor_survey_build_command_type(UWB_DISTANCE_FRAME_RANGING_CMD, pair,
-                                         slot_index, sequence, payload);
-
-    const esp_err_t err = uwb_dw3000_send_payload(payload, sizeof(payload),
-                                                  NULL);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG,
-                 "UWB_RANGING command TX failed slot=%u seq=%u anchor=%u tag=%u: %s",
-                 (unsigned)slot_index, (unsigned)sequence,
-                 (unsigned)pair->initiator_id,
-                 (unsigned)pair->responder_id,
-                 esp_err_to_name(err));
-        return err;
-    }
-
-    ESP_LOGI(TAG, "UWB_RANGING command slot=%u seq=%u anchor=%u tag=%u",
-             (unsigned)slot_index, (unsigned)sequence,
-             (unsigned)pair->initiator_id, (unsigned)pair->responder_id);
-    return ESP_OK;
-}
-
-static bool uwb_ranging_parse_command(
-    const struct uwb_distance_frame *frame, uint8_t coordinator_id,
-    const uint8_t *anchor_ids, size_t anchor_count, uint8_t tag_id,
-    struct uwb_anchor_survey_pair *pair)
-{
-    uint8_t slot_index = 0;
-    if (frame == NULL || pair == NULL ||
-        frame->type != UWB_DISTANCE_FRAME_RANGING_CMD ||
-        frame->source_id != coordinator_id ||
-        !uwb_distance_destination_matches(frame->destination_id) ||
-        !uwb_anchor_survey_parse_command(frame, pair, &slot_index)) {
-        return false;
-    }
-
-    return pair->initiator_id == s_source_id &&
-           pair->responder_id == tag_id &&
-           uwb_anchor_survey_id_in_set(anchor_ids, anchor_count,
-                                       pair->initiator_id);
-}
-
-static void uwb_ranging_anchor_follower_loop(uint8_t coordinator_id,
-                                             const uint8_t *anchor_ids,
-                                             size_t anchor_count,
-                                             uint8_t tag_id)
-{
-    const app_runtime_config_t *config = app_runtime_config_get();
-    s_status = UWB_DW3000_STATUS_READY;
-    ESP_LOGI(TAG,
-             "UWB_RANGING anchor follower active: source_id=%u coordinator=%u tag_id=%u rx_slice=%u ms",
-             (unsigned)s_source_id, (unsigned)coordinator_id,
-             (unsigned)tag_id, (unsigned)config->ranging_rx_slice_ms);
-
-    while (true) {
-        config = app_runtime_config_get();
-        struct uwb_distance_frame frame = {0};
-        const esp_err_t rx_err =
-            uwb_distance_receive_next(&frame, config->ranging_rx_slice_ms);
-        if (rx_err == ESP_ERR_TIMEOUT) {
-            continue;
-        }
-        if (rx_err != ESP_OK) {
-            ESP_LOGW(TAG, "UWB_RANGING follower RX failed: %s",
-                     esp_err_to_name(rx_err));
-            uwb_dw3000_delay_ms(20);
-            continue;
-        }
-
-        struct uwb_anchor_survey_pair pair = {0};
-        if (!uwb_ranging_parse_command(&frame, coordinator_id, anchor_ids,
-                                       anchor_count, tag_id, &pair)) {
-            continue;
-        }
-
-        uwb_dw3000_delay_ms(UWB_RANGING_COMMAND_DELAY_MS);
-        const esp_err_t err =
-            uwb_distance_initiate_once(tag_id, frame.sequence, false);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG,
-                     "UWB_RANGING anchor initiate failed tag=%u seq=%u: %s",
-                     (unsigned)tag_id, (unsigned)frame.sequence,
-                     esp_err_to_name(err));
-        }
-    }
-}
-
-static void uwb_ranging_coordinator_listen_until(TickType_t end_tick,
-                                                 uint8_t coordinator_id,
-                                                 const uint8_t *anchor_ids,
-                                                 size_t anchor_count,
-                                                 uint8_t tag_id)
-{
-    while ((int32_t)(xTaskGetTickCount() - end_tick) < 0) {
-        const TickType_t now = xTaskGetTickCount();
-        const uint32_t remaining_ms =
-            (uint32_t)(end_tick - now) * portTICK_PERIOD_MS;
-        uint32_t slice_ms = app_runtime_config_get()->ranging_rx_slice_ms;
-        if (remaining_ms < slice_ms) {
-            slice_ms = remaining_ms;
-        }
-        if (slice_ms == 0) {
-            break;
-        }
-
-        struct uwb_distance_frame frame = {0};
-        const esp_err_t err = uwb_distance_receive_next(&frame, slice_ms);
-        if (err == ESP_OK) {
-            struct uwb_anchor_survey_pair pair = {0};
-            if (uwb_ranging_parse_command(&frame, coordinator_id, anchor_ids,
-                                          anchor_count, tag_id, &pair)) {
-                ESP_LOGD(TAG,
-                         "UWB_RANGING coordinator ignored self command seq=%u",
-                         (unsigned)frame.sequence);
-            }
-        } else if (err != ESP_ERR_TIMEOUT) {
-            ESP_LOGW(TAG, "UWB_RANGING coordinator listen failed: %s",
-                     esp_err_to_name(err));
-            uwb_dw3000_delay_ms(20);
-        }
-    }
-}
-
-static void uwb_ranging_anchor_coordinator_loop(const uint8_t *anchor_ids,
-                                                size_t anchor_count,
-                                                uint8_t tag_id)
-{
-    const uint8_t coordinator_id = anchor_ids[0];
-    const app_runtime_config_t *config = app_runtime_config_get();
-    uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
-    uint32_t round = 0;
-
-    s_status = UWB_DW3000_STATUS_READY;
-    ESP_LOGI(TAG,
-             "UWB_RANGING anchor coordinator active: source_id=%u tag_id=%u anchor_count=%u slot=%u ms round_gap=%u ms command_delay=%u ms",
-             (unsigned)s_source_id, (unsigned)tag_id, (unsigned)anchor_count,
-             (unsigned)config->ranging_slot_ms,
-             (unsigned)config->ranging_round_gap_ms,
-             (unsigned)UWB_RANGING_COMMAND_DELAY_MS);
-
-    while (true) {
-        ESP_LOGI(TAG, "UWB_RANGING round=%lu start", (unsigned long)round);
-        for (size_t i = 0; i < anchor_count; ++i) {
-            config = app_runtime_config_get();
-            const uint8_t anchor_id = anchor_ids[i];
-            const TickType_t slot_end =
-                xTaskGetTickCount() + pdMS_TO_TICKS(config->ranging_slot_ms);
-            const struct uwb_anchor_survey_pair pair = {
-                .initiator_id = anchor_id,
-                .responder_id = tag_id,
-            };
-
-            if (anchor_id == s_source_id) {
-                ESP_LOGI(TAG, "UWB_RANGING local slot=%u seq=%u anchor=%u tag=%u",
-                         (unsigned)i, (unsigned)sequence,
-                         (unsigned)anchor_id, (unsigned)tag_id);
-                const esp_err_t err =
-                    uwb_distance_initiate_once(tag_id, sequence, false);
-                if (err != ESP_OK) {
-                    ESP_LOGW(TAG,
-                             "UWB_RANGING local anchor=%u tag=%u seq=%u failed: %s",
-                             (unsigned)anchor_id, (unsigned)tag_id,
-                             (unsigned)sequence, esp_err_to_name(err));
-                }
-            } else {
-                (void)uwb_ranging_send_command(&pair, (uint8_t)i, sequence);
-            }
-
-            sequence++;
-            uwb_ranging_coordinator_listen_until(slot_end, coordinator_id,
-                                                 anchor_ids, anchor_count,
-                                                 tag_id);
-        }
-
-        round++;
-        ESP_LOGI(TAG, "UWB_RANGING round=%lu complete",
-                 (unsigned long)(round - 1UL));
-        uwb_dw3000_delay_ms(
-            app_runtime_config_get()->ranging_round_gap_ms);
+        uwb_ranging_log_result(&measurement);
     }
 }
 
@@ -7022,9 +7149,9 @@ static void uwb_dw3000_ranging_loop(void)
     const uint8_t tag_id = config->tag_id;
 
     ESP_LOGI(TAG,
-             "UWB_RANGING runtime start: source_id=%u tag_id=%u coordinator=%u anchors=[%u,%u,%u,%u]",
+             "UWB_RANGING native three-frame runtime start: "
+             "source_id=%u tag_id=%u anchors=[%u,%u,%u,%u]",
              (unsigned)s_source_id, (unsigned)tag_id,
-             (unsigned)anchor_ids[0],
              (unsigned)anchor_ids[0], (unsigned)anchor_ids[1],
              (unsigned)anchor_ids[2], (unsigned)anchor_ids[3]);
 
@@ -7049,13 +7176,7 @@ static void uwb_dw3000_ranging_loop(void)
     }
 
     if (uwb_anchor_survey_id_in_set(anchor_ids, anchor_count, s_source_id)) {
-        if (s_source_id == anchor_ids[0]) {
-            uwb_ranging_anchor_coordinator_loop(anchor_ids, anchor_count,
-                                                tag_id);
-        } else {
-            uwb_ranging_anchor_follower_loop(anchor_ids[0], anchor_ids,
-                                             anchor_count, tag_id);
-        }
+        uwb_ranging_anchor_loop(tag_id);
         return;
     }
 
