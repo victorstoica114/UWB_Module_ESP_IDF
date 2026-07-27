@@ -52,6 +52,12 @@ NVS_TAG_REFERENCE = tuple(
     for axis in (0, 1)
 )
 TRUE_RANGE_M = math.sqrt(1.5**2 + 1.5**2)
+FLEX_PHYSICAL_BOUND_MARGIN_M = 0.01
+FLEX_POSITION_RMS_LIMIT_M = max(
+    math.dist(first, second)
+    for first in SURVEYED_ANCHORS.values()
+    for second in SURVEYED_ANCHORS.values()
+)
 BLOCKS = ("flex_1", "ds_1", "flex_2", "ds_2", "flex_3", "ds_3")
 PROTOCOL_COLORS = {
     "DS-TWR": "#2563eb",
@@ -70,6 +76,33 @@ def finite(value: Any) -> bool:
         return math.isfinite(float(value))
     except (TypeError, ValueError):
         return False
+
+
+def flex_observation_is_structurally_valid(event: dict[str, Any]) -> bool:
+    initiator_id = int(event["initiator_id"])
+    responder_id = int(event["responder_id"])
+    if (
+        initiator_id not in SURVEYED_ANCHORS
+        or responder_id not in SURVEYED_ANCHORS
+        or not finite(event.get("diff_m"))
+    ):
+        return False
+    separation = math.dist(
+        SURVEYED_ANCHORS[initiator_id],
+        SURVEYED_ANCHORS[responder_id],
+    )
+    return (
+        abs(float(event["diff_m"]))
+        <= separation + FLEX_PHYSICAL_BOUND_MARGIN_M
+    )
+
+
+def flex_position_is_structurally_valid(event: dict[str, Any]) -> bool:
+    """Use only solver self-consistency, never ground-truth position error."""
+    return (
+        finite(event.get("rms_m"))
+        and float(event["rms_m"]) <= FLEX_POSITION_RMS_LIMIT_M
+    )
 
 
 def load_events(block: str) -> Iterable[dict[str, Any]]:
@@ -334,8 +367,10 @@ def main() -> int:
     ds_ranges: list[dict[str, Any]] = []
     ds_positions: list[dict[str, Any]] = []
     flex_observations: list[dict[str, Any]] = []
+    flex_valid_observations: list[dict[str, Any]] = []
     flex_slot_positions: list[dict[str, Any]] = []
     flex_embedded_positions: list[dict[str, Any]] = []
+    flex_valid_embedded_positions: list[dict[str, Any]] = []
     block_metrics: list[dict[str, Any]] = []
     measurement_rows: list[dict[str, Any]] = []
     metadata = {block: load_metadata(block) for block in BLOCKS}
@@ -345,7 +380,9 @@ def main() -> int:
         duration = float(metadata[block]["duration_sec"])
         block_ds: list[dict[str, Any]] = []
         block_flex: list[dict[str, Any]] = []
+        block_flex_valid: list[dict[str, Any]] = []
         block_positions: list[dict[str, Any]] = []
+        block_positions_valid: list[dict[str, Any]] = []
         for event in load_events(block):
             kind = event["kind"]
             if kind == "ds_range":
@@ -355,8 +392,19 @@ def main() -> int:
             elif kind == "tdoa_observation":
                 event["error_m"] = float(event["diff_m"])
                 event["raw_error_m"] = float(event["raw_diff_m"])
+                event["comparison_valid"] = int(
+                    flex_observation_is_structurally_valid(event)
+                )
+                event["exclusion_reason"] = (
+                    ""
+                    if event["comparison_valid"]
+                    else "physical_range_difference_violation"
+                )
                 block_flex.append(event)
                 flex_observations.append(event)
+                if event["comparison_valid"]:
+                    block_flex_valid.append(event)
+                    flex_valid_observations.append(event)
             elif kind == "local_position":
                 event["truth_x_m"] = NVS_TAG_REFERENCE[0]
                 event["truth_y_m"] = NVS_TAG_REFERENCE[1]
@@ -364,8 +412,19 @@ def main() -> int:
                     float(event["x_m"]) - NVS_TAG_REFERENCE[0],
                     float(event["y_m"]) - NVS_TAG_REFERENCE[1],
                 )
+                event["comparison_valid"] = int(
+                    flex_position_is_structurally_valid(event)
+                )
+                event["exclusion_reason"] = (
+                    ""
+                    if event["comparison_valid"]
+                    else "internal_rms_exceeds_anchor_array_diagonal"
+                )
                 block_positions.append(event)
                 flex_embedded_positions.append(event)
+                if event["comparison_valid"]:
+                    block_positions_valid.append(event)
+                    flex_valid_embedded_positions.append(event)
 
         if protocol == "DS-TWR":
             groups: dict[int, dict[int, dict[str, Any]]] = defaultdict(dict)
@@ -420,6 +479,9 @@ def main() -> int:
                     "duration_s": duration,
                     "measurements": len(block_ds),
                     "measurement_rate_hz": len(block_ds) / duration,
+                    "valid_measurements": len(block_ds),
+                    "excluded_measurements": 0,
+                    "valid_measurement_rate_hz": len(block_ds) / duration,
                     "theoretical_measurement_rate_hz": 62.5,
                     "measurement_delivery_pct": 100.0
                     * len(block_ds)
@@ -450,7 +512,10 @@ def main() -> int:
         else:
             groups: dict[int, dict[int, dict[str, Any]]] = defaultdict(dict)
             slot_times: dict[int, float] = {}
-            for event in block_flex:
+            observed_slot_ids = {
+                int(event["slot_id"]) for event in block_flex
+            }
+            for event in block_flex_valid:
                 slot_id = int(event["slot_id"])
                 groups[slot_id][int(event["responder_id"])] = event
                 slot_times[slot_id] = max(
@@ -494,7 +559,7 @@ def main() -> int:
             expected_observations = duration * 1000.0
             expected_slots = duration / 0.003
             embedded_times = [
-                float(row["received_at"]) for row in block_positions
+                float(row["received_at"]) for row in block_positions_valid
             ]
             block_metrics.append(
                 {
@@ -503,17 +568,28 @@ def main() -> int:
                     "duration_s": duration,
                     "measurements": len(block_flex),
                     "measurement_rate_hz": len(block_flex) / duration,
+                    "valid_measurements": len(block_flex_valid),
+                    "excluded_measurements": (
+                        len(block_flex) - len(block_flex_valid)
+                    ),
+                    "valid_measurement_rate_hz": (
+                        len(block_flex_valid) / duration
+                    ),
                     "theoretical_measurement_rate_hz": 1000.0,
                     "measurement_delivery_pct": 100.0
                     * len(block_flex)
                     / expected_observations,
-                    "observed_slots": len(groups),
-                    "slot_rate_hz": len(groups) / duration,
+                    "observed_slots": len(observed_slot_ids),
+                    "slot_rate_hz": len(observed_slot_ids) / duration,
                     "theoretical_slot_rate_hz": 333.333333,
-                    "slot_delivery_pct": 100.0 * len(groups) / expected_slots,
+                    "slot_delivery_pct": (
+                        100.0 * len(observed_slot_ids) / expected_slots
+                    ),
                     "complete_units": complete,
-                    "candidate_units": len(groups),
-                    "complete_unit_pct": 100.0 * complete / len(groups),
+                    "candidate_units": len(observed_slot_ids),
+                    "complete_unit_pct": (
+                        100.0 * complete / len(observed_slot_ids)
+                    ),
                     "offline_position_rate_hz": complete / duration,
                     **{
                         f"offline_pos_{key}": value
@@ -526,15 +602,18 @@ def main() -> int:
                             SURVEYED_TAG,
                         ).items()
                     },
-                    "position_updates": len(block_positions),
-                    "position_rate_hz": len(block_positions) / duration,
+                    "position_updates": len(block_positions_valid),
+                    "excluded_position_updates": (
+                        len(block_positions) - len(block_positions_valid)
+                    ),
+                    "position_rate_hz": len(block_positions_valid) / duration,
                     "theoretical_position_rate_hz": math.nan,
                     "position_delivery_pct": math.nan,
                     **interval_metrics(embedded_times),
                     **{
                         f"pos_{key}": value
                         for key, value in position_metrics(
-                            block_positions,
+                            block_positions_valid,
                             NVS_TAG_REFERENCE,
                         ).items()
                     },
@@ -559,23 +638,26 @@ def main() -> int:
         for responder_id in ANCHOR_IDS:
             if initiator_id == responder_id:
                 continue
-            selected = [
+            all_selected = [
                 row
                 for row in flex_observations
                 if int(row["initiator_id"]) == initiator_id
                 and int(row["responder_id"]) == responder_id
+            ]
+            selected = [
+                row for row in all_selected if row["comparison_valid"]
             ]
             pair_separation = math.dist(
                 SURVEYED_ANCHORS[initiator_id],
                 SURVEYED_ANCHORS[responder_id],
             )
             impossible_corrected = sum(
-                abs(float(row["error_m"])) > pair_separation + 0.01
-                for row in selected
+                not bool(row["comparison_valid"]) for row in all_selected
             )
             impossible_raw = sum(
-                abs(float(row["raw_error_m"])) > pair_separation + 0.01
-                for row in selected
+                abs(float(row["raw_error_m"]))
+                > pair_separation + FLEX_PHYSICAL_BOUND_MARGIN_M
+                for row in all_selected
             )
             measurement_rows.append(
                 {
@@ -611,8 +693,8 @@ def main() -> int:
             flex_slot_positions,
             SURVEYED_TAG,
         ),
-        "FlexTDOA embedded operational geometry": position_metrics(
-            flex_embedded_positions,
+        "FlexTDOA embedded operational geometry (structurally valid)": position_metrics(
+            flex_valid_embedded_positions,
             NVS_TAG_REFERENCE,
         ),
     }
@@ -634,8 +716,22 @@ def main() -> int:
             "ds_ranges": len(ds_ranges),
             "ds_complete_positions": len(ds_positions),
             "flex_observations": len(flex_observations),
+            "flex_valid_observations": len(flex_valid_observations),
+            "flex_excluded_observations": (
+                len(flex_observations) - len(flex_valid_observations)
+            ),
             "flex_complete_slot_positions": len(flex_slot_positions),
             "flex_embedded_positions": len(flex_embedded_positions),
+            "flex_valid_embedded_positions": len(
+                flex_valid_embedded_positions
+            ),
+            "flex_excluded_embedded_positions": (
+                len(flex_embedded_positions)
+                - len(flex_valid_embedded_positions)
+            ),
+            "flex_position_internal_rms_limit_m": (
+                FLEX_POSITION_RMS_LIMIT_M
+            ),
             "flex_corrected_physically_impossible": sum(
                 int(row.get("physically_impossible_count", 0))
                 for row in measurement_rows
@@ -646,11 +742,14 @@ def main() -> int:
             "DS-TWR range error": measurement_metrics(
                 [float(row["error_m"]) for row in ds_ranges]
             ),
-            "FlexTDOA corrected range-difference error": measurement_metrics(
-                [float(row["error_m"]) for row in flex_observations]
+            "FlexTDOA corrected valid range-difference error": measurement_metrics(
+                [float(row["error_m"]) for row in flex_valid_observations]
             ),
-            "FlexTDOA uncorrected range-difference error": measurement_metrics(
-                [float(row["raw_error_m"]) for row in flex_observations]
+            "FlexTDOA uncorrected valid range-difference error": measurement_metrics(
+                [float(row["raw_error_m"]) for row in flex_valid_observations]
+            ),
+            "FlexTDOA corrected all observations (audit)": measurement_metrics(
+                [float(row["error_m"]) for row in flex_observations]
             ),
         },
         "block_metrics": block_metrics,
@@ -683,13 +782,13 @@ def main() -> int:
             axes[0],
             SURVEYED_ANCHORS,
             SURVEYED_TAG,
-            "Geometrie măsurată (analiză comună)",
+            "Surveyed geometry (common analysis)",
         ),
         (
             axes[1],
             NVS_ANCHORS,
             NVS_TAG_REFERENCE,
-            "Geometrie NVS (solver operațional)",
+            "NVS geometry (operational solver)",
         ),
     ):
         polygon = [anchors[key] for key in (2, 3, 5, 4, 2)]
@@ -714,7 +813,7 @@ def main() -> int:
             s=70,
             marker="*",
             color="#dc2626",
-            label="referință tag",
+            label="tag reference",
         )
         axis.set_title(title)
         axis.set_xlabel("x [m]")
@@ -745,9 +844,9 @@ def main() -> int:
         patch.set_facecolor(PROTOCOL_COLORS["DS-TWR"])
         patch.set_alpha(0.55)
     axis.axhline(0.0, color="#111827", linewidth=1.0)
-    axis.set_title("DS-TWR: eroarea distanței față de 2,12132 m")
-    axis.set_xlabel("ancoră")
-    axis.set_ylabel("eroare [cm]")
+    axis.set_title("DS-TWR: range error relative to 2.12132 m")
+    axis.set_xlabel("anchor")
+    axis.set_ylabel("error [cm]")
     save_figure(figure, "02_ds_range_error")
 
     # Figure 3: corrected and raw FlexTDOA directed-pair bias/std heatmaps.
@@ -757,7 +856,7 @@ def main() -> int:
             for j, responder_id in enumerate(ANCHOR_IDS):
                 values = [
                     100.0 * float(row[field])
-                    for row in flex_observations
+                    for row in flex_valid_observations
                     if int(row["initiator_id"]) == initiator_id
                     and int(row["responder_id"]) == responder_id
                 ]
@@ -775,13 +874,13 @@ def main() -> int:
         return result
 
     heatmaps = (
-        (pair_matrix("error_m", "mean"), "Corectat: bias [cm]", "coolwarm"),
+        (pair_matrix("error_m", "mean"), "Corrected: bias [cm]", "coolwarm"),
         (
             pair_matrix("error_m", "robust"),
-            "Corectat: σ robust (MAD) [cm]",
+            "Corrected: robust σ (MAD) [cm]",
             "viridis",
         ),
-        (pair_matrix("raw_error_m", "mean"), "Necorectat: bias [cm]", "coolwarm"),
+        (pair_matrix("raw_error_m", "mean"), "Uncorrected: bias [cm]", "coolwarm"),
     )
     figure, axes = plt.subplots(1, 3, figsize=(10.0, 3.5))
     for axis, (matrix, title, color_map) in zip(axes, heatmaps):
@@ -805,7 +904,7 @@ def main() -> int:
         axis.set_xticks(range(4), [f"A{x}" for x in ANCHOR_IDS])
         axis.set_yticks(range(4), [f"A{x}" for x in ANCHOR_IDS])
         axis.set_xlabel("responder")
-        axis.set_ylabel("inițiator")
+        axis.set_ylabel("initiator")
         axis.set_title(title)
         figure.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
     save_figure(figure, "03_flex_pair_heatmaps")
@@ -826,7 +925,7 @@ def main() -> int:
         ),
         (
             "FlexTDOA ESP32",
-            subsample(flex_embedded_positions),
+            subsample(flex_valid_embedded_positions),
             NVS_TAG_REFERENCE,
             PROTOCOL_COLORS["FlexTDOA ESP32"],
         ),
@@ -879,7 +978,7 @@ def main() -> int:
         ),
         (
             "FlexTDOA ESP32",
-            flex_embedded_positions,
+            flex_valid_embedded_positions,
             NVS_TAG_REFERENCE,
             PROTOCOL_COLORS["FlexTDOA ESP32"],
         ),
@@ -907,15 +1006,15 @@ def main() -> int:
     display_limit = max(cdf_limits) * 1.08
     axis.set_xlim(0.0, display_limit)
     axis.set_ylim(0.0, 1.01)
-    axis.set_xlabel("eroare radială [cm]")
-    axis.set_ylabel("probabilitate cumulată")
-    axis.set_title("CDF eroare de poziție")
+    axis.set_xlabel("radial error [cm]")
+    axis.set_ylabel("cumulative probability")
+    axis.set_title("Position-error CDF")
     axis.legend()
     if max(cdf_maxima) > display_limit:
         axis.text(
             0.99,
             0.04,
-            f"maxim în afara axei: {max(cdf_maxima):.1f} cm",
+            f"maximum outside axis: {max(cdf_maxima):.1f} cm",
             transform=axis.transAxes,
             ha="right",
             va="bottom",
@@ -936,7 +1035,7 @@ def main() -> int:
         else:
             rows = [
                 row
-                for row in flex_embedded_positions
+                for row in flex_valid_embedded_positions
                 if row["block"] == block
             ]
             truth = NVS_TAG_REFERENCE
@@ -971,15 +1070,17 @@ def main() -> int:
             fontsize=8,
             bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.65},
         )
-    axis.set_xlabel("timp cumulat al blocurilor [s]")
-    axis.set_ylabel("mediana pe 1 s a erorii [cm]")
-    axis.set_title("Stabilitate temporală în secvența alternată Flex/DS")
+    axis.set_xlabel("cumulative block time [s]")
+    axis.set_ylabel("1 s median error [cm]")
+    axis.set_title("Temporal stability over the alternating Flex/DS sequence")
     save_figure(figure, "06_position_error_time")
 
     # Figure 7: measured throughput and completeness.
     figure, axes = plt.subplots(1, 2, figsize=(9.0, 3.8))
     labels = [row["block"] for row in block_metrics]
-    rates = [float(row["measurement_rate_hz"]) for row in block_metrics]
+    rates = [
+        float(row["valid_measurement_rate_hz"]) for row in block_metrics
+    ]
     colors = [
         PROTOCOL_COLORS["FlexTDOA offline"]
         if row["protocol"] == "FlexTDOA"
@@ -987,15 +1088,15 @@ def main() -> int:
         for row in block_metrics
     ]
     axes[0].bar(labels, rates, color=colors, alpha=0.78)
-    axes[0].set_ylabel("observații valide/s")
-    axes[0].set_title("Debit observat")
+    axes[0].set_ylabel("valid observations/s")
+    axes[0].set_title("Observed throughput")
     axes[0].tick_params(axis="x", rotation=30)
     completeness = [
         float(row["complete_unit_pct"]) for row in block_metrics
     ]
     axes[1].bar(labels, completeness, color=colors, alpha=0.78)
-    axes[1].set_ylabel("unități complete [%]")
-    axes[1].set_title("Cadre DS / sloturi Flex cu toate cele 4 / 3 măsurători")
+    axes[1].set_ylabel("complete units [%]")
+    axes[1].set_title("DS frames / Flex slots with all 4 / 3 measurements")
     axes[1].set_ylim(0.0, 105.0)
     axes[1].tick_params(axis="x", rotation=30)
     save_figure(figure, "07_throughput_completeness")
@@ -1009,8 +1110,8 @@ def main() -> int:
     axis.bar(x - width / 2, rmse, width, label="RMSE 2D", color="#475569")
     axis.bar(x + width / 2, p95, width, label="P95", color="#94a3b8")
     axis.set_xticks(x, labels, rotation=30)
-    axis.set_ylabel("eroare [cm]")
-    axis.set_title("Repetabilitate între blocuri (poziția publicată/operațională)")
+    axis.set_ylabel("error [cm]")
+    axis.set_title("Between-block repeatability (published/operational position)")
     axis.legend()
     save_figure(figure, "08_block_repeatability")
 
@@ -1030,7 +1131,7 @@ def main() -> int:
     axes[0].broken_barh([(60, 4)], (-0.1, 0.5), facecolors="#94a3b8")
     axes[0].text(62, 0.15, "gap", ha="center", va="center")
     axes[0].set_yticks([])
-    axes[0].set_xlabel("timp [ms]")
+    axes[0].set_xlabel("time [ms]")
     axes[0].set_title("DS-TWR: 4 × 15 ms + 4 ms = 64 ms")
 
     axes[1].set_xlim(0, 12)
@@ -1045,8 +1146,8 @@ def main() -> int:
         )
         axes[1].text(start + 1.5, 0.15, f"A{anchor_id}\\nREQ+3 RESP", ha="center", va="center")
     axes[1].set_yticks([])
-    axes[1].set_xlabel("timp [ms]")
-    axes[1].set_title("FlexTDOA: 4 × 3 ms = 12 ms; tag pasiv")
+    axes[1].set_xlabel("time [ms]")
+    axes[1].set_title("FlexTDOA: 4 × 3 ms = 12 ms; passive tag")
     save_figure(figure, "09_protocol_timing")
 
     manifest_rows = []

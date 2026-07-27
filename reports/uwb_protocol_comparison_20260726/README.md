@@ -3,6 +3,17 @@
 Controlled LOS capture performed on 2026-07-26 with four anchors in a surveyed
 3.000 m square and the tag fixed at the center.
 
+Comparative metrics use ground-truth-independent structural validation:
+
+- a FlexTDOA range difference must satisfy
+  `abs(z_ij) <= anchor_separation + 0.01 m`;
+- an embedded FlexTDOA position must report an internal solver RMS no greater
+  than the 4.243 m anchor-array diagonal.
+
+This excludes 4 of 289,716 observations and 1 of 9,075 embedded positions.
+The raw captures remain immutable, and the complete embedded-position CSV
+retains every row with `comparison_valid` and `exclusion_reason` fields.
+
 The repository stores the six raw JSONL captures as lossless XZ archives so the
 complete experiment remains below GitHub's normal file-size limits. Restore the
 collector output before rerunning the analysis:
@@ -17,7 +28,7 @@ latexmk -pdf -interaction=nonstopmode -halt-on-error report.tex
 
 Primary artifacts:
 
-- `DS-TWR_vs_FlexTDOA_raport_teren_2026-07-26.pdf`: final Romanian report;
+- `DS-TWR_vs_FlexTDOA_field_report_2026-07-26.pdf`: final English report;
 - `analysis_summary.json`: machine-readable aggregate results;
 - `measurement_metrics.csv`, `position_metrics.csv`, `block_metrics.csv`:
   tabular summaries;

@@ -5,7 +5,12 @@
     "flex_complete_slot_positions": 50879,
     "flex_corrected_physically_impossible": 4,
     "flex_embedded_positions": 9075,
-    "flex_observations": 289716
+    "flex_excluded_embedded_positions": 1,
+    "flex_excluded_observations": 4,
+    "flex_observations": 289716,
+    "flex_position_internal_rms_limit_m": 4.242640687119285,
+    "flex_valid_embedded_positions": 9074,
+    "flex_valid_observations": 289712
   },
   "aggregate_measurement_metrics": {
     "DS-TWR range error": {
@@ -22,7 +27,7 @@
       "robust_sigma_mad_cm": 5.337360000000004,
       "std_cm": 4.594982937006196
     },
-    "FlexTDOA corrected range-difference error": {
+    "FlexTDOA corrected all observations (audit)": {
       "bias_cm": 0.1303728478924188,
       "mae_cm": 10.049553010534455,
       "max_abs_cm": 7974.299999999999,
@@ -36,19 +41,33 @@
       "robust_sigma_mad_cm": 12.305579999999999,
       "std_cm": 32.37033574738252
     },
-    "FlexTDOA uncorrected range-difference error": {
-      "bias_cm": 71.89014517665576,
-      "mae_cm": 72.03304304905491,
-      "max_abs_cm": 8079.900000000001,
+    "FlexTDOA corrected valid range-difference error": {
+      "bias_cm": 0.020342270944938415,
+      "mae_cm": 9.939659385872865,
+      "max_abs_cm": 211.39999999999998,
+      "median_cm": 0.1,
+      "n": 289712,
+      "p05_cm": -19.8,
+      "p95_abs_cm": 24.099999999999998,
+      "p95_cm": 19.8,
+      "p99_abs_cm": 36.4,
+      "rmse_cm": 13.075606969667902,
+      "robust_sigma_mad_cm": 12.305579999999999,
+      "std_cm": 13.075613712587666
+    },
+    "FlexTDOA uncorrected valid range-difference error": {
+      "bias_cm": 71.7801813525156,
+      "mae_cm": 71.92308119787928,
+      "max_abs_cm": 161.20000000000002,
       "median_cm": 82.5,
-      "n": 289716,
+      "n": 289712,
       "p05_cm": 6.800000000000001,
-      "p95_abs_cm": 122.39999999999999,
-      "p95_cm": 122.39999999999999,
+      "p95_abs_cm": 122.30000000000001,
+      "p95_cm": 122.30000000000001,
       "p99_abs_cm": 131.4,
-      "rmse_cm": 86.56341099230974,
+      "rmse_cm": 81.25040014494208,
       "robust_sigma_mad_cm": 35.43414,
-      "std_cm": 48.21866002222121
+      "std_cm": 38.06885986017634
     }
   },
   "block_metrics": [
@@ -58,6 +77,8 @@
       "complete_unit_pct": 40.82347349726093,
       "complete_units": 16320,
       "duration_s": 120.05436944961548,
+      "excluded_measurements": 0,
+      "excluded_position_updates": 0,
       "measurement_delivery_pct": 79.9071291114155,
       "measurement_rate_hz": 799.071291114155,
       "measurements": 95932,
@@ -111,7 +132,9 @@
       "slot_rate_hz": 332.9907956142953,
       "theoretical_measurement_rate_hz": 1000.0,
       "theoretical_position_rate_hz": NaN,
-      "theoretical_slot_rate_hz": 333.333333
+      "theoretical_slot_rate_hz": 333.333333,
+      "valid_measurement_rate_hz": 799.071291114155,
+      "valid_measurements": 95932
     },
     {
       "block": "ds_1",
@@ -119,6 +142,7 @@
       "complete_unit_pct": 97.69807280513919,
       "complete_units": 1825,
       "duration_s": 120.00192904472351,
+      "excluded_measurements": 0,
       "measurement_delivery_pct": 99.01174168268452,
       "measurement_rate_hz": 61.88233855167782,
       "measurements": 7426,
@@ -148,7 +172,9 @@
       "position_updates": 1825,
       "protocol": "DS-TWR",
       "theoretical_measurement_rate_hz": 62.5,
-      "theoretical_position_rate_hz": 15.625
+      "theoretical_position_rate_hz": 15.625,
+      "valid_measurement_rate_hz": 61.88233855167782,
+      "valid_measurements": 7426
     },
     {
       "block": "flex_2",
@@ -156,10 +182,12 @@
       "complete_unit_pct": 43.00870783705335,
       "complete_units": 17188,
       "duration_s": 120.00710368156433,
+      "excluded_measurements": 2,
+      "excluded_position_updates": 1,
       "measurement_delivery_pct": 80.6702245367764,
       "measurement_rate_hz": 806.702245367764,
       "measurements": 96810,
-      "median_interval_ms": 36.88502311706543,
+      "median_interval_ms": 36.88549995422363,
       "observed_slots": 39964,
       "offline_pos_bias_x_cm": 4.502331683522728,
       "offline_pos_bias_y_cm": 0.6011266088373617,
@@ -181,35 +209,37 @@
       "offline_pos_std_y_cm": 6.234723713415275,
       "offline_pos_two_drms_cm": 17.843028547176587,
       "offline_position_rate_hz": 143.22485480199492,
-      "p95_interval_ms": 69.8491096496582,
-      "pos_bias_x_cm": 1.97050768203072,
-      "pos_bias_y_cm": 0.7555277221108901,
-      "pos_cep50_precision_cm": 2.859272753973432,
-      "pos_cep95_precision_cm": 6.60886505610601,
-      "pos_max_error_cm": 1068.2029175793332,
-      "pos_mean_error_cm": 4.172966704631789,
-      "pos_mean_x_m": 1.5372050768203072,
-      "pos_mean_y_m": 1.4743052772211087,
+      "p95_interval_ms": 69.90050077438353,
+      "pos_bias_x_cm": 2.2344971600400854,
+      "pos_bias_y_cm": 0.5148763782158386,
+      "pos_cep50_precision_cm": 2.8363061957038878,
+      "pos_cep95_precision_cm": 6.645046850940184,
+      "pos_max_error_cm": 23.827570690273895,
+      "pos_mean_error_cm": 3.8174605399559787,
+      "pos_mean_x_m": 1.539844971600401,
+      "pos_mean_y_m": 1.4718987637821583,
       "pos_median_error_cm": 3.5648457189617484,
-      "pos_n": 2994,
-      "pos_outliers_gt_50cm": 1,
-      "pos_outliers_gt_50cm_pct": 0.033400133600534405,
-      "pos_p95_error_cm": 7.572918831088303,
-      "pos_p99_error_cm": 10.378183955510648,
-      "pos_rmse_2d_cm": 20.010527425141277,
+      "pos_n": 2993,
+      "pos_outliers_gt_50cm": 0,
+      "pos_outliers_gt_50cm_pct": 0.0,
+      "pos_p95_error_cm": 7.568231256068242,
+      "pos_p99_error_cm": 10.20518458640587,
+      "pos_rmse_2d_cm": 4.394648779681839,
       "pos_rmse_within_50cm_cm": 4.394648779681839,
-      "pos_std_x_cm": 14.67905290982846,
-      "pos_std_y_cm": 13.439687075809825,
-      "pos_two_drms_cm": 39.804511454117005,
+      "pos_std_x_cm": 2.612218095492361,
+      "pos_std_y_cm": 2.6899585045317935,
+      "pos_two_drms_cm": 7.499215994894576,
       "position_delivery_pct": NaN,
-      "position_rate_hz": 24.948523113635837,
-      "position_updates": 2994,
+      "position_rate_hz": 24.940190273584523,
+      "position_updates": 2993,
       "protocol": "FlexTDOA",
       "slot_delivery_pct": 99.90408594322071,
       "slot_rate_hz": 333.01361981073563,
       "theoretical_measurement_rate_hz": 1000.0,
       "theoretical_position_rate_hz": NaN,
-      "theoretical_slot_rate_hz": 333.333333
+      "theoretical_slot_rate_hz": 333.333333,
+      "valid_measurement_rate_hz": 806.6855796876613,
+      "valid_measurements": 96808
     },
     {
       "block": "ds_2",
@@ -217,6 +247,7 @@
       "complete_unit_pct": 96.41327623126338,
       "complete_units": 1801,
       "duration_s": 120.00826287269592,
+      "excluded_measurements": 0,
       "measurement_delivery_pct": 98.65987321689511,
       "measurement_rate_hz": 61.66242076055944,
       "measurements": 7400,
@@ -246,7 +277,9 @@
       "position_updates": 1801,
       "protocol": "DS-TWR",
       "theoretical_measurement_rate_hz": 62.5,
-      "theoretical_position_rate_hz": 15.625
+      "theoretical_position_rate_hz": 15.625,
+      "valid_measurement_rate_hz": 61.66242076055944,
+      "valid_measurements": 7400
     },
     {
       "block": "flex_3",
@@ -254,6 +287,8 @@
       "complete_unit_pct": 43.453572143285975,
       "complete_units": 17371,
       "duration_s": 120.02229118347168,
+      "excluded_measurements": 2,
+      "excluded_position_updates": 0,
       "measurement_delivery_pct": 80.79665789062551,
       "measurement_rate_hz": 807.9665789062551,
       "measurements": 96974,
@@ -307,7 +342,9 @@
       "slot_rate_hz": 333.0714620244236,
       "theoretical_measurement_rate_hz": 1000.0,
       "theoretical_position_rate_hz": NaN,
-      "theoretical_slot_rate_hz": 333.333333
+      "theoretical_slot_rate_hz": 333.333333,
+      "valid_measurement_rate_hz": 807.9499153350112,
+      "valid_measurements": 96972
     },
     {
       "block": "ds_3",
@@ -315,6 +352,7 @@
       "complete_unit_pct": 97.91220556745182,
       "complete_units": 1829,
       "duration_s": 120.0120620727539,
+      "excluded_measurements": 0,
       "measurement_delivery_pct": 99.05670975633464,
       "measurement_rate_hz": 61.91044359770915,
       "measurements": 7430,
@@ -344,7 +382,9 @@
       "position_updates": 1829,
       "protocol": "DS-TWR",
       "theoretical_measurement_rate_hz": 62.5,
-      "theoretical_position_rate_hz": 15.625
+      "theoretical_position_rate_hz": 15.625,
+      "valid_measurement_rate_hz": 61.91044359770915,
+      "valid_measurements": 7430
     }
   ],
   "experiment": {
@@ -427,26 +467,26 @@
       "std_y_cm": 1.0833316053406623,
       "two_drms_cm": 3.2437327182701847
     },
-    "FlexTDOA embedded operational geometry": {
-      "bias_x_cm": 2.2015151515151428,
-      "bias_y_cm": 0.4736611570247952,
-      "cep50_precision_cm": 2.849329573656601,
-      "cep95_precision_cm": 6.643956485986917,
-      "max_error_cm": 1068.2029175793332,
-      "mean_error_cm": 3.965874499085742,
-      "mean_x_m": 1.5395151515151515,
-      "mean_y_m": 1.4714866115702478,
-      "median_error_cm": 3.588610455315528,
-      "n": 9075,
-      "outliers_gt_50cm": 1,
-      "outliers_gt_50cm_pct": 0.011019283746556474,
-      "p95_error_cm": 7.559207838112668,
-      "p99_error_cm": 10.509492137544642,
-      "rmse_2d_cm": 12.061562651457782,
+    "FlexTDOA embedded operational geometry (structurally valid)": {
+      "bias_x_cm": 2.288615825435302,
+      "bias_y_cm": 0.39425281022702396,
+      "cep50_precision_cm": 2.8416253504016415,
+      "cep95_precision_cm": 6.640866602941731,
+      "max_error_cm": 25.44333164111964,
+      "mean_error_cm": 3.848590275691402,
+      "mean_x_m": 1.540386158254353,
+      "mean_y_m": 1.47069252810227,
+      "median_error_cm": 3.5886104553155267,
+      "n": 9074,
+      "outliers_gt_50cm": 0,
+      "outliers_gt_50cm_pct": 0.0,
+      "p95_error_cm": 7.5561645369848325,
+      "p99_error_cm": 10.436321099859661,
+      "rmse_2d_cm": 4.443771923723438,
       "rmse_within_50cm_cm": 4.443771923723438,
-      "std_x_cm": 8.712576740618765,
-      "std_y_cm": 8.032231955751254,
-      "two_drms_cm": 23.700273724340207
+      "std_x_cm": 2.657449077924146,
+      "std_y_cm": 2.700640235273149,
+      "two_drms_cm": 7.577728757915818
     },
     "FlexTDOA surveyed complete-slot offline": {
       "bias_x_cm": 4.532864553253908,

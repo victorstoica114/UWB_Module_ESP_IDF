@@ -23,6 +23,7 @@
 #include "flextdoa_solver_service.h"
 #include "sdkconfig.h"
 
+#include "app_config.h"
 #include "app_identity.h"
 #include "app_runtime_config.h"
 #include "uwb_config.h"
@@ -2147,6 +2148,21 @@ static bool uwb_dw3000_should_capture_rx_diagnostics(const uint8_t *payload,
                                                      size_t payload_len)
 {
 #if APP_UWB_DIAGNOSTICS_ENABLED
+    /*
+     * Native positioning is a continuous real-time workload. Reading the
+     * extended DW3000 diagnostics registers and forwarding their verbose
+     * text after every APP_UWB_DIAGNOSTICS_LOG_EVERY exchange can keep an
+     * anchor busy until its next poll at short frame periods. The compact
+     * UWB_RANGING result remains available for every successful exchange;
+     * detailed diagnostics stay enabled for the dedicated distance-test and
+     * anchor-survey modes.
+     */
+    const app_runtime_config_t *config = app_runtime_config_get();
+    if (config != NULL &&
+        config->runtime_mode == APP_RUNTIME_MODE_UWB_RANGING) {
+        return false;
+    }
+
     if (!uwb_dw3000_payload_is_distance_frame(payload, payload_len) ||
         APP_UWB_DIAGNOSTICS_LOG_EVERY == 0) {
         return false;
@@ -7136,7 +7152,12 @@ static void uwb_ranging_anchor_loop(uint8_t tag_id)
             continue;
         }
 
-        uwb_distance_log_measurement(&measurement);
+        /*
+         * Keep the high-rate positioning path to one compact result record.
+         * uwb_distance_log_measurement() emits a second verbose record plus
+         * periodic diagnostics/event-counter SPI reads; those facilities are
+         * intended for the dedicated diagnostic modes.
+         */
         uwb_ranging_log_result(&measurement);
     }
 }

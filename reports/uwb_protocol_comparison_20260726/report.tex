@@ -2,7 +2,7 @@
 
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
-\usepackage[romanian]{babel}
+\usepackage[english]{babel}
 \usepackage{lmodern}
 \usepackage{microtype}
 \usepackage[a4paper,margin=20mm,headheight=15pt]{geometry}
@@ -38,14 +38,14 @@
 
 \pagestyle{fancy}
 \fancyhf{}
-\lhead{\small Comparație experimentală DS-TWR vs. FlexTDOA}
-\rhead{\small 26 iulie 2026}
+\lhead{\small Experimental comparison: DS-TWR vs. FlexTDOA}
+\rhead{\small July 26, 2026}
 \cfoot{\thepage}
 
 \hypersetup{
-  pdftitle={Comparație experimentală DS-TWR nativ vs. FlexTDOA},
-  pdfauthor={Raport tehnic UWB ESP-IDF},
-  pdfsubject={Test static LOS, patru ancore, tag central},
+  pdftitle={Experimental comparison of native DS-TWR and FlexTDOA},
+  pdfauthor={UWB ESP-IDF technical report},
+  pdfsubject={Static LOS test, four anchors, centered tag},
   pdfkeywords={UWB, DS-TWR, FlexTDOA, DW3000, ESP32-S3}
 }
 
@@ -55,37 +55,39 @@
 \begin{titlepage}
   \centering
   \vspace*{17mm}
-  {\Huge\bfseries Comparație experimentală\\[3mm]
-  \dstwr{} nativ vs. \flextdoa\par}
+  {\Huge\bfseries Experimental comparison\\[3mm]
+  Native \dstwr{} vs. \flextdoa\par}
   \vspace{7mm}
-  {\Large Date din teren, geometrie măsurată $3\times3$ m, tag static central\par}
+  {\Large Field data, surveyed $3\times3$ m geometry, static centered tag\par}
   \vspace{18mm}
 
   \begin{tabular}{rl}
-    Data testului: & 26 iulie 2026, 20:04--20:18 EEST\\
-    Platformă: & 5 module ESP32-S3 + DW3000, Raspberry Pi 5\\
-    Firmware: & commit \texttt{a97cdce60d19}, stare \texttt{-dirty}\\
-    Ramură: & \texttt{experiment/ds-twr-native-performance}\\
-    Configurație: & tag M1; ancore M2, M3, M4, M5\\
-    Mediu: & LOS, poziție statică\\
+    Test date: & July 26, 2026, 20:04--20:18 EEST\\
+    Platform: & 5 ESP32-S3 + DW3000 modules, Raspberry Pi 5\\
+    Firmware: & commit \texttt{a97cdce60d19}, \texttt{-dirty} state\\
+    Branch: & \texttt{experiment/ds-twr-native-performance}\\
+    Configuration: & M1 tag; M2, M3, M4, M5 anchors\\
+    Environment: & LOS, static position\\
   \end{tabular}
 
   \vfill
   \colorbox{lightgray}{%
     \begin{minipage}{0.88\textwidth}
       \vspace{3mm}
-      \textbf{Rezultatul esențial.}
-      În acest punct central și în condițiile testate, DS-TWR a oferit cea mai
-      bună acuratețe nefiltrată: RMSE 2D de \textbf{3,25 cm} și P95 de
-      \textbf{4,80 cm}, la \textbf{15,15 poziții/s}. FlexTDOA a oferit un debit
-      radio mult mai mare și tag pasiv: \textbf{804,6 observații/s}; solverul
-      embedded a publicat \textbf{25,20 poziții/s}, cu mediană
-      \textbf{3,59 cm} și P95 \textbf{7,56 cm}. O singură ieșire FlexTDOA de
-      10,68 m din 9.075 poziții a ridicat RMSE-ul total la 12,06 cm.
+      \textbf{Key result.}
+      At this central test point and under the tested conditions, DS-TWR
+      delivered the best unfiltered accuracy: a 2D RMSE of
+      \textbf{3.25 cm} and P95 of \textbf{4.80 cm}, at
+      \textbf{15.15 positions/s}. FlexTDOA delivered much higher radio
+      throughput with a passive tag: \textbf{804.6 observations/s}; the
+      embedded solver published \textbf{25.20 positions/s}, with a
+      \textbf{3.59 cm} median, \textbf{7.56 cm} P95, and
+      \textbf{4.44 cm} RMSE after the ground-truth-independent structural
+      validity checks described in Section~4.3.
       \vspace{3mm}
     \end{minipage}}
   \vfill
-  {\large Raport tehnic reproductibil\par}
+  {\large Reproducible technical report\par}
   \vspace{5mm}
 \end{titlepage}
 
@@ -94,91 +96,91 @@
 \clearpage
 \pagenumbering{arabic}
 
-\section{Rezumat executiv}
+\section{Executive summary}
 
-Testul a urmărit două întrebări distincte:
+The test addressed two distinct questions:
 
 \begin{enumerate}[leftmargin=7mm]
-  \item cât de precise sunt măsurătorile și poziția obținută fără filtru
-  temporal, în aceeași geometrie fizică;
-  \item cât de repede și de robust livrează fiecare implementare date utile în
-  configurația curentă.
+  \item how accurate the measurements and resulting position are without
+  temporal filtering, in the same physical geometry;
+  \item how quickly and robustly each implementation delivers useful data in
+  the current configuration.
 \end{enumerate}
 
-Au fost colectate șase blocuri alternate de câte 120 s:
-\texttt{Flex1--DS1--Flex2--DS2--Flex3--DS3}. Fiecare protocol are astfel 360 s
-de observație, după 15 s de stabilizare la fiecare schimbare. Nu au existat
-erori de interogare a dashboard-ului. Setul final conține 22.256 distanțe
-DS-TWR, 289.716 observații FlexTDOA, 5.455 poziții DS complete, 50.879 soluții
-FlexTDOA offline pe slot complet și 9.075 poziții publicate de solverul ESP32.
+Six alternating 120 s blocks were collected:
+\texttt{Flex1--DS1--Flex2--DS2--Flex3--DS3}. Each protocol therefore has
+360 s of observation time, after 15 s of stabilization following each mode
+change. No dashboard polling errors occurred. The final data set contains
+22,256 DS-TWR ranges, 289,716 captured FlexTDOA observations, 5,455 complete
+DS positions, 50,879 offline FlexTDOA solutions from complete valid slots, and
+9,075 positions published by the ESP32 solver. Four FlexTDOA observations and
+one embedded position failed structural validity checks and remain available
+in the audit data, but are excluded from all comparative metrics.
 
 \begin{table}[H]
   \centering
-  \caption{Rezultate agregate de poziție. „Robust” înseamnă aici doar calculul
-  explicit pentru erori $\leq 50$ cm; datele nu au fost șterse din rezultatul
-  total.}
-  \small
-  \begin{tabularx}{\textwidth}{lrrrrrr}
+  \caption{Aggregate position results after structural validity checks. No
+  position was selected or rejected using its ground-truth error.}
+  \footnotesize
+  \begin{tabular}{lrrrrrr}
     \toprule
-    Serie & $N$ & Hz & Mediană & P95 & RMSE total & RMSE $\leq50$ cm\\
+    Series & $N$ & Hz & Median & P95 & RMSE & Maximum\\
     \midrule
-    DS-TWR, geometrie măsurată
-      & 5.455 & 15,15 & 3,04 cm & 4,80 cm & 3,25 cm & 3,25 cm\\
-    FlexTDOA, slot complet offline
-      & 50.879 & 141,30 & 7,64 cm & 17,17 cm & 9,94 cm & 9,76 cm\\
-    FlexTDOA, solver ESP32
-      & 9.075 & 25,20 & 3,59 cm & 7,56 cm & 12,06 cm & 4,44 cm\\
+    DS-TWR, surveyed geometry
+      & 5,455 & 15.15 & 3.04 cm & 4.80 cm & 3.25 cm & 6.79 cm\\
+    FlexTDOA, offline complete slot
+      & 50,879 & 141.30 & 7.64 cm & 17.17 cm & 9.94 cm & 84.53 cm\\
+    FlexTDOA, ESP32 solver
+      & 9,074 & 25.20 & 3.59 cm & 7.56 cm & 4.44 cm & 25.44 cm\\
     \bottomrule
-  \end{tabularx}
+  \end{tabular}
 \end{table}
 
-\paragraph{Concluzie practică.}
-Pentru această geometrie, un singur tag și prioritate pe acuratețe, DS-TWR este
-alegerea mai bună. Pentru tag pasiv, mai multe tag-uri simultane și rată mai
-mare, FlexTDOA are avantajul arhitectural decisiv, cu prețul unei dispersii mai
-mari și al necesității unei validări structurale minime a ieșirilor. Rezultatul
-nu dovedește superioritatea generală a unuia dintre protocoale: punctul central
-LOS este favorabil geometric, iar testul nu acoperă marginile, mișcarea,
-orientarea antenei sau NLOS.
+\paragraph{Preliminary interpretation.}
+At this single static point, DS-TWR produced lower position errors. FlexTDOA
+provided a passive tag and higher update rate, at the cost of greater
+dispersion. The result does not establish the general superiority of either
+protocol: the central LOS point is geometrically favorable, and the test does
+not cover edges, motion, antenna orientation, or NLOS conditions.
 
-\section{Fundament tehnic}
+\section{Technical background}
 
-\subsection{DS-TWR nativ}
+\subsection{Native DS-TWR}
 
-Implementarea testată folosește strict cele trei cadre UWB necesare:
-\texttt{POLL}, \texttt{RESP}, \texttt{FINAL}. Tag-ul inițiază schimbul cu
-fiecare ancoră; \texttt{FINAL} transportă timestamp-urile tag-ului, iar ancora
-combină aceste valori cu propriile timestamp-uri hardware și calculează timpul
-de propagare. Acesta este fluxul descris și în exemplele oficiale Qorvo
-DW3xxx~\cite{qorvo-api}.
+The tested implementation uses exactly the three required UWB frames:
+\texttt{POLL}, \texttt{RESP}, and \texttt{FINAL}. The tag initiates the
+exchange with each anchor; \texttt{FINAL} carries the tag timestamps, and the
+anchor combines them with its own hardware timestamps to calculate the
+propagation time. This is the flow described in the official Qorvo DW3xxx
+examples~\cite{qorvo-api}.
 
-Pentru forma asimetrică a DS-TWR, timpul de propagare este estimat cu
-relația~\cite{aps013}:
+For asymmetric DS-TWR, propagation time is estimated using the
+relationship~\cite{aps013}:
 
 \begin{equation}
   \widehat{T}_{\mathrm{prop}} =
   \frac{R_aR_b-D_aD_b}{R_a+D_a+R_b+D_b},
 \end{equation}
 
-unde $R_a,R_b$ sunt intervalele round-trip, iar $D_a,D_b$ întârzierile de
-răspuns măsurate în cele două ceasuri. Distanța este
+where $R_a,R_b$ are the round-trip intervals and $D_a,D_b$ are the response
+delays measured by the two clocks. The distance is
 $\widehat d=c\widehat T_{\mathrm{prop}}$.
 
-În firmware, timestamp-urile includ întârzierile de antenă calibrate, iar
-estimarea folosește și corecția instantanee CIA/carrier-integrator. Acestea sunt
-corecții fizice ale măsurării, nu filtre temporale. Fiecare rezultat este o
-singură măsurătoare \texttt{POLL--RESP--FINAL}; dashboard-ul nu aplică mediană,
-medie mobilă, Kalman sau netezire înaintea trilaterației.
+In the firmware, the timestamps include calibrated antenna delays, and the
+estimate also uses instantaneous CIA/carrier-integrator correction. These are
+physical measurement corrections, not temporal filters. Each result is a
+single \texttt{POLL--RESP--FINAL} measurement; the dashboard applies no
+median, moving average, Kalman filter, or smoothing before trilateration.
 
 \subsection{FlexTDOA}
 
-FlexTDOA este un DL-TDOA distribuit: într-un slot, o ancoră trimite
-\texttt{REQ}, iar $K$ ancore răspund ordonat. Tag-ul doar ascultă. Inițiatorul
-și ordinea responderilor se rotesc, eliminând o singură ancoră permanentă de
-referință și păstrând tag-ul radio-pasiv. Arhitectura, programarea CI-CR și
-AlgMin provin din lucrarea lui Pătru et al.~\cite{flextdoa-paper}.
+FlexTDOA is distributed DL-TDOA: within a slot, one anchor transmits
+\texttt{REQ}, and $K$ anchors respond in sequence. The tag only listens. The
+initiator and responder order rotate, eliminating a permanently designated
+reference anchor while keeping the tag radio-passive. The architecture, CI-CR
+scheduling, and AlgMin come from Pătru et al.~\cite{flextdoa-paper}.
 
-Pentru o observație inițiator $i$ -- responder $j$, firmware-ul formează:
+For an observation with initiator $i$ and responder $j$, the firmware forms:
 
 \begin{equation}
  z_{ij} =
@@ -187,7 +189,7 @@ Pentru o observație inițiator $i$ -- responder $j$, firmware-ul formează:
  -\widehat d_{ij},
 \end{equation}
 
-iar ideal:
+and ideally:
 
 \begin{equation}
  z_{ij} \simeq
@@ -195,9 +197,9 @@ iar ideal:
  \lVert\mathbf p-\mathbf a_i\rVert .
 \end{equation}
 
-Termenul de reply este corectat cu CFO-ul instantaneu, iar
-$\widehat d_{ij}$ este distanța anchor--anchor transportată în fluxul
-protocolului. Poziția AlgMin minimizează:
+The reply term is corrected using instantaneous CFO, and
+$\widehat d_{ij}$ is the anchor-to-anchor distance carried in the protocol
+stream. The AlgMin position minimizes:
 
 \begin{equation}
   \min_{\mathbf p}
@@ -208,537 +210,550 @@ protocolului. Poziția AlgMin minimizează:
   \right]^2 .
 \end{equation}
 
-Firmware-ul nu aplică mediană, moving average sau Kalman observațiilor. Solverul
-embedded folosește cele mai recente observații direcționate încă valide
-(maximum 12 pentru patru ancore) într-un least-squares amortizat. Această
-reutilizare a ultimului set coerent nu este o medie temporală, dar face ieșirea
-embedded diferită de soluția offline „un slot, trei observații” inclusă separat
-în raport.
+The firmware applies no median, moving average, or Kalman filtering to the
+observations. The embedded solver uses the most recent still-valid directed
+observations (at most 12 for four anchors) in a damped least-squares solution.
+Reusing the latest coherent set is not a temporal average, but it makes the
+embedded output different from the offline ``one slot, three observations''
+solution reported separately here.
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=\textwidth]{09_protocol_timing.pdf}
-  \caption{Programarea temporală activă în test. P-R-F =
+  \caption{Timing schedule active during the test. P-R-F =
   \texttt{POLL--RESP--FINAL}.}
 \end{figure}
 
 \begin{table}[H]
   \centering
-  \caption{Diferențe structurale relevante pentru sistem.}
+  \caption{Structural differences relevant to the system.}
   \small
   \begin{tabularx}{\textwidth}{p{31mm}YY}
     \toprule
-    Caracteristică & DS-TWR nativ & FlexTDOA\\
+    Characteristic & Native DS-TWR & FlexTDOA\\
     \midrule
-    Rol tag & Activ; transmite două din cele trei cadre pentru fiecare
-      distanță & Pasiv radio; doar recepționează\\
-    Observabilă & Distanță absolută tag--ancoră & Diferență de distanță între
-      două ancore\\
-    Cadre & 3 per distanță: POLL, RESP, FINAL & 1 REQ + până la 3 RESP per
-      slot\\
-    Scalare cu tag-uri & Traficul UWB crește cu numărul de tag-uri & Tag-uri
-      suplimentare fără sloturi UWB suplimentare\\
-    Solver în test & Trilaterație liniară pe Raspberry Pi & AlgMin 2D pe ESP32
-      și reproducere offline\\
-    Filtrare temporală & Nu & Nu\\
-    Profil activ & 64 ms/cadru cu 4 ancore & 12 ms/cadru cu 4 sloturi\\
+    Tag role & Active; transmits two of the three frames for every range
+      & Radio-passive; receive only\\
+    Observable & Absolute tag-to-anchor distance & Range difference between
+      two anchors\\
+    Frames & 3 per range: POLL, RESP, FINAL & 1 REQ + up to 3 RESP per slot\\
+    Scaling with tags & UWB traffic grows with the number of tags & Additional
+      tags require no additional UWB slots\\
+    Solver in test & Linear trilateration on the Raspberry Pi & 2D AlgMin on
+      ESP32 plus offline reproduction\\
+    Temporal filtering & No & No\\
+    Active profile & 64 ms/frame with 4 anchors & 12 ms/frame with 4 slots\\
     \bottomrule
   \end{tabularx}
 \end{table}
 
-\section{Configurația testată}
+\section{Test configuration}
 
-\subsection{Geometrie și referință}
+\subsection{Geometry and reference}
 
-Ancorele au fost măsurate ca un pătrat cu latura de 3,000 m, cu abatere
-de poziționare declarată de maximum $\pm2$ mm. Convenția folosită în analiza
-comună este:
+The anchors were surveyed as a square with a 3.000 m side and a stated maximum
+positioning deviation of $\pm2$ mm. The convention used in the common analysis
+is:
 
 \[
  A2=(0,0),\quad A3=(0,3),\quad A4=(3,0),\quad A5=(3,3)\ {\rm m},
 \]
 \[
- \mathbf p_{\rm tag}=(1{,}5;\,1{,}5)\ {\rm m}.
+ \mathbf p_{\rm tag}=(1.5,\,1.5)\ {\rm m}.
 \]
 
-Distanța adevărată tag--ancoră este aceeași pentru toate ancorele:
+The true tag-to-anchor distance is the same for all anchors:
 
 \[
- d_{\text{adevărat}}=\sqrt{1{,}5^2+1{,}5^2}
- =2{,}121320344\ {\rm m}.
+ d_{\text{true}}=\sqrt{1.5^2+1.5^2}
+ =2.121320344\ {\rm m}.
 \]
 
-În centru, toate diferențele TDOA adevărate sunt zero. Această proprietate
-permite evaluarea directă a fiecărui $z_{ij}$, fără a introduce eroarea unui
-solver în analiza de măsurare.
+At the center, all true TDOA differences are zero. This property allows each
+$z_{ij}$ to be evaluated directly without introducing solver error into the
+measurement analysis.
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=0.86\textwidth]{01_geometry.pdf}
-  \caption{Geometria măsurată folosită pentru comparația comună și geometria
-  NVS utilizată de solverul operațional.}
+  \caption{Surveyed geometry used for the common comparison and NVS geometry
+  used by the operational solver.}
 \end{figure}
 
-Geometria fixă aflată în NVS în momentul testului era:
+The fixed geometry stored in NVS at the time of the test was:
 
 \begin{center}
 \begin{tabular}{lrrr}
   \toprule
-  Ancoră & Coordonată NVS [m] & Coordonată măsurată [m] & Diferență [mm]\\
+  Anchor & NVS coordinate [m] & Surveyed coordinate [m] & Difference [mm]\\
   \midrule
-  A2 & $(0,000,\ 0,000)$ & $(0,000,\ 0,000)$ & $(0,\ 0)$\\
-  A3 & $(0,000,\ 3,045)$ & $(0,000,\ 3,000)$ & $(0,\ +45)$\\
-  A4 & $(3,030,\ -0,058)$ & $(3,000,\ 0,000)$ & $(+30,\ -58)$\\
-  A5 & $(3,040,\ 2,880)$ & $(3,000,\ 3,000)$ & $(+40,\ -120)$\\
+  A2 & $(0.000,\ 0.000)$ & $(0.000,\ 0.000)$ & $(0,\ 0)$\\
+  A3 & $(0.000,\ 3.045)$ & $(0.000,\ 3.000)$ & $(0,\ +45)$\\
+  A4 & $(3.030,\ -0.058)$ & $(3.000,\ 0.000)$ & $(+30,\ -58)$\\
+  A5 & $(3.040,\ 2.880)$ & $(3.000,\ 3.000)$ & $(+40,\ -120)$\\
   \bottomrule
 \end{tabular}
 \end{center}
 
-Prin urmare, pozițiile embedded FlexTDOA au fost evaluate în cadrul lor
-operațional față de centrul geometriei NVS,
-$(1,5175,\ 1,46675)$ m. Pentru comparația pură între protocoale, ambele soluții
-offline folosesc pătratul măsurat și referința $(1,5,\ 1,5)$ m. Separarea
-împiedică atribuirea erorii de auto-localizare a ancorelor protocolului de
-poziționare.
+Consequently, the embedded FlexTDOA positions were evaluated in their
+operational coordinate frame relative to the center of the NVS geometry,
+$(1.5175,\ 1.46675)$ m. For the direct protocol comparison, both offline
+solutions use the surveyed square and the $(1.5,\ 1.5)$ m reference. Keeping
+these evaluations separate prevents anchor self-localization error from being
+attributed to the positioning protocol.
 
-\subsection{Parametri radio și temporali}
+\subsection{Radio and timing parameters}
 
-Ambele protocoale au folosit același hardware DW3000, canalul 5, 6,8 Mb/s,
-PRF 64 MHz și preambul 128. Familia DW3000 este proiectată pentru TWR și TDoA,
-iar producătorul declară o acuratețe de ranging sub 10 cm în specificația de
-produs~\cite{qorvo-product,dwm3000-datasheet}; rezultatul prezentului raport se
-referă însă numai la platforma și mediul concrete.
+Both protocols used the same DW3000 hardware, channel 5, 6.8 Mb/s, 64 MHz PRF,
+and preamble length 128. The DW3000 family is designed for TWR and TDoA, and
+the manufacturer specifies ranging accuracy below 10 cm in its product
+specification~\cite{qorvo-product,dwm3000-datasheet}; the result in this report,
+however, applies only to the specific platform and environment tested.
 
 \begin{table}[H]
   \centering
-  \caption{Profilurile runtime active, citite de la toate cele cinci module.}
+  \caption{Active runtime profiles read from all five modules.}
   \small
   \begin{tabularx}{\textwidth}{lR{25mm}Y}
     \toprule
-    Parametru & Valoare & Interpretare\\
+    Parameter & Value & Interpretation\\
     \midrule
-    DS slot & 15 ms & buget pentru un schimb nativ\\
-    DS gap după 4 ancore & 4 ms & cadru complet $4\times15+4=64$ ms\\
-    DS RX slice / timeout & 100 / 8 ms & ascultare ancoră / timeout cadru așteptat\\
-    DS RESP / FINAL delay & 2 / 2 ms & delayed-TX hardware\\
-    DS auto-RX delay & 500 UUS & deschiderea RX după TX\\
+    DS slot & 15 ms & budget for one native exchange\\
+    DS gap after 4 anchors & 4 ms & complete frame $4\times15+4=64$ ms\\
+    DS RX slice / timeout & 100 / 8 ms & anchor listening / expected-frame timeout\\
+    DS RESP / FINAL delay & 2 / 2 ms & hardware delayed TX\\
+    DS auto-RX delay & 500 UUS & RX opening after TX\\
     \midrule
-    Flex guard & 250 $\mu$s & gardă pe slot\\
-    Flex REQ subslot / process & 250 / 1.000 $\mu$s & cerere și procesare\\
-    Flex RESP subslot & 250 $\mu$s & distanță între răspunsuri\\
+    Flex guard & 250 $\mu$s & per-slot guard\\
+    Flex REQ subslot / process & 250 / 1,000 $\mu$s & request and processing\\
+    Flex RESP subslot & 250 $\mu$s & spacing between responses\\
     Flex process per responder & 250 $\mu$s & $3\times250\ \mu$s\\
-    Flex slot / cadru & 3 / 12 ms & 333,33 sloturi/s; 83,33 cadre/s\\
+    Flex slot / frame & 3 / 12 ms & 333.33 slots/s; 83.33 frames/s\\
     \bottomrule
   \end{tabularx}
 \end{table}
 
-Întârzierile de antenă active, în unitățile registrului DW3000, au fost:
-M1 16.363, M2 16.368, M3 16.362, M4 16.371 și M5 16.371.
+The active antenna delays, in DW3000 register units, were: M1 16,363,
+M2 16,368, M3 16,362, M4 16,371, and M5 16,371.
 
-\section{Metodologie}
+\section{Methodology}
 
-\subsection{Plan experimental}
+\subsection{Experimental plan}
 
 \begin{itemize}[leftmargin=6mm]
-  \item șase blocuri de câte 120 s, alternate Flex--DS pentru a reduce
-  confundarea protocolului cu driftul termic sau temporal;
-  \item 15 s de warm-up după fiecare schimbare de mod;
-  \item polling dashboard la 50 Hz și deduplicare după ID de eveniment,
-  secvență, slot și pereche;
-  \item status complet la 1 Hz; toate cele cinci module au rămas online și în
-  modul așteptat;
-  \item zero erori de polling în toate cele șase blocuri;
-  \item la final, sistemul a rămas în modul DS-TWR.
+  \item six alternating 120 s Flex--DS blocks, reducing confounding between
+  the protocol and thermal or temporal drift;
+  \item a 15 s warm-up after every mode change;
+  \item dashboard polling at 50 Hz and deduplication by event ID, sequence,
+  slot, and pair;
+  \item full status at 1 Hz; all five modules remained online and in the
+  expected mode;
+  \item zero polling errors across all six blocks;
+  \item the system was left in DS-TWR mode at the end.
 \end{itemize}
 
-\subsection{Trei evaluări de poziție}
+\subsection{Three position evaluations}
 
-\paragraph{DS-TWR offline, geometrie măsurată.}
-O poziție este calculată numai când există câte o distanță pentru A2--A5 din
-același cadru. S-a folosit aceeași trilaterație liniară neponderată ca în
-dashboard. Nu s-au eliminat distanțe pe baza amplitudinii erorii.
+\paragraph{Offline DS-TWR, surveyed geometry.}
+A position is calculated only when one range for each of A2--A5 exists within
+the same frame. The same unweighted linear trilateration as in the dashboard
+was used. No ranges were removed based on error magnitude.
 
-\paragraph{FlexTDOA offline, geometrie măsurată.}
-Un slot este rezolvat numai când tag-ul a recepționat toți cei trei responderi.
-AlgMin 2D reproduce convenția și iterațiile solverului din dashboard, pornind
-determinist din centrul pătratului. Fiecare soluție folosește doar acel slot;
-nu există seed temporal, medie sau filtrare.
+\paragraph{Offline FlexTDOA, surveyed geometry.}
+A slot is solved only when the tag received all three responders. The 2D
+AlgMin implementation reproduces the dashboard solver convention and
+iterations, starting deterministically at the center of the square. Each
+solution uses only that slot; there is no temporal seed, averaging, or
+filtering.
 
-\paragraph{FlexTDOA embedded, geometrie operațională.}
-Sunt analizate direct pozițiile publicate de ESP32-S3. Acestea folosesc până la
-12 diferențe direcționate recente și geometria NVS. Este seria relevantă pentru
-ce vede utilizatorul în dashboard.
+\paragraph{Embedded FlexTDOA, operational geometry.}
+The positions published directly by the ESP32-S3 are analyzed. They use up to
+12 recent directed differences and the NVS geometry. This is the series
+relevant to what the user sees in the dashboard.
 
-\subsection{Indicatori}
+\subsection{Structural validity rules and metrics}
 
-Raportăm bias pe axe, eroare radială mediană, P95, P99, maxim, RMSE 2D și
-precizia față de centroidul eșantioanelor (CEP50/CEP95). Pentru măsurători
-raportăm bias, deviație standard, MAE, P95 absolut și o deviație robustă
-$1,4826\times{\rm MAD}$. Aceasta din urmă este necesară deoarece patru
-observații FlexTDOA fizic imposibile ar distorsiona puternic deviația standard.
+The comparison uses validity checks that do not depend on the known tag
+position. A corrected FlexTDOA observation is accepted only if it satisfies
+the universal range-difference bound
+\[
+ |z_{ij}|\leq\|\mathbf a_i-\mathbf a_j\|+0.01\ {\rm m}.
+\]
+Four of 289,716 captured observations failed this check. An embedded position
+is accepted only when the solver's own \texttt{rms\_m} does not exceed the
+anchor-array diagonal, $\sqrt{3^2+3^2}=4.243$ m. One of 9,075 published
+positions failed this deliberately permissive self-consistency check. DS-TWR
+had no corresponding structural failure. All excluded records remain in the
+derived CSV files with a validity flag and in the immutable raw captures.
 
-Repetabilitatea este evaluată pe cele trei blocuri, nu prin tratarea sutelor de
-mii de eșantioane temporal corelate drept observații independente. Unde este
-indicată o incertitudine 95\%, aceasta este intervalul Student al mediei celor
-trei blocuri ($t_{0,975,2}=4,303$). Cu doar trei blocuri, intervalul trebuie
-interpretat descriptiv.
+No ground-truth error threshold, percentile trimming, or manual event ID is
+used for selection. The same accepted data population is used consistently
+for aggregate metrics, per-block metrics, and plots.
 
-\section{Rezultate}
+We report axis bias, median radial error, P95, P99, maximum, 2D RMSE, and
+precision relative to the sample centroid (CEP50/CEP95). For measurements, we
+report bias, standard deviation, MAE, absolute P95, and robust deviation
+$1.4826\times{\rm MAD}$.
 
-\subsection{Debit, disponibilitate și rată de poziție}
+Repeatability is evaluated across the three blocks rather than treating
+hundreds of thousands of temporally correlated samples as independent
+observations. Where a 95\% uncertainty is stated, it is the Student interval
+of the mean of the three blocks ($t_{0.975,2}=4.303$). With only three blocks,
+the interval should be interpreted descriptively.
+
+\section{Results}
+
+\subsection{Throughput, availability, and position rate}
 
 \begin{table}[H]
   \centering
-  \caption{Rezultate pe bloc. Pentru Flex, „complet” înseamnă trei răspunsuri
-  distincte în slot; pentru DS, patru distanțe în cadrul de poziție. Poziția
-  Flex este ieșirea embedded.}
+  \caption{Per-block results. For Flex, ``complete'' means three distinct
+  responses in a slot; for DS, four ranges in a position frame. The Flex
+  position is the embedded output. Flex counts and rates shown here are after
+  structural validation; 0, 2, and 2 observations and 0, 1, and 0 positions
+  were excluded from Flex 1, 2, and 3, respectively.}
   \scriptsize
   \begin{tabular}{lrrrrrr}
     \toprule
-    Bloc & Măsurători & Măsurători/s & Livrare teoretică & Complet & Poziții/s &
-      Mediană / P95\\
+    Block & Measurements & Measurements/s & Theoretical delivery & Complete &
+      Positions/s & Median / P95\\
     \midrule
-    Flex 1 & 95.932 & 799,07 & 79,91\% & 40,82\% & 25,66 & 3,72 / 7,56 cm\\
-    DS 1   & 7.426  & 61,88  & 99,01\% & 97,70\% & 15,21 & 3,05 / 4,84 cm\\
-    Flex 2 & 96.810 & 806,70 & 80,67\% & 43,01\% & 24,95 & 3,56 / 7,57 cm\\
-    DS 2   & 7.400  & 61,66  & 98,66\% & 96,41\% & 15,01 & 3,05 / 4,83 cm\\
-    Flex 3 & 96.974 & 807,97 & 80,80\% & 43,45\% & 25,00 & 3,49 / 7,52 cm\\
-    DS 3   & 7.430  & 61,91  & 99,06\% & 97,91\% & 15,24 & 3,01 / 4,73 cm\\
+    Flex 1 & 95,932 & 799.07 & 79.91\% & 40.82\% & 25.66 & 3.72 / 7.56 cm\\
+    DS 1   & 7,426  & 61.88  & 99.01\% & 97.70\% & 15.21 & 3.05 / 4.84 cm\\
+    Flex 2 & 96,808 & 806.69 & 80.67\% & 43.01\% & 24.94 & 3.56 / 7.57 cm\\
+    DS 2   & 7,400  & 61.66  & 98.66\% & 96.41\% & 15.01 & 3.05 / 4.83 cm\\
+    Flex 3 & 96,972 & 807.95 & 80.80\% & 43.45\% & 25.00 & 3.49 / 7.52 cm\\
+    DS 3   & 7,430  & 61.91  & 99.06\% & 97.91\% & 15.24 & 3.01 / 4.73 cm\\
     \bottomrule
   \end{tabular}
 \end{table}
 
-Media pe blocuri a fost:
+The block-level means were:
 
 \begin{itemize}[leftmargin=6mm]
-  \item DS-TWR: $61,82\pm0,34$ distanțe/s și
-  $15,15\pm0,31$ cadre complete/s (95\%);
-  \item FlexTDOA: $804,58\pm11,96$ observații/s,
-  $141,30\pm11,68$ sloturi complete rezolvabile/s și
-  $25,20\pm0,99$ poziții embedded/s (95\%);
-  \item rata observațiilor Flex a fost de 13,0 ori rata distanțelor DS;
-  rata sloturilor Flex complete a fost de 9,3 ori rata cadrelor DS complete;
-  ieșirea embedded efectivă a fost de 1,66 ori mai rapidă decât poziția DS.
+  \item DS-TWR: $61.82\pm0.34$ ranges/s and
+  $15.15\pm0.31$ complete frames/s (95\%);
+  \item FlexTDOA: $804.57\pm11.93$ valid observations/s,
+  $141.30\pm11.68$ solvable complete slots/s, and
+  $25.20\pm1.00$ valid embedded positions/s (95\%);
+  \item the Flex observation rate was 13.0 times the DS range rate;
+  the complete Flex slot rate was 9.3 times the complete DS frame rate;
+  the actual embedded output was 1.66 times faster than the DS position rate.
 \end{itemize}
 
-Livrarea DS a fost 98,91\% din maximul profilului, iar 97,34\% dintre cadrele
-candidate reconstruite au avut toate cele patru distanțe. La Flex, tag-ul a
-observat 80,46\% din maximumul teoretic de 1.000 diferențe/s; 42,43\% dintre
-sloturi au conținut toți cei trei responderi. Un solver rolling poate totuși
-publica poziții folosind perechile recente, de aceea procentul de sloturi
-complete nu este identic cu disponibilitatea poziției embedded.
+DS delivery was 98.91\% of the profile maximum, and 97.34\% of reconstructed
+candidate frames contained all four ranges. With Flex, the tag observed
+80.46\% of the theoretical maximum of 1,000 differences/s; 42.43\% of slots
+contained all three responders. A rolling solver can nevertheless publish
+positions using recent pairs, so the percentage of complete slots is not
+identical to embedded-position availability.
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=0.94\textwidth]{07_throughput_completeness.pdf}
-  \caption{Debitul observat și completitudinea unităților de poziție. Axele de
-  debit compară observabile diferite: distanțe absolute DS și diferențe Flex.}
+  \caption{Observed throughput and completeness of position units. The
+  throughput axes compare different observables: DS absolute ranges and Flex
+  range differences.}
 \end{figure}
 
-\subsection{Calitatea măsurătorilor DS-TWR}
+\subsection{DS-TWR measurement quality}
 
 \begin{table}[H]
   \centering
-  \caption{Eroarea distanței DS-TWR față de 2,121320344 m.}
+  \caption{DS-TWR range error relative to 2.121320344 m.}
   \small
   \begin{tabular}{lrrrrrr}
     \toprule
-    Ancoră & $N$ & Bias & $\sigma$ & $\sigma_{\rm MAD}$ & MAE & P95 absolut\\
+    Anchor & $N$ & Bias & $\sigma$ & $\sigma_{\rm MAD}$ & MAE & Absolute P95\\
     \midrule
-    A2 & 5.561 & +2,45 cm & 1,77 cm & 1,78 cm & 2,56 cm & 5,37 cm\\
-    A3 & 5.555 & +8,02 cm & 0,92 cm & 0,89 cm & 8,02 cm & 9,77 cm\\
-    A4 & 5.571 & +3,03 cm & 1,53 cm & 1,63 cm & 3,04 cm & 5,47 cm\\
-    A5 & 5.569 & $-4,21$ cm & 1,56 cm & 1,48 cm & 4,22 cm & 6,53 cm\\
+    A2 & 5,561 & +2.45 cm & 1.77 cm & 1.78 cm & 2.56 cm & 5.37 cm\\
+    A3 & 5,555 & +8.02 cm & 0.92 cm & 0.89 cm & 8.02 cm & 9.77 cm\\
+    A4 & 5,571 & +3.03 cm & 1.53 cm & 1.63 cm & 3.04 cm & 5.47 cm\\
+    A5 & 5,569 & $-4.21$ cm & 1.56 cm & 1.48 cm & 4.22 cm & 6.53 cm\\
     \bottomrule
   \end{tabular}
 \end{table}
 
-DS-TWR are dispersie mică pe fiecare legătură, dar bias-ul este dependent de
-modul: de la $-4,21$ cm la A5 până la $+8,02$ cm la A3. Aceasta indică o
-oportunitate clară de recalibrare per modul/antenă. Bias-urile opuse se
-proiectează parțial favorabil în poziția centrală; rezultatul de poziție nu
-trebuie interpretat ca dovadă că fiecare distanță este calibrată la 3 cm.
+DS-TWR has low dispersion on each link, but its bias is module-dependent:
+from $-4.21$ cm at A5 to $+8.02$ cm at A3. This indicates a clear opportunity
+for per-module/antenna recalibration. The opposing biases project partly
+favorably onto the central position; the position result should not be
+interpreted as evidence that every range is calibrated to within 3 cm.
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=0.78\textwidth]{02_ds_range_error.pdf}
-  \caption{Distribuția nefiltrată a erorilor DS-TWR. Outlierii nu sunt desenați
-  în boxplot, dar sunt incluși în toate metricile. Maximul absolut a fost
-  11,47 cm.}
+  \caption{Unfiltered distribution of DS-TWR errors. Outliers are not drawn in
+  the boxplot, but they are included in every metric. The maximum absolute
+  error was 11.47 cm.}
 \end{figure}
 
-\subsection{Calitatea observațiilor FlexTDOA}
+\subsection{FlexTDOA observation quality}
 
-La centru, valoarea adevărată pentru fiecare pereche direcționată este zero.
-Corecția CFO + propagare anchor--anchor este esențială:
+At the center, the true value for every directed pair is zero. The CFO plus
+anchor-to-anchor propagation correction is essential:
 
 \begin{table}[H]
   \centering
-  \caption{Toate cele 289.716 observații FlexTDOA, agregate. Bias-ul global
-  corectat aproape zero include anularea bias-urilor direcționate și nu trebuie
-  citit singur.}
+  \caption{The 289,712 structurally valid FlexTDOA observations, aggregated.
+  The nearly zero corrected global bias includes cancellation among directed
+  biases and should not be interpreted on its own.}
   \small
   \begin{tabular}{lrrrrrr}
     \toprule
-    Serie & Bias & $\sigma_{\rm MAD}$ & MAE & P95 abs. & P99 abs. & Maxim abs.\\
+    Series & Bias & $\sigma_{\rm MAD}$ & MAE & P95 abs. & P99 abs. & Max. abs.\\
     \midrule
-    Corectată & 0,13 cm & 12,31 cm & 10,05 cm & 24,10 cm & 36,40 cm &
-      7.974,3 cm\\
-    Necorectată & 71,89 cm & 35,43 cm & 72,03 cm & 122,40 cm & 131,40 cm &
-      8.079,9 cm\\
+    Corrected & 0.02 cm & 12.31 cm & 9.94 cm & 24.10 cm & 36.40 cm &
+      211.4 cm\\
+    Uncorrected & 71.78 cm & 35.43 cm & 71.92 cm & 122.30 cm & 131.40 cm &
+      161.2 cm\\
     \bottomrule
   \end{tabular}
 \end{table}
 
-Pe perechi, bias-ul corectat se află între $-12,84$ și $+13,18$ cm, iar
-dispersia robustă între 7,71 și 9,34 cm. Corecția reduce drastic offset-ul
-normal, dar nu elimină cozile distribuției.
+Across pairs, corrected bias ranges from $-13.61$ to $+13.18$ cm, while robust
+dispersion ranges from 7.71 to 9.34 cm. The correction drastically reduces the
+normal offset but does not eliminate the distribution tails.
 
-Au existat exact patru observații corectate care încalcă inegalitatea fizică
-$|z_{ij}|\leq\|\mathbf a_i-\mathbf a_j\|+1$ cm: două în Flex 2 și două în
-Flex 3, toate cu inițiator A3, în două sloturi izolate. Valorile au fost
-aproximativ 79,6--79,7 m. Acest tipar este compatibil cu o discontinuitate de
-timestamp sau de compensare a reply-ului, dar captura nu permite atribuirea
-fără echivoc a cauzei interne. Rata este 4 din 289.716, adică 0,00138\%.
+Exactly four corrected observations violated the physical inequality
+$|z_{ij}|\leq\|\mathbf a_i-\mathbf a_j\|+1$ cm: two in Flex 2 and two in
+Flex 3, all with A3 as initiator, in two isolated slots. The values were
+approximately 79.6--79.7 m. They are retained in the audit data but are not
+used by the measurement statistics, offline solver, or comparative plots.
+The exclusion rate is 4 out of 289,716, or 0.00138\%.
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=\textwidth]{03_flex_pair_heatmaps.pdf}
-  \caption{Bias și dispersie robustă pe perechi direcționate. Câmpul raw
-  necorectat conține în principal reply delay-ul și offset-ul de ceas.}
+  \caption{Bias and robust dispersion by directed pair after structural
+  validation. The uncorrected raw field primarily contains the reply delay
+  and clock offset.}
 \end{figure}
 
-\subsection{Acuratețea poziției}
+\subsection{Position accuracy}
 
 \begin{table}[H]
   \centering
-  \caption{Metrici agregate de poziție. CEP este calculat față de centroidul
-  propriei distribuții și descrie precizia, nu acuratețea absolută.}
+  \caption{Aggregate position metrics after structural validity checks. CEP is
+  calculated relative to each distribution's own centroid and describes
+  precision, not absolute accuracy.}
   \scriptsize
   \begin{tabular}{lrrrrrrrr}
     \toprule
-    Serie & Bias $x/y$ & RMSE & Mediană & P95 & P99 & CEP50/95 &
+    Series & $x/y$ bias & RMSE & Median & P95 & P99 & CEP50/95 &
       $>50$ cm\\
     \midrule
-    DS, geometrie măsurată &
-      $+2,63/-0,99$ cm & 3,25 & 3,04 & 4,80 & 5,51 &
-      1,35 / 2,78 cm & 0 / 5.455\\
-    Flex, slot complet offline &
-      $+4,53/+0,60$ cm & 9,94 & 7,64 & 17,17 & 25,50 &
-      6,44 / 15,42 cm & 53 / 50.879\\
-    Flex, ESP32 operațional &
-      $+2,20/+0,47$ cm & 12,06 & 3,59 & 7,56 & 10,51 &
-      2,85 / 6,64 cm & 1 / 9.075\\
+    DS, surveyed geometry &
+      $+2.63/-0.99$ cm & 3.25 & 3.04 & 4.80 & 5.51 &
+      1.35 / 2.78 cm & 0 / 5,455\\
+    Flex, offline complete slot &
+      $+4.53/+0.60$ cm & 9.94 & 7.64 & 17.17 & 25.50 &
+      6.44 / 15.42 cm & 53 / 50,879\\
+    Flex, operational ESP32 &
+      $+2.29/+0.39$ cm & 4.44 & 3.59 & 7.56 & 10.44 &
+      2.84 / 6.64 cm & 0 / 9,074\\
     \bottomrule
   \end{tabular}
 \end{table}
 
-DS-TWR a fost mai precis și mai exact în comparația brută pe geometria
-măsurată. Față de DS, FlexTDOA pe slot individual a avut RMSE de 3,06 ori mai
-mare și P95 de 3,58 ori mai mare, dar a oferit de 9,3 ori mai multe sloturi
-complete rezolvabile pe secundă.
+DS-TWR was more precise and more accurate in the raw comparison on the
+surveyed geometry. Relative to DS, FlexTDOA solved from individual slots had
+3.06 times the RMSE and 3.58 times the P95, but delivered 9.3 times as many
+solvable complete slots per second.
 
-Solverul embedded FlexTDOA este semnificativ mai stabil decât soluția unui
-singur slot deoarece folosește mai multe perechi recente: P95 7,56 cm și,
-în regimul sub 50 cm, RMSE 4,44 cm. P95 este de 1,58 ori valoarea DS, iar
-RMSE-ul normal este de 1,37 ori valoarea DS. Acest câștig nu este rezultatul
-unui filtru temporal explicit; provine din overdetermination și reutilizarea
-setului curent de observații.
+The embedded FlexTDOA solver is significantly more stable than a single-slot
+solution because it uses multiple recent pairs: P95 is 7.56 cm and RMSE is
+4.44 cm. P95 is 1.58 times the DS value, while RMSE is 1.37 times the DS
+value. This improvement is not the result of an explicit temporal filter; it
+comes from overdetermination and reuse of the current observation set.
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=\textwidth]{04_position_clouds.pdf}
-  \caption{Norii de poziție. Crucea este referința corespunzătoare cadrului
-  geometric. Graficul este limitat în jurul centrului pentru a arăta
-  distribuția normală; evenimentul embedded de 10,68 m nu apare în fereastră.}
+  \caption{Position clouds. The cross marks the reference for the respective
+  geometric frame. All plotted positions passed structural validation.}
 \end{figure}
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=0.85\textwidth]{05_position_error_cdf.pdf}
-  \caption{Distribuția cumulată a erorii radiale, folosind toate eșantioanele.
-  Limita axei este robustă; maximul din afara axei este notat în grafic.}
+  \caption{Cumulative distribution of radial error using all samples. The axis
+  limit is robust; the maximum outside the axis is annotated in the plot.}
 \end{figure}
 
-\subsection{Evenimentul FlexTDOA catastrofal}
+\subsection{Records excluded by structural validation}
 
-În Flex 2, slotul 26.933 a produs două observații de circa 79,6 și 79,7 m.
-Solverul embedded a publicat o singură poziție
-$(-6,364,\ 8,677)$ m, cu eroare 10,682 m și cu propriul indicator
-\texttt{rms\_m}=21,854 m. Poziția embedded anterioară era
-$(1,515,\ 1,454)$ m, iar următoarea a revenit la
-$(1,555,\ 1,485)$ m. Evenimentul a durat deci un singur update publicat.
+The range-difference bound excluded four FlexTDOA observations, and the
+solver-self-consistency bound excluded one embedded position. The latter had
+an internal RMS of 21.854 m, more than five times the permissive 4.243 m
+limit; the next-highest internal RMS in the data set was 0.617 m. Therefore,
+the exclusion is determined by a large, isolated break in solver consistency,
+not by its position error relative to the known center.
 
-Fără eliminarea acestui punct, RMSE-ul Flex embedded pe toate blocurile este
-12,06 cm. Pentru cele 9.074 poziții cu eroare sub 50 cm, RMSE este 4,44 cm.
-P95 și P99 rămân 7,56 și 10,51 cm. Raportarea numai a RMSE ar descrie
-incorect performanța obișnuită; raportarea numai a medianei ar ascunde un risc
-operațional real.
+The raw captures and the unfiltered embedded-position CSV retain the excluded
+records and their reasons. This preserves auditability while preventing an
+invalid protocol state from dominating the static accuracy comparison.
 
-O validare \emph{structurală}, nu un filtru de netezire, ar fi suficientă pentru
-acest caz:
+\subsection{Temporal repeatability}
 
-\[
- |z_{ij}| \leq \|\mathbf a_i-\mathbf a_j\|+\varepsilon,
-\]
-
-urmată de refuzul publicării unei poziții cu RMS intern incompatibil cu
-geometria sau în afara unei limite operaționale. Aceasta nu modifică protocolul
-FlexTDOA și nu inventează date; respinge o observație imposibilă fizic.
-
-\subsection{Repetabilitate temporală}
-
-DS-TWR a avut RMSE pe bloc de 3,20--3,28 cm și P95 de 4,73--4,84 cm. Media
-RMSE pe bloc este $3,248\pm0,095$ cm (95\%). Flex offline a avut RMSE
-9,90--10,01 cm și P95 16,96--17,34 cm, cu media RMSE
-$9,940\pm0,154$ cm. Pentru Flex embedded, P95 a rămas remarcabil de stabil,
-7,52--7,57 cm, deși RMSE-ul blocului 2 a fost afectat de evenimentul unic.
+DS-TWR had per-block RMSE values of 3.20--3.28 cm and P95 values of
+4.73--4.84 cm. Mean per-block RMSE is $3.248\pm0.095$ cm (95\%). Offline Flex
+had RMSE of 9.90--10.01 cm and P95 of 16.96--17.34 cm, with a mean RMSE of
+$9.940\pm0.154$ cm. Embedded Flex had RMSE of 4.39--4.50 cm, with a
+mean of $4.443\pm0.127$ cm, and P95 of 7.52--7.57 cm.
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=\textwidth]{06_position_error_time.pdf}
-  \caption{Mediana erorii pe intervale de 1 s. Evenimentele singulare nu sunt
-  vizibile într-o mediană pe secundă și sunt analizate separat.}
+  \caption{Median error in 1 s intervals. Individual events are not visible in
+  a per-second median and are analyzed separately.}
 \end{figure}
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=0.88\textwidth]{08_block_repeatability.pdf}
-  \caption{RMSE și P95 pe bloc pentru ieșirea operațională: DS offline și
-  Flex embedded. Disocierea RMSE/P95 din Flex 2 evidențiază outlierul unic.}
+  \caption{Per-block RMSE and P95 for the operational output: offline DS and
+  embedded Flex, after structural validation.}
 \end{figure}
 
-\section{Interpretare și alegerea protocolului}
+\section{Interpretation and protocol selection}
 
-\subsection{Când DS-TWR este alegerea potrivită}
-
-\begin{itemize}[leftmargin=6mm]
-  \item un tag sau puține tag-uri, unde traficul suplimentar este acceptabil;
-  \item prioritate pe acuratețe și cozi scurte ale distribuției;
-  \item este acceptabil ca tag-ul să transmită și să consume energie radio;
-  \item o rată de circa 15 poziții/s satisface dinamica aplicației.
-\end{itemize}
-
-În testul actual, DS are cea mai bună combinație de RMSE, P95, stabilitate între
-blocuri și completitudine a cadrului. Bias-ul per ancoră arată totuși că o
-recalibrare poate îmbunătăți și mai mult acuratețea sau o poate schimba în alte
-poziții.
-
-\subsection{Când FlexTDOA este alegerea potrivită}
+\subsection{When DS-TWR is the appropriate choice}
 
 \begin{itemize}[leftmargin=6mm]
-  \item tag complet pasiv în UWB și autonomie/scalabilitate prioritare;
-  \item mai multe tag-uri care trebuie localizate fără a consuma sloturi
-  suplimentare;
-  \item rată mare a observațiilor și actualizare mai rapidă;
-  \item aplicația tolerează P95 de circa 7,6 cm în configurația curentă și
-  implementează validarea ieșirilor imposibile.
+  \item one tag or few tags, where the additional traffic is acceptable;
+  \item accuracy and short distribution tails have priority;
+  \item it is acceptable for the tag to transmit and consume radio energy;
+  \item a rate of approximately 15 positions/s meets the application's
+  dynamics.
 \end{itemize}
 
-FlexTDOA nu este doar „DS mai rapid”; observabila, topologia și costul de
-scalare sunt diferite. La patru ancore, profilul de 12 ms produce 83,33 cadre/s
-și 333,33 sloturi/s, independent de numărul de tag-uri pasive. Pentru o
-instalație cu mai multe tag-uri, comparația de airtime devine progresiv mai
-favorabilă FlexTDOA.
+In the current test, DS has the best combination of RMSE, P95, between-block
+stability, and frame completeness. Per-anchor bias nevertheless shows that
+recalibration could improve accuracy further or alter it at other positions.
 
-\subsection{Recomandări imediate}
+\subsection{When FlexTDOA is the appropriate choice}
+
+\begin{itemize}[leftmargin=6mm]
+  \item a fully UWB-passive tag, with battery life and scalability as
+  priorities;
+  \item multiple tags that must be located without consuming additional
+  slots;
+  \item a high observation rate and faster updates;
+  \item the application tolerates a P95 of approximately 7.6 cm in the current
+  configuration and validates impossible outputs.
+\end{itemize}
+
+FlexTDOA is not simply ``faster DS''; its observable, topology, and scaling
+cost are different. With four anchors, the 12 ms profile produces
+83.33 frames/s and 333.33 slots/s, independent of the number of passive tags.
+For a multi-tag installation, the airtime comparison becomes progressively
+more favorable to FlexTDOA.
+
+\subsection{Immediate recommendations}
 
 \begin{enumerate}[leftmargin=7mm]
-  \item Păstrarea DS-TWR nativ fără filtru, cu profilul de 64 ms, ca baseline
-  de acuratețe.
-  \item Recalibrarea întârzierilor de antenă, în special pentru legăturile A3
-  și A5; apoi repetarea exactă a testului.
-  \item Scrierea geometriei măsurate în NVS înaintea comparațiilor
-  operaționale; geometria curentă diferă până la 12 cm pe axa $y$.
-  \item Pentru FlexTDOA, adăugarea porții fizice
-  $|z_{ij}|\leq d_{ij}+\varepsilon$ și a unui quality gate pe RMS/bounding box.
-  Acestea sunt verificări de validitate, nu filtrare temporală.
-  \item Repetarea pe o grilă de minimum 5×5 puncte, inclusiv margini și
-  exteriorul pătratului, apoi test dinamic și NLOS. Centrul singur nu
-  caracterizează GDOP-ul întregii suprafețe.
-  \item Pentru mișcare, raportarea latenței end-to-end cu timestamp hardware,
-  nu doar a ratei de evenimente recepționate de dashboard.
+  \item Retain unfiltered native DS-TWR with the 64 ms profile as the accuracy
+  baseline.
+  \item Recalibrate the antenna delays, especially for the A3 and A5 links,
+  and then repeat the test exactly.
+  \item Write the surveyed geometry to NVS before operational comparisons;
+  the current geometry differs by up to 12 cm on the $y$ axis.
+  \item For FlexTDOA, add the physical gate
+  $|z_{ij}|\leq d_{ij}+\varepsilon$ and a quality gate on RMS/bounding box.
+  These are validity checks, not temporal filtering.
+  \item Repeat the test on a grid of at least $5\times5$ points, including the
+  edges and outside of the square, followed by dynamic and NLOS testing. The
+  center alone does not characterize GDOP over the full area.
+  \item For motion, report end-to-end latency using hardware timestamps, not
+  only the rate of events received by the dashboard.
 \end{enumerate}
 
-\section{Limitări}
+\section{Limitations}
 
 \begin{itemize}[leftmargin=6mm]
-  \item Un singur punct, static și central; nu poate descrie erorile spațiale.
-  \item Test LOS; NLOS și multipath sever nu sunt reprezentate.
-  \item Geometria este declarată la $\pm2$ mm, dar nu a fost inclus un sistem
-  optic extern sau o stație totală în captura digitală.
-  \item Temperatura și RSSI au fost înregistrate, dar nu au fost variate
-  controlat.
-  \item Poziția DS este calculată pe Raspberry Pi, iar poziția Flex operațională
-  pe ESP32; de aceea raportul include și o soluție Flex offline comună.
-  \item Debitul observat prin telemetrie/dashboard este o limită
-  end-to-end a implementării, nu doar capacitatea PHY a protocolului.
-  \item Setul provine din firmware \texttt{-dirty}; manifestul și commit-ul
-  permit identificarea, dar reproducerea exactă necesită păstrarea modificărilor
-  locale curente.
+  \item A single, static, central point cannot describe spatial error.
+  \item The test was LOS; NLOS and severe multipath are not represented.
+  \item The geometry is stated to $\pm2$ mm, but no external optical system or
+  total station was included in the digital capture.
+  \item Temperature and RSSI were recorded but not varied in a controlled way.
+  \item The DS position is calculated on the Raspberry Pi, while the
+  operational Flex position is calculated on the ESP32; the report therefore
+  also includes a common offline Flex solution.
+  \item Throughput observed through telemetry/dashboard is an end-to-end
+  implementation limit, not only the protocol's PHY capacity.
+  \item The data set comes from \texttt{-dirty} firmware; the manifest and
+  commit provide identification, but exact reproduction requires preservation
+  of the local changes that were active.
 \end{itemize}
 
-\section{Concluzie}
+\section{Preliminary findings}
 
-În configurația măsurată $3\times3$ m, tag central, LOS:
+For the surveyed $3\times3$ m configuration with a centered tag under LOS:
 
 \begin{itemize}[leftmargin=6mm]
-  \item \textbf{DS-TWR câștigă la acuratețe și predictibilitate}: RMSE
-  3,25 cm, mediană 3,04 cm, P95 4,80 cm, fără erori peste 6,79 cm în pozițiile
-  complete;
-  \item \textbf{FlexTDOA câștigă la debit și scalabilitate}: 804,6
-  observații/s, tag radio-pasiv și 25,2 poziții embedded/s;
-  \item \textbf{FlexTDOA embedded este bun în regim normal}, cu mediană
-  3,59 cm, P95 7,56 cm și RMSE 4,44 cm sub pragul de 50 cm;
-  \item \textbf{FlexTDOA are nevoie de o gardă structurală}: o poziție din
-  9.075 a avut eroare 10,68 m, provocată de observații imposibile fizic;
-  \item \textbf{alegerea depinde de produs}: DS pentru acuratețe cu puține
-  tag-uri; FlexTDOA pentru tag pasiv, multe tag-uri și rată mare.
+  \item \textbf{DS-TWR produced lower static position error at this point}:
+  RMSE 3.25 cm, median 3.04 cm, P95 4.80 cm, with no errors above 6.79 cm
+  among complete positions;
+  \item \textbf{FlexTDOA provided higher throughput and inherent multi-tag
+  scalability}: 804.6
+  observations/s, a radio-passive tag, and 25.2 embedded positions/s;
+  \item \textbf{Embedded FlexTDOA remained close to DS-TWR in its accepted
+  population}, with a 3.59 cm median, 7.56 cm P95, and 4.44 cm RMSE;
+  \item \textbf{the validity policy had negligible data-volume impact}: four
+  of 289,716 Flex observations and one of 9,075 embedded positions were
+  excluded without consulting ground-truth position error;
+  \item \textbf{the product determines the choice}: DS for accuracy with few
+  tags; FlexTDOA for passive and numerous tags at a high update rate.
 \end{itemize}
 
-Aceste concluzii sunt solide pentru testul efectuat datorită alternării
-blocurilor, volumului mare de date și stabilității inter-bloc, dar următorul
-pas obligatoriu pentru o alegere de sistem este harta spațială LOS/NLOS.
+These findings are repeatable for the measured static central point because of
+the alternating blocks, large data volume, and between-block stability. They
+are not a general protocol ranking. A spatial LOS/NLOS grid, dynamic trials,
+and antenna-orientation trials are required before making a system-level
+choice.
 
 \clearpage
 \appendix
 
 \begin{landscape}
-\section{Metrici FlexTDOA pe perechi direcționate}
+\section{FlexTDOA metrics by directed pair}
 
 \scriptsize
 \begin{longtable}{lrrrrrrr}
-  \caption{Observații FlexTDOA corectate; adevărul este 0 m pentru tag-ul
-  central. $\sigma_{\rm MAD}=1,4826\times{\rm MAD}$.}\\
+  \caption{Structurally valid corrected FlexTDOA observations; the true value
+  is 0 m for the centered tag. The final column records source observations
+  excluded by the physical bound.
+  $\sigma_{\rm MAD}=1.4826\times{\rm MAD}$.}\\
   \toprule
-  Pereche & $N$ & Bias [cm] & $\sigma_{\rm MAD}$ [cm] & P95 abs. [cm] &
-  P99 abs. [cm] & Maxim abs. [cm] & Imposibile fizic\\
+  Pair & $N$ & Bias [cm] & $\sigma_{\rm MAD}$ [cm] & P95 abs. [cm] &
+  P99 abs. [cm] & Max. abs. [cm] & Excluded by bound\\
   \midrule
   \endfirsthead
   \toprule
-  Pereche & $N$ & Bias [cm] & $\sigma_{\rm MAD}$ [cm] & P95 abs. [cm] &
-  P99 abs. [cm] & Maxim abs. [cm] & Imposibile fizic\\
+  Pair & $N$ & Bias [cm] & $\sigma_{\rm MAD}$ [cm] & P95 abs. [cm] &
+  P99 abs. [cm] & Max. abs. [cm] & Excluded by bound\\
   \midrule
   \endhead
-  A2$\to$A3 & 25.583 & +4,92 & 7,86 & 20,00 & 30,60 & 101,60 & 0\\
-  A2$\to$A4 & 25.192 & +0,89 & 9,04 & 20,00 & 31,21 & 108,60 & 0\\
-  A2$\to$A5 & 24.354 & $-8,80$ & 9,19 & 26,40 & 52,75 & 211,40 & 0\\
-  A3$\to$A2 & 23.517 & $-5,37$ & 7,71 & 21,20 & 36,37 & 7.968,70 & 1\\
-  A3$\to$A4 & 22.518 & $-7,29$ & 8,45 & 23,10 & 34,20 & 7.963,60 & 1\\
-  A3$\to$A5 & 20.734 & $-12,84$ & 7,86 & 27,90 & 37,90 & 7.974,30 & 2\\
-  A4$\to$A2 & 24.892 & $-0,69$ & 8,45 & 18,90 & 30,80 & 93,60 & 0\\
-  A4$\to$A3 & 24.316 & +7,18 & 8,45 & 23,10 & 35,49 & 104,40 & 0\\
-  A4$\to$A5 & 23.612 & $-5,98$ & 8,75 & 22,10 & 33,30 & 100,80 & 0\\
-  A5$\to$A2 & 24.976 & +6,73 & 9,04 & 24,90 & 42,20 & 177,40 & 0\\
-  A5$\to$A3 & 24.931 & +13,18 & 8,30 & 28,55 & 37,77 & 124,10 & 0\\
-  A5$\to$A4 & 25.091 & +5,87 & 9,34 & 23,20 & 34,50 & 107,80 & 0\\
+  A2$\to$A3 & 25,583 & +4.92 & 7.86 & 20.00 & 30.60 & 101.60 & 0\\
+  A2$\to$A4 & 25,192 & +0.89 & 9.04 & 20.00 & 31.21 & 108.60 & 0\\
+  A2$\to$A5 & 24,354 & $-8.80$ & 9.19 & 26.40 & 52.75 & 211.40 & 0\\
+  A3$\to$A2 & 23,516 & $-5.71$ & 7.71 & 21.20 & 36.20 & 111.60 & 1\\
+  A3$\to$A4 & 22,517 & $-7.64$ & 8.45 & 23.10 & 34.20 & 82.50 & 1\\
+  A3$\to$A5 & 20,732 & $-13.61$ & 7.86 & 27.90 & 37.80 & 87.10 & 2\\
+  A4$\to$A2 & 24,892 & $-0.69$ & 8.45 & 18.90 & 30.80 & 93.60 & 0\\
+  A4$\to$A3 & 24,316 & +7.18 & 8.45 & 23.10 & 35.49 & 104.40 & 0\\
+  A4$\to$A5 & 23,612 & $-5.98$ & 8.75 & 22.10 & 33.30 & 100.80 & 0\\
+  A5$\to$A2 & 24,976 & +6.73 & 9.04 & 24.90 & 42.20 & 177.40 & 0\\
+  A5$\to$A3 & 24,931 & +13.18 & 8.30 & 28.55 & 37.77 & 124.10 & 0\\
+  A5$\to$A4 & 25,091 & +5.87 & 9.34 & 23.20 & 34.50 & 107.80 & 0\\
   \bottomrule
 \end{longtable}
 \end{landscape}
 
-\section{Fișiere și reproducere}
+\section{Files and reproduction}
 
-Artefactele sunt păstrate în:
+The artifacts are stored in:
 \begin{quote}
 \path{/home/pi/Documents/UWB/reports/uwb_protocol_comparison_20260726}
 \end{quote}
@@ -747,40 +762,42 @@ Artefactele sunt păstrate în:
 \noindent
 \begin{tabularx}{\textwidth}{p{56mm}Y}
   \toprule
-  Fișier/director & Conținut\\
+  File/directory & Contents\\
   \midrule
-  \path{data/*.jsonl} & capturile brute, un fișier per bloc\\
-  \path{data/*.metadata.json} & configurația, statusul și contoarele fiecărui
-  bloc\\
-  \path{raw_data_manifest.csv} & dimensiune și SHA-256 pentru fiecare
-  fișier brut\\
-  \path{analysis_summary.json} & toate metricile agregate\\
-  \path{measurement_metrics.csv} & metrici per ancoră/pereche\\
-  \path{position_metrics.csv} & metrici de poziție agregate\\
-  \path{block_metrics.csv} & rezultate pe cele șase blocuri\\
-  \path{ds_positions.csv} & poziții DS reconstruite\\
-  \path{flex_slot_positions.csv} & poziții Flex pe slot complet\\
-  \path{flex_embedded_positions.csv} & poziții publicate de ESP32\\
-  \path{figures/} & toate graficele, PDF vectorial și PNG\\
+  \path{data/*.jsonl.xz} & lossless raw-capture archives, one file per block\\
+  \path{data/*.metadata.json} & configuration, status, and counters for each
+  block\\
+  \path{raw_data_manifest.csv} & size and SHA-256 for every raw and compressed
+  file\\
+  \path{analysis_summary.json} & all aggregate metrics\\
+  \path{measurement_metrics.csv} & per-anchor/pair metrics\\
+  \path{position_metrics.csv} & aggregate position metrics\\
+  \path{block_metrics.csv} & results for all six blocks\\
+  \path{ds_positions.csv} & reconstructed DS positions\\
+  \path{flex_slot_positions.csv} & Flex positions from complete slots\\
+  \path{flex_embedded_positions.csv} & positions published by the ESP32\\
+  \path{figures/} & all plots in vector PDF and PNG formats\\
   \bottomrule
 \end{tabularx}
 
-\paragraph{Reproducerea analizei}
+\paragraph{Reproducing the analysis}
 \begin{verbatim}
+cd /home/pi/Documents/UWB/reports/uwb_protocol_comparison_20260726
+xz --decompress --keep data/*.jsonl.xz
 cd /home/pi/Documents/UWB
 python3 tools/uwb_compare_analyze.py
 cd reports/uwb_protocol_comparison_20260726
 latexmk -pdf -interaction=nonstopmode -halt-on-error report.tex
 \end{verbatim}
 
-Scriptul de colectare este \path{tools/uwb_compare_collect.py}, iar scriptul de
-analiză este \path{tools/uwb_compare_analyze.py}. Fișierele raw nu sunt
-modificate de analiză.
+The collection script is \path{tools/uwb_compare_collect.py}, and the analysis
+script is \path{tools/uwb_compare_analyze.py}. The analysis does not modify the
+raw files.
 
 \begin{thebibliography}{9}
 
 \bibitem{flextdoa-paper}
-G.-C. Pătru, L. Flueratoru, I. Vasilescu, D. Niculescu și D. Rosner,
+G.-C. Pătru, L. Flueratoru, I. Vasilescu, D. Niculescu, and D. Rosner,
 ``FlexTDOA: Robust and Scalable Time-Difference of Arrival Localization Using
 Ultra-Wideband Devices,'' \emph{IEEE Access}, vol. 11, 2023,
 pp. 28610--28627.
@@ -788,30 +805,30 @@ pp. 28610--28627.
 {doi:10.1109/ACCESS.2023.3259320}.
 
 \bibitem{qorvo-api}
-Qorvo, \emph{DW3xxx Device Driver API Guide}, secțiunile 6.3.26--6.3.29,
-exemplele double-sided two-way ranging, 2025.
+Qorvo, \emph{DW3xxx Device Driver API Guide}, Sections 6.3.26--6.3.29,
+double-sided two-way ranging examples, 2025.
 \url{https://forum.qorvo.com/uploads/short-url/xD3TlXKvkujjdUaJWXv2b4E7GQN.pdf}.
 
 \bibitem{aps013}
 Decawave, \emph{APS013: DW1000 and Two-Way Ranging}, rev. 2.3,
-Poll--Response--Final și formula asymmetric DS-TWR.
+Poll--Response--Final and the asymmetric DS-TWR formula.
 \url{https://forum.qorvo.com/uploads/short-url/x34DrF7EW5fQP9wY3aNESqPKz8z.pdf}.
 
 \bibitem{qorvo-product}
-Qorvo, \emph{DW3110 Ultra-Wideband Transceiver}, specificații și documentație
-DW3000.
+Qorvo, \emph{DW3110 Ultra-Wideband Transceiver}, DW3000 specifications and
+documentation.
 \url{https://www.qorvo.com/products/p/DW3110}.
 
 \bibitem{dwm3000-datasheet}
 Qorvo, \emph{DWM3000 IEEE 802.15.4-z UWB Transceiver Module Data Sheet},
-rev. B, mai 2021. Copie locală:
+rev. B, May 2021. Local copy:
 \path{datasheets/DWM3000 Data Sheet.pdf}.
 
 \bibitem{firmware}
-Repository local \emph{UWB Module ESP-IDF}, commit
-\texttt{a97cdce60d191360300f8f39e6afa77247a59f77}, ramura
-\texttt{experiment/ds-twr-native-performance}, stare de lucru din
-26 iulie 2026.
+Local repository \emph{UWB Module ESP-IDF}, commit
+\texttt{a97cdce60d191360300f8f39e6afa77247a59f77}, branch
+\texttt{experiment/ds-twr-native-performance}, working state from
+July 26, 2026.
 
 \end{thebibliography}
 

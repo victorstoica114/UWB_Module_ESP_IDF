@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import pathlib
+import re
 import sys
 import time
 import urllib.error
@@ -18,6 +19,12 @@ PROTOCOL_MODES = {
     "ds_twr": "uwb_ranging",
     "flextdoa": "uwb_flex_tdoa",
 }
+
+RANGING_RESULT_RE = re.compile(
+    r"\bUWB_RANGING result\s+tag=(?P<tag>\d+)\s+"
+    r"anchor=(?P<anchor>\d+)\s+seq=(?P<seq>\d+)\s+"
+    r"distance=(?P<distance>[+-]?(?:\d+(?:\.\d*)?|\.\d+))\s+m\b"
+)
 
 STATUS_KEYS = (
     "module_id",
@@ -166,7 +173,76 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-hz", type=float, default=50.0)
     parser.add_argument("--expected-modules", type=int, default=5)
     parser.add_argument("--ready-timeout-sec", type=float, default=90.0)
+    parser.add_argument(
+        "--log-output",
+        default="",
+        help=(
+            "Optional JSONL file for DS-TWR timing summaries and failures "
+            "captured concurrently from the dashboard log API."
+        ),
+    )
     return parser.parse_args()
+
+
+def relevant_timing_log(item: dict[str, Any]) -> bool:
+    message = str(item.get("message") or "")
+    return (
+        "UWB_RANGING native summary" in message
+        or "UWB_RANGING native tag initiator active" in message
+        or "UWB_RANGING native anchor responder active" in message
+        or (
+            "Native DS-TWR" in message
+            and (
+                "failed" in message
+                or "mismatch" in message
+            )
+        )
+    )
+
+
+def capture_timing_logs(
+    log_url: str,
+    cursor: int,
+    handle: Any,
+) -> tuple[int, int, list[dict[str, Any]]]:
+    captured = 0
+    ranging_items: list[dict[str, Any]] = []
+    while True:
+        response = fetch_json(
+            f"{log_url}?after={max(0, cursor)}&limit=8000",
+            timeout=3.0,
+        )
+        logs = response.get("logs", [])
+        if not logs:
+            break
+        for item in logs:
+            cursor = max(cursor, int(item.get("id") or 0))
+            match = RANGING_RESULT_RE.search(str(item.get("message") or ""))
+            if match is not None:
+                ranging_items.append(
+                    {
+                        "tag_id": int(match.group("tag")),
+                        "anchor_id": int(match.group("anchor")),
+                        "seq": int(match.group("seq")),
+                        "distance_m": float(match.group("distance")),
+                        "log_id": item.get("id"),
+                        "source_module_id": item.get("module_id"),
+                        "received_at": item.get("received_at"),
+                    }
+                )
+            if relevant_timing_log(item):
+                handle.write(
+                    json.dumps(
+                        clean_item(item),
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+                handle.write("\n")
+                captured += 1
+        if len(logs) < 8000:
+            break
+    return cursor, captured, ranging_items
 
 
 def main() -> int:
@@ -176,6 +252,12 @@ def main() -> int:
     events_path = output_dir / f"{args.block}.jsonl"
     metadata_path = output_dir / f"{args.block}.metadata.json"
     snapshot_url = args.dashboard.rstrip("/") + "/api/snapshot"
+    log_url = args.dashboard.rstrip("/") + "/api/logs"
+    log_path = (
+        pathlib.Path(args.log_output).expanduser().resolve()
+        if args.log_output
+        else None
+    )
     runtime_mode = PROTOCOL_MODES[args.protocol]
 
     initial = wait_for_runtime(
@@ -192,13 +274,18 @@ def main() -> int:
     while time.monotonic() < warmup_deadline:
         time.sleep(min(0.25, warmup_deadline - time.monotonic()))
 
+    last_snapshot = fetch_json(snapshot_url)
+    log_cursor = max(
+        0,
+        int(last_snapshot.get("next_log_id") or 0) - 1,
+    )
     started_at = time.time()
     started_monotonic = time.monotonic()
     deadline = started_monotonic + max(1.0, args.duration_sec)
     interval = 1.0 / max(1.0, args.poll_hz)
     next_poll = started_monotonic
     next_status = started_monotonic
-    last_snapshot = initial
+    next_log_capture = started_monotonic
     seen_ds: set[tuple[int, int, int]] = set()
     seen_tdoa: set[tuple[int, int, int, int, int]] = set()
     seen_anchor: set[tuple[int, int, int, int]] = set()
@@ -210,9 +297,20 @@ def main() -> int:
         "local_position": 0,
         "status": 0,
         "poll_error": 0,
+        "timing_log": 0,
+        "timing_log_error": 0,
     }
 
-    with events_path.open("w", encoding="utf-8", buffering=1) as handle:
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    with (
+        events_path.open("w", encoding="utf-8", buffering=1) as handle,
+        (
+            log_path.open("w", encoding="utf-8", buffering=1)
+            if log_path is not None
+            else open("/dev/null", "w", encoding="utf-8")
+        ) as log_handle,
+    ):
         while time.monotonic() < deadline:
             now_monotonic = time.monotonic()
             if now_monotonic < next_poll:
@@ -230,6 +328,46 @@ def main() -> int:
                 if counters["poll_error"] <= 5:
                     print(f"{args.block}: snapshot error: {exc}", file=sys.stderr)
                 continue
+
+            if log_path is not None and time.monotonic() >= next_log_capture:
+                try:
+                    log_cursor, captured, log_ranges = capture_timing_logs(
+                        log_url,
+                        log_cursor,
+                        log_handle,
+                    )
+                    counters["timing_log"] += captured
+                    if args.protocol == "ds_twr":
+                        for item in log_ranges:
+                            key = (
+                                int(item["tag_id"]),
+                                int(item["anchor_id"]),
+                                int(item["seq"]),
+                            )
+                            if key in seen_ds:
+                                continue
+                            seen_ds.add(key)
+                            event_time = received_at(item, captured_at)
+                            if event_time + 0.05 < started_at:
+                                continue
+                            write_event(
+                                handle,
+                                kind="ds_range",
+                                protocol=args.protocol,
+                                block=args.block,
+                                captured_at=captured_at,
+                                event_received_at=event_time,
+                                payload=clean_item(item),
+                            )
+                            counters["ds_range"] += 1
+                except (OSError, ValueError, urllib.error.URLError) as exc:
+                    counters["timing_log_error"] += 1
+                    if counters["timing_log_error"] <= 5:
+                        print(
+                            f"{args.block}: timing log error: {exc}",
+                            file=sys.stderr,
+                        )
+                next_log_capture += 1.0
 
             for item in snapshot.get("ranging", {}).get("distances", {}).values():
                 event_time = received_at(item, captured_at)
@@ -363,6 +501,45 @@ def main() -> int:
                         flush=True,
                     )
 
+        if log_path is not None:
+            try:
+                final_captured_at = time.time()
+                log_cursor, captured, log_ranges = capture_timing_logs(
+                    log_url,
+                    log_cursor,
+                    log_handle,
+                )
+                counters["timing_log"] += captured
+                if args.protocol == "ds_twr":
+                    for item in log_ranges:
+                        key = (
+                            int(item["tag_id"]),
+                            int(item["anchor_id"]),
+                            int(item["seq"]),
+                        )
+                        if key in seen_ds:
+                            continue
+                        seen_ds.add(key)
+                        event_time = received_at(item, final_captured_at)
+                        if event_time + 0.05 < started_at:
+                            continue
+                        write_event(
+                            handle,
+                            kind="ds_range",
+                            protocol=args.protocol,
+                            block=args.block,
+                            captured_at=final_captured_at,
+                            event_received_at=event_time,
+                            payload=clean_item(item),
+                        )
+                        counters["ds_range"] += 1
+            except (OSError, ValueError, urllib.error.URLError) as exc:
+                counters["timing_log_error"] += 1
+                print(
+                    f"{args.block}: final timing log error: {exc}",
+                    file=sys.stderr,
+                )
+
     ended_at = time.time()
     counters.pop("_last_marker", None)
     metadata = {
@@ -377,6 +554,7 @@ def main() -> int:
         "poll_hz": args.poll_hz,
         "expected_modules": args.expected_modules,
         "events_file": events_path.name,
+        "timing_log_file": log_path.name if log_path is not None else None,
         "event_counts": counters,
         "ground_truth": {
             "coordinate_convention": "A2=(0,0), A3=(0,3), A4=(3,0), A5=(3,3)",

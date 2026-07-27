@@ -1,0 +1,523 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[a4paper,margin=20mm,headheight=15pt]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xurl}
+
+\graphicspath{{figures/}}
+\definecolor{baselineblue}{HTML}{2563EB}
+\definecolor{balancedgreen}{HTML}{16A34A}
+\definecolor{maximumred}{HTML}{DC2626}
+\definecolor{slate}{HTML}{334155}
+\definecolor{lightgray}{HTML}{F1F5F9}
+
+\newcommand{\dstwr}{DS-TWR}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small Native DS-TWR speed-limit study}
+\rhead{\small July 26, 2026}
+\cfoot{\thepage}
+
+\hypersetup{
+  pdftitle={Native DS-TWR speed-limit study},
+  pdfauthor={UWB ESP-IDF technical report},
+  pdfsubject={Static LOS throughput, reliability, and accuracy sweep},
+  pdfkeywords={UWB, DS-TWR, DW3000, ESP32-S3, ranging, latency}
+}
+
+\begin{document}
+\pagenumbering{gobble}
+
+\begin{titlepage}
+  \centering
+  \vspace*{17mm}
+  {\Huge\bfseries Native \dstwr{} speed-limit study\par}
+  \vspace{4mm}
+  {\Large Throughput, reliability, and unfiltered static accuracy\par}
+  \vspace{16mm}
+
+  \begin{tabular}{rl}
+    Test date: & July 26, 2026, EEST\\
+    Platform: & 5 ESP32-S3 + DW3000 modules, Raspberry Pi 5\\
+    Branch: & \texttt{experiment/ds-twr-native-performance}\\
+    Firmware baseline: & \texttt{a97cdce-dirty}\\
+    Accelerated firmware: & \texttt{27a28b0-dirty} + instrumentation patch\\
+    Configuration: & M1 tag; M2, M3, M4, M5 anchors\\
+    Geometry: & surveyed $3\times3$ m square, tag at the center\\
+    Environment: & static, line of sight\\
+  \end{tabular}
+
+  \vfill
+  \colorbox{lightgray}{%
+    \begin{minipage}{0.88\textwidth}
+      \vspace{3mm}
+      \textbf{Key result.}
+      The validated 17 ms profile delivered \textbf{58.02 complete
+      positions/s}, \textbf{99.85\% frame completeness}, and
+      \textbf{3.35 cm 2D RMSE}: a \textbf{3.83$\times$} speedup over the
+      64 ms reference without a measurable static-accuracy penalty.
+      The tested scheduling limit was 13 ms, which delivered
+      \textbf{74.68 positions/s} and \textbf{3.47 cm RMSE}, but with much
+      less timing margin and about 9.4 times more failed exchanges than the
+      17 ms profile.
+      \vspace{3mm}
+    \end{minipage}}
+  \vfill
+  {\large Reproducible field report\par}
+  \vspace{5mm}
+\end{titlepage}
+
+\pagenumbering{roman}
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\section{Executive summary}
+
+This study asks how far the current native three-message \dstwr{}
+implementation can be accelerated without sacrificing the static accuracy
+observed in the earlier 64 ms field test. The radio exchange remains strictly
+\texttt{POLL--RESP--FINAL}; no additional ranging frames, temporal filters,
+moving averages, or position smoothing were introduced.
+
+The sweep covered frame periods from 64 ms down to 13 ms. Six 60 s screening
+blocks identified the useful region. The two fastest candidates were then
+validated in the interleaved order
+\texttt{13 ms V1--17 ms V1--13 ms V2--17 ms V2}, with two 120 s blocks per
+profile. Together with the immutable 3$\times$120 s reference, the eligible
+data contain 1,200.6 s of measurements, 218,617 ranges, and 54,214 complete
+positions.
+
+\begin{table}[H]
+  \centering
+  \caption{Main results. The 17 and 13 ms rows use pooled data from their two
+  120 s validation blocks.}
+  \small
+  \begin{tabular}{lrrrrrr}
+    \toprule
+    Profile & Position rate & Speedup & Complete & RMSE & P95 & Radio success\\
+    \midrule
+    64 ms reference & 15.15 Hz & 1.00$\times$ & 97.34\% & 3.25 cm & 4.80 cm & n/a\\
+    21 ms screening & 47.10 Hz & 3.11$\times$ & 99.89\% & 3.56 cm & 5.03 cm & 99.982\%\\
+    \textcolor{balancedgreen}{17 ms balanced}
+      & 58.02 Hz & 3.83$\times$ & 99.85\% & 3.35 cm & 4.65 cm & 99.966\%\\
+    \textcolor{maximumred}{13 ms maximum}
+      & 74.68 Hz & 4.93$\times$ & 98.71\% & 3.47 cm & 4.83 cm & 99.678\%\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Decision.}
+The 13 ms profile is the measured throughput limit of the current
+millisecond-resolution scheduler. It remains usable in this test, but its
+3 ms slots have little reserve for host-task jitter. The 17 ms profile is the
+recommended operating point: it preserves essentially all of the measured
+accuracy, loses only 0.15\% of frames, and leaves substantially more timing
+headroom. The modules were left on this 17 ms profile.
+
+\section{System and protocol}
+
+\subsection{Native three-frame DS-TWR}
+
+For each anchor, the tag transmits \texttt{POLL}, the anchor returns
+\texttt{RESP} using delayed transmission, and the tag sends
+\texttt{FINAL}. The final frame contains the tag-side hardware timestamps;
+the anchor already owns the complementary receive/transmit timestamps and
+therefore calculates the range without a report or acknowledgement frame.
+This is the native asymmetric double-sided two-way-ranging structure
+described by Decawave and used by the Qorvo examples~\cite{aps013,qorvo-api}.
+
+The time of flight is estimated as
+
+\begin{equation}
+  \widehat{T}_{\mathrm{prop}} =
+  \frac{R_aR_b-D_aD_b}{R_a+D_a+R_b+D_b},
+\end{equation}
+
+where $R_a,R_b$ are round-trip intervals and $D_a,D_b$ are reply delays
+formed from DW3000 hardware timestamps. Antenna-delay calibration and the
+instantaneous carrier-integrator correction remain enabled. These are
+physical timestamp corrections, not temporal filtering.
+
+\subsection{Frame scheduler}
+
+The tag visits anchors A2, A3, A4, and A5 sequentially. For four anchors,
+
+\begin{equation}
+  T_{\mathrm{frame}} = 4T_{\mathrm{slot}} + T_{\mathrm{gap}},
+  \qquad
+  f_{\mathrm{ideal}} = T_{\mathrm{frame}}^{-1}.
+\end{equation}
+
+Each complete position requires all four ranges associated with the same
+sequence round. The 64--21 ms profiles retain 2 ms response and final delays.
+The 17 and 13 ms profiles use 1 ms for each delayed transmission. Shortening
+these delays changes only the scheduled turnaround time, not the messages or
+the DS-TWR estimator.
+
+\begin{table}[H]
+  \centering
+  \caption{Timing profiles tested. All values except the ideal rate are in
+  milliseconds.}
+  \small
+  \begin{tabular}{rrrrrrr}
+    \toprule
+    Frame & Slot & Gap & RX timeout & RESP delay & FINAL delay & Ideal Hz\\
+    \midrule
+    64 & 15 & 4 & 8 & 2 & 2 & 15.63\\
+    33 & 8 & 1 & 5 & 2 & 2 & 30.30\\
+    29 & 7 & 1 & 5 & 2 & 2 & 34.48\\
+    25 & 6 & 1 & 5 & 2 & 2 & 40.00\\
+    21 & 5 & 1 & 5 & 2 & 2 & 47.62\\
+    17 & 4 & 1 & 4 & 1 & 1 & 58.82\\
+    13 & 3 & 1 & 3 & 1 & 1 & 76.92\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Experimental method}
+
+\subsection{Geometry and reference data}
+
+The anchors form a nominal $3\times3$ m square and the tag is at
+$(1.5,1.5)$ m. Physical placement uncertainty is approximately
+$\pm2$ mm. The true center-to-corner range is
+$\sqrt{1.5^2+1.5^2}=2.12132$ m. All equipment remained static and in line of
+sight throughout the sweep.
+
+The 64 ms reference is the three-block DS-TWR data set from the preceding
+protocol comparison. It contains 360 s, 22,256 ranges, and 5,455 complete
+positions. Reusing it avoids redefining the baseline after seeing accelerated
+results.
+
+\subsection{Collection sequence}
+
+Every mode change was applied to all five modules in parallel and followed by
+a reboot and a warm-up interval. The eligible accelerated sequence was:
+
+\begin{enumerate}[leftmargin=8mm]
+  \item 60 s screening at 33, 29, 25, 21, 17, and 13 ms;
+  \item 120 s at 13 ms, then 120 s at 17 ms;
+  \item a second 120 s block at 13 ms, then a second at 17 ms.
+\end{enumerate}
+
+The interleaved validation order limits the chance that temperature or slow
+environmental drift favors one final candidate.
+
+\subsection{Instrumentation controls}
+
+The first exploratory 33 ms run revealed a deterministic instrumentation
+artifact: extended DW3000 diagnostic-register reads and verbose log output
+executed periodically in the anchor's real-time path. They caused the next
+poll to be missed in an almost exact five-sequence pattern. The firmware was
+changed once so that continuous positioning retains one compact result record
+per successful exchange while extended diagnostics remain available in the
+dedicated distance-test and survey modes. No protocol frame or ranging
+equation changed. Repeating the identical 33 ms profile improved frame
+completeness from 19.41\% to 98.62\%.
+
+At 21 ms, the original collector reached a separate observation limit because
+it read only the latest distance per anchor from an HTTP snapshot. The radio
+still reported 99.982\% successful exchanges. Collection was changed to an
+ordered log cursor, then the same profile was repeated. The valid repeat
+captured 99.89\% complete frames.
+
+Both exploratory runs are retained verbatim and marked
+\texttt{comparison\_eligible=false}. Their exclusion was based on known
+instrumentation/collection behavior, not on range or position error.
+
+\subsection{Metrics}
+
+Ranges are grouped into rounds using the anchor index and the 16-bit sequence
+number. A frame is complete only if all four anchors are present. Positions
+are reconstructed by the same unfiltered linear trilateration used for the
+reference report. The reported error is Euclidean distance from
+$(1.5,1.5)$ m.
+
+Radio success, timeouts, maximum exchange duration, and slot overruns come
+from one-second tag summaries and failure records. The historical baseline
+capture predates this timing-log collector, so its radio-success entry is
+shown as unavailable rather than inferred.
+
+\section{Results}
+
+\subsection{Throughput and completeness}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{01_rate_completeness.pdf}
+  \caption{Effective complete-position rate versus the theoretical scheduler
+  rate, and frame completeness. Final 17 and 13 ms values use validation
+  blocks; intermediate profiles are screening results.}
+\end{figure}
+
+The 17 ms profile reaches 98.6\% of its theoretical rate and produces
+3.83 times the reference update rate. The 13 ms profile reaches 97.1\% of
+theoretical and produces 4.93 times the reference update rate. Even at the
+tested limit, its 98.71\% completeness remains above the 97.34\% historical
+reference value.
+
+\subsection{Static accuracy}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.92\textwidth]{02_accuracy.pdf}
+  \caption{Unfiltered position RMSE, median, and P95 across the timing sweep.}
+\end{figure}
+
+There is no monotonic loss of accuracy with update rate. Relative to the
+reference, the validated 17 ms profile changes RMSE by only +0.99 mm and
+improves P95 by 1.45 mm. The 13 ms profile changes RMSE by +2.17 mm and P95
+by +0.33 mm. These differences are comparable to placement uncertainty and
+between-block variation and should not be interpreted as a causal accuracy
+change.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.90\textwidth]{04_position_error_cdf.pdf}
+  \caption{Empirical CDF of individual unfiltered position errors for the
+  reference and the two validated accelerated profiles.}
+\end{figure}
+
+The distributions substantially overlap. The maximum errors were 6.79 cm at
+64 ms, 7.70 cm at 17 ms, and 7.20 cm at 13 ms; no large outlier comparable to
+the previously excluded pathological FlexTDOA event appears.
+
+\subsection{Reliability and timing margin}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth]{03_reliability.pdf}
+  \caption{Failed exchanges and slot overruns. The final two profiles are
+  derived from 240 s each; intermediate profiles are 60 s screening blocks.}
+\end{figure}
+
+\begin{table}[H]
+  \centering
+  \caption{Reliability of the final candidates, pooled over two 120 s blocks.}
+  \small
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Profile & Attempts & Failures & Success & Failures/1,000 & Overruns/min\\
+    \midrule
+    17 ms & 55,640 & 19 & 99.966\% & 0.341 & 4.50\\
+    13 ms & 72,604 & 234 & 99.678\% & 3.223 & 61.96\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The faster profile gains 16.66 complete positions/s, but failed exchanges are
+about 9.4 times more frequent and slot overruns about 13.8 times more
+frequent. This is the clearest evidence that 13 ms is a boundary profile
+rather than a comfortable operating point.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth]{07_timing_margin.pdf}
+  \caption{Distribution of the maximum exchange duration in failure-free
+  one-second windows, compared with the configured slot budget.}
+\end{figure}
+
+At 17 ms, the median and P95 one-second maxima are 2.63 and 2.73 ms inside a
+4 ms slot; even P99 is 3.48 ms. At 13 ms, the median is similar at 2.62 ms,
+but P95 rises to 3.46 ms and P99 to 4.74 ms, both beyond the 3 ms slot.
+Occasional scheduling/logging jitter therefore creates frequent overruns at
+the limit. A shorter nominal frame with the current integer-millisecond
+configuration would overrun by construction and was not treated as a valid
+profile.
+
+\subsection{Range bias and repeatability}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth]{05_anchor_bias.pdf}
+  \caption{Per-anchor mean range bias over the sweep. The persistent
+  module-dependent calibration offsets dominate any timing-profile effect.}
+\end{figure}
+
+Anchor biases remain approximately +2.4 to +3.2 cm for A2, +7.7 to +8.0 cm
+for A3, +2.5 to +3.0 cm for A4, and $-4.5$ to $-4.1$ cm for A5. Their
+stability explains why accelerated position accuracy stays close to the
+reference: response-delay reduction does not introduce a new systematic
+range shift in this data.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{06_validation_repeatability.pdf}
+  \caption{The two interleaved 120 s validation blocks for each final
+  profile.}
+\end{figure}
+
+The validation blocks reproduce both rate and accuracy. The 13 ms position
+rates are 74.60 and 74.76 Hz; the 17 ms rates are 58.01 and 58.03 Hz. RMSE
+varies by 1.10 mm between the two 13 ms blocks and by 0.27 mm between the two
+17 ms blocks.
+
+\section{Interpretation and recommendation}
+
+\subsection{What limits the current implementation}
+
+The initial 64 ms configuration was dominated by deliberate idle time, not
+UWB airtime. Removing nonessential diagnostics from the real-time path and
+reducing scheduled turnaround delays exposes the actual implementation
+envelope:
+
+\begin{itemize}[leftmargin=7mm]
+  \item with 2+2 ms delayed transmissions, 21 ms is a strong operating point
+  at 47.10 positions/s;
+  \item with 1+1 ms delayed transmissions, 17 ms is robust and 13 ms is the
+  current scheduling boundary;
+  \item the 13 ms boundary is set by the 3 ms host slot, integer-millisecond
+  runtime configuration, and occasional ESP32 task/log jitter---not by a
+  demonstrated degradation of the DS-TWR distance estimator.
+\end{itemize}
+
+Moving below 13 ms cleanly would require sub-millisecond runtime timing,
+tighter real-time scheduling, or a design that pipelines work differently.
+That would be a separate firmware optimization study. Simply configuring a
+2 ms slot today would make most healthy exchanges overrun their nominal slot
+and would not constitute a valid 9 ms frame.
+
+\subsection{Recommended profiles}
+
+\paragraph{Default: 17 ms balanced profile.}
+Use slot 4 ms, round gap 1 ms, RX timeout 4 ms, response delay 1 ms, final
+delay 1 ms, and auto-RX delay 500 UUS. It gives 58.02 complete positions/s,
+99.85\% completeness, and accuracy statistically indistinguishable from the
+64 ms reference, while retaining useful scheduling reserve.
+
+\paragraph{Maximum-throughput option: 13 ms.}
+Use slot 3 ms, gap 1 ms, timeout 3 ms, and 1+1 ms delayed transmissions when
+74.68 positions/s is worth the reduced timing margin. The test remained
+accurate and 98.71\% complete, but this setting should be revalidated under
+network load, motion, and longer operation before deployment.
+
+\paragraph{Conservative option: 21 ms.}
+If retaining the original 2+2 ms UWB reply delays is desirable, the 21 ms
+profile supplies 47.10 positions/s and 99.89\% frame completeness.
+
+\section{Limits of inference and next tests}
+
+This is a rigorous speed sweep at one favorable static point, not a complete
+localization qualification. The conclusions apply to the tested modules,
+firmware, geometry, channel, and line-of-sight environment. They do not yet
+establish performance:
+
+\begin{itemize}[leftmargin=7mm]
+  \item near edges or outside the anchor square;
+  \item while the tag is moving or rotating;
+  \item under human blockage, multipath, or NLOS;
+  \item with different anchor/tag antenna orientations;
+  \item under heavy simultaneous Wi-Fi/dashboard load;
+  \item over hours of thermal drift or with multiple tags.
+\end{itemize}
+
+The next study should use a spatial grid with independently measured ground
+truth, repeat 64/21/17/13 ms in randomized order at every point, and add
+controlled dynamic trajectories. The 17 ms profile is the appropriate
+starting point for those tests.
+
+\clearpage
+\appendix
+
+\section{Complete profile table}
+
+\begin{table}[H]
+  \centering
+  \caption{Aggregate comparison. Intermediate profiles are screening blocks;
+  17 and 13 ms use validation data.}
+  \scriptsize
+  \begin{tabular}{rrrrrrrr}
+    \toprule
+    Frame & Positions/s & Complete & RMSE & Median & P95 & Success & Fail/1,000\\
+    \midrule
+    64 & 15.15 & 97.34\% & 3.25 cm & 3.04 cm & 4.80 cm & n/a & n/a\\
+    33 & 29.67 & 98.62\% & 3.41 cm & 3.29 cm & 4.92 cm & 99.916\% & 0.835\\
+    29 & 33.46 & 97.81\% & 3.43 cm & 3.28 cm & 4.92 cm & 99.976\% & 0.242\\
+    25 & 38.61 & 97.44\% & 3.53 cm & 3.43 cm & 5.03 cm & 99.989\% & 0.106\\
+    21 & 47.10 & 99.89\% & 3.56 cm & 3.42 cm & 5.03 cm & 99.982\% & 0.177\\
+    17 & 58.02 & 99.85\% & 3.35 cm & 3.24 cm & 4.65 cm & 99.966\% & 0.341\\
+    13 & 74.68 & 98.71\% & 3.47 cm & 3.36 cm & 4.83 cm & 99.678\% & 3.223\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Files and reproduction}
+
+\small
+\begin{tabularx}{\textwidth}{p{57mm}Y}
+  \toprule
+  File/directory & Contents\\
+  \midrule
+  \path{data/*.jsonl.xz} & lossless archives of raw range/status events and
+  timing logs\\
+  \path{data/*.metadata.json} & timing configuration, module state, and
+  collection metadata\\
+  \path{raw_data_manifest.csv} & byte counts and SHA-256 checksums for raw and
+  archived files\\
+  \path{block_metrics.csv} & metrics for every baseline, screening,
+  validation, and exploratory block\\
+  \path{profile_metrics.csv} & phase-aware aggregate metrics\\
+  \path{positions.csv} & every reconstructed complete position\\
+  \path{analysis_summary.json} & machine-readable analysis output\\
+  \path{figures/} & all plots in vector PDF and PNG\\
+  \bottomrule
+\end{tabularx}
+
+\paragraph{Reproduction}
+\begin{verbatim}
+cd /home/pi/Documents/UWB
+xz --decompress --keep reports/ds_twr_speed_limit_20260726/data/*.jsonl.xz
+python3 tools/uwb_ds_speed_analyze.py
+cd reports/ds_twr_speed_limit_20260726
+latexmk -pdf -interaction=nonstopmode -halt-on-error report.tex
+\end{verbatim}
+
+The analysis never modifies raw event files. The original 64 ms blocks live
+under \path{reports/uwb_protocol_comparison_20260726/data}; the path is
+recorded in \path{analysis_summary.json}.
+
+\begin{thebibliography}{9}
+
+\bibitem{qorvo-api}
+Qorvo, \emph{DW3xxx Device Driver API Guide}, double-sided two-way-ranging
+examples, 2025.
+\url{https://forum.qorvo.com/uploads/short-url/xD3TlXKvkujjdUaJWXv2b4E7GQN.pdf}.
+
+\bibitem{aps013}
+Decawave, \emph{APS013: DW1000 and Two-Way Ranging}, rev. 2.3,
+Poll--Response--Final and the asymmetric DS-TWR formula.
+\url{https://forum.qorvo.com/uploads/short-url/x34DrF7EW5fQP9wY3aNESqPKz8z.pdf}.
+
+\bibitem{qorvo-product}
+Qorvo, \emph{DW3110 Ultra-Wideband Transceiver}, product documentation.
+\url{https://www.qorvo.com/products/p/DW3110}.
+
+\bibitem{firmware}
+Local repository \emph{UWB Module ESP-IDF}, branch
+\texttt{experiment/ds-twr-native-performance}, reference commit
+\texttt{27a28b03f1dd627cdcbbf327fb94127bb3fe371b}, working state from
+July 26, 2026.
+
+\end{thebibliography}
+
+\end{document}
