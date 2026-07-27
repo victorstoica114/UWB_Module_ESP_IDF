@@ -172,8 +172,19 @@ were recorded before and after calibration.
 The embedded autonomous-geometry result improved from 4.12 cm to 3.33 cm
 2-D RMSE, while its bias magnitude fell from 3.51 cm to 0.96 cm. Re-solving
 the calibrated observations with the surveyed square produced 1.89 cm RMSE
-and 3.11 cm P95 at 49.17 complete frames/s. This isolates autonomous anchor
-geometry as the largest remaining accuracy penalty.
+and 3.11 cm P95 at 49.17 complete frames/s.
+
+A direct before/after measurement separates the calibration layers. Mean
+absolute effective-range bias across the six anchor pairs fell from 5.63 cm
+to 0.17 cm, so the pair-range correction is effective. Mean absolute
+directed-observation bias across the twelve paths increased from 4.65 cm to
+5.33 cm, however. Correcting the range also shifts the observation formed with
+that range, so the independently fitted per-anchor observation term
+double-counts part of the error. The next calibration iteration must fit
+observation residuals after range correction, using both an antisymmetric
+per-anchor term and, if required, a symmetric per-pair term. Autonomous
+geometry filtering and this calibration interaction are the two remaining
+accuracy tasks.
 
 All raw captures, metrics, figures, limitations, and reproduction instructions
 are in

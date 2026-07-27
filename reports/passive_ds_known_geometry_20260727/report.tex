@@ -43,9 +43,10 @@ the live position-bias magnitude from \(3.51\cm\) to \(0.96\cm\). The embedded
 solver improves from \(4.12\cm\) to \(3.33\cm\) 2-D RMSE. Re-solving the same
 calibrated observations with the surveyed geometry reaches
 \textbf{\(1.89\cm\) RMSE and \(3.11\cm\) P95 at \(49.17\) complete frames/s}.
-The remaining live accuracy penalty is therefore dominated by autonomous
-anchor-geometry reconstruction rather than by the passive observation
-equation.
+The final static position therefore improves. A direct before/after
+comparison also shows that the range calibration works very well, while the
+directed-observation calibration still interacts with the range correction
+and requires a joint refit.
 \end{abstract}
 
 \section{Experimental setup}
@@ -94,6 +95,24 @@ keeps only the newest embedded position, so its 28--29 samples/s is a capture
 limit. Offline reconstruction of one solution per complete three-slot star
 shows the actual \(49.2\) frames/s position cadence.
 
+\begin{center}
+\small
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+Calibration effect & Before [cm] & After [cm] & Change \\
+\midrule
+Live position RMSE & 4.12 & 3.33 & \(19.2\%\) better \\
+Position-bias magnitude & 3.51 & 0.96 & \(72.7\%\) better \\
+Mean absolute effective-range bias & 5.63 & 0.17 & \(96.9\%\) better \\
+Mean absolute directed-path bias & 4.65 & 5.33 & \(14.7\%\) worse \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The current calibration therefore helps the final position and nearly removes
+pair-range bias, but it does not yet independently calibrate every directed
+observation.
+
 \begin{figure}[ht]
 \centering
 \includegraphics[width=\textwidth]{figures/position_scatter.pdf}
@@ -130,9 +149,9 @@ A4 & \(-16\mm\) & A5 & \(-55\mm\) \\
 \end{tabular}
 \end{center}
 
-This uses only \(N-1\) independent values for \(N\) anchors while reproducing
-the corrections for all 12 directed paths. The piggybacked DS ranges use one
-additional correction per unordered anchor pair:
+This uses only \(N-1\) independent values for \(N\) anchors and fits the
+antisymmetric component of all 12 directed paths. The piggybacked DS ranges
+use one additional correction per unordered anchor pair:
 
 \begin{center}
 \begin{tabular}{@{}cr@{\hspace{9mm}}cr@{\hspace{9mm}}cr@{}}
@@ -147,18 +166,18 @@ A3--A4 & \(+67\mm\) & A3--A5 & \(+66\mm\) & A4--A5 & \(-29\mm\) \\
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.82\textwidth]{figures/directed_observation_bias.pdf}
-\caption{Uncalibrated error on each directed path. Opposite signs are
-consistent with a compact per-anchor bias model.}
+\includegraphics[width=\textwidth]{figures/directed_observation_bias.pdf}
+\caption{Direct before/after comparison on the same scale. The current
+combined calibration does not move every directed-path median toward zero.}
 \end{figure}
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=0.72\textwidth]{figures/anchor_pair_range_bias.pdf}
-\caption{Mean anchor-pair DS range error with one standard deviation.}
+\includegraphics[width=0.82\textwidth]{figures/anchor_pair_range_bias.pdf}
+\caption{The effective anchor range used by the tag before and after
+calibration. Pair-range bias is almost completely removed.}
 \end{figure}
 
-\clearpage
 \section{Protocol health and interpretation}
 
 During the calibrated capture, anchor radio success ranged from \(97.37\%\) to
@@ -168,19 +187,24 @@ transients and remain included in every reported statistic and plot.
 
 The uncorrected pair distances still fit a planar geometry with
 \(1.99\cm\) range-residual RMS, but the resulting anchor coordinates are
-displaced by several centimeters. Consequently:
+displaced by several centimeters. The direct comparison supports the
+following conclusions:
 
 \begin{itemize}
   \item CFO correction of the responder reply interval is working;
-  \item passive directed observations benefit from the per-anchor bias model;
-  \item piggybacked DS ranges benefit from per-pair corrections;
-  \item autonomous geometry is now the largest remaining live accuracy
-        penalty.
+  \item piggybacked DS ranges clearly benefit from per-pair corrections;
+  \item final static position RMSE and bias improve;
+  \item the independent per-anchor observation fit is incomplete once the
+        range correction is active;
+  \item autonomous geometry and the observation/range interaction remain
+        accuracy penalties.
 \end{itemize}
 
-The next implementation step should robustly filter pair ranges before they
-update geometry: a rolling median or Huber estimate, a physical-change gate,
-and a slower geometry-update cadence. Validation should then cover several
+The next implementation step is a joint observation fit performed after range
+correction, with an antisymmetric per-anchor term and, if needed, a symmetric
+per-pair observation term. Pair ranges should then be robustly filtered before
+they update geometry: a rolling median or Huber estimate, a physical-change
+gate, and a slower geometry-update cadence. Validation should cover several
 static tag locations and a dynamic trajectory. A single center position
 identifies the current bias, but cannot establish workspace-wide accuracy.
 

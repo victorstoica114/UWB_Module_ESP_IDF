@@ -19,6 +19,10 @@
   "key_results": {
     "calibrated_surveyed_geometry_p95_cm": 3.111058674724626,
     "calibrated_surveyed_geometry_rmse_cm": 1.8876773042850217,
+    "directed_path_mean_abs_bias_after_cm": 5.331468214693013,
+    "directed_path_mean_abs_bias_before_cm": 4.64958943987065,
+    "effective_range_mean_abs_bias_after_cm": 0.17227172931000748,
+    "effective_range_mean_abs_bias_before_cm": 5.632232682456427,
     "embedded_bias_norm_after_cm": 0.9579161703512764,
     "embedded_bias_norm_before_cm": 3.507360289222033,
     "embedded_rmse_improvement_pct": 19.16454783692647

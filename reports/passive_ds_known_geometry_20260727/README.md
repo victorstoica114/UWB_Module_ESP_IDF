@@ -31,6 +31,20 @@ The calibrated embedded result contains five estimates above 10 cm (0.142%),
 including two above 15 cm. These are short transients rather than a shifted
 distribution. They remain visible in every metric and plot.
 
+The effect is not uniformly positive at every calibration layer:
+
+| Metric | Before | After | Result |
+|---|---:|---:|---|
+| Live position RMSE | 4.12 cm | 3.33 cm | 19.2% better |
+| Position-bias magnitude | 3.51 cm | 0.96 cm | 72.7% better |
+| Mean absolute effective-range bias across 6 pairs | 5.63 cm | 0.17 cm | 96.9% better |
+| Mean absolute directed-observation bias across 12 paths | 4.65 cm | 5.33 cm | 14.7% worse |
+
+Thus the current calibration **does help the final static position**, and the
+pair-range correction is highly effective. However, the current per-anchor
+directed-observation model does not independently improve all paths once the
+range correction is active.
+
 ![Position clouds](figures/position_scatter.png)
 
 ![Position error CDF](figures/position_error_cdf.png)
@@ -50,8 +64,8 @@ A5 = -55 mm
 ```
 
 Only `N - 1` independent values are needed for `N` anchors because A2 fixes
-the arbitrary common offset. This model reproduces all 12 directed-path
-corrections without storing a separate value for every direction.
+the arbitrary common offset. This fits the antisymmetric component of the 12
+directed paths without storing a separate value for every direction.
 
 The mean DS range errors provide six unordered pair corrections:
 
@@ -68,6 +82,12 @@ The mean DS range errors provide six unordered pair corrections:
 
 ![Anchor-pair range bias](figures/anchor_pair_range_bias.png)
 
+The effective pair-range comparison is conclusive: mean absolute bias falls
+from 5.63 cm to 0.17 cm. In contrast, mean absolute directed-path bias rises
+from 4.65 cm to 5.33 cm after both corrections are active. Correcting a pair
+range changes the TDOA observation formed with that range, so fitting the
+per-anchor term independently double-counts part of the error.
+
 The uncorrected pair distances fit a planar geometry with 1.99 cm range
 residual RMS, but displace the reconstructed anchors by several centimeters.
 This explains the remaining difference between the calibrated embedded result
@@ -76,24 +96,30 @@ with the surveyed geometry (1.89 cm RMSE).
 
 ## Interpretation
 
-This experiment validates the four immediate implementation items:
+This experiment validates three immediate implementation items:
 
 1. use the responder CFO to correct the reply interval in tag clock units;
 2. preserve and expose each directed observation and piggybacked DS range;
-3. correct directed observations with a compact per-anchor bias model;
-4. correct the DS ranges used by the autonomous geometry solver per anchor
+3. correct the DS ranges used by the autonomous geometry solver per anchor
    pair.
+
+The compact per-anchor observation model is implemented, but the new
+before/after comparison shows that it is not yet a complete calibration model.
+The next fit must be performed jointly after range correction, for example
+with an antisymmetric per-anchor term plus a symmetric per-pair observation
+term.
 
 The correction is operationally applied to passive tags only. Ranging anchors
 continue to execute the three-frame exchange without needing these position
 calibration values.
 
-The main remaining limitation is now the autonomous geometry input, not the
-receive-only TDOA equation. The next iteration should robustly filter
-anchor-pair ranges (rolling median/Huber estimator, physical-change gate, and a
-slower geometry update cadence), then repeat this test at multiple static tag
-locations and along a dynamic trajectory. One center point is sufficient to
-identify the current bias, but not to claim workspace-wide accuracy.
+The two remaining limitations are the observation/range calibration
+interaction and the autonomous geometry input. After jointly refitting the
+observation model, the geometry should robustly filter anchor-pair ranges
+(rolling median/Huber estimator, physical-change gate, and a slower update
+cadence). The test must then be repeated at multiple static tag locations and
+along a dynamic trajectory. One center point is sufficient to identify the
+current bias, but not to claim workspace-wide accuracy.
 
 ## Reproduce
 
@@ -111,6 +137,7 @@ regenerates its supporting outputs:
 - `position_metrics.csv`
 - `observation_metrics.csv`
 - `anchor_range_metrics.csv`
+- `effective_anchor_range_metrics.csv`
 - `protocol_metrics.csv`
 - `raw_data_manifest.csv`
 - `figures/*.png` and `figures/*.pdf`
