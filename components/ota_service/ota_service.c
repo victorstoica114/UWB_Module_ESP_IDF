@@ -714,10 +714,10 @@ static bool runtime_config_reboot_recommended(
                after->passive_ds_rx_slice_ms ||
            before->passive_ds_rx_timeout_ms !=
                after->passive_ds_rx_timeout_ms ||
-           before->passive_ds_resp_delay_ms !=
-               after->passive_ds_resp_delay_ms ||
-           before->passive_ds_final_delay_ms !=
-               after->passive_ds_final_delay_ms ||
+           before->passive_ds_resp_delay_us !=
+               after->passive_ds_resp_delay_us ||
+           before->passive_ds_final_delay_us !=
+               after->passive_ds_final_delay_us ||
            before->passive_ds_auto_rx_delay_uus !=
                after->passive_ds_auto_rx_delay_uus ||
            before->anchor_survey_coordinator_id !=
@@ -940,8 +940,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_passive_ds_round_gap_ms\":%lu,"
         "\"runtime_passive_ds_rx_slice_ms\":%lu,"
         "\"runtime_passive_ds_rx_timeout_ms\":%lu,"
-        "\"runtime_passive_ds_resp_delay_ms\":%lu,"
-        "\"runtime_passive_ds_final_delay_ms\":%lu,"
+        "\"runtime_passive_ds_resp_delay_us\":%lu,"
+        "\"runtime_passive_ds_final_delay_us\":%lu,"
         "\"runtime_passive_ds_auto_rx_delay_uus\":%lu,"
         "\"runtime_distance_test_peer_id\":%u,"
         "\"runtime_distance_test_initiator_id\":%u,"
@@ -1438,8 +1438,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)runtime_config->passive_ds_round_gap_ms,
         (unsigned long)runtime_config->passive_ds_rx_slice_ms,
         (unsigned long)runtime_config->passive_ds_rx_timeout_ms,
-        (unsigned long)runtime_config->passive_ds_resp_delay_ms,
-        (unsigned long)runtime_config->passive_ds_final_delay_ms,
+        (unsigned long)runtime_config->passive_ds_resp_delay_us,
+        (unsigned long)runtime_config->passive_ds_final_delay_us,
         (unsigned long)runtime_config->passive_ds_auto_rx_delay_uus,
         (unsigned)runtime_config->distance_test_peer_id,
         (unsigned)runtime_config->distance_test_initiator_id,
@@ -3412,10 +3412,10 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         APPLY_U32_PARAM("passive_ds_gap_ms", passive_ds_round_gap_ms);
         APPLY_U32_PARAM("passive_ds_rx_ms", passive_ds_rx_slice_ms);
         APPLY_U32_PARAM("passive_ds_timeout_ms", passive_ds_rx_timeout_ms);
-        APPLY_U32_PARAM("passive_ds_resp_delay_ms",
-                        passive_ds_resp_delay_ms);
-        APPLY_U32_PARAM("passive_ds_final_delay_ms",
-                        passive_ds_final_delay_ms);
+        APPLY_U32_PARAM("passive_ds_resp_delay_us",
+                        passive_ds_resp_delay_us);
+        APPLY_U32_PARAM("passive_ds_final_delay_us",
+                        passive_ds_final_delay_us);
         APPLY_U32_PARAM("passive_ds_auto_rx_delay_uus",
                         passive_ds_auto_rx_delay_uus);
         APPLY_U8_PARAM("dt_peer", distance_test_peer_id);
@@ -3635,8 +3635,8 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         "\"runtime_passive_ds_round_gap_ms\":%lu,"
         "\"runtime_passive_ds_rx_slice_ms\":%lu,"
         "\"runtime_passive_ds_rx_timeout_ms\":%lu,"
-        "\"runtime_passive_ds_resp_delay_ms\":%lu,"
-        "\"runtime_passive_ds_final_delay_ms\":%lu,"
+        "\"runtime_passive_ds_resp_delay_us\":%lu,"
+        "\"runtime_passive_ds_final_delay_us\":%lu,"
         "\"runtime_passive_ds_auto_rx_delay_uus\":%lu,"
         "\"runtime_anchor_survey_slot_ms\":%lu,"
         "\"runtime_anchor_survey_round_gap_ms\":%lu,"
@@ -3685,8 +3685,8 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         (unsigned long)active_config->passive_ds_round_gap_ms,
         (unsigned long)active_config->passive_ds_rx_slice_ms,
         (unsigned long)active_config->passive_ds_rx_timeout_ms,
-        (unsigned long)active_config->passive_ds_resp_delay_ms,
-        (unsigned long)active_config->passive_ds_final_delay_ms,
+        (unsigned long)active_config->passive_ds_resp_delay_us,
+        (unsigned long)active_config->passive_ds_final_delay_us,
         (unsigned long)active_config->passive_ds_auto_rx_delay_uus,
         (unsigned long)active_config->anchor_survey_slot_ms,
         (unsigned long)active_config->anchor_survey_round_gap_ms,

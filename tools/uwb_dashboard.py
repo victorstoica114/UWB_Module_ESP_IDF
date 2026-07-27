@@ -88,14 +88,19 @@ TELEMETRY_STREAM_FLEX_POSITION = 4
 TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION = 5
 TELEMETRY_STREAM_PASSIVE_DS_ANCHOR_RANGE = 6
 TELEMETRY_STREAM_PASSIVE_DS_POSITION = 7
+TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2 = 8
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
 TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
 TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32
+TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN = 41
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
 TELEMETRY_FLEX_OBSERVATION_STRUCT = struct.Struct("<IIiiiHBBBB")
 TELEMETRY_FLEX_ANCHOR_RANGE_STRUCT = struct.Struct("<IIiiHBB")
 TELEMETRY_FLEX_POSITION_STRUCT = struct.Struct("<IIiiiiIHBB")
+TELEMETRY_PASSIVE_DS_OBSERVATION_V2_STRUCT = struct.Struct(
+    "<IIiiiiiIHBBBBBH"
+)
 TELEMETRY_STREAM_SAMPLE_SIZES = {
     TELEMETRY_STREAM_BNO085_ACCEL: TELEMETRY_ACCEL_SAMPLE_LEN,
     TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION:
@@ -109,6 +114,8 @@ TELEMETRY_STREAM_SAMPLE_SIZES = {
         TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN,
     TELEMETRY_STREAM_PASSIVE_DS_POSITION:
         TELEMETRY_FLEX_POSITION_SAMPLE_LEN,
+    TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2:
+        TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN,
 }
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
 
@@ -232,8 +239,8 @@ RUNTIME_PARAM_STATUS_FIELDS = {
     "passive_ds_gap_ms": "runtime_passive_ds_round_gap_ms",
     "passive_ds_rx_ms": "runtime_passive_ds_rx_slice_ms",
     "passive_ds_timeout_ms": "runtime_passive_ds_rx_timeout_ms",
-    "passive_ds_resp_delay_ms": "runtime_passive_ds_resp_delay_ms",
-    "passive_ds_final_delay_ms": "runtime_passive_ds_final_delay_ms",
+    "passive_ds_resp_delay_us": "runtime_passive_ds_resp_delay_us",
+    "passive_ds_final_delay_us": "runtime_passive_ds_final_delay_us",
     "passive_ds_auto_rx_delay_uus":
         "runtime_passive_ds_auto_rx_delay_uus",
     "radio_channel": "runtime_radio_channel",
@@ -561,6 +568,54 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "z": z / 1000.0,
                     "accuracy": int(accuracy),
                     "reports": int(reports),
+                }
+            )
+        elif stream_type == TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2:
+            (
+                uptime_ms,
+                slot_id,
+                diff_mm,
+                raw_diff_mm,
+                anchor_distance_mm,
+                cfo_correction_mm,
+                clock_offset_ppb,
+                reply_delay_us,
+                sequence,
+                tag_id,
+                initiator_id,
+                responder_id,
+                responder_index,
+                range_source,
+                range_age_slots,
+            ) = TELEMETRY_PASSIVE_DS_OBSERVATION_V2_STRUCT.unpack_from(
+                frame, offset
+            )
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "topic": "uwb.passive_ds.observation",
+                    "tdoa_protocol": "passive_ds",
+                    "slot_id": int(slot_id),
+                    "diff_m": diff_mm / 1000.0,
+                    "raw_diff_m": raw_diff_mm / 1000.0,
+                    "anchor_distance_m": anchor_distance_mm / 1000.0,
+                    "cfo_correction_m": cfo_correction_mm / 1000.0,
+                    "clock_offset_ppm": clock_offset_ppb / 1000.0,
+                    "reply_delay_us": int(reply_delay_us),
+                    "range_source": (
+                        "piggyback_ds"
+                        if range_source == 1
+                        else "fixed_geometry"
+                        if range_source == 2
+                        else "none"
+                    ),
+                    "range_age_slots": int(range_age_slots),
+                    "seq": int(sequence),
+                    "tag_id": int(tag_id),
+                    "initiator_id": int(initiator_id),
+                    "responder_id": int(responder_id),
+                    "responder_index": int(responder_index),
                 }
             )
         elif stream_type in (
@@ -1036,6 +1091,11 @@ class DashboardState:
             "fused": fused,
             "suspect": suspect,
             "anchor_distance_m": anchor_distance_m,
+            "cfo_correction_m": item.get("cfo_correction_m"),
+            "clock_offset_ppm": item.get("clock_offset_ppm"),
+            "reply_delay_us": item.get("reply_delay_us"),
+            "range_source": item.get("range_source"),
+            "range_age_slots": item.get("range_age_slots"),
             "received_at": now,
             "log_id": item.get("id"),
             "source_module_id": item.get("module_id"),
@@ -1100,6 +1160,11 @@ class DashboardState:
             "fused": False,
             "suspect": False,
             "anchor_distance_m": anchor_distance_m,
+            "cfo_correction_m": item.get("cfo_correction_m"),
+            "clock_offset_ppm": item.get("clock_offset_ppm"),
+            "reply_delay_us": item.get("reply_delay_us"),
+            "range_source": item.get("range_source"),
+            "range_age_slots": item.get("range_age_slots"),
             "received_at": now,
             "log_id": None,
             "source_module_id": item.get("module_id"),
@@ -1338,6 +1403,11 @@ class DashboardState:
                 "fused": bool(item.get("fused")),
                 "suspect": bool(item.get("suspect")),
                 "anchor_distance_m": float(item["anchor_distance_m"]),
+                "cfo_correction_m": item.get("cfo_correction_m"),
+                "clock_offset_ppm": item.get("clock_offset_ppm"),
+                "reply_delay_us": item.get("reply_delay_us"),
+                "range_source": item.get("range_source"),
+                "range_age_slots": item.get("range_age_slots"),
                 "age_sec": now - float(item["received_at"]),
                 "log_id": item.get("log_id"),
                 "source_module_id": item.get("source_module_id"),
@@ -1370,6 +1440,17 @@ class DashboardState:
                         "raw_diff_m": float(sample["raw_diff_m"]),
                         "primary_diff_m": sample.get("primary_diff_m"),
                         "anchor_distance_m": float(sample["anchor_distance_m"]),
+                        "cfo_correction_m": sample.get(
+                            "cfo_correction_m"
+                        ),
+                        "clock_offset_ppm": sample.get(
+                            "clock_offset_ppm"
+                        ),
+                        "reply_delay_us": sample.get("reply_delay_us"),
+                        "range_source": sample.get("range_source"),
+                        "range_age_slots": sample.get(
+                            "range_age_slots"
+                        ),
                         "age_sec": age_sec,
                         "received_at": float(sample.get("received_at") or 0.0),
                         "log_id": sample.get("log_id"),
@@ -3840,8 +3921,8 @@ tr.status-stale td { color: #4f3b1d; }
                 <label for="passiveDsFastGapMs">Frame gap ms</label><input id="passiveDsFastGapMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsFastRxMs">Anchor RX slice ms</label><input id="passiveDsFastRxMs" value="100" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsFastTimeoutMs">RX timeout ms</label><input id="passiveDsFastTimeoutMs" value="4" type="number" min="1" max="60000" step="1">
-                <label for="passiveDsFastRespMs">RESP delay ms</label><input id="passiveDsFastRespMs" value="1" type="number" min="1" max="60000" step="1">
-                <label for="passiveDsFastFinalMs">FINAL delay ms</label><input id="passiveDsFastFinalMs" value="1" type="number" min="1" max="60000" step="1">
+                <label for="passiveDsFastRespUs">RESP delay µs</label><input id="passiveDsFastRespUs" value="750" type="number" min="100" max="1000000" step="50">
+                <label for="passiveDsFastFinalUs">FINAL delay µs</label><input id="passiveDsFastFinalUs" value="750" type="number" min="100" max="1000000" step="50">
                 <label for="passiveDsFastAutoRxUus">Auto RX delay UUS</label><input id="passiveDsFastAutoRxUus" value="500" type="number" min="0" max="65535" step="10">
                 <label for="passiveDsFastFreshSec">Observation freshness s</label><input id="passiveDsFastFreshSec" value="0.2" type="number" min="0.2" step="0.1">
               </div>
@@ -3857,8 +3938,8 @@ tr.status-stale td { color: #4f3b1d; }
                 <label for="passiveDsRobustGapMs">Frame gap ms</label><input id="passiveDsRobustGapMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsRobustRxMs">Anchor RX slice ms</label><input id="passiveDsRobustRxMs" value="100" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsRobustTimeoutMs">RX timeout ms</label><input id="passiveDsRobustTimeoutMs" value="4" type="number" min="1" max="60000" step="1">
-                <label for="passiveDsRobustRespMs">RESP delay ms</label><input id="passiveDsRobustRespMs" value="1" type="number" min="1" max="60000" step="1">
-                <label for="passiveDsRobustFinalMs">FINAL delay ms</label><input id="passiveDsRobustFinalMs" value="1" type="number" min="1" max="60000" step="1">
+                <label for="passiveDsRobustRespUs">RESP delay µs</label><input id="passiveDsRobustRespUs" value="750" type="number" min="100" max="1000000" step="50">
+                <label for="passiveDsRobustFinalUs">FINAL delay µs</label><input id="passiveDsRobustFinalUs" value="750" type="number" min="100" max="1000000" step="50">
                 <label for="passiveDsRobustAutoRxUus">Auto RX delay UUS</label><input id="passiveDsRobustAutoRxUus" value="500" type="number" min="0" max="65535" step="10">
                 <label for="passiveDsRobustFreshSec">Observation freshness s</label><input id="passiveDsRobustFreshSec" value="0.2" type="number" min="0.2" step="0.1">
               </div>
@@ -4443,7 +4524,7 @@ const rangingProtocolProfileFields = {
 };
 const rangingProfileDefaultsVersion = "2026-07-26-native-ds-twr-speed-study-v3";
 const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
-const passiveDsProfileDefaultsVersion = "2026-07-27-passive-ds-safe-baseline-v2";
+const passiveDsProfileDefaultsVersion = "2026-07-27-passive-ds-us-piggyback-v3";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -5310,7 +5391,11 @@ function currentAnchorDistanceBatch(anchorIds, maxAge) {
     const slotId = Number(sample.slot_id);
     if (!selected.has(initiator) || !selected.has(responder) ||
         !Number.isInteger(slotId) || Number(sample.age_sec) > maxAge) continue;
-    const frameId = Math.floor(slotId / ids.length);
+    const passiveDs = String(sample.tdoa_protocol || "") === "passive_ds";
+    const geometryCycleSlots = passiveDs
+      ? ids.length * Math.max(1, ids.length - 1)
+      : ids.length;
+    const frameId = Math.floor(slotId / geometryCycleSlots);
     const group = groups.get(frameId) || {frameId, items: {}, newestAt: 0};
     const pair = anchorPairKey(initiator, responder);
     group.items[pair] = {...(liveItems[pair] || {}), ...sample};
@@ -5672,7 +5757,7 @@ function paperAnchorGeometry(anchorIds, maxAge) {
     residuals,
     fitQuality,
     complete: true,
-    positionReady: false,
+    positionReady: fitQuality.acceptable && session.ekf.updates > 0,
     canFix: batch.coherent && batch.missingPairs.length === 0 &&
       session.ekf.updates > 0 && fitQuality.acceptable,
     status: "self_localizing",
@@ -6705,11 +6790,20 @@ function renderPositionReadout(model) {
         const protocolText = item.tdoa_protocol === "passive_ds"
           ? "Passive DS-TWR"
           : (item.tdoa_protocol === "flextdoa" ? "FlexTDOA" : "legacy");
+        const cfoPpm = Number(item.clock_offset_ppm);
+        const cfoCorrectionM = Number(item.cfo_correction_m);
+        const passiveDiag = item.tdoa_protocol === "passive_ds"
+          ? ` · CFO ${Number.isFinite(cfoPpm) ? fmtFixed(cfoPpm, 3) + " ppm" : "-"} / ` +
+            `${Number.isFinite(cfoCorrectionM) ? fmtFixed(cfoCorrectionM * 100, 1) + " cm" : "-"} · ` +
+            `reply ${Number.isFinite(Number(item.reply_delay_us)) ? esc(item.reply_delay_us) + " µs" : "-"} · ` +
+            `range ${esc(item.range_source || "-")}` +
+            `${Number.isFinite(Number(item.range_age_slots)) ? " age " + esc(item.range_age_slots) + " slots" : ""}`
+          : "";
         const suspectText = item.suspect ? " · suspect" : "";
         const fusedText = Number(item.fused_count || 0) > 0 ? ` · fused ${esc(item.fused_count)}` : "";
         tdoaRows.push(`<tr class="${used ? "" : "position-skip"}">
           <td>T${esc(tag.tagId)}</td>
-          <td>A${esc(item.initiator_id)}→A${esc(item.responder_id)}<br><span class="muted">${esc(protocolText)} · seq ${esc(item.seq)}${agreementText}${blendText}${fusedText}${suspectText} · ${esc(fitNote)}</span></td>
+          <td>A${esc(item.initiator_id)}→A${esc(item.responder_id)}<br><span class="muted">${esc(protocolText)} · seq ${esc(item.seq)}${passiveDiag}${agreementText}${blendText}${fusedText}${suspectText} · ${esc(fitNote)}</span></td>
           <td>${fmtFixed(item.diff_m, 3)}</td>
           <td>${Number.isFinite(Number(item.raw_diff_m)) ? fmtFixed(item.raw_diff_m, 3) : "-"}</td>
           <td class="${Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${fmtFixed(item.age_sec, 1)}s</td>
@@ -10135,8 +10229,8 @@ const passiveDsProfileDefaults = {
     gapMs: 1,
     rxMs: 100,
     timeoutMs: 4,
-    respMs: 1,
-    finalMs: 1,
+    respUs: 750,
+    finalUs: 750,
     autoRxUus: 500,
     freshSec: 0.2,
   },
@@ -10144,12 +10238,12 @@ const passiveDsProfileDefaults = {
     prefix: "passiveDsRobust",
     label: "Robust Rotating",
     schedule: 1,
-    slotMs: 3,
+    slotMs: 5,
     gapMs: 1,
     rxMs: 100,
-    timeoutMs: 3,
-    respMs: 1,
-    finalMs: 1,
+    timeoutMs: 4,
+    respUs: 750,
+    finalUs: 750,
     autoRxUus: 500,
     freshSec: 0.2,
   },
@@ -10159,8 +10253,8 @@ const passiveDsProfileFieldSuffixes = {
   gapMs: "GapMs",
   rxMs: "RxMs",
   timeoutMs: "TimeoutMs",
-  respMs: "RespMs",
-  finalMs: "FinalMs",
+  respUs: "RespUs",
+  finalUs: "FinalUs",
   autoRxUus: "AutoRxUus",
   freshSec: "FreshSec",
 };
@@ -10213,7 +10307,7 @@ function updatePassiveDsProfileSummary(key) {
   const frameHz = frameMs > 0 ? 1000 / frameMs : NaN;
   const superframeMs = key === "robust" ? anchorCount * frameMs : frameMs;
   const warnings = [];
-  if (values.respMs + values.finalMs >= values.slotMs) {
+  if (values.respUs + values.finalUs >= values.slotMs * 1000) {
     warnings.push("RESP + FINAL >= slot");
   }
   if (values.timeoutMs > values.slotMs) warnings.push("timeout > slot");
@@ -10237,9 +10331,9 @@ async function applyPassiveDsProfile(key) {
     .every(field => Number.isFinite(values[field]) && values[field] >= 0);
   if (!valid || values.slotMs < 1 || values.gapMs < 1 ||
       values.timeoutMs < 1 ||
-      values.respMs < 1 || values.finalMs < 1 ||
+      values.respUs < 100 || values.finalUs < 100 ||
       values.freshSec < 0.2 ||
-      values.respMs + values.finalMs >= values.slotMs) {
+      values.respUs + values.finalUs >= values.slotMs * 1000) {
     setToast(
       "passiveDsProfileToast",
       "Invalid timing: RESP + FINAL must fit strictly inside the slot.",
@@ -10262,8 +10356,8 @@ async function applyPassiveDsProfile(key) {
       passive_ds_gap_ms: String(values.gapMs),
       passive_ds_rx_ms: String(values.rxMs),
       passive_ds_timeout_ms: String(values.timeoutMs),
-      passive_ds_resp_delay_ms: String(values.respMs),
-      passive_ds_final_delay_ms: String(values.finalMs),
+      passive_ds_resp_delay_us: String(values.respUs),
+      passive_ds_final_delay_us: String(values.finalUs),
       passive_ds_auto_rx_delay_uus: String(values.autoRxUus),
       reboot: "1",
     },
@@ -10295,8 +10389,8 @@ function passiveDsRuntimeConfig() {
     gapMs: Number(status.runtime_passive_ds_round_gap_ms ?? 1),
     rxMs: Number(status.runtime_passive_ds_rx_slice_ms || 100),
     timeoutMs: Number(status.runtime_passive_ds_rx_timeout_ms || 4),
-    respMs: Number(status.runtime_passive_ds_resp_delay_ms || 1),
-    finalMs: Number(status.runtime_passive_ds_final_delay_ms || 1),
+    respUs: Number(status.runtime_passive_ds_resp_delay_us || 750),
+    finalUs: Number(status.runtime_passive_ds_final_delay_us || 750),
     autoRxUus: Number(status.runtime_passive_ds_auto_rx_delay_uus || 500),
     live: Boolean(
       statusIsFresh(status) &&
@@ -10336,9 +10430,9 @@ function renderPassiveDsTimingDiagram() {
     </div>
     <div class="flex-frame-track" style="grid-template-columns:repeat(${slots}, minmax(190px, 1fr))">${slotCards}</div>
     <div class="flex-packet-flow" style="margin-top:12px">
-      <div class="flex-packet-row"><b>POLL · reference → responder</b><code>header | slot32</code></div>
-      <div class="flex-packet-row"><b>RESP · responder → reference · +${esc(config.respMs)} ms</b><code>header | slot32 | exact_reply_dtu32</code></div>
-      <div class="flex-packet-row"><b>FINAL · reference → responder · +${esc(config.finalMs)} ms</b><code>header | poll_tx40 | resp_rx40 | final_tx40 | slot32</code></div>
+      <div class="flex-packet-row"><b>POLL · reference → responder</b><code>header | slot32 | previous DS-TWR range</code></div>
+      <div class="flex-packet-row"><b>RESP · responder → reference · +${esc(config.respUs)} µs</b><code>header | slot32 | exact_reply_dtu32 | previous DS-TWR range</code></div>
+      <div class="flex-packet-row"><b>FINAL · reference → responder · +${esc(config.finalUs)} µs</b><code>header | poll_tx40 | resp_rx40 | final_tx40 | slot32</code></div>
       <div class="flex-packet-row"><b>Receive-only tags</b><code>timestamp POLL_RX and RESP_RX, correct responder clock skew, emit TDOA; no absolute clock phase synchronization</code></div>
     </div>
     <div class="flex-timing-note ${config.live ? "" : "warn"}">
@@ -10649,17 +10743,17 @@ function runPositionOverlayAction(event) {
 
 async function restartAnchorSelfLocalization() {
     const settings = positionSettings();
-    if (settings.solver !== "flextdoa") {
+    if (!positionProtocolUsesTdoa(settings.solver)) {
       setToast(
         "positionToast",
-        "Select FlexTDOA before restarting anchor self-localization.",
+        "Select FlexTDOA or Passive DS-TWR before restarting anchor self-localization.",
         "bad"
       );
       return;
     }
     if (!window.confirm(
       "Clear the fixed anchor geometry from this browser and every module? " +
-      "Positioning will remain unavailable until FlexTDOA learns a new " +
+      "Positioning will remain unavailable until the selected passive protocol learns a new " +
       "geometry and you press Fix Anchor Geometry."
     )) {
       return;
@@ -10672,7 +10766,7 @@ async function restartAnchorSelfLocalization() {
     resetPaperAnchorSelfLocalization(settings.anchorIds, true);
     state.positionTrail = {};
     state.positionTrailTokens = {};
-    setToast("positionToast", "Paper TWR-EKF anchor self-localization restarted on all modules", "good");
+    setToast("positionToast", "DS-TWR anchor self-localization restarted on all modules", "good");
     renderPosition();
 }
 

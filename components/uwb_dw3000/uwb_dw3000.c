@@ -302,8 +302,21 @@ enum {
 #define UWB_PASSIVE_DS_SLOT_ID_OFFSET UWB_DISTANCE_FRAME_HEADER_LEN
 #define UWB_PASSIVE_DS_REPLY_DTU_OFFSET \
     (UWB_PASSIVE_DS_SLOT_ID_OFFSET + 4U)
-#define UWB_PASSIVE_DS_POLL_LEN (UWB_PASSIVE_DS_SLOT_ID_OFFSET + 4U)
-#define UWB_PASSIVE_DS_RESP_LEN (UWB_PASSIVE_DS_REPLY_DTU_OFFSET + 4U)
+#define UWB_PASSIVE_DS_POLL_PIGGYBACK_OFFSET \
+    (UWB_PASSIVE_DS_SLOT_ID_OFFSET + 4U)
+#define UWB_PASSIVE_DS_RESP_PIGGYBACK_OFFSET \
+    (UWB_PASSIVE_DS_REPLY_DTU_OFFSET + 4U)
+#define UWB_PASSIVE_DS_PIGGYBACK_PEER_OFFSET 0U
+#define UWB_PASSIVE_DS_PIGGYBACK_DISTANCE_MM_OFFSET 1U
+#define UWB_PASSIVE_DS_PIGGYBACK_RAW_DISTANCE_MM_OFFSET 3U
+#define UWB_PASSIVE_DS_PIGGYBACK_SLOT_ID_OFFSET 5U
+#define UWB_PASSIVE_DS_PIGGYBACK_LEN 9U
+#define UWB_PASSIVE_DS_POLL_LEN \
+    (UWB_PASSIVE_DS_POLL_PIGGYBACK_OFFSET + \
+     UWB_PASSIVE_DS_PIGGYBACK_LEN)
+#define UWB_PASSIVE_DS_RESP_LEN \
+    (UWB_PASSIVE_DS_RESP_PIGGYBACK_OFFSET + \
+     UWB_PASSIVE_DS_PIGGYBACK_LEN)
 #define UWB_PASSIVE_DS_FINAL_SLOT_ID_OFFSET \
     UWB_DISTANCE_FRAME_NATIVE_FINAL_LEN
 #define UWB_PASSIVE_DS_FINAL_LEN \
@@ -585,6 +598,12 @@ struct uwb_passive_ds_observation {
     uint64_t poll_rx_tag_ts;
     int64_t poll_rx_host_us;
     TickType_t updated_tick;
+};
+
+enum uwb_passive_ds_range_source {
+    UWB_PASSIVE_DS_RANGE_NONE = 0,
+    UWB_PASSIVE_DS_RANGE_PIGGYBACK_DS = 1,
+    UWB_PASSIVE_DS_RANGE_FIXED_GEOMETRY = 2,
 };
 
 static struct uwb_flex_tdoa_geometry_staging s_flex_tdoa_geometry_staging;
@@ -5354,40 +5373,39 @@ static int32_t uwb_flex_tdoa_store_anchor_distance(
     return slot->distance_mm;
 }
 
-static int32_t uwb_flex_tdoa_cached_anchor_distance_mm(uint8_t anchor_a_id,
-                                                       uint8_t anchor_b_id)
+static const struct uwb_flex_tdoa_anchor_distance *
+uwb_flex_tdoa_cached_anchor_distance(uint8_t anchor_a_id,
+                                     uint8_t anchor_b_id)
 {
     const struct uwb_flex_tdoa_anchor_distance *forward =
         uwb_flex_tdoa_find_anchor_distance(anchor_a_id, anchor_b_id, false);
     const struct uwb_flex_tdoa_anchor_distance *reverse =
         uwb_flex_tdoa_find_anchor_distance(anchor_b_id, anchor_a_id, false);
     if (forward == NULL) {
-        return reverse != NULL ? reverse->distance_mm : 0;
+        return reverse;
     }
     if (reverse == NULL) {
-        return forward->distance_mm;
+        return forward;
     }
     return (int32_t)(forward->updated_tick - reverse->updated_tick) >= 0
-               ? forward->distance_mm
-               : reverse->distance_mm;
+               ? forward
+               : reverse;
+}
+
+static int32_t uwb_flex_tdoa_cached_anchor_distance_mm(uint8_t anchor_a_id,
+                                                       uint8_t anchor_b_id)
+{
+    const struct uwb_flex_tdoa_anchor_distance *cached =
+        uwb_flex_tdoa_cached_anchor_distance(anchor_a_id, anchor_b_id);
+    return cached != NULL ? cached->distance_mm : 0;
 }
 
 static uint32_t uwb_flex_tdoa_cached_anchor_distance_slot_id(
     uint8_t anchor_a_id, uint8_t anchor_b_id)
 {
-    const struct uwb_flex_tdoa_anchor_distance *forward =
-        uwb_flex_tdoa_find_anchor_distance(anchor_a_id, anchor_b_id, false);
-    const struct uwb_flex_tdoa_anchor_distance *reverse =
-        uwb_flex_tdoa_find_anchor_distance(anchor_b_id, anchor_a_id, false);
-    if (forward == NULL) {
-        return reverse != NULL ? reverse->slot_id : 0;
-    }
-    if (reverse == NULL) {
-        return forward->slot_id;
-    }
-    return (int32_t)(forward->updated_tick - reverse->updated_tick) >= 0
-               ? forward->slot_id
-               : reverse->slot_id;
+    const struct uwb_flex_tdoa_anchor_distance *cached =
+        uwb_flex_tdoa_cached_anchor_distance(anchor_a_id, anchor_b_id);
+    return cached != NULL ? cached->slot_id : 0;
 }
 
 static const struct uwb_flex_tdoa_anchor_distance *
@@ -5409,6 +5427,68 @@ uwb_flex_tdoa_next_piggyback_distance(void)
         }
     }
     return NULL;
+}
+
+static void uwb_passive_ds_write_piggyback(uint8_t *payload, size_t offset)
+{
+    if (payload == NULL ||
+        offset + UWB_PASSIVE_DS_PIGGYBACK_LEN >
+            UWB_DW3000_PAYLOAD_LEN) {
+        return;
+    }
+    memset(&payload[offset], 0, UWB_PASSIVE_DS_PIGGYBACK_LEN);
+    const struct uwb_flex_tdoa_anchor_distance *range =
+        uwb_flex_tdoa_next_piggyback_distance();
+    if (range == NULL || range->distance_mm <= 0 ||
+        range->distance_mm > UINT16_MAX || range->raw_distance_mm <= 0 ||
+        range->raw_distance_mm > UINT16_MAX) {
+        return;
+    }
+    payload[offset + UWB_PASSIVE_DS_PIGGYBACK_PEER_OFFSET] =
+        range->responder_id;
+    uwb_distance_put_u16(
+        payload, offset + UWB_PASSIVE_DS_PIGGYBACK_DISTANCE_MM_OFFSET,
+        (uint16_t)range->distance_mm);
+    uwb_distance_put_u16(
+        payload,
+        offset + UWB_PASSIVE_DS_PIGGYBACK_RAW_DISTANCE_MM_OFFSET,
+        (uint16_t)range->raw_distance_mm);
+    uwb_distance_put_u32(
+        payload, offset + UWB_PASSIVE_DS_PIGGYBACK_SLOT_ID_OFFSET,
+        range->slot_id);
+}
+
+static void uwb_passive_ds_accept_piggyback(
+    const struct uwb_distance_frame *frame, size_t offset,
+    const uint8_t *anchor_ids, size_t anchor_count)
+{
+    if (frame == NULL || frame->payload_len <
+                             offset + UWB_PASSIVE_DS_PIGGYBACK_LEN) {
+        return;
+    }
+    const uint8_t peer_id =
+        frame->payload[offset + UWB_PASSIVE_DS_PIGGYBACK_PEER_OFFSET];
+    const int32_t distance_mm = (int32_t)uwb_distance_get_u16(
+        frame->payload,
+        offset + UWB_PASSIVE_DS_PIGGYBACK_DISTANCE_MM_OFFSET);
+    const int32_t raw_distance_mm = (int32_t)uwb_distance_get_u16(
+        frame->payload,
+        offset + UWB_PASSIVE_DS_PIGGYBACK_RAW_DISTANCE_MM_OFFSET);
+    const uint32_t range_slot_id = uwb_distance_get_u32(
+        frame->payload,
+        offset + UWB_PASSIVE_DS_PIGGYBACK_SLOT_ID_OFFSET);
+    if (distance_mm <= 0 || raw_distance_mm <= 0 ||
+        !uwb_flex_tdoa_anchor_pair_valid(
+            anchor_ids, anchor_count, frame->source_id, peer_id)) {
+        return;
+    }
+    const int32_t stored = uwb_flex_tdoa_store_anchor_distance(
+        frame->source_id, peer_id, frame->sequence, range_slot_id,
+        distance_mm, raw_distance_mm);
+    if (stored > 0) {
+        (void)flextdoa_solver_service_submit_anchor_range(
+            frame->source_id, peer_id, range_slot_id, stored);
+    }
 }
 
 static uint32_t uwb_flex_tdoa_slot_duration_us(size_t responder_count)
@@ -7012,13 +7092,25 @@ static void uwb_passive_ds_schedule_from_poll(
     schedule->synced = false;
 }
 
-static bool uwb_passive_ds_anchor_geometry_distance_mm(
+static bool uwb_passive_ds_anchor_distance_mm(
     uint8_t anchor_a_id, uint8_t anchor_b_id, const uint8_t *anchor_ids,
-    size_t anchor_count, int32_t *distance_mm)
+    size_t anchor_count, uint32_t current_slot_id, int32_t *distance_mm,
+    enum uwb_passive_ds_range_source *range_source,
+    uint32_t *range_age_slots)
 {
-    if (distance_mm == NULL) {
+    if (distance_mm == NULL || range_source == NULL ||
+        range_age_slots == NULL) {
         return false;
     }
+    const struct uwb_flex_tdoa_anchor_distance *cached =
+        uwb_flex_tdoa_cached_anchor_distance(anchor_a_id, anchor_b_id);
+    if (cached != NULL && cached->distance_mm > 0) {
+        *distance_mm = cached->distance_mm;
+        *range_source = UWB_PASSIVE_DS_RANGE_PIGGYBACK_DS;
+        *range_age_slots = current_slot_id - cached->slot_id;
+        return true;
+    }
+
     const app_runtime_config_t *config = app_runtime_config_get();
     if (!config->flex_tdoa_geometry_fixed) {
         return false;
@@ -7042,6 +7134,8 @@ static bool uwb_passive_ds_anchor_geometry_distance_mm(
         return false;
     }
     *distance_mm = (int32_t)lround(distance);
+    *range_source = UWB_PASSIVE_DS_RANGE_FIXED_GEOMETRY;
+    *range_age_slots = 0U;
     return true;
 }
 
@@ -7055,6 +7149,8 @@ static esp_err_t uwb_passive_ds_initiate_once(
     uwb_distance_build_frame(UWB_DISTANCE_FRAME_PASSIVE_DS_POLL,
                              responder_id, sequence, payload);
     uwb_distance_put_u32(payload, UWB_PASSIVE_DS_SLOT_ID_OFFSET, slot_id);
+    uwb_passive_ds_write_piggyback(
+        payload, UWB_PASSIVE_DS_POLL_PIGGYBACK_OFFSET);
     esp_err_t err = uwb_dw3000_send_payload_expect_rx(
         payload, UWB_PASSIVE_DS_POLL_LEN,
         config->passive_ds_auto_rx_delay_uus,
@@ -7092,7 +7188,7 @@ static esp_err_t uwb_passive_ds_initiate_once(
 
     const uint64_t final_tx_due = uwb_dw3000_add_timestamp_delta(
         response.rx_timestamp,
-        uwb_dw3000_ms_to_dtu(config->passive_ds_final_delay_ms));
+        uwb_dw3000_us_to_dtu(config->passive_ds_final_delay_us));
     const uint64_t expected_final_tx_ts = uwb_dw3000_programmed_tx_timestamp(
         uwb_dw3000_delayed_time_word(final_tx_due));
     uwb_distance_build_frame(UWB_DISTANCE_FRAME_PASSIVE_DS_FINAL,
@@ -7133,7 +7229,7 @@ static esp_err_t uwb_passive_ds_respond_to_poll(
     const app_runtime_config_t *config = app_runtime_config_get();
     const uint64_t resp_tx_due = uwb_dw3000_add_timestamp_delta(
         poll->rx_timestamp,
-        uwb_dw3000_ms_to_dtu(config->passive_ds_resp_delay_ms));
+        uwb_dw3000_us_to_dtu(config->passive_ds_resp_delay_us));
     const uint64_t expected_resp_tx_ts = uwb_dw3000_programmed_tx_timestamp(
         uwb_dw3000_delayed_time_word(resp_tx_due));
     const uint64_t reply_dtu = uwb_distance_delta_ts(
@@ -7148,6 +7244,8 @@ static esp_err_t uwb_passive_ds_respond_to_poll(
     uwb_distance_put_u32(payload, UWB_PASSIVE_DS_SLOT_ID_OFFSET, slot_id);
     uwb_distance_put_u32(payload, UWB_PASSIVE_DS_REPLY_DTU_OFFSET,
                          (uint32_t)reply_dtu);
+    uwb_passive_ds_write_piggyback(
+        payload, UWB_PASSIVE_DS_RESP_PIGGYBACK_OFFSET);
     uint64_t programmed_resp_tx_ts = 0;
     uint64_t actual_resp_tx_ts = 0;
     esp_err_t err = uwb_dw3000_send_payload_delayed_expect_rx(
@@ -7185,6 +7283,10 @@ static esp_err_t uwb_passive_ds_respond_to_poll(
         final.clock_offset_raw, measurement);
     measurement->poll_rx_diagnostics = poll->diagnostics;
     measurement->final_rx_diagnostics = final.diagnostics;
+    (void)uwb_flex_tdoa_store_anchor_distance(
+        s_source_id, measurement->initiator_id, measurement->sequence,
+        slot_id, uwb_distance_meters_to_mm(measurement->distance_m),
+        uwb_distance_meters_to_mm(measurement->raw_distance_m));
     (void)actual_resp_tx_ts;
     return ESP_OK;
 }
@@ -7250,6 +7352,9 @@ static void uwb_passive_ds_tag_process_frame(
             frame->destination_id != responder_id) {
             return;
         }
+        uwb_passive_ds_accept_piggyback(
+            frame, UWB_PASSIVE_DS_POLL_PIGGYBACK_OFFSET, anchor_ids,
+            anchor_count);
         struct uwb_passive_ds_observation *observation =
             uwb_passive_ds_find_observation(
                 observations, slot_id, frame->sequence, initiator_id,
@@ -7283,6 +7388,9 @@ static void uwb_passive_ds_tag_process_frame(
         frame->destination_id != initiator_id) {
         return;
     }
+    uwb_passive_ds_accept_piggyback(
+        frame, UWB_PASSIVE_DS_RESP_PIGGYBACK_OFFSET, anchor_ids,
+        anchor_count);
     struct uwb_passive_ds_observation *observation =
         uwb_passive_ds_find_observation(
             observations, slot_id, frame->sequence, initiator_id,
@@ -7301,9 +7409,12 @@ static void uwb_passive_ds_tag_process_frame(
         return;
     }
     int32_t anchor_distance_mm = 0;
-    if (!uwb_passive_ds_anchor_geometry_distance_mm(
-            initiator_id, responder_id, anchor_ids, anchor_count,
-            &anchor_distance_mm)) {
+    enum uwb_passive_ds_range_source range_source =
+        UWB_PASSIVE_DS_RANGE_NONE;
+    uint32_t range_age_slots = 0;
+    if (!uwb_passive_ds_anchor_distance_mm(
+            initiator_id, responder_id, anchor_ids, anchor_count, slot_id,
+            &anchor_distance_mm, &range_source, &range_age_slots)) {
         memset(observation, 0, sizeof(*observation));
         return;
     }
@@ -7325,10 +7436,23 @@ static void uwb_passive_ds_tag_process_frame(
         uwb_distance_tof_to_meters(difference_dtu));
     const int32_t raw_difference_mm = uwb_distance_meters_to_mm(
         uwb_distance_tof_to_meters(raw_difference_dtu));
+    const int32_t cfo_correction_mm =
+        raw_difference_mm - difference_mm;
+    const int32_t clock_offset_ppb =
+        (int32_t)lround(clock_offset_ratio * 1000000000.0);
+    const int64_t reply_delay_us_i64 =
+        uwb_dw3000_dtu_to_us((uint64_t)reply_dtu);
+    const uint32_t reply_delay_us =
+        reply_delay_us_i64 > 0 ? (uint32_t)reply_delay_us_i64 : 0U;
+    const uint16_t telemetry_range_age_slots =
+        range_age_slots > UINT16_MAX ? UINT16_MAX
+                                     : (uint16_t)range_age_slots;
     (void)wireless_telemetry_service_submit_passive_ds_observation(
         tag_id, initiator_id, responder_id, responder_index,
         frame->sequence, slot_id, difference_mm, raw_difference_mm,
-        anchor_distance_mm);
+        anchor_distance_mm, cfo_correction_mm, clock_offset_ppb,
+        reply_delay_us, (uint8_t)range_source,
+        telemetry_range_age_slots);
     (void)flextdoa_solver_service_submit_anchor_range(
         initiator_id, responder_id, slot_id, anchor_distance_mm);
     (void)flextdoa_solver_service_submit_observation(

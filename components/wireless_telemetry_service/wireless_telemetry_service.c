@@ -39,6 +39,7 @@ enum {
     WIRELESS_TELEMETRY_FRAME_HEADER_LEN = 12,
     WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN = 21,
     WIRELESS_TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26,
+    WIRELESS_TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN = 41,
     WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20,
     WIRELESS_TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32,
     WIRELESS_TELEMETRY_FRAME_VERSION = 1,
@@ -49,6 +50,7 @@ enum {
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION = 5,
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_ANCHOR_RANGE = 6,
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION = 7,
+    WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2 = 8,
     WIRELESS_TELEMETRY_RECONNECT_MS = 2000,
     WIRELESS_TELEMETRY_WIFI_WAIT_MS = 500,
     WIRELESS_TELEMETRY_QUEUE_WAIT_MS = 20,
@@ -85,11 +87,16 @@ typedef struct {
     int32_t diff_mm;
     int32_t raw_diff_mm;
     int32_t anchor_distance_mm;
+    int32_t cfo_correction_mm;
+    int32_t clock_offset_ppb;
+    uint32_t reply_delay_us;
+    uint16_t range_age_slots;
     uint16_t sequence;
     uint8_t tag_id;
     uint8_t initiator_id;
     uint8_t responder_id;
     uint8_t responder_index;
+    uint8_t range_source;
 } wireless_telemetry_flex_observation_t;
 
 typedef struct {
@@ -501,8 +508,10 @@ static bool wireless_telemetry_binary_item_info(
         *sample_len = WIRELESS_TELEMETRY_FLEX_POSITION_SAMPLE_LEN;
         return true;
     case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_OBSERVATION:
-        *stream_type = WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION;
-        *sample_len = WIRELESS_TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN;
+        *stream_type =
+            WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2;
+        *sample_len =
+            WIRELESS_TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN;
         return true;
     case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_ANCHOR_RANGE:
         *stream_type = WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_ANCHOR_RANGE;
@@ -591,7 +600,6 @@ static bool wireless_telemetry_append_binary_sample(
         sample[20] = item->data.accel.accuracy;
         break;
     case WIRELESS_TELEMETRY_ITEM_FLEX_TDOA_OBSERVATION:
-    case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_OBSERVATION:
         wireless_telemetry_write_u32_le(
             &sample[4], item->data.flex_observation.slot_id);
         wireless_telemetry_write_i32_le(
@@ -606,6 +614,34 @@ static bool wireless_telemetry_append_binary_sample(
         sample[23] = item->data.flex_observation.initiator_id;
         sample[24] = item->data.flex_observation.responder_id;
         sample[25] = item->data.flex_observation.responder_index;
+        break;
+    case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_OBSERVATION:
+        wireless_telemetry_write_u32_le(
+            &sample[4], item->data.flex_observation.slot_id);
+        wireless_telemetry_write_i32_le(
+            &sample[8], item->data.flex_observation.diff_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[12], item->data.flex_observation.raw_diff_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[16],
+            item->data.flex_observation.anchor_distance_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[20],
+            item->data.flex_observation.cfo_correction_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[24],
+            item->data.flex_observation.clock_offset_ppb);
+        wireless_telemetry_write_u32_le(
+            &sample[28], item->data.flex_observation.reply_delay_us);
+        wireless_telemetry_write_u16_le(
+            &sample[32], item->data.flex_observation.sequence);
+        sample[34] = item->data.flex_observation.tag_id;
+        sample[35] = item->data.flex_observation.initiator_id;
+        sample[36] = item->data.flex_observation.responder_id;
+        sample[37] = item->data.flex_observation.responder_index;
+        sample[38] = item->data.flex_observation.range_source;
+        wireless_telemetry_write_u16_le(
+            &sample[39], item->data.flex_observation.range_age_slots);
         break;
     case WIRELESS_TELEMETRY_ITEM_FLEX_ANCHOR_RANGE:
     case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_ANCHOR_RANGE:
@@ -1210,7 +1246,10 @@ bool wireless_telemetry_service_submit_flex_position(
 bool wireless_telemetry_service_submit_passive_ds_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
     uint8_t responder_index, uint16_t sequence, uint32_t slot_id,
-    int32_t diff_mm, int32_t raw_diff_mm, int32_t anchor_distance_mm)
+    int32_t diff_mm, int32_t raw_diff_mm, int32_t anchor_distance_mm,
+    int32_t cfo_correction_mm, int32_t clock_offset_ppb,
+    uint32_t reply_delay_us, uint8_t range_source,
+    uint16_t range_age_slots)
 {
     if (!s_connected) {
         return false;
@@ -1226,11 +1265,16 @@ bool wireless_telemetry_service_submit_passive_ds_observation(
                 .diff_mm = diff_mm,
                 .raw_diff_mm = raw_diff_mm,
                 .anchor_distance_mm = anchor_distance_mm,
+                .cfo_correction_mm = cfo_correction_mm,
+                .clock_offset_ppb = clock_offset_ppb,
+                .reply_delay_us = reply_delay_us,
+                .range_age_slots = range_age_slots,
                 .sequence = sequence,
                 .tag_id = tag_id,
                 .initiator_id = initiator_id,
                 .responder_id = responder_id,
                 .responder_index = responder_index,
+                .range_source = range_source,
             },
         },
     };

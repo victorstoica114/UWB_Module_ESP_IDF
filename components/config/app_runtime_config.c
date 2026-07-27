@@ -54,8 +54,8 @@ static const char *TAG = "app_runtime_config";
 #define KEY_PDS_GAP "pds_gap"
 #define KEY_PDS_RX "pds_rx"
 #define KEY_PDS_TIMEOUT "pds_timeout"
-#define KEY_PDS_RESP "pds_resp"
-#define KEY_PDS_FINAL "pds_final"
+#define KEY_PDS_RESP_US "pds_rsp_us"
+#define KEY_PDS_FINAL_US "pds_fin_us"
 #define KEY_PDS_ARX "pds_arx"
 #define KEY_DT_PEER "dt_peer"
 #define KEY_DT_INIT "dt_init"
@@ -381,8 +381,8 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->passive_ds_round_gap_ms = APP_UWB_PASSIVE_DS_ROUND_GAP_MS;
     config->passive_ds_rx_slice_ms = APP_UWB_PASSIVE_DS_RX_SLICE_MS;
     config->passive_ds_rx_timeout_ms = APP_UWB_PASSIVE_DS_RX_TIMEOUT_MS;
-    config->passive_ds_resp_delay_ms = APP_UWB_PASSIVE_DS_RESP_DELAY_MS;
-    config->passive_ds_final_delay_ms = APP_UWB_PASSIVE_DS_FINAL_DELAY_MS;
+    config->passive_ds_resp_delay_us = APP_UWB_PASSIVE_DS_RESP_DELAY_US;
+    config->passive_ds_final_delay_us = APP_UWB_PASSIVE_DS_FINAL_DELAY_US;
     config->passive_ds_auto_rx_delay_uus =
         APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS;
     config->distance_test_peer_id = (uint8_t)APP_UWB_DISTANCE_TEST_PEER_ID;
@@ -492,11 +492,11 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         !ms_valid(config->passive_ds_round_gap_ms) ||
         !ms_valid(config->passive_ds_rx_slice_ms) ||
         !ms_valid(config->passive_ds_rx_timeout_ms) ||
-        !ms_valid(config->passive_ds_resp_delay_ms) ||
-        !ms_valid(config->passive_ds_final_delay_ms) ||
-        config->passive_ds_resp_delay_ms +
-                config->passive_ds_final_delay_ms >=
-            config->passive_ds_slot_ms ||
+        !us_valid(config->passive_ds_resp_delay_us) ||
+        !us_valid(config->passive_ds_final_delay_us) ||
+        config->passive_ds_resp_delay_us +
+                config->passive_ds_final_delay_us >=
+            config->passive_ds_slot_ms * 1000U ||
         config->passive_ds_auto_rx_delay_uus == 0 ||
         !id_valid(config->distance_test_initiator_id) ||
         !id_valid(config->distance_test_responder_id) ||
@@ -667,10 +667,10 @@ static void read_config_from_nvs(app_runtime_config_t *config)
     found |= read_u32(handle, KEY_PDS_RX, &config->passive_ds_rx_slice_ms);
     found |= read_u32(handle, KEY_PDS_TIMEOUT,
                       &config->passive_ds_rx_timeout_ms);
-    found |= read_u32(handle, KEY_PDS_RESP,
-                      &config->passive_ds_resp_delay_ms);
-    found |= read_u32(handle, KEY_PDS_FINAL,
-                      &config->passive_ds_final_delay_ms);
+    found |= read_u32(handle, KEY_PDS_RESP_US,
+                      &config->passive_ds_resp_delay_us);
+    found |= read_u32(handle, KEY_PDS_FINAL_US,
+                      &config->passive_ds_final_delay_us);
     found |= read_u32(handle, KEY_PDS_ARX,
                       &config->passive_ds_auto_rx_delay_uus);
     found |= read_u8(handle, KEY_DT_PEER, &config->distance_test_peer_id);
@@ -887,10 +887,10 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
                             config->passive_ds_rx_slice_ms));
     WRITE_OR_GOTO(write_u32(handle, KEY_PDS_TIMEOUT,
                             config->passive_ds_rx_timeout_ms));
-    WRITE_OR_GOTO(write_u32(handle, KEY_PDS_RESP,
-                            config->passive_ds_resp_delay_ms));
-    WRITE_OR_GOTO(write_u32(handle, KEY_PDS_FINAL,
-                            config->passive_ds_final_delay_ms));
+    WRITE_OR_GOTO(write_u32(handle, KEY_PDS_RESP_US,
+                            config->passive_ds_resp_delay_us));
+    WRITE_OR_GOTO(write_u32(handle, KEY_PDS_FINAL_US,
+                            config->passive_ds_final_delay_us));
     WRITE_OR_GOTO(write_u32(handle, KEY_PDS_ARX,
                             config->passive_ds_auto_rx_delay_uus));
     WRITE_OR_GOTO(write_u8(handle, KEY_DT_PEER,

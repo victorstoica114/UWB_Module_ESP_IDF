@@ -62,7 +62,10 @@ bool wireless_telemetry_service_submit_flex_position(
 bool wireless_telemetry_service_submit_passive_ds_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
     uint8_t responder_index, uint16_t sequence, uint32_t slot_id,
-    int32_t diff_mm, int32_t raw_diff_mm, int32_t anchor_distance_mm);
+    int32_t diff_mm, int32_t raw_diff_mm, int32_t anchor_distance_mm,
+    int32_t cfo_correction_mm, int32_t clock_offset_ppb,
+    uint32_t reply_delay_us, uint8_t range_source,
+    uint16_t range_age_slots);
 bool wireless_telemetry_service_submit_passive_ds_anchor_range(
     uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
     uint32_t slot_id, int32_t distance_mm, int32_t raw_distance_mm);

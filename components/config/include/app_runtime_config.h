@@ -54,8 +54,8 @@ typedef struct {
     uint32_t passive_ds_round_gap_ms;
     uint32_t passive_ds_rx_slice_ms;
     uint32_t passive_ds_rx_timeout_ms;
-    uint32_t passive_ds_resp_delay_ms;
-    uint32_t passive_ds_final_delay_ms;
+    uint32_t passive_ds_resp_delay_us;
+    uint32_t passive_ds_final_delay_us;
     uint32_t passive_ds_auto_rx_delay_uus;
     uint8_t distance_test_peer_id;
     uint8_t distance_test_initiator_id;

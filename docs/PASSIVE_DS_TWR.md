@@ -21,6 +21,11 @@ FlexTDOA.
    the slot ID. The responder uses the six timestamps to calculate the
    anchor-to-anchor range.
 
+A POLL or RESP also carries one previously measured DS-TWR anchor range.
+Measurements are rotated through the available cache, following the
+piggyback principle from the FlexTDOA paper. This adds no radio frame and lets
+receive-only tags self-localize an unknown anchor geometry.
+
 A passive tag timestamps the received POLL and RESP. It does not transmit and
 does not need to receive FINAL to form its observation.
 
@@ -32,8 +37,9 @@ d(T,R) - d(T,I)
     - d(I,R)
 ```
 
-The fixed anchor geometry supplies `d(I,R)`. The responder-to-tag carrier
-frequency offset corrects `reply_R` into tag clock units.
+The freshest piggybacked DS-TWR range supplies `d(I,R)`. Fixed anchor geometry
+is used only as a bootstrap fallback. The responder-to-tag carrier frequency
+offset corrects `reply_R` into tag clock units.
 
 ## Clock requirements
 
@@ -44,6 +50,10 @@ Clock frequency error does not cancel. The reply interval is measured by the
 responder but subtracted from an interval measured by the tag, so the tag must
 apply the DW3000 carrier-frequency-offset correction. Observations without a
 valid CFO estimate are rejected.
+
+RESP and FINAL delays are configured in microseconds. Shorter responder delays
+reduce the distance-equivalent CFO correction and its residual noise; the
+default 750 us value is a conservative starting point for hardware validation.
 
 ## Schedules
 
@@ -67,15 +77,17 @@ time. The first anchor bootstraps slot zero after a silent startup interval.
 
 ## Geometry and current validation status
 
-Passive positioning requires fixed anchor coordinates. The implementation
-shares the existing fixed FlexTDOA geometry record so the same surveyed
-coordinate frame is used by both passive protocols.
+Passive positioning requires anchor coordinates, but they do not have to be
+surveyed manually. With fixed geometry cleared, piggybacked DS-TWR ranges feed
+the existing local anchor solver. The coordinate frame fixes the first anchor
+at the origin and the second anchor on the positive Y axis. A fixed FlexTDOA
+geometry record remains available as a surveyed bootstrap and fallback.
 
 Fast Star alone measures only ranges from the fixed reference to the other
 anchors, so it cannot fully self-localize an unconstrained 2D anchor geometry.
-Robust Rotating eventually measures every anchor pair and can provide the
-complete range set needed by the existing geometry workflow.
+Robust Rotating measures every directed anchor pair over one superframe and
+provides the complete range set needed by the autonomous geometry workflow.
 
-The firmware and dashboard are build-validated. Radio timing, packet loss,
-position rate, accuracy, and the practical minimum slot size still require
-field validation with a known anchor geometry.
+Passive observation telemetry includes the CFO in ppm, the applied
+distance-equivalent correction, reply delay, anchor-range source and range age.
+Position telemetry already carries the frame RMS and solver sigma.
