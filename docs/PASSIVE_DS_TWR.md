@@ -52,8 +52,9 @@ apply the DW3000 carrier-frequency-offset correction. Observations without a
 valid CFO estimate are rejected.
 
 RESP and FINAL delays are configured in microseconds. Shorter responder delays
-reduce the distance-equivalent CFO correction and its residual noise; the
-default 750 us value is a conservative starting point for hardware validation.
+reduce the distance-equivalent CFO correction and its residual noise. Hardware
+validation selected 1000 us as the default: 750 us was measurably less reliable
+on the current five-module setup.
 
 ## Schedules
 
@@ -91,3 +92,35 @@ provides the complete range set needed by the autonomous geometry workflow.
 Passive observation telemetry includes the CFO in ppm, the applied
 distance-equivalent correction, reply delay, anchor-range source and range age.
 Position telemetry already carries the frame RMS and solver sigma.
+
+## Unsurveyed-geometry smoke test
+
+The first hardware test on 2026-07-27 deliberately used the modules in their
+existing, unsurveyed positions. Robust Rotating used 5 ms slots, a 1 ms frame
+gap, and 1000 us RESP and FINAL delays. No fixed geometry was available.
+
+The receive-only tag reconstructed all six anchor ranges from piggybacked
+DS-TWR measurements and produced 49.3 position results/s during a 30 s sample.
+The four anchors reported 96.4% to 97.7% successful protocol operations.
+The six fitted distances were consistent with a planar geometry to 1.61 cm RMS
+(2.01 cm maximum residual).
+
+One equivalent coordinate realization, fixing A2 at the origin and A3 on the
+positive Y axis, was:
+
+```text
+A2 = (0.000, 0.000) m
+A3 = (0.000, 5.619) m
+A4 = (4.193, 2.122) m
+A5 = (3.704, 4.315) m
+```
+
+Across 1492 consecutive estimates, the solver RMS median was 8.1 cm and the
+95th percentile was 10.6 cm. Position standard deviation was 2.35 cm on X and
+1.59 cm on Y, with no estimate above 25 cm solver RMS in that window. These are
+repeatability and internal-consistency results, not absolute-accuracy results:
+the anchor and tag coordinates were not surveyed.
+
+An earlier 750 us trial reached only about 72% successful protocol operations
+and produced four consecutive bad estimates in a 4000-result window. This is
+why 1000 us, rather than 750 us, is the validated default.

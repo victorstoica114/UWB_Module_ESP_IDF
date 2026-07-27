@@ -3921,8 +3921,8 @@ tr.status-stale td { color: #4f3b1d; }
                 <label for="passiveDsFastGapMs">Frame gap ms</label><input id="passiveDsFastGapMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsFastRxMs">Anchor RX slice ms</label><input id="passiveDsFastRxMs" value="100" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsFastTimeoutMs">RX timeout ms</label><input id="passiveDsFastTimeoutMs" value="4" type="number" min="1" max="60000" step="1">
-                <label for="passiveDsFastRespUs">RESP delay µs</label><input id="passiveDsFastRespUs" value="750" type="number" min="100" max="1000000" step="50">
-                <label for="passiveDsFastFinalUs">FINAL delay µs</label><input id="passiveDsFastFinalUs" value="750" type="number" min="100" max="1000000" step="50">
+                <label for="passiveDsFastRespUs">RESP delay µs</label><input id="passiveDsFastRespUs" value="1000" type="number" min="100" max="1000000" step="50">
+                <label for="passiveDsFastFinalUs">FINAL delay µs</label><input id="passiveDsFastFinalUs" value="1000" type="number" min="100" max="1000000" step="50">
                 <label for="passiveDsFastAutoRxUus">Auto RX delay UUS</label><input id="passiveDsFastAutoRxUus" value="500" type="number" min="0" max="65535" step="10">
                 <label for="passiveDsFastFreshSec">Observation freshness s</label><input id="passiveDsFastFreshSec" value="0.2" type="number" min="0.2" step="0.1">
               </div>
@@ -3938,8 +3938,8 @@ tr.status-stale td { color: #4f3b1d; }
                 <label for="passiveDsRobustGapMs">Frame gap ms</label><input id="passiveDsRobustGapMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsRobustRxMs">Anchor RX slice ms</label><input id="passiveDsRobustRxMs" value="100" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsRobustTimeoutMs">RX timeout ms</label><input id="passiveDsRobustTimeoutMs" value="4" type="number" min="1" max="60000" step="1">
-                <label for="passiveDsRobustRespUs">RESP delay µs</label><input id="passiveDsRobustRespUs" value="750" type="number" min="100" max="1000000" step="50">
-                <label for="passiveDsRobustFinalUs">FINAL delay µs</label><input id="passiveDsRobustFinalUs" value="750" type="number" min="100" max="1000000" step="50">
+                <label for="passiveDsRobustRespUs">RESP delay µs</label><input id="passiveDsRobustRespUs" value="1000" type="number" min="100" max="1000000" step="50">
+                <label for="passiveDsRobustFinalUs">FINAL delay µs</label><input id="passiveDsRobustFinalUs" value="1000" type="number" min="100" max="1000000" step="50">
                 <label for="passiveDsRobustAutoRxUus">Auto RX delay UUS</label><input id="passiveDsRobustAutoRxUus" value="500" type="number" min="0" max="65535" step="10">
                 <label for="passiveDsRobustFreshSec">Observation freshness s</label><input id="passiveDsRobustFreshSec" value="0.2" type="number" min="0.2" step="0.1">
               </div>
@@ -4524,7 +4524,7 @@ const rangingProtocolProfileFields = {
 };
 const rangingProfileDefaultsVersion = "2026-07-26-native-ds-twr-speed-study-v3";
 const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
-const passiveDsProfileDefaultsVersion = "2026-07-27-passive-ds-us-piggyback-v3";
+const passiveDsProfileDefaultsVersion = "2026-07-27-passive-ds-validated-1ms-v4";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -10229,8 +10229,8 @@ const passiveDsProfileDefaults = {
     gapMs: 1,
     rxMs: 100,
     timeoutMs: 4,
-    respUs: 750,
-    finalUs: 750,
+    respUs: 1000,
+    finalUs: 1000,
     autoRxUus: 500,
     freshSec: 0.2,
   },
@@ -10242,8 +10242,8 @@ const passiveDsProfileDefaults = {
     gapMs: 1,
     rxMs: 100,
     timeoutMs: 4,
-    respUs: 750,
-    finalUs: 750,
+    respUs: 1000,
+    finalUs: 1000,
     autoRxUus: 500,
     freshSec: 0.2,
   },
@@ -10389,8 +10389,8 @@ function passiveDsRuntimeConfig() {
     gapMs: Number(status.runtime_passive_ds_round_gap_ms ?? 1),
     rxMs: Number(status.runtime_passive_ds_rx_slice_ms || 100),
     timeoutMs: Number(status.runtime_passive_ds_rx_timeout_ms || 4),
-    respUs: Number(status.runtime_passive_ds_resp_delay_us || 750),
-    finalUs: Number(status.runtime_passive_ds_final_delay_us || 750),
+    respUs: Number(status.runtime_passive_ds_resp_delay_us || 1000),
+    finalUs: Number(status.runtime_passive_ds_final_delay_us || 1000),
     autoRxUus: Number(status.runtime_passive_ds_auto_rx_delay_uus || 500),
     live: Boolean(
       statusIsFresh(status) &&
