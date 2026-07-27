@@ -606,6 +606,12 @@ struct uwb_passive_ds_observation {
     TickType_t updated_tick;
 };
 
+struct uwb_passive_ds_cfo_filter {
+    bool valid;
+    uint8_t sample_count;
+    double ratio;
+};
+
 enum uwb_passive_ds_range_source {
     UWB_PASSIVE_DS_RANGE_NONE = 0,
     UWB_PASSIVE_DS_RANGE_PIGGYBACK_DS = 1,
@@ -1044,6 +1050,9 @@ static size_t s_flex_tdoa_piggyback_cursor;
 static struct uwb_flex_tdoa_observation
     s_flex_tdoa_tag_observations[UWB_FLEX_TDOA_MAX_OBSERVATIONS];
 static struct uwb_flex_tdoa_local_request s_flex_tdoa_local_request;
+static struct uwb_passive_ds_cfo_filter
+    s_passive_ds_cfo_filters[UWB_ANCHOR_SURVEY_MAX_ANCHORS]
+                            [UWB_ANCHOR_SURVEY_MAX_ANCHORS];
 static esp_timer_handle_t s_flex_tdoa_schedule_timer;
 static volatile bool s_flex_tdoa_schedule_alarm_fired;
 static esp_timer_handle_t s_ranging_slot_timer;
@@ -7428,6 +7437,33 @@ uwb_passive_ds_find_observation(
     return oldest;
 }
 
+static double uwb_passive_ds_filter_clock_offset(
+    const uint8_t *anchor_ids, size_t anchor_count, uint8_t initiator_id,
+    uint8_t responder_id, double raw_ratio)
+{
+    const size_t initiator_index = uwb_anchor_survey_id_index(
+        anchor_ids, anchor_count, initiator_id);
+    const size_t responder_index = uwb_anchor_survey_id_index(
+        anchor_ids, anchor_count, responder_id);
+    if (initiator_index == SIZE_MAX || responder_index == SIZE_MAX) {
+        return raw_ratio;
+    }
+    struct uwb_passive_ds_cfo_filter *filter =
+        &s_passive_ds_cfo_filters[initiator_index][responder_index];
+    if (!filter->valid || !isfinite(filter->ratio)) {
+        filter->valid = true;
+        filter->sample_count = 1U;
+        filter->ratio = raw_ratio;
+        return raw_ratio;
+    }
+    const double alpha = filter->sample_count < 4U ? 0.50 : 0.18;
+    filter->ratio += alpha * (raw_ratio - filter->ratio);
+    if (filter->sample_count < UINT8_MAX) {
+        filter->sample_count++;
+    }
+    return filter->ratio;
+}
+
 static void uwb_passive_ds_tag_process_frame(
     const struct uwb_distance_frame *frame,
     struct uwb_passive_ds_observation *observations, uint8_t tag_id,
@@ -7519,10 +7555,14 @@ static void uwb_passive_ds_tag_process_frame(
         memset(observation, 0, sizeof(*observation));
         return;
     }
-    const double clock_offset_ratio =
+    const double raw_clock_offset_ratio =
         frame->clock_offset_from_cia
             ? uwb_dw3000_cia_clock_offset_ratio(frame->clock_offset_raw)
             : uwb_dw3000_clock_offset_ratio(frame->clock_offset_raw);
+    const double clock_offset_ratio =
+        uwb_passive_ds_filter_clock_offset(
+            anchor_ids, anchor_count, initiator_id, responder_id,
+            raw_clock_offset_ratio);
     const double corrected_reply_dtu =
         uwb_dw3000_remote_interval_in_local_dtu(
             (double)reply_dtu, clock_offset_ratio);
@@ -7582,6 +7622,8 @@ static void uwb_passive_ds_tag_loop(const uint8_t *anchor_ids,
 {
     struct uwb_passive_ds_observation
         observations[UWB_PASSIVE_DS_MAX_OBSERVATIONS] = {0};
+    memset(s_passive_ds_cfo_filters, 0,
+           sizeof(s_passive_ds_cfo_filters));
     const esp_err_t solver_err = flextdoa_solver_service_start();
     if (solver_err != ESP_OK) {
         ESP_LOGW(TAG, "PASSIVE_DS local solver unavailable: %s",
@@ -8861,9 +8903,7 @@ static void uwb_dw3000_task(void *arg)
         const enum uwb_dw3000_runtime_mode requested_runtime =
             s_requested_runtime_mode;
         const esp_err_t switch_err =
-            requested_runtime == s_runtime_mode
-                ? ESP_OK
-                : uwb_dw3000_reinitialize_runtime(requested_runtime);
+            uwb_dw3000_reinitialize_runtime(requested_runtime);
         if (switch_err != ESP_OK) {
             ESP_LOGE(TAG,
                      "Hot switch failed; rebooting ESP32 to recover persisted runtime");
@@ -8961,11 +9001,6 @@ esp_err_t uwb_dw3000_request_runtime_switch(uint8_t app_runtime_mode)
         !uwb_dw3000_runtime_mode_hot_switchable(s_runtime_mode)) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (!uwb_dw3000_runtime_switch_pending() &&
-        runtime_mode == s_runtime_mode) {
-        return ESP_OK;
-    }
-
     s_requested_runtime_mode = runtime_mode;
     s_runtime_switch_request_generation++;
     if (s_runtime_switch_request_generation == 0U) {

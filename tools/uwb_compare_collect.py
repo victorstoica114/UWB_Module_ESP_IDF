@@ -276,6 +276,9 @@ def main() -> int:
     metadata_path = output_dir / f"{args.block}.metadata.json"
     snapshot_url = args.dashboard.rstrip("/") + "/api/snapshot"
     log_url = args.dashboard.rstrip("/") + "/api/logs"
+    position_events_url = (
+        args.dashboard.rstrip("/") + "/api/position-events"
+    )
     log_path = (
         pathlib.Path(args.log_output).expanduser().resolve()
         if args.log_output
@@ -298,6 +301,12 @@ def main() -> int:
         time.sleep(min(0.25, warmup_deadline - time.monotonic()))
 
     last_snapshot = fetch_json(snapshot_url)
+    initial_position_events = fetch_json(
+        f"{position_events_url}?after=0&limit=1"
+    )
+    position_cursor = int(
+        initial_position_events.get("next_event_id") or 0
+    )
     log_cursor = max(
         0,
         int(last_snapshot.get("next_log_id") or 0) - 1,
@@ -309,6 +318,7 @@ def main() -> int:
     next_poll = started_monotonic
     next_status = started_monotonic
     next_log_capture = started_monotonic
+    next_position_capture = started_monotonic
     seen_ds: set[tuple[int, int, int]] = set()
     seen_tdoa: set[tuple[int, int, int, int, int]] = set()
     seen_anchor: set[tuple[int, int, int, int]] = set()
@@ -391,6 +401,73 @@ def main() -> int:
                             file=sys.stderr,
                         )
                 next_log_capture += 1.0
+
+            if time.monotonic() >= next_position_capture:
+                try:
+                    while True:
+                        response = fetch_json(
+                            f"{position_events_url}?after={position_cursor}"
+                            "&limit=512",
+                            timeout=3.0,
+                        )
+                        position_events = response.get("events", [])
+                        if not position_events:
+                            break
+                        for item in position_events:
+                            position_cursor = max(
+                                position_cursor,
+                                int(
+                                    item.get(
+                                        "position_stream_event_id"
+                                    )
+                                    or 0
+                                ),
+                            )
+                            if item.get("position_stream_type") not in (
+                                "flextdoa_position",
+                                "passive_ds_position",
+                            ):
+                                continue
+                            event_time = received_at(
+                                item, captured_at
+                            )
+                            if event_time + 0.05 < started_at:
+                                continue
+                            key = (
+                                int(item.get("module_id") or 0),
+                                int(
+                                    item.get("position_event_id")
+                                    or item.get("slot_id")
+                                    or 0
+                                ),
+                            )
+                            if key in seen_position:
+                                continue
+                            seen_position.add(key)
+                            write_event(
+                                handle,
+                                kind="local_position",
+                                protocol=args.protocol,
+                                block=args.block,
+                                captured_at=captured_at,
+                                event_received_at=event_time,
+                                payload=clean_item(item),
+                            )
+                            counters["local_position"] += 1
+                        if len(position_events) < 512:
+                            break
+                except (
+                    OSError,
+                    ValueError,
+                    urllib.error.URLError,
+                ) as exc:
+                    counters["poll_error"] += 1
+                    if counters["poll_error"] <= 5:
+                        print(
+                            f"{args.block}: position stream error: {exc}",
+                            file=sys.stderr,
+                        )
+                next_position_capture += 0.1
 
             for item in snapshot.get("ranging", {}).get("distances", {}).values():
                 event_time = received_at(item, captured_at)

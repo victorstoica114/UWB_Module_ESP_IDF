@@ -90,17 +90,22 @@ TELEMETRY_STREAM_PASSIVE_DS_ANCHOR_RANGE = 6
 TELEMETRY_STREAM_PASSIVE_DS_POSITION = 7
 TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2 = 8
 TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE = 9
+TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2 = 10
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
 TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
 TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32
 TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN = 41
+TELEMETRY_PASSIVE_DS_POSITION_V2_SAMPLE_LEN = 40
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
 TELEMETRY_FLEX_OBSERVATION_STRUCT = struct.Struct("<IIiiiHBBBB")
 TELEMETRY_FLEX_ANCHOR_RANGE_STRUCT = struct.Struct("<IIiiHBB")
 TELEMETRY_FLEX_POSITION_STRUCT = struct.Struct("<IIiiiiIHBB")
 TELEMETRY_PASSIVE_DS_OBSERVATION_V2_STRUCT = struct.Struct(
     "<IIiiiiiIHBBBBBH"
+)
+TELEMETRY_PASSIVE_DS_POSITION_V2_STRUCT = struct.Struct(
+    "<IIiiiiiiIHBB"
 )
 TELEMETRY_STREAM_SAMPLE_SIZES = {
     TELEMETRY_STREAM_BNO085_ACCEL: TELEMETRY_ACCEL_SAMPLE_LEN,
@@ -119,6 +124,8 @@ TELEMETRY_STREAM_SAMPLE_SIZES = {
         TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN,
     TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE:
         TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN,
+    TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2:
+        TELEMETRY_PASSIVE_DS_POSITION_V2_SAMPLE_LEN,
 }
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
 
@@ -769,6 +776,43 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "observation_count": int(observation_count),
                     "tag_id": int(tag_id),
                     "anchor_count": int(anchor_count),
+                }
+            )
+        elif stream_type == TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2:
+            (
+                uptime_ms,
+                slot_id,
+                x_mm,
+                y_mm,
+                raw_x_mm,
+                raw_y_mm,
+                sigma_mm,
+                rms_mm,
+                geometry_version,
+                observation_count,
+                tag_id,
+                anchor_count,
+            ) = TELEMETRY_PASSIVE_DS_POSITION_V2_STRUCT.unpack_from(
+                frame, offset
+            )
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "topic": "uwb.passive_ds.position",
+                    "tdoa_protocol": "passive_ds",
+                    "slot_id": int(slot_id),
+                    "x_m": x_mm / 1000.0,
+                    "y_m": y_mm / 1000.0,
+                    "raw_x_m": raw_x_mm / 1000.0,
+                    "raw_y_m": raw_y_mm / 1000.0,
+                    "sigma_m": sigma_mm / 1000.0,
+                    "rms_m": rms_mm / 1000.0,
+                    "geometry_version": int(geometry_version),
+                    "observation_count": int(observation_count),
+                    "tag_id": int(tag_id),
+                    "anchor_count": int(anchor_count),
+                    "position_filter": "ekf_cv",
                 }
             )
         offset += sample_size
@@ -3231,7 +3275,7 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div class="section">
             <h2>Live Position</h2>
-            <div class="position-legend"><span style="color:#d7352a">tag</span><span style="color:#2b64d8">trail</span><span style="color:#6d4c9f">known reference</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
+            <div class="position-legend"><span style="color:#d7352a">EKF tag</span><span style="color:#7b8798">raw solver</span><span style="color:#2b64d8">filtered trail</span><span style="color:#6d4c9f">known reference</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
             <div id="positionReadout" class="position-readout"></div>
             <table>
               <thead><tr><th>Tag</th><th>solver σaxis</th><th>TDOA RMS</th><th>TDOA max</th></tr></thead>
@@ -3983,6 +4027,7 @@ tr.status-stale td { color: #4f3b1d; }
               <p class="muted">A1 initiates one exchange to every other anchor. Lowest coordination overhead and fastest steady-state position frame.</p>
               <div class="profile-validation">implementation baseline · hardware validation pending</div>
               <div class="form-grid compact">
+                <label for="passiveDsFastSpeedPreset">Speed preset</label><select id="passiveDsFastSpeedPreset" class="passive-ds-speed-preset"><option value="safe">16 ms Safe · 62.5 Hz</option><option value="balanced">13 ms Balanced · 76.9 Hz</option><option value="maximum">10 ms Maximum · 100 Hz</option><option value="custom">Custom timing</option></select>
                 <label for="passiveDsFastSlotMs">Slot ms</label><input id="passiveDsFastSlotMs" value="5" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsFastGapMs">Frame gap ms</label><input id="passiveDsFastGapMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsFastRxMs">Anchor RX slice ms</label><input id="passiveDsFastRxMs" value="100" type="number" min="1" max="60000" step="1">
@@ -4000,6 +4045,7 @@ tr.status-stale td { color: #4f3b1d; }
               <p class="muted">The reference rotates A1 → A2 → A3 → A4 after each frame. Every position frame remains solvable, with diversified directed paths over a superframe.</p>
               <div class="profile-validation">diversity profile · hardware validation pending</div>
               <div class="form-grid compact">
+                <label for="passiveDsRobustSpeedPreset">Speed preset</label><select id="passiveDsRobustSpeedPreset" class="passive-ds-speed-preset"><option value="safe">16 ms Safe · 62.5 Hz</option><option value="balanced">13 ms Balanced · 76.9 Hz</option><option value="maximum">10 ms Maximum · 100 Hz</option><option value="custom">Custom timing</option></select>
                 <label for="passiveDsRobustSlotMs">Slot ms</label><input id="passiveDsRobustSlotMs" value="5" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsRobustGapMs">Frame gap ms</label><input id="passiveDsRobustGapMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsRobustRxMs">Anchor RX slice ms</label><input id="passiveDsRobustRxMs" value="100" type="number" min="1" max="60000" step="1">
@@ -4619,7 +4665,7 @@ const rangingProtocolProfileFields = {
 };
 const rangingProfileDefaultsVersion = "2026-07-26-native-ds-twr-speed-study-v3";
 const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
-const passiveDsProfileDefaultsVersion = "2026-07-27-passive-ds-validated-1ms-v4";
+const passiveDsProfileDefaultsVersion = "2026-07-27-passive-ds-speed-sweep-v5";
 const nativeDsGeometryFrameInterval = 4;
 const nativeDsGeometryCommandDelayMs = 1;
 const BQ_REG_NAMES = {
@@ -6660,6 +6706,7 @@ function computePositionModel() {
       let accuracy = null;
       let coherence = null;
       let localPosition = null;
+      let rawPosition = null;
       if (positionProtocolUsesTdoa(settings.solver)) {
         coherence = coherentTdoaBatch(
           tagId,
@@ -6701,6 +6748,13 @@ function computePositionModel() {
             x: Number(localPosition.x_m),
             y: Number(localPosition.y_m),
           };
+          if (Number.isFinite(Number(localPosition.raw_x_m)) &&
+              Number.isFinite(Number(localPosition.raw_y_m))) {
+            rawPosition = {
+              x: Number(localPosition.raw_x_m),
+              y: Number(localPosition.raw_y_m),
+            };
+          }
           accuracy = {
             count: Number(localPosition.observation_count),
             sigma_major_m: Number(localPosition.sigma_m),
@@ -6769,6 +6823,7 @@ function computePositionModel() {
         residuals,
         accuracy,
         coherence,
+        rawPosition,
         solverSource: localPosition &&
           localPositionAge(localPosition, now) <= settings.maxAge
             ? "ESP32 AlgMin"
@@ -7029,6 +7084,23 @@ function drawPosition(model) {
 
   for (const tag of Object.values(model.tags)) {
     if (!tag.position) continue;
+    if (tag.rawPosition) {
+      const rawX = tx.x(tag.rawPosition.x);
+      const rawY = tx.y(tag.rawPosition.y);
+      ctx.save();
+      ctx.strokeStyle = "rgba(123, 135, 152, 0.88)";
+      ctx.lineWidth = 1.25;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(rawX, rawY);
+      ctx.lineTo(tx.x(tag.position.x), tx.y(tag.position.y));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(rawX, rawY, 5, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
     const x = tx.x(tag.position.x);
     const y = tx.y(tag.position.y);
     ctx.fillStyle = "#d7352a";
@@ -7439,6 +7511,12 @@ function applyStreamPositionToModel(model) {
     const y = Number(item.y_m);
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
     tag.position = {x, y};
+    const rawX = Number(item.raw_x_m);
+    const rawY = Number(item.raw_y_m);
+    tag.rawPosition =
+      Number.isFinite(rawX) && Number.isFinite(rawY)
+        ? {x: rawX, y: rawY}
+        : null;
     tag.solverSource = "ESP32 AlgMin";
     tag.accuracy = {
       count: Number(item.observation_count),
@@ -7462,7 +7540,19 @@ function updatePositionLiveMetrics(model) {
     const referenceStats = positionReferenceErrorStats(
       tag.tagId, tag.position, model.reference, model.settings.errorWindowSec);
     if (summary) {
-      summary.textContent = `Tag ${tag.tagId}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m`;
+      const rawDelta = tag.rawPosition
+        ? Math.hypot(
+            tag.rawPosition.x - tag.position.x,
+            tag.rawPosition.y - tag.position.y
+          )
+        : NaN;
+      summary.textContent =
+        `Tag ${tag.tagId}: EKF x=${fmtFixed(tag.position.x, 3)} m, ` +
+        `y=${fmtFixed(tag.position.y, 3)} m` +
+        (tag.rawPosition
+          ? ` · raw x=${fmtFixed(tag.rawPosition.x, 3)}, ` +
+            `y=${fmtFixed(tag.rawPosition.y, 3)} · Δ ${fmtPositionCm(rawDelta, 1)}`
+          : "");
     }
     if (meta) {
       const sigmaText = Number.isFinite(sigma)
@@ -10830,6 +10920,26 @@ const passiveDsProfileDefaults = {
   },
 };
 const passiveDsFastGeometryFrameInterval = 4;
+const passiveDsSpeedPresets = {
+  safe: {
+    label: "16 ms Safe",
+    slotMs: 5,
+    gapMs: 1,
+    timeoutMs: 4,
+  },
+  balanced: {
+    label: "13 ms Balanced",
+    slotMs: 4,
+    gapMs: 1,
+    timeoutMs: 4,
+  },
+  maximum: {
+    label: "10 ms Maximum",
+    slotMs: 3,
+    gapMs: 1,
+    timeoutMs: 3,
+  },
+};
 const passiveDsProfileFieldSuffixes = {
   slotMs: "SlotMs",
   gapMs: "GapMs",
@@ -10869,6 +10979,35 @@ function writePassiveDsProfile(key, values = passiveDsProfileDefaults[key]) {
   updatePassiveDsProfileSummary(key);
 }
 
+function passiveDsSpeedPresetElement(key) {
+  const profile = passiveDsProfileDefaults[key];
+  return profile
+    ? document.getElementById(`${profile.prefix}SpeedPreset`)
+    : null;
+}
+
+function matchingPassiveDsSpeedPreset(values) {
+  return Object.entries(passiveDsSpeedPresets).find(([, preset]) =>
+    Number(values.slotMs) === preset.slotMs &&
+    Number(values.gapMs) === preset.gapMs &&
+    Number(values.timeoutMs) === preset.timeoutMs
+  )?.[0] || "custom";
+}
+
+function applyPassiveDsSpeedPreset(key, presetKey) {
+  const preset = passiveDsSpeedPresets[presetKey];
+  if (!preset) return;
+  const values = readPassiveDsProfile(key);
+  writePassiveDsProfile(key, {
+    ...values,
+    slotMs: preset.slotMs,
+    gapMs: preset.gapMs,
+    timeoutMs: preset.timeoutMs,
+  });
+  const selector = passiveDsSpeedPresetElement(key);
+  if (selector) selector.value = presetKey;
+}
+
 function updatePassiveDsProfileSummary(key) {
   const values = readPassiveDsProfile(key);
   const summary = document.getElementById(
@@ -10890,13 +11029,20 @@ function updatePassiveDsProfileSummary(key) {
   const superframeMs = key === "robust"
     ? anchorCount * frameMs
     : (anchorCount - 1) * passiveDsFastGeometryFrameInterval * frameMs;
+  const speedPresetKey = matchingPassiveDsSpeedPreset(values);
+  const speedPreset = passiveDsSpeedPresets[speedPresetKey];
+  const selector = passiveDsSpeedPresetElement(key);
+  if (selector && selector.value !== speedPresetKey) {
+    selector.value = speedPresetKey;
+  }
   const warnings = [];
   if (values.respUs + values.finalUs >= values.slotMs * 1000) {
     warnings.push("RESP + FINAL >= slot");
   }
   if (values.timeoutMs > values.slotMs) warnings.push("timeout > slot");
   summary.textContent =
-    `${profileSummaryScheduleLabel(key)} · POLL → RESP → FINAL · ` +
+    `${profileSummaryScheduleLabel(key)} · ` +
+    `${speedPreset?.label || "Custom timing"} · POLL → RESP → FINAL · ` +
     `${fmtFixed(frameMs, 0)} ms position frame · ${fmtFixed(frameHz, 2)} Hz · ` +
     `${fmtFixed(superframeMs, 0)} ms ${key === "robust" ? "rotating superframe" : "full geometry maintenance cycle"}` +
     (warnings.length ? ` · ${warnings.join(", ")}` : "");
@@ -10943,7 +11089,7 @@ async function applyPassiveDsProfile(key) {
       passive_ds_resp_delay_us: String(values.respUs),
       passive_ds_final_delay_us: String(values.finalUs),
       passive_ds_auto_rx_delay_uus: String(values.autoRxUus),
-      reboot: "1",
+      hot_switch: "1",
     },
   }, "passiveDsProfileToast");
   if (apiResponseOk(data)) {
@@ -11603,6 +11749,15 @@ function wireSettings() {
     el.addEventListener("input", update);
     el.addEventListener("change", update);
   });
+  document.querySelectorAll(".passive-ds-speed-preset").forEach(el => {
+    el.addEventListener("change", () => {
+      const profile = el.closest(".passive-ds-profile-card")
+        ?.dataset.passiveDsProfile;
+      if (profile && el.value !== "custom") {
+        applyPassiveDsSpeedPreset(profile, el.value);
+      }
+    });
+  });
   document.querySelectorAll(".apply-passive-ds-profile").forEach(button => {
     button.addEventListener("click", () =>
       applyPassiveDsProfile(button.dataset.passiveDsProfile)
@@ -11873,6 +12028,31 @@ class HttpHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/position-stream":
             self.handle_position_stream(parsed)
+            return
+        if parsed.path == "/api/position-events":
+            query = urllib.parse.parse_qs(parsed.query)
+            after = max(0, int(query.get("after", ["0"])[0] or "0"))
+            limit = max(
+                1, min(int(query.get("limit", ["512"])[0] or "512"), 4096)
+            )
+            events = self.server.state.position_events_after(
+                after, limit, 0.0
+            )
+            self.send_json(
+                {
+                    "events": events,
+                    "next_event_id": max(
+                        [after]
+                        + [
+                            int(
+                                item.get("position_stream_event_id")
+                                or 0
+                            )
+                            for item in events
+                        ]
+                    ),
+                }
+            )
             return
         if parsed.path == "/api/logs":
             query = urllib.parse.parse_qs(parsed.query)

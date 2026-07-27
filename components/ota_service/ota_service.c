@@ -819,6 +819,32 @@ static bool runtime_config_hot_switch_eligible(
         return false;
     }
 
+    bool passive_mode_valid = false;
+    const uint8_t passive_mode =
+        app_runtime_config_runtime_mode_from_string(
+            "passive_ds_twr", &passive_mode_valid);
+    if (passive_mode_valid &&
+        before->runtime_mode == passive_mode &&
+        after->runtime_mode == passive_mode) {
+        app_runtime_config_t allowed = *before;
+        allowed.passive_ds_schedule = after->passive_ds_schedule;
+        allowed.passive_ds_slot_ms = after->passive_ds_slot_ms;
+        allowed.passive_ds_round_gap_ms =
+            after->passive_ds_round_gap_ms;
+        allowed.passive_ds_rx_slice_ms =
+            after->passive_ds_rx_slice_ms;
+        allowed.passive_ds_rx_timeout_ms =
+            after->passive_ds_rx_timeout_ms;
+        allowed.passive_ds_resp_delay_us =
+            after->passive_ds_resp_delay_us;
+        allowed.passive_ds_final_delay_us =
+            after->passive_ds_final_delay_us;
+        allowed.passive_ds_auto_rx_delay_uus =
+            after->passive_ds_auto_rx_delay_uus;
+        allowed.from_nvs = after->from_nvs;
+        return memcmp(&allowed, after, sizeof(allowed)) == 0;
+    }
+
     const uint8_t *before_bytes = (const uint8_t *)before;
     const uint8_t *after_bytes = (const uint8_t *)after;
     const size_t mode_begin =
@@ -3767,7 +3793,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
                     &before_config, &config)) {
                 return httpd_resp_send_err(
                     req, HTTPD_400_BAD_REQUEST,
-                    "Hot switch only supports a mode-only transition among ranging, flex_tdoa and passive_ds");
+                    "Hot switch supports protocol transitions and in-place Passive DS-TWR timing reloads");
             }
             err = app_runtime_config_save(&config);
             if (err == ESP_OK &&
@@ -3834,9 +3860,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
                 req, HTTPD_500_INTERNAL_SERVER_ERROR,
                 "UWB hot switch request failed");
         }
-        hot_switch_started =
-            before_config.runtime_mode !=
-            active_config->runtime_mode;
+        hot_switch_started = true;
     }
 
     const bool reboot_recommended =

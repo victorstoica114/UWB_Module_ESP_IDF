@@ -42,6 +42,7 @@ enum {
     WIRELESS_TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN = 41,
     WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20,
     WIRELESS_TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32,
+    WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V2_SAMPLE_LEN = 40,
     WIRELESS_TELEMETRY_FRAME_VERSION = 1,
     WIRELESS_TELEMETRY_STREAM_BNO085_ACCEL = 1,
     WIRELESS_TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION = 2,
@@ -52,6 +53,7 @@ enum {
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION = 7,
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2 = 8,
     WIRELESS_TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE = 9,
+    WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2 = 10,
     WIRELESS_TELEMETRY_RECONNECT_MS = 2000,
     WIRELESS_TELEMETRY_WIFI_WAIT_MS = 500,
     WIRELESS_TELEMETRY_QUEUE_WAIT_MS = 20,
@@ -115,6 +117,8 @@ typedef struct {
     uint32_t geometry_version;
     int32_t x_mm;
     int32_t y_mm;
+    int32_t raw_x_mm;
+    int32_t raw_y_mm;
     int32_t sigma_mm;
     int32_t rms_mm;
     uint16_t observation_count;
@@ -520,8 +524,10 @@ static bool wireless_telemetry_binary_item_info(
         *sample_len = WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN;
         return true;
     case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_POSITION:
-        *stream_type = WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION;
-        *sample_len = WIRELESS_TELEMETRY_FLEX_POSITION_SAMPLE_LEN;
+        *stream_type =
+            WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2;
+        *sample_len =
+            WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V2_SAMPLE_LEN;
         return true;
     case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_ANCHOR_RANGE:
         *stream_type = WIRELESS_TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE;
@@ -664,7 +670,6 @@ static bool wireless_telemetry_append_binary_sample(
         sample[19] = item->data.flex_anchor_range.responder_id;
         break;
     case WIRELESS_TELEMETRY_ITEM_FLEX_POSITION:
-    case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_POSITION:
         wireless_telemetry_write_u32_le(
             &sample[4], item->data.flex_position.slot_id);
         wireless_telemetry_write_i32_le(
@@ -681,6 +686,28 @@ static bool wireless_telemetry_append_binary_sample(
             &sample[28], item->data.flex_position.observation_count);
         sample[30] = item->data.flex_position.tag_id;
         sample[31] = item->data.flex_position.anchor_count;
+        break;
+    case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_POSITION:
+        wireless_telemetry_write_u32_le(
+            &sample[4], item->data.flex_position.slot_id);
+        wireless_telemetry_write_i32_le(
+            &sample[8], item->data.flex_position.x_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[12], item->data.flex_position.y_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[16], item->data.flex_position.raw_x_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[20], item->data.flex_position.raw_y_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[24], item->data.flex_position.sigma_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[28], item->data.flex_position.rms_mm);
+        wireless_telemetry_write_u32_le(
+            &sample[32], item->data.flex_position.geometry_version);
+        wireless_telemetry_write_u16_le(
+            &sample[36], item->data.flex_position.observation_count);
+        sample[38] = item->data.flex_position.tag_id;
+        sample[39] = item->data.flex_position.anchor_count;
         break;
     default:
         return false;
@@ -1341,7 +1368,8 @@ bool wireless_telemetry_service_submit_native_ds_anchor_range(
 }
 
 bool wireless_telemetry_service_submit_passive_ds_position(
-    uint8_t tag_id, uint32_t slot_id, int32_t x_mm, int32_t y_mm,
+    uint8_t tag_id, uint32_t slot_id, int32_t filtered_x_mm,
+    int32_t filtered_y_mm, int32_t raw_x_mm, int32_t raw_y_mm,
     int32_t sigma_mm, int32_t rms_mm, uint16_t observation_count,
     uint8_t anchor_count, uint32_t geometry_version)
 {
@@ -1357,8 +1385,10 @@ bool wireless_telemetry_service_submit_passive_ds_position(
             .flex_position = {
                 .slot_id = slot_id,
                 .geometry_version = geometry_version,
-                .x_mm = x_mm,
-                .y_mm = y_mm,
+                .x_mm = filtered_x_mm,
+                .y_mm = filtered_y_mm,
+                .raw_x_mm = raw_x_mm,
+                .raw_y_mm = raw_y_mm,
                 .sigma_mm = sigma_mm,
                 .rms_mm = rms_mm,
                 .observation_count = observation_count,
