@@ -243,6 +243,65 @@ ANCHOR_SURVEY result pair=2-3 seq=... distance=...
 This is a first skeleton. The next session should expect to tune slot timing and
 failure recovery after testing with actual boards.
 
+## Hot Protocol Switching (2026-07-27)
+
+The Position tab now changes directly among Native DS-TWR, FlexTDOA, and Passive
+DS-TWR without rebooting the ESP32. It sends an authenticated
+`/config/runtime` request with `hot_switch=1`; the persistent UWB supervisor
+cooperatively stops the old radio loop, clears stale solver observations,
+reinitializes only the DW3000, and starts the new loop. Wi-Fi, HTTP, wireless
+logs, and binary telemetry remain online throughout the transition.
+
+The radio reset must use the DW3000 boot SPI rate: switch from the operational
+40 MHz rate back to 4 MHz, reset/configure the radio, then restore 40 MHz.
+Keeping the bus at 40 MHz across reset causes an apparently successful switch
+followed by RX timeouts. FlexTDOA also restores its double-buffer configuration
+when it becomes active. A radio reinitialization failure falls back to a full
+ESP32 restart.
+
+Hot switching is accepted only when the runtime mode is the sole effective
+configuration change and both the old and new modes are one of the three
+positioning protocols. Topology, channel, timing, calibration, diagnostics, and
+survey changes still use the reboot path. `/status` now includes
+`uwb_runtime_switching`, `uwb_runtime_switch_count`, and
+`uwb_last_runtime_switch_ms`.
+
+Live simultaneous testing on all five modules measured 0.623-0.773 s until all
+modules were UWB-ready and 0.784-0.932 s until the first complete positioning
+data. The final Passive-to-Native test acknowledged in 0.083 s, had all modules
+ready in 0.764 s, produced tag ranges in 0.814 s, and refreshed all six
+anchor-to-anchor geometry pairs in 2.115 s. Boot counters were unchanged. All
+five modules were left in Native DS-TWR mode.
+
+The runtime-config HTTP response is heap/PSRAM-backed. Do not move its large
+response buffer back onto the 8192-byte HTTP server task stack: doing so caused
+an ESP32 stack panic on every runtime-config POST and was the original reason
+the dashboard waited for HTTP status. Native anchor-survey commands use the
+13-byte wire length rather than the 64-byte local storage buffer.
+
+## Dashboard Geometry Glitch Guard (2026-07-27)
+
+Occasional 30-100 cm anchor-pair spikes were entering the browser TWR-EKF,
+briefly turning the surveyed square into a trapezoid/parallelogram and
+triggering repeated automatic relocation resets. A slow maintenance pair could
+also age out for one refresh and temporarily cover the canvas with the dynamic
+geometry overlay.
+
+The Position tab now conditions every anchor edge before EKF assimilation:
+
+- isolated jumps beyond the 10-16 cm adaptive gate are rejected;
+- the last accepted edge remains usable for 15 seconds;
+- a relocation needs three persistent samples on at least two changed edges
+  sharing one anchor;
+- the proposed complete geometry must fit within 12 cm RMS; and
+- published anchor coordinates move by at most 5 cm per estimator update.
+
+The Live Anchor Geometry panel shows raw/stable range, robust MAD-derived sigma,
+cumulative rejected spikes, held edges, and the last rejected pair/delta.
+Native DS-TWR tag positioning also uses a robust 3-of-4 fit and records omitted
+tag-range spikes. This is browser/dashboard logic only; no firmware rollout is
+needed.
+
 ## Next Intended Steps
 
 1. Move to the new PC and pull `main`.
@@ -262,6 +321,10 @@ failure recovery after testing with actual boards.
 - Use `rg` for search.
 - Use `apply_patch` for manual edits.
 - Do not use destructive Git commands unless explicitly asked.
+- Shared firmware rollouts must use one simultaneous invocation:
+  `python3 tools/ota_upload.py --target-list tools/ota_targets.local.txt --parallel 5`.
+  Do not upload module-by-module unless an explicit single-device diagnostic
+  requires it.
 - Build with `.\idf.bat build`.
 - Flash with `.\idf.bat -p COMxx flash`.
 - Capture logs with `tools\serial_log.ps1`.

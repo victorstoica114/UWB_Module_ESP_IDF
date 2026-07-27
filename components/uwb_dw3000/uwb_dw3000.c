@@ -322,6 +322,7 @@ enum {
 #define UWB_PASSIVE_DS_FINAL_LEN \
     (UWB_PASSIVE_DS_FINAL_SLOT_ID_OFFSET + 4U)
 #define UWB_PASSIVE_DS_BOOTSTRAP_LISTEN_US 2000000LL
+#define UWB_PASSIVE_DS_FAST_GEOMETRY_FRAME_INTERVAL 4U
 #define UWB_PASSIVE_DS_MAX_OBSERVATIONS \
     (UWB_ANCHOR_SURVEY_MAX_ANCHORS * 2U)
 
@@ -333,6 +334,10 @@ enum {
 #define UWB_ANCHOR_SURVEY_CMD_INITIATOR_OFFSET 10U
 #define UWB_ANCHOR_SURVEY_CMD_RESPONDER_OFFSET 11U
 #define UWB_ANCHOR_SURVEY_CMD_SLOT_OFFSET 12U
+#define UWB_ANCHOR_SURVEY_CMD_LEN \
+    (UWB_ANCHOR_SURVEY_CMD_SLOT_OFFSET + 1U)
+#define UWB_RANGING_GEOMETRY_FRAME_INTERVAL 4U
+#define UWB_RANGING_GEOMETRY_COMMAND_DELAY_MS 1U
 
 // Figure 3 common payload. The transport header already carries message type,
 // source ID and sequence, so the application payload starts with Slot ID.
@@ -381,6 +386,7 @@ enum {
 #define UWB_FLEX_TDOA_CONFIG_TX_SPACING_US 30000LL
 #define UWB_FLEX_TDOA_CONFIG_FRAME_GAP_MS 10U
 #define UWB_FLEX_TDOA_BOOTSTRAP_LISTEN_US 2000000LL
+#define UWB_HOT_SWITCH_BOOTSTRAP_GUARD_US 150000LL
 // Host-only preparation lead. It must be shorter than one 4.80 ms slot so an
 // initiator keeps receiving the preceding slot while still programming its
 // own DW3000 delayed TX with comfortable margin.
@@ -1006,6 +1012,14 @@ static uint8_t s_source_id;
 static uint32_t s_device_id;
 static enum uwb_dw3000_runtime_mode s_runtime_mode =
     UWB_DW3000_RUNTIME_BEACON_SMOKE;
+static volatile enum uwb_dw3000_runtime_mode s_requested_runtime_mode =
+    UWB_DW3000_RUNTIME_BEACON_SMOKE;
+static volatile uint32_t s_runtime_switch_request_generation;
+static volatile uint32_t s_runtime_switch_applied_generation;
+static volatile bool s_runtime_switch_active;
+static volatile bool s_runtime_hot_entry;
+static volatile uint32_t s_runtime_switch_count;
+static volatile uint32_t s_last_runtime_switch_ms;
 static volatile enum uwb_dw3000_status s_status = UWB_DW3000_STATUS_IDLE;
 static volatile uint32_t s_tx_count;
 static volatile uint32_t s_tx_error_count;
@@ -1066,6 +1080,41 @@ static uint32_t s_flex_tdoa_dtx_arm_max_us;
 static uint32_t s_flex_tdoa_request_arm_max_us;
 static int64_t s_last_delayed_command_host_us;
 static uint32_t s_last_delayed_arm_us;
+
+static bool uwb_dw3000_runtime_from_app_mode(
+    uint8_t app_runtime_mode, enum uwb_dw3000_runtime_mode *runtime_mode)
+{
+    if (runtime_mode == NULL) {
+        return false;
+    }
+    switch (app_runtime_mode) {
+    case APP_RUNTIME_MODE_UWB_RANGING:
+        *runtime_mode = UWB_DW3000_RUNTIME_RANGING;
+        return true;
+    case APP_RUNTIME_MODE_UWB_FLEX_TDOA:
+        *runtime_mode = UWB_DW3000_RUNTIME_FLEX_TDOA;
+        return true;
+    case APP_RUNTIME_MODE_UWB_PASSIVE_DS_TWR:
+        *runtime_mode = UWB_DW3000_RUNTIME_PASSIVE_DS_TWR;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool uwb_dw3000_runtime_mode_hot_switchable(
+    enum uwb_dw3000_runtime_mode runtime_mode)
+{
+    return runtime_mode == UWB_DW3000_RUNTIME_RANGING ||
+           runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA ||
+           runtime_mode == UWB_DW3000_RUNTIME_PASSIVE_DS_TWR;
+}
+
+static bool uwb_dw3000_runtime_switch_pending(void)
+{
+    return s_runtime_switch_request_generation !=
+           s_runtime_switch_applied_generation;
+}
 
 static bool uwb_flex_tdoa_local_is_anchor(void)
 {
@@ -1205,7 +1254,8 @@ static void uwb_ranging_wait_until_host_us(int64_t target_us)
     }
 
     if (uwb_ranging_slot_timer_init() != ESP_OK) {
-        while ((remaining_us = target_us - esp_timer_get_time()) > 0) {
+        while (!uwb_dw3000_runtime_switch_pending() &&
+               (remaining_us = target_us - esp_timer_get_time()) > 0) {
             uwb_dw3000_delay_ms(
                 (uint32_t)((remaining_us + 999LL) / 1000LL));
         }
@@ -1215,14 +1265,16 @@ static void uwb_ranging_wait_until_host_us(int64_t target_us)
     (void)esp_timer_stop(s_ranging_slot_timer);
     if (esp_timer_start_once(s_ranging_slot_timer, (uint64_t)remaining_us) !=
         ESP_OK) {
-        while ((remaining_us = target_us - esp_timer_get_time()) > 0) {
+        while (!uwb_dw3000_runtime_switch_pending() &&
+               (remaining_us = target_us - esp_timer_get_time()) > 0) {
             uwb_dw3000_delay_ms(
                 (uint32_t)((remaining_us + 999LL) / 1000LL));
         }
         return;
     }
 
-    while ((remaining_us = target_us - esp_timer_get_time()) > 0) {
+    while (!uwb_dw3000_runtime_switch_pending() &&
+           (remaining_us = target_us - esp_timer_get_time()) > 0) {
         const uint32_t remaining_ms =
             (uint32_t)((remaining_us + 999LL) / 1000LL);
         TickType_t wait_ticks = pdMS_TO_TICKS(remaining_ms) + 1U;
@@ -3648,6 +3700,12 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
 
     const int64_t start = esp_timer_get_time();
     while (true) {
+        if (uwb_dw3000_runtime_switch_pending()) {
+            (void)uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF);
+            (void)uwb_dw3000_clear_status();
+            s_rx_armed = false;
+            return ESP_ERR_INVALID_STATE;
+        }
         uint32_t status = 0;
         uint8_t rdb_status = 0;
         bool rx_good = false;
@@ -5088,8 +5146,8 @@ static esp_err_t uwb_anchor_survey_send_command(
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
     uwb_anchor_survey_build_command(pair, slot_index, sequence, payload);
 
-    const esp_err_t err = uwb_dw3000_send_payload(payload, sizeof(payload),
-                                                  NULL);
+    const esp_err_t err = uwb_dw3000_send_payload(
+        payload, UWB_ANCHOR_SURVEY_CMD_LEN, NULL);
     if (err != ESP_OK) {
         ESP_LOGW(TAG,
                  "ANCHOR_SURVEY command TX failed slot=%u seq=%u pair=%u-%u: %s",
@@ -5242,7 +5300,7 @@ static void uwb_anchor_survey_passive_tag_loop(uint8_t coordinator_id)
              (unsigned)config->anchor_survey_rx_slice_ms,
              (unsigned)config->anchor_survey_passive_tag_log_every);
 
-    while (true) {
+    while (!uwb_dw3000_runtime_switch_pending()) {
         config = app_runtime_config_get();
         struct uwb_distance_frame frame = {0};
         const esp_err_t err =
@@ -6109,7 +6167,7 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
              (unsigned)anchor_ids[3],
              (unsigned)config->anchor_survey_rx_slice_ms);
 
-    while (true) {
+    while (!uwb_dw3000_runtime_switch_pending()) {
         config = app_runtime_config_get();
         struct uwb_distance_frame frame = {0};
         const esp_err_t err =
@@ -6122,7 +6180,8 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
                 &frame, s_flex_tdoa_tag_observations, tag_id, anchor_ids,
                 anchor_count);
         } else if (err != ESP_ERR_TIMEOUT &&
-                   err != ESP_ERR_INVALID_RESPONSE) {
+                   err != ESP_ERR_INVALID_RESPONSE &&
+                   !uwb_dw3000_runtime_switch_pending()) {
             ESP_LOGW(TAG, "FLEX_TDOA passive tag RX failed: %s",
                      esp_err_to_name(err));
         }
@@ -6734,7 +6793,9 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
 
     s_status = UWB_DW3000_STATUS_READY;
     int64_t bootstrap_deadline_us =
-        esp_timer_get_time() + UWB_FLEX_TDOA_BOOTSTRAP_LISTEN_US;
+        esp_timer_get_time() +
+        (s_runtime_hot_entry ? UWB_HOT_SWITCH_BOOTSTRAP_GUARD_US
+                             : UWB_FLEX_TDOA_BOOTSTRAP_LISTEN_US);
     ESP_LOGI(TAG,
              "FLEX_TDOA CI-CR anchor active: source_id=%u bootstrap=%u slot_index=%u anchors=%u K=%u slot=%lu us frame=%lu us req_lead=%lu us",
              (unsigned)s_source_id, (unsigned)bootstrap_id,
@@ -6747,7 +6808,7 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
                      config->flex_tdoa_responder_count)),
              (unsigned long)UWB_FLEX_TDOA_REQUEST_TX_LEAD_US);
 
-    while (true) {
+    while (!uwb_dw3000_runtime_switch_pending()) {
         config = app_runtime_config_get();
         const int64_t now_us = esp_timer_get_time();
 
@@ -6877,11 +6938,14 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
         } else if (err == ESP_ERR_NOT_FINISHED && schedule_alarm) {
             continue;
         } else if (err != ESP_ERR_TIMEOUT &&
-                   err != ESP_ERR_INVALID_RESPONSE) {
+                   err != ESP_ERR_INVALID_RESPONSE &&
+                   !uwb_dw3000_runtime_switch_pending()) {
             ESP_LOGW(TAG, "FLEX_TDOA distributed RX failed: %s",
                      esp_err_to_name(err));
         }
     }
+    (void)esp_timer_stop(s_flex_tdoa_schedule_timer);
+    s_flex_tdoa_schedule_alarm_fired = false;
 }
 
 static void uwb_flex_tdoa_configuration_phase(void)
@@ -6892,7 +6956,8 @@ static void uwb_flex_tdoa_configuration_phase(void)
     uint32_t tx_count = 0;
     uint32_t rx_count = 0;
 
-    while (esp_timer_get_time() < end_us) {
+    while (!uwb_dw3000_runtime_switch_pending() &&
+           esp_timer_get_time() < end_us) {
         const app_runtime_config_t *config = app_runtime_config_get();
         int own_index = -1;
         for (size_t i = 0; i < config->anchor_count; ++i) {
@@ -6974,7 +7039,15 @@ static void uwb_flex_tdoa_configuration_phase(void)
 
 static void uwb_dw3000_flex_tdoa_loop(void)
 {
-    uwb_flex_tdoa_configuration_phase();
+    if (s_runtime_hot_entry) {
+        ESP_LOGI(TAG,
+                 "FlexTDOA hot entry: unchanged topology, skipping 3 s radio configuration phase");
+    } else {
+        uwb_flex_tdoa_configuration_phase();
+    }
+    if (uwb_dw3000_runtime_switch_pending()) {
+        return;
+    }
     uint8_t anchor_ids[UWB_ANCHOR_SURVEY_MAX_ANCHORS] = {0};
     const app_runtime_config_t *config = app_runtime_config_get();
     const size_t anchor_count = app_runtime_config_get_anchor_ids(
@@ -7023,10 +7096,23 @@ static bool uwb_passive_ds_slot_pair(
     const uint32_t slots_per_frame = (uint32_t)anchor_count - 1U;
     const uint32_t frame_id = slot_id / slots_per_frame;
     const uint32_t index = slot_id % slots_per_frame;
-    const size_t initiator_index =
-        schedule_mode == APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING
-            ? (size_t)(frame_id % (uint32_t)anchor_count)
-            : 0U;
+    size_t initiator_index = 0U;
+    if (schedule_mode == APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING) {
+        initiator_index = (size_t)(frame_id % (uint32_t)anchor_count);
+    } else if ((frame_id + 1U) %
+                   UWB_PASSIVE_DS_FAST_GEOMETRY_FRAME_INTERVAL ==
+               0U) {
+        /*
+         * Fast Star keeps anchor[0] as the position reference for most
+         * frames. One maintenance frame in four rotates through the other
+         * anchors, making every pair observable without adding radio slots.
+         */
+        const uint32_t maintenance_frame =
+            frame_id / UWB_PASSIVE_DS_FAST_GEOMETRY_FRAME_INTERVAL;
+        initiator_index =
+            1U + (size_t)(maintenance_frame %
+                          ((uint32_t)anchor_count - 1U));
+    }
     size_t candidate = 0U;
     for (size_t i = 0; i < anchor_count; ++i) {
         if (i == initiator_index) {
@@ -7508,7 +7594,7 @@ static void uwb_passive_ds_tag_loop(const uint8_t *anchor_ids,
              app_runtime_config_get()->flex_tdoa_geometry_fixed
                  ? "fixed"
                  : "unavailable");
-    while (true) {
+    while (!uwb_dw3000_runtime_switch_pending()) {
         const app_runtime_config_t *config = app_runtime_config_get();
         struct uwb_distance_frame frame = {0};
         const esp_err_t err = uwb_distance_receive_next(
@@ -7516,7 +7602,8 @@ static void uwb_passive_ds_tag_loop(const uint8_t *anchor_ids,
         if (err == ESP_OK) {
             uwb_passive_ds_tag_process_frame(
                 &frame, observations, s_source_id, anchor_ids, anchor_count);
-        } else if (err != ESP_ERR_TIMEOUT) {
+        } else if (err != ESP_ERR_TIMEOUT &&
+                   !uwb_dw3000_runtime_switch_pending()) {
             ESP_LOGW(TAG, "PASSIVE_DS tag RX failed: %s",
                      esp_err_to_name(err));
             uwb_dw3000_delay_ms(2);
@@ -7528,14 +7615,19 @@ static void uwb_passive_ds_anchor_loop(const uint8_t *anchor_ids,
                                        size_t anchor_count)
 {
     struct uwb_passive_ds_schedule schedule = {
-        .last_poll_host_us = esp_timer_get_time(),
+        .last_poll_host_us =
+            esp_timer_get_time() -
+            (s_runtime_hot_entry
+                 ? UWB_PASSIVE_DS_BOOTSTRAP_LISTEN_US -
+                       UWB_HOT_SWITCH_BOOTSTRAP_GUARD_US
+                 : 0),
     };
     uint32_t completed = 0;
     uint32_t failed = 0;
     int64_t summary_started_us = esp_timer_get_time();
     s_status = UWB_DW3000_STATUS_READY;
 
-    while (true) {
+    while (!uwb_dw3000_runtime_switch_pending()) {
         const app_runtime_config_t *config = app_runtime_config_get();
         int64_t now_us = esp_timer_get_time();
         bool initiate = schedule.synced &&
@@ -7633,7 +7725,8 @@ static void uwb_passive_ds_anchor_loop(const uint8_t *anchor_ids,
                     failed++;
                 }
             }
-        } else if (rx_err != ESP_OK && rx_err != ESP_ERR_TIMEOUT) {
+        } else if (rx_err != ESP_OK && rx_err != ESP_ERR_TIMEOUT &&
+                   !uwb_dw3000_runtime_switch_pending()) {
             ESP_LOGD(TAG, "PASSIVE_DS anchor RX: %s",
                      esp_err_to_name(rx_err));
         }
@@ -7840,13 +7933,68 @@ uwb_ranging_log_result(const struct uwb_distance_measurement *measurement)
              measurement->clock_offset_valid ? 1U : 0U);
 }
 
+static void uwb_ranging_log_anchor_geometry(
+    const struct uwb_distance_measurement *measurement)
+{
+    if (measurement == NULL) {
+        return;
+    }
+    ESP_LOGI(TAG,
+             "UWB_RANGING geometry pair=%u-%u seq=%u distance=%.3f m "
+             "%.1f cm raw=%.3f m",
+             (unsigned)measurement->initiator_id,
+             (unsigned)measurement->responder_id,
+             (unsigned)measurement->sequence, measurement->distance_m,
+             measurement->distance_m * 100.0,
+             measurement->raw_distance_m);
+}
+
+static void uwb_ranging_handle_geometry_command(
+    const struct uwb_distance_frame *frame, uint8_t tag_id,
+    const uint8_t *anchor_ids, size_t anchor_count)
+{
+    if (frame == NULL || frame->type != UWB_DISTANCE_FRAME_SURVEY_CMD ||
+        frame->source_id != tag_id ||
+        !uwb_distance_destination_matches(frame->destination_id)) {
+        return;
+    }
+
+    struct uwb_anchor_survey_pair pair = {0};
+    uint8_t pair_index = 0;
+    if (!uwb_anchor_survey_parse_command(frame, &pair, &pair_index) ||
+        pair.initiator_id != s_source_id ||
+        !uwb_anchor_survey_id_in_set(
+            anchor_ids, anchor_count, pair.responder_id)) {
+        return;
+    }
+
+    uwb_dw3000_delay_ms(UWB_RANGING_GEOMETRY_COMMAND_DELAY_MS);
+    const esp_err_t err = uwb_ranging_native_initiate_once(
+        pair.responder_id, frame->sequence);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "UWB_RANGING geometry initiate pair=%u-%u index=%u "
+                 "seq=%u failed: %s",
+                 (unsigned)pair.initiator_id,
+                 (unsigned)pair.responder_id, (unsigned)pair_index,
+                 (unsigned)frame->sequence, esp_err_to_name(err));
+    }
+}
+
 static void uwb_ranging_tag_loop(const uint8_t *anchor_ids, size_t anchor_count)
 {
     const app_runtime_config_t *config = app_runtime_config_get();
+    struct uwb_anchor_survey_pair
+        geometry_pairs[UWB_ANCHOR_SURVEY_MAX_PAIRS] = {0};
+    const size_t geometry_pair_count = uwb_anchor_survey_build_pairs(
+        anchor_ids, anchor_count, geometry_pairs);
+    size_t geometry_pair_index = 0;
     uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
     uint32_t round = 0;
     uint32_t successful_exchanges = 0;
     uint32_t failed_exchanges = 0;
+    uint32_t successful_geometry_commands = 0;
+    uint32_t failed_geometry_commands = 0;
     uint32_t slot_overruns = 0;
     uint32_t exchange_max_us = 0;
     int64_t summary_started_us = esp_timer_get_time();
@@ -7865,8 +8013,9 @@ static void uwb_ranging_tag_loop(const uint8_t *anchor_ids, size_t anchor_count)
              (unsigned)config->ranging_resp_delay_ms,
              (unsigned)config->ranging_final_delay_ms);
 
-    while (true) {
-        for (size_t i = 0; i < anchor_count; ++i) {
+    while (!uwb_dw3000_runtime_switch_pending()) {
+        for (size_t i = 0;
+             i < anchor_count && !uwb_dw3000_runtime_switch_pending(); ++i) {
             config = app_runtime_config_get();
             const uint8_t anchor_id = anchor_ids[i];
             const int64_t exchange_started_us = esp_timer_get_time();
@@ -7894,7 +8043,31 @@ static void uwb_ranging_tag_loop(const uint8_t *anchor_ids, size_t anchor_count)
             }
         }
 
+        if (uwb_dw3000_runtime_switch_pending()) {
+            break;
+        }
         round++;
+        if (geometry_pair_count > 0U &&
+            round % UWB_RANGING_GEOMETRY_FRAME_INTERVAL == 0U) {
+            config = app_runtime_config_get();
+            const struct uwb_anchor_survey_pair *pair =
+                &geometry_pairs[geometry_pair_index];
+            const esp_err_t geometry_err = uwb_anchor_survey_send_command(
+                pair, (uint8_t)geometry_pair_index, sequence);
+            if (geometry_err == ESP_OK) {
+                successful_geometry_commands++;
+            } else {
+                failed_geometry_commands++;
+            }
+            sequence++;
+            geometry_pair_index =
+                (geometry_pair_index + 1U) % geometry_pair_count;
+            uwb_ranging_wait_until_host_us(
+                esp_timer_get_time() +
+                (int64_t)(config->ranging_slot_ms +
+                          UWB_RANGING_GEOMETRY_COMMAND_DELAY_MS) *
+                    1000LL);
+        }
         config = app_runtime_config_get();
         uwb_ranging_wait_until_host_us(
             esp_timer_get_time() +
@@ -7908,7 +8081,8 @@ static void uwb_ranging_tag_loop(const uint8_t *anchor_ids, size_t anchor_count)
                 successful_exchanges + failed_exchanges;
             ESP_LOGI(TAG,
                      "UWB_RANGING native summary round=%lu frame=%lu ms "
-                     "ok=%lu fail=%lu rate=%.2f/s overrun=%lu max=%lu us",
+                     "ok=%lu fail=%lu rate=%.2f/s overrun=%lu max=%lu us "
+                     "geometry_cmd_ok=%lu geometry_cmd_fail=%lu pair=%u/%u",
                      (unsigned long)round,
                      (unsigned long)(anchor_count * config->ranging_slot_ms +
                                      config->ranging_round_gap_ms),
@@ -7916,17 +8090,24 @@ static void uwb_ranging_tag_loop(const uint8_t *anchor_ids, size_t anchor_count)
                      (unsigned long)failed_exchanges,
                      elapsed_s > 0.0 ? (double)attempts / elapsed_s : 0.0,
                      (unsigned long)slot_overruns,
-                     (unsigned long)exchange_max_us);
+                     (unsigned long)exchange_max_us,
+                     (unsigned long)successful_geometry_commands,
+                     (unsigned long)failed_geometry_commands,
+                     (unsigned)geometry_pair_index,
+                     (unsigned)geometry_pair_count);
             successful_exchanges = 0;
             failed_exchanges = 0;
             slot_overruns = 0;
             exchange_max_us = 0;
+            successful_geometry_commands = 0;
+            failed_geometry_commands = 0;
             summary_started_us = now_us;
         }
     }
 }
 
-static void uwb_ranging_anchor_loop(uint8_t tag_id)
+static void uwb_ranging_anchor_loop(
+    uint8_t tag_id, const uint8_t *anchor_ids, size_t anchor_count)
 {
     const app_runtime_config_t *config = app_runtime_config_get();
     s_status = UWB_DW3000_STATUS_READY;
@@ -7938,7 +8119,7 @@ static void uwb_ranging_anchor_loop(uint8_t tag_id)
              (unsigned)config->ranging_rx_timeout_ms,
              (unsigned)config->ranging_resp_delay_ms);
 
-    while (true) {
+    while (!uwb_dw3000_runtime_switch_pending()) {
         config = app_runtime_config_get();
         struct uwb_distance_frame frame = {0};
         const esp_err_t rx_err =
@@ -7947,13 +8128,24 @@ static void uwb_ranging_anchor_loop(uint8_t tag_id)
             continue;
         }
         if (rx_err != ESP_OK) {
+            if (uwb_dw3000_runtime_switch_pending()) {
+                break;
+            }
             ESP_LOGW(TAG, "UWB_RANGING native anchor RX failed: %s",
                      esp_err_to_name(rx_err));
             uwb_dw3000_delay_ms(5);
             continue;
         }
+        if (frame.type == UWB_DISTANCE_FRAME_SURVEY_CMD) {
+            uwb_ranging_handle_geometry_command(
+                &frame, tag_id, anchor_ids, anchor_count);
+            continue;
+        }
+        const bool from_tag = frame.source_id == tag_id;
+        const bool from_anchor = uwb_anchor_survey_id_in_set(
+            anchor_ids, anchor_count, frame.source_id);
         if (frame.type != UWB_DISTANCE_FRAME_POLL ||
-            frame.source_id != tag_id ||
+            (!from_tag && !from_anchor) ||
             !uwb_distance_destination_matches(frame.destination_id)) {
             continue;
         }
@@ -7976,7 +8168,16 @@ static void uwb_ranging_anchor_loop(uint8_t tag_id)
          * periodic diagnostics/event-counter SPI reads; those facilities are
          * intended for the dedicated diagnostic modes.
          */
-        uwb_ranging_log_result(&measurement);
+        if (from_tag) {
+            uwb_ranging_log_result(&measurement);
+        } else {
+            uwb_ranging_log_anchor_geometry(&measurement);
+            (void)wireless_telemetry_service_submit_native_ds_anchor_range(
+                measurement.initiator_id, measurement.responder_id,
+                measurement.sequence, (uint32_t)measurement.sequence,
+                uwb_distance_meters_to_mm(measurement.distance_m),
+                uwb_distance_meters_to_mm(measurement.raw_distance_m));
+        }
     }
 }
 
@@ -8015,7 +8216,7 @@ static void uwb_dw3000_ranging_loop(void)
     }
 
     if (uwb_anchor_survey_id_in_set(anchor_ids, anchor_count, s_source_id)) {
-        uwb_ranging_anchor_loop(tag_id);
+        uwb_ranging_anchor_loop(tag_id, anchor_ids, anchor_count);
         return;
     }
 
@@ -8023,8 +8224,8 @@ static void uwb_dw3000_ranging_loop(void)
     ESP_LOGW(TAG,
              "UWB_RANGING idle: source_id=%u is neither tag nor configured anchor",
              (unsigned)s_source_id);
-    while (true) {
-        uwb_dw3000_delay_ms(1000);
+    while (!uwb_dw3000_runtime_switch_pending()) {
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
     }
 }
 
@@ -8466,6 +8667,84 @@ static void uwb_dw3000_radio_loop(void)
     }
 }
 
+static esp_err_t uwb_dw3000_reinitialize_runtime(
+    enum uwb_dw3000_runtime_mode runtime_mode)
+{
+    const int64_t started_us = esp_timer_get_time();
+    s_runtime_switch_active = true;
+    s_status = UWB_DW3000_STATUS_INITIALIZING;
+
+    if (s_flex_tdoa_schedule_timer != NULL) {
+        (void)esp_timer_stop(s_flex_tdoa_schedule_timer);
+    }
+    if (s_ranging_slot_timer != NULL) {
+        (void)esp_timer_stop(s_ranging_slot_timer);
+    }
+    s_flex_tdoa_schedule_alarm_fired = false;
+    s_flex_tdoa_local_request.active = false;
+    s_flex_tdoa_anchor_request_buffer_pending = false;
+    (void)uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF);
+    (void)uwb_dw3000_clear_status();
+    s_rx_armed = false;
+    s_rx_double_buffer_enabled = false;
+    s_rx_double_buffer_index = 0;
+    s_flex_tdoa_rx_timestamp_reference_valid = false;
+    s_tx_fctrl_base_valid = false;
+    s_tx_fctrl_payload_len = SIZE_MAX;
+    (void)ulTaskNotifyTake(pdTRUE, 0);
+
+    s_runtime_mode = runtime_mode;
+    esp_err_t err = uwb_dw3000_restore_boot_spi(s_device_id);
+    if (err == ESP_OK) {
+        err = uwb_dw3000_radio_init();
+    }
+    if (err == ESP_OK) {
+        err = uwb_dw3000_enable_operational_spi(s_device_id);
+    }
+    if (err == ESP_OK &&
+        runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
+        err = uwb_dw3000_configure_flex_rx_double_buffer();
+    }
+    if (err != ESP_OK) {
+        s_status = UWB_DW3000_STATUS_FAILED;
+        s_runtime_switch_active = false;
+        ESP_LOGE(TAG, "DW3000 hot runtime reinitialization failed: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    (void)flextdoa_solver_service_reset();
+    s_runtime_hot_entry = true;
+    s_runtime_switch_count++;
+    s_last_runtime_switch_ms =
+        (uint32_t)((esp_timer_get_time() - started_us + 999LL) / 1000LL);
+    s_runtime_switch_active = false;
+    ESP_LOGI(TAG,
+             "DW3000 hot runtime reinitialized mode=%u in %lu ms; Wi-Fi and telemetry stayed online",
+             (unsigned)runtime_mode,
+             (unsigned long)s_last_runtime_switch_ms);
+    return ESP_OK;
+}
+
+static void uwb_dw3000_run_selected_runtime(void)
+{
+    if (s_runtime_mode == UWB_DW3000_RUNTIME_DISTANCE_TEST) {
+        uwb_dw3000_distance_test_loop();
+    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_CALIBRATION) {
+        uwb_dw3000_calibration_loop();
+    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_ANCHOR_SURVEY) {
+        uwb_dw3000_anchor_survey_loop();
+    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_RANGING) {
+        uwb_dw3000_ranging_loop();
+    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
+        uwb_dw3000_flex_tdoa_loop();
+    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_PASSIVE_DS_TWR) {
+        uwb_dw3000_passive_ds_twr_loop();
+    } else {
+        uwb_dw3000_radio_loop();
+    }
+}
+
 static void uwb_dw3000_task(void *arg)
 {
     (void)arg;
@@ -8564,21 +8843,39 @@ static void uwb_dw3000_task(void *arg)
         }
     }
 
-    if (s_runtime_mode == UWB_DW3000_RUNTIME_DISTANCE_TEST) {
-        uwb_dw3000_distance_test_loop();
-    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_CALIBRATION) {
-        uwb_dw3000_calibration_loop();
-    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_ANCHOR_SURVEY) {
-        uwb_dw3000_anchor_survey_loop();
-    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_RANGING) {
-        uwb_dw3000_ranging_loop();
-    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
-        uwb_dw3000_flex_tdoa_loop();
-    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_PASSIVE_DS_TWR) {
-        uwb_dw3000_passive_ds_twr_loop();
-    } else {
-        uwb_dw3000_radio_loop();
+    s_requested_runtime_mode = s_runtime_mode;
+    s_runtime_switch_request_generation = 0;
+    s_runtime_switch_applied_generation = 0;
+    s_runtime_hot_entry = false;
+
+    while (true) {
+        uwb_dw3000_run_selected_runtime();
+        if (!uwb_dw3000_runtime_switch_pending()) {
+            s_status = UWB_DW3000_STATUS_FAILED;
+            ESP_LOGE(TAG, "UWB runtime returned without a switch request");
+            break;
+        }
+
+        const uint32_t request_generation =
+            s_runtime_switch_request_generation;
+        const enum uwb_dw3000_runtime_mode requested_runtime =
+            s_requested_runtime_mode;
+        const esp_err_t switch_err =
+            requested_runtime == s_runtime_mode
+                ? ESP_OK
+                : uwb_dw3000_reinitialize_runtime(requested_runtime);
+        if (switch_err != ESP_OK) {
+            ESP_LOGE(TAG,
+                     "Hot switch failed; rebooting ESP32 to recover persisted runtime");
+            vTaskDelay(pdMS_TO_TICKS(100));
+            esp_restart();
+        }
+        s_runtime_switch_applied_generation = request_generation;
     }
+
+    s_task_handle = NULL;
+    s_started = false;
+    vTaskDelete(NULL);
 }
 
 static esp_err_t uwb_dw3000_start_runtime(
@@ -8592,6 +8889,7 @@ static esp_err_t uwb_dw3000_start_runtime(
     }
 
     s_runtime_mode = runtime_mode;
+    s_requested_runtime_mode = runtime_mode;
 
     const BaseType_t created = xTaskCreatePinnedToCore(
         uwb_dw3000_task, "uwb_dw3000", UWB_DW3000_TASK_STACK_WORDS, NULL,
@@ -8639,6 +8937,63 @@ esp_err_t uwb_dw3000_start_passive_ds_twr(void)
 {
     return uwb_dw3000_start_runtime(
         UWB_DW3000_RUNTIME_PASSIVE_DS_TWR);
+}
+
+bool uwb_dw3000_hot_switch_mode_supported(uint8_t app_runtime_mode)
+{
+    enum uwb_dw3000_runtime_mode runtime_mode =
+        UWB_DW3000_RUNTIME_BEACON_SMOKE;
+    return uwb_dw3000_runtime_from_app_mode(
+               app_runtime_mode, &runtime_mode) &&
+           uwb_dw3000_runtime_mode_hot_switchable(runtime_mode);
+}
+
+esp_err_t uwb_dw3000_request_runtime_switch(uint8_t app_runtime_mode)
+{
+    enum uwb_dw3000_runtime_mode runtime_mode =
+        UWB_DW3000_RUNTIME_BEACON_SMOKE;
+    if (!uwb_dw3000_runtime_from_app_mode(
+            app_runtime_mode, &runtime_mode) ||
+        !uwb_dw3000_runtime_mode_hot_switchable(runtime_mode)) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (!s_started || s_task_handle == NULL ||
+        !uwb_dw3000_runtime_mode_hot_switchable(s_runtime_mode)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!uwb_dw3000_runtime_switch_pending() &&
+        runtime_mode == s_runtime_mode) {
+        return ESP_OK;
+    }
+
+    s_requested_runtime_mode = runtime_mode;
+    s_runtime_switch_request_generation++;
+    if (s_runtime_switch_request_generation == 0U) {
+        s_runtime_switch_request_generation = 1U;
+        s_runtime_switch_applied_generation = 0U;
+    }
+    xTaskNotifyGive(s_task_handle);
+    ESP_LOGI(TAG,
+             "DW3000 hot runtime switch requested current=%u target=%u generation=%lu",
+             (unsigned)s_runtime_mode, (unsigned)runtime_mode,
+             (unsigned long)s_runtime_switch_request_generation);
+    return ESP_OK;
+}
+
+bool uwb_dw3000_runtime_switch_in_progress(void)
+{
+    return s_runtime_switch_active ||
+           uwb_dw3000_runtime_switch_pending();
+}
+
+uint32_t uwb_dw3000_get_runtime_switch_count(void)
+{
+    return s_runtime_switch_count;
+}
+
+uint32_t uwb_dw3000_get_last_runtime_switch_ms(void)
+{
+    return s_last_runtime_switch_ms;
 }
 
 bool uwb_dw3000_is_ready(void)

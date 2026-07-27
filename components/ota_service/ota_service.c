@@ -53,6 +53,7 @@ enum {
     OTA_SERVICE_MAX_TOKEN_LEN = 128,
     OTA_SERVICE_MAX_QUERY_LEN = 768,
     OTA_SERVICE_STATUS_RESPONSE_SIZE = 32000,
+    OTA_SERVICE_RUNTIME_RESPONSE_SIZE = 3072,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -808,6 +809,38 @@ static bool runtime_config_reboot_recommended(
            before->radio_channel != after->radio_channel;
 }
 
+static bool runtime_config_hot_switch_eligible(
+    const app_runtime_config_t *before, const app_runtime_config_t *after)
+{
+    if (before == NULL || after == NULL ||
+        !before->uwb_enabled || !after->uwb_enabled ||
+        !uwb_dw3000_hot_switch_mode_supported(before->runtime_mode) ||
+        !uwb_dw3000_hot_switch_mode_supported(after->runtime_mode)) {
+        return false;
+    }
+
+    const uint8_t *before_bytes = (const uint8_t *)before;
+    const uint8_t *after_bytes = (const uint8_t *)after;
+    const size_t mode_begin =
+        offsetof(app_runtime_config_t, runtime_mode);
+    const size_t mode_end =
+        mode_begin + sizeof(before->runtime_mode);
+    const size_t source_begin =
+        offsetof(app_runtime_config_t, from_nvs);
+    const size_t source_end =
+        source_begin + sizeof(before->from_nvs);
+    for (size_t index = 0; index < sizeof(*before); ++index) {
+        if ((index >= mode_begin && index < mode_end) ||
+            (index >= source_begin && index < source_end)) {
+            continue;
+        }
+        if (before_bytes[index] != after_bytes[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static uint8_t runtime_radio_channel(const app_runtime_config_t *config)
 {
     return config != NULL && config->radio_channel == 9U ? 9U : 5U;
@@ -1398,6 +1431,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_radio_channel\":%u,"
         "\"runtime_wireless_telemetry_port\":%lu,"
         "\"uwb_status\":\"%s\","
+        "\"uwb_runtime_switching\":%s,"
+        "\"uwb_runtime_switch_count\":%lu,"
+        "\"uwb_last_runtime_switch_ms\":%lu,"
         "\"uwb_radio_profile\":%u,"
         "\"uwb_radio_channel\":%u,"
         "\"uwb_radio_rf_channel_bit\":%u,"
@@ -1912,6 +1948,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned)runtime_radio_channel(runtime_config),
         (unsigned long)runtime_config->wireless_telemetry_port,
         uwb_dw3000_status_to_string(uwb_dw3000_get_status()),
+        uwb_dw3000_runtime_switch_in_progress() ? "true" : "false",
+        (unsigned long)uwb_dw3000_get_runtime_switch_count(),
+        (unsigned long)uwb_dw3000_get_last_runtime_switch_ms(),
         (unsigned)runtime_radio_profile(runtime_config),
         (unsigned)runtime_radio_channel(runtime_config),
         (unsigned)runtime_radio_rf_channel_bit(runtime_config),
@@ -3241,6 +3280,13 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
     const app_runtime_config_t before_config = *app_runtime_config_get();
     const bool clear_requested = ota_query_option_enabled(query, "clear");
     const bool reboot_requested = ota_query_option_enabled(query, "reboot");
+    const bool hot_switch_requested =
+        ota_query_option_enabled(query, "hot_switch");
+    if (reboot_requested && hot_switch_requested) {
+        return httpd_resp_send_err(
+            req, HTTPD_400_BAD_REQUEST,
+            "Choose either reboot=1 or hot_switch=1");
+    }
     bool changed = false;
     bool cleared = false;
     esp_err_t err = ESP_OK;
@@ -3716,6 +3762,13 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         }
 
         if (changed) {
+            if (hot_switch_requested &&
+                !runtime_config_hot_switch_eligible(
+                    &before_config, &config)) {
+                return httpd_resp_send_err(
+                    req, HTTPD_400_BAD_REQUEST,
+                    "Hot switch only supports a mode-only transition among ranging, flex_tdoa and passive_ds");
+            }
             err = app_runtime_config_save(&config);
             if (err == ESP_OK &&
                 config.flex_tdoa_geometry_generation !=
@@ -3769,10 +3822,27 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         }
     }
 
+    bool hot_switch_started = false;
+    if (hot_switch_requested && changed && !cleared) {
+        const esp_err_t switch_err =
+            uwb_dw3000_request_runtime_switch(
+                active_config->runtime_mode);
+        if (switch_err != ESP_OK) {
+            ESP_LOGE(TAG, "UWB hot switch request failed: %s",
+                     esp_err_to_name(switch_err));
+            return httpd_resp_send_err(
+                req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                "UWB hot switch request failed");
+        }
+        hot_switch_started =
+            before_config.runtime_mode !=
+            active_config->runtime_mode;
+    }
+
     const bool reboot_recommended =
         runtime_config_reboot_recommended(&before_config, active_config);
     ESP_LOGW(TAG,
-             "Runtime config: changed=%s cleared=%s mode=%s(%u) tag=%u anchors=%s count=%u K=%u M=%u generation=%lu coord=%u reboot_recommended=%s reboot_requested=%s",
+             "Runtime config: changed=%s cleared=%s mode=%s(%u) tag=%u anchors=%s count=%u K=%u M=%u generation=%lu coord=%u reboot_recommended=%s reboot_requested=%s hot_switch_requested=%s hot_switch_started=%s",
              changed ? "true" : "false", cleared ? "true" : "false",
              app_runtime_config_runtime_mode_to_string(
                  active_config->runtime_mode),
@@ -3785,11 +3855,23 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
              (unsigned long)active_config->flex_tdoa_config_generation,
              (unsigned)active_config->anchor_survey_coordinator_id,
              reboot_recommended ? "true" : "false",
-             reboot_requested ? "true" : "false");
+             reboot_requested ? "true" : "false",
+             hot_switch_requested ? "true" : "false",
+             hot_switch_started ? "true" : "false");
 
-    char response[3072];
+    char *response = heap_caps_calloc(
+        1, OTA_SERVICE_RUNTIME_RESPONSE_SIZE,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (response == NULL) {
+        response = heap_caps_calloc(
+            1, OTA_SERVICE_RUNTIME_RESPONSE_SIZE, MALLOC_CAP_8BIT);
+    }
+    if (response == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "runtime response allocation failed");
+    }
     const int len = snprintf(
-        response, sizeof(response),
+        response, OTA_SERVICE_RUNTIME_RESPONSE_SIZE,
         "{"
         "\"ok\":true,"
         "\"changed\":%s,"
@@ -3840,7 +3922,10 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         "\"runtime_radio_channel\":%u,"
         "\"runtime_wireless_telemetry_port\":%lu,"
         "\"reboot_recommended\":%s,"
-        "\"rebooting\":%s"
+        "\"rebooting\":%s,"
+        "\"hot_switch_requested\":%s,"
+        "\"hot_switch_started\":%s,"
+        "\"hot_switch_in_progress\":%s"
         "}\n",
         changed ? "true" : "false", cleared ? "true" : "false",
         active_config->from_nvs ? "true" : "false",
@@ -3892,15 +3977,20 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         (unsigned)runtime_radio_channel(active_config),
         (unsigned long)active_config->wireless_telemetry_port,
         reboot_recommended ? "true" : "false",
-        reboot_requested ? "true" : "false");
+        reboot_requested ? "true" : "false",
+        hot_switch_requested ? "true" : "false",
+        hot_switch_started ? "true" : "false",
+        uwb_dw3000_runtime_switch_in_progress() ? "true" : "false");
 
-    if (len < 0 || len >= (int)sizeof(response)) {
+    if (len < 0 || len >= OTA_SERVICE_RUNTIME_RESPONSE_SIZE) {
+        free(response);
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                                    "response too long");
     }
 
     httpd_resp_set_type(req, "application/json");
     const esp_err_t response_err = httpd_resp_send(req, response, len);
+    free(response);
 
     if (reboot_requested) {
         s_status = OTA_SERVICE_STATUS_REBOOTING;

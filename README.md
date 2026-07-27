@@ -152,7 +152,7 @@ most Wi-Fi and TCP work:
 | `max77958` | 0 | Low-rate USB-C PD monitor/config service; also uses background I2C access. |
 | `wireless_log` | unpinned | Drains the log queue and mirrors logs over TCP; FreeRTOS may run it on either core. |
 | `wireless_tel` | 1 | Drains high-rate telemetry into batched TCP writes. |
-| short-lived reboot tasks | unpinned | Temporary restart helpers after OTA or runtime-config changes. |
+| short-lived reboot tasks | unpinned | Temporary restart helpers after OTA or runtime-config changes that explicitly require a reboot. |
 
 ESP-IDF also creates internal Wi-Fi, TCP/IP, and event-loop tasks. The HTTP
 server task is pinned to core 0 so `/status` and runtime config do not share the
@@ -259,6 +259,40 @@ implemented for the current lab workflow.
 `APP_RUNTIME_MODE` remains the firmware default. The effective runtime mode and
 common test parameters can be overridden at runtime through NVS using the
 authenticated `/config/runtime` HTTP endpoint.
+
+### Hot Protocol Switching
+
+The Position tab switches directly between Native DS-TWR, FlexTDOA, and Passive
+DS-TWR through `/config/runtime?...&hot_switch=1`. A successful hot switch:
+
+- persists the selected mode in NVS;
+- lets the active UWB loop leave at a safe protocol boundary;
+- stops the active UWB timers and resets the solver state;
+- resets and reconfigures only the DW3000; and
+- keeps Wi-Fi, HTTP, wireless logs, and binary telemetry running.
+
+The supervisor restores the 4 MHz DW3000 boot SPI rate for the radio reset and
+returns to the verified 40 MHz operational rate after initialization. If radio
+initialization fails, the firmware falls back to a full ESP32 restart.
+
+Hot switching is deliberately limited to a mode-only transition among these
+three positioning runtimes. Changes to module topology, tag/anchor IDs, channel,
+radio settings, timing parameters, diagnostics, calibration, or survey modes
+still follow the normal reboot path. The `/status` response exposes
+`uwb_runtime_switching`, `uwb_runtime_switch_count`, and
+`uwb_last_runtime_switch_ms` so the dashboard can distinguish a short radio
+transition from an offline module.
+
+The five-module live test on 2026-07-27 produced:
+
+| Transition | HTTP acknowledgement | All modules UWB-ready | First complete live data |
+| --- | ---: | ---: | ---: |
+| Native DS-TWR -> FlexTDOA | 0.101 s | 0.773 s | 0.784 s |
+| FlexTDOA -> Passive DS-TWR | 0.105 s | 0.623 s | 0.932 s |
+| Passive DS-TWR -> Native DS-TWR | 0.083 s | 0.764 s | 0.814 s tag ranges; 2.115 s all six anchor pairs |
+
+The measured DW3000 reinitialization time was 449-481 ms. ESP32 boot counters
+did not change during any transition.
 
 ## UWB Ranging Protocol
 
@@ -431,12 +465,10 @@ same controlled rebuild. This is the distributed propagation and recovery
 path; normal slot synchronization still comes from `REQ/RESP`, not from a
 separate periodic synchronization packet.
 
-Fixed geometry uses its own generation and one UWB frame per anchor point.
-Startup broadcasts repeat every point about four times. A `10 ms` gap between
-the topology and geometry frames lets receivers process the first frame and
-rearm the DW3000 before the second arrives. A one-node reboot was verified to
-propagate both fixed geometry and its later clear operation to four already
-running peers.
+The versioned fixed-geometry transport remains for backward compatibility with
+older captures and deployments. The current positioning workflow clears that
+legacy state and does not freeze coordinates: live anchor ranges continuously
+drive the embedded and dashboard geometry solvers.
 
 #### FlexTDOA Slot Timing
 
@@ -579,8 +611,8 @@ estimator are deliberately kept outside this radio validation.
 | Anchor self-localization payload | Implemented. Each request and response carries one previous directed SS-TWR+CFO result using the Figure 3 fields. |
 | Fully distributed slot synchronization | Implemented from request RX timestamps. A response can recover a node that missed the request, but a directly received request is authoritative for that slot. |
 | General `N/K/M` topology | Implemented for `3..10` anchors, configurable responder count, initiator slots, and per-slot responder masks. |
-| Configuration propagation | Implemented as versioned UWB frames. Topology and fixed geometry have independent generations; newer values are persisted in NVS and rebroadcast during startup. |
-| Local solver | Implemented on the tag ESP32-S3. Before fixation it reconstructs geometry from TWR; afterwards it loads the exact dashboard geometry from NVS and stops updating anchor coordinates. Raw TDOA observations feed a damped 2D least-squares AlgMin service on core 0; UWB remains on core 1. |
+| Configuration propagation | Implemented as versioned UWB frames. Topology is persisted and rebroadcast during startup; the legacy fixed-geometry generation is cleared for live positioning. |
+| Local solver | Implemented on the tag ESP32-S3. It continuously reconstructs relative geometry from fresh anchor TWR ranges. Raw TDOA observations feed a damped 2D least-squares AlgMin service on core 0; UWB remains on core 1. |
 | Paper radio setup | Use CH5, 6.8 Mb/s, PRF 64 MHz, preamble 128 when matching the paper. |
 | Firmware-side measurement filters | None. The radio path emits every structurally valid raw anchor range and tag range difference. |
 
@@ -894,40 +926,30 @@ TWR measurement variance  sigma_R^2 = 10 cm^2
 
 The dashboard treats the resulting covariance and the geometric fit as two
 different quantities. A small EKF covariance does not prove that the nonlinear
-solver selected the correct geometric minimum. Before `Fix Anchor Geometry` is
-allowed, the RMS error between the EKF coordinates and the current complete
-TWR frame must be below three measurement standard deviations:
+solver selected the correct geometric minimum. The RMS error between the EKF
+coordinates and the current complete TWR frame is compared with three
+measurement standard deviations:
 
 ```text
-fix limit = 3 * sqrt(10 cm^2) = 9.49 cm RMS
+fit reference = 3 * sqrt(10 cm^2) = 9.49 cm RMS
 ```
 
-This is a solver validity check before the geometry is fixed, not a filter
-applied to the raw FlexTDOA or TWR observations. After the operator fixes the
-geometry, a live RMS above the same limit remains visible as a diagnostic
-warning but does not suspend tag positioning. This avoids hiding the tag due
-to one noisy anchor-anchor frame during hardware tests. Use `Restart Anchor
-Self-Localization` explicitly after an anchor is physically moved.
+This is a solver diagnostic, not a filter applied to the raw FlexTDOA or TWR
+observations. Positioning no longer waits for an operator to freeze geometry.
+The EKF keeps updating while the protocol runs. Three newly updated geometry
+batches above `25 cm` RMS trigger an automatic geometric reinitialization, so a
+physically relocated anchor is acquired instead of being treated as a
+permanent residual. `Reset Live Geometry Estimate` remains available for a
+manual recovery and also clears any legacy fixed generation from the modules.
 
 For the current planar setup, the paper's coordinate convention is adapted to
 2D: the first selected anchor is fixed at `(0,0)`, the second is on the positive
-Y axis, and the third has positive X. Anchor coordinates remain in the explicit
-`self-localizing` phase until the operator chooses `Fix Anchor Geometry`. They
-are then sent to all modules, persisted in each ESP32 NVS, rebroadcast as
-versioned one-anchor UWB geometry frames, and loaded by the tag's local solver.
-The solver stops modifying anchor coordinates while this fixed generation is
-active. `Restart Anchor Self-Localization` clears the persisted generation on
-all modules after an anchor is physically moved. The dashboard enables this
-destructive action only while FlexTDOA is selected and asks for confirmation.
-Reapplying an unchanged anchor ID list no longer resets the fixed geometry;
-only an actual topology change starts a new self-localization generation.
-The module status also publishes the fixed X/Y coordinate vectors from NVS.
-The dashboard accepts them only when every HTTP-live module with the selected
-topology reports the same generation and coordinates. A new browser, a cleared
-`localStorage`, or a dashboard reload can therefore recover the authoritative
-geometry from the modules instead of requiring another FlexTDOA survey.
-There is no median window, stability threshold, or automatic freeze in this
-path.
+Y axis, and the third has positive X. This removes the unobservable global
+translation, rotation, and mirror ambiguity while allowing every relative
+anchor coordinate to change continuously. Geometry sessions are kept separate
+per radio protocol so protocol-specific range bias is not mixed when the
+operator switches solvers. There is no median window or automatic freeze in
+this path.
 
 Each new least-squares tag solve is seeded from the previous valid tag position,
 as described for AlgMin in the paper. This selects the same physical solution
@@ -1156,11 +1178,37 @@ clock-corrected `diff` so the correction can be audited.
 
 The dashboard `Position` tab reconstructs relative anchor geometry through the
 paper-style TWR-EKF phase. Raw pair ranges are grouped by TDMA frame and all
-available edges update the anchor state simultaneously. Tag positioning remains
-disabled until the operator fixes the resulting geometry. The geometry table
-continues to report current raw TWR residuals in centimeters after fixing, so a
-moved or unhealthy anchor remains visible without silently moving the solver's
-coordinate frame.
+available edges update the anchor state simultaneously. Tag positioning starts
+automatically once a complete live geometry exists and keeps following physical
+anchor movement.
+
+The browser-side geometry estimator has a temporal range gate in front of the
+EKF. A one-shot pair jump is rejected and the last accepted edge is held for up
+to 15 seconds, so a missed maintenance range or a brief radio outlier cannot
+reshape the canvas or hide the live position. A physical relocation is accepted
+automatically only after at least three persistent samples on two or more
+changed edges that share the same anchor, and only when the proposed complete
+geometry passes a 12 cm RMS consistency check. Published coordinates are
+slew-limited to 5 cm per update. The geometry panel preserves a cumulative
+rejected-spike counter and the last rejected pair/delta, making sub-second
+failures inspectable after they disappear from the raw stream. It reports the
+raw and accepted distances side by side and uses median-absolute-deviation
+robust sigma rather than the outlier-sensitive standard deviation.
+
+Native DS-TWR tag positioning additionally uses a robust 3-of-4 fit. A single
+bad tag-anchor range is omitted from the position and circle drawing, recorded
+in a persistent session counter, and shown as a skipped range in the
+measurement table. FlexTDOA and Passive DS-TWR tag observations remain raw for
+protocol analysis; the guard described above applies to their shared
+anchor-geometry stage.
+
+Native DS-TWR now inserts one rotating anchor-pair maintenance exchange every
+four tag-position frames. With four anchors, all six geometry edges are
+refreshed over 24 position frames; this costs about one quarter of one slot per
+frame on average. Passive DS-TWR Fast Star keeps its reference for three frames
+and rotates the fourth frame through the remaining anchors, so it obtains a
+complete geometry without extra slots. Robust Rotating and FlexTDOA already
+observe the required anchor pairs in their normal schedules.
 
 The `Position Setup` solver selector is intentionally protocol-level, so field
 tests can compare the same geometry and tag path without changing dashboard
@@ -1170,6 +1218,7 @@ code:
 | --- | --- | --- | --- | --- |
 | `DS-TWR ranges` | `uwb_ranging` | tag actively responds to each anchor | absolute tag-anchor DS-TWR distance | Baseline comparison with direct ranges. |
 | `FlexTDOA` | `uwb_flex_tdoa` | tag only listens | paper-style request/response passive range difference | Current default. Matches the FlexTDOA paper slot model. |
+| `Passive DS-TWR` | `uwb_passive_ds_twr` | tag only listens | passive difference from native anchor DS-TWR | Scalable passive tags with native three-packet anchor ranging. |
 | `Legacy hybrid logs` | `uwb_flex_tdoa` legacy captures | tag only listens | guarded dual-leg `diff`, fused from `primary` and `alt` when they agree | Historical comparison only. Useful for replaying older captures. |
 
 The passive FlexTDOA path now has two consumers of the same raw measurements.

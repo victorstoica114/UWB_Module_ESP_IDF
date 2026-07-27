@@ -30,6 +30,7 @@ enum flex_solver_item_type {
     FLEX_SOLVER_ITEM_RANGE,
     FLEX_SOLVER_ITEM_OBSERVATION,
     FLEX_SOLVER_ITEM_RELOAD_GEOMETRY,
+    FLEX_SOLVER_ITEM_RESET,
 };
 
 struct flex_solver_item {
@@ -568,6 +569,13 @@ static void flex_solver_task(void *arg)
         if (xQueueReceive(s_queue, &item, portMAX_DELAY) != pdTRUE) {
             continue;
         }
+        if (item.type == FLEX_SOLVER_ITEM_RESET) {
+            memset(&state, 0, sizeof(state));
+            flex_solver_apply_runtime_geometry(&state);
+            xQueueReset(s_queue);
+            ESP_LOGI(TAG, "FlexTDOA local solver reset for runtime switch");
+            continue;
+        }
         if (item.type == FLEX_SOLVER_ITEM_RELOAD_GEOMETRY) {
             flex_solver_apply_runtime_geometry(&state);
             continue;
@@ -676,6 +684,14 @@ bool flextdoa_solver_service_reload_geometry(void)
 {
     const struct flex_solver_item item = {
         .type = FLEX_SOLVER_ITEM_RELOAD_GEOMETRY,
+    };
+    return flex_solver_submit(&item);
+}
+
+bool flextdoa_solver_service_reset(void)
+{
+    const struct flex_solver_item item = {
+        .type = FLEX_SOLVER_ITEM_RESET,
     };
     return flex_solver_submit(&item);
 }

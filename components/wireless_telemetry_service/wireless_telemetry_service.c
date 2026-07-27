@@ -51,6 +51,7 @@ enum {
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_ANCHOR_RANGE = 6,
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION = 7,
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2 = 8,
+    WIRELESS_TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE = 9,
     WIRELESS_TELEMETRY_RECONNECT_MS = 2000,
     WIRELESS_TELEMETRY_WIFI_WAIT_MS = 500,
     WIRELESS_TELEMETRY_QUEUE_WAIT_MS = 20,
@@ -72,6 +73,7 @@ typedef enum {
     WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_OBSERVATION,
     WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_ANCHOR_RANGE,
     WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_POSITION,
+    WIRELESS_TELEMETRY_ITEM_NATIVE_DS_ANCHOR_RANGE,
 } wireless_telemetry_item_type_t;
 
 typedef struct {
@@ -521,6 +523,10 @@ static bool wireless_telemetry_binary_item_info(
         *stream_type = WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION;
         *sample_len = WIRELESS_TELEMETRY_FLEX_POSITION_SAMPLE_LEN;
         return true;
+    case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_ANCHOR_RANGE:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE;
+        *sample_len = WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN;
+        return true;
     default:
         return false;
     }
@@ -645,6 +651,7 @@ static bool wireless_telemetry_append_binary_sample(
         break;
     case WIRELESS_TELEMETRY_ITEM_FLEX_ANCHOR_RANGE:
     case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_ANCHOR_RANGE:
+    case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_ANCHOR_RANGE:
         wireless_telemetry_write_i32_le(
             &sample[8], item->data.flex_anchor_range.distance_mm);
         wireless_telemetry_write_i32_le(
@@ -1291,6 +1298,32 @@ bool wireless_telemetry_service_submit_passive_ds_anchor_range(
 
     const wireless_telemetry_item_t item = {
         .type = WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_ANCHOR_RANGE,
+        .uptime_ms =
+            (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
+        .data = {
+            .flex_anchor_range = {
+                .slot_id = slot_id,
+                .distance_mm = distance_mm,
+                .raw_distance_mm = raw_distance_mm,
+                .sequence = sequence,
+                .initiator_id = initiator_id,
+                .responder_id = responder_id,
+            },
+        },
+    };
+    return wireless_telemetry_enqueue(&item);
+}
+
+bool wireless_telemetry_service_submit_native_ds_anchor_range(
+    uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
+    uint32_t slot_id, int32_t distance_mm, int32_t raw_distance_mm)
+{
+    if (!s_connected) {
+        return false;
+    }
+
+    const wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_NATIVE_DS_ANCHOR_RANGE,
         .uptime_ms =
             (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
         .data = {

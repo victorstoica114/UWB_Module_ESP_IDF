@@ -89,6 +89,7 @@ TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION = 5
 TELEMETRY_STREAM_PASSIVE_DS_ANCHOR_RANGE = 6
 TELEMETRY_STREAM_PASSIVE_DS_POSITION = 7
 TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2 = 8
+TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE = 9
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
 TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
@@ -116,6 +117,8 @@ TELEMETRY_STREAM_SAMPLE_SIZES = {
         TELEMETRY_FLEX_POSITION_SAMPLE_LEN,
     TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2:
         TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN,
+    TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE:
+        TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN,
 }
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
 
@@ -690,6 +693,7 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
         elif stream_type in (
             TELEMETRY_STREAM_FLEX_ANCHOR_RANGE,
             TELEMETRY_STREAM_PASSIVE_DS_ANCHOR_RANGE,
+            TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE,
         ):
             (
                 uptime_ms,
@@ -704,16 +708,20 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                 {
                     **common,
                     "uptime_ms": int(uptime_ms),
-                    "topic": (
-                        "uwb.passive_ds.anchor_range"
-                        if stream_type == TELEMETRY_STREAM_PASSIVE_DS_ANCHOR_RANGE
-                        else "uwb.flex_tdoa.anchor_range"
+                    "topic": {
+                        TELEMETRY_STREAM_PASSIVE_DS_ANCHOR_RANGE:
+                            "uwb.passive_ds.anchor_range",
+                        TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE:
+                            "uwb.native_ds.anchor_range",
+                    }.get(
+                        stream_type, "uwb.flex_tdoa.anchor_range"
                     ),
-                    "tdoa_protocol": (
-                        "passive_ds"
-                        if stream_type == TELEMETRY_STREAM_PASSIVE_DS_ANCHOR_RANGE
-                        else "flextdoa"
-                    ),
+                    "tdoa_protocol": {
+                        TELEMETRY_STREAM_PASSIVE_DS_ANCHOR_RANGE:
+                            "passive_ds",
+                        TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE:
+                            "native_ds",
+                    }.get(stream_type, "flextdoa"),
                     "slot_id": int(slot_id),
                     "distance_m": distance_mm / 1000.0,
                     "raw_distance_m": raw_distance_mm / 1000.0,
@@ -850,6 +858,7 @@ class DashboardState:
                 elif topic in (
                     "uwb.flex_tdoa.anchor_range",
                     "uwb.passive_ds.anchor_range",
+                    "uwb.native_ds.anchor_range",
                 ):
                     self.record_tdoa_anchor_sample_locked(sample)
                 elif topic in (
@@ -1322,6 +1331,19 @@ class DashboardState:
             return clean[middle]
         return (clean[middle - 1] + clean[middle]) / 2.0
 
+    @classmethod
+    def robust_spread_float(
+        cls, values: list[float], center: float | None = None
+    ) -> tuple[float | None, float | None]:
+        if center is None:
+            center = cls.median_float(values)
+        if center is None:
+            return None, None
+        deviations = [abs(value - center) for value in values]
+        mad_m = cls.median_float(deviations)
+        robust_sigma_m = 1.4826 * mad_m if mad_m is not None else None
+        return mad_m, robust_sigma_m
+
     @staticmethod
     def optional_float(value: Any) -> float | None:
         try:
@@ -1358,6 +1380,9 @@ class DashboardState:
             ]
             mean_m = sum(values) / len(values) if values else None
             median_m = self.median_float(values)
+            mad_m, robust_sigma_m = self.robust_spread_float(
+                values, median_m
+            )
             std_m = None
             if len(values) >= 2 and mean_m is not None:
                 variance = sum((value - mean_m) ** 2 for value in values) / (
@@ -1380,6 +1405,8 @@ class DashboardState:
                     "samples": len(values),
                     "mean_m": mean_m,
                     "median_m": median_m,
+                    "mad_m": mad_m,
+                    "robust_sigma_m": robust_sigma_m,
                     "std_m": std_m,
                     "min_m": min(values) if values else None,
                     "max_m": max(values) if values else None,
@@ -1409,6 +1436,9 @@ class DashboardState:
             ]
             mean_m = sum(values) / len(values) if values else None
             median_m = self.median_float(values)
+            mad_m, robust_sigma_m = self.robust_spread_float(
+                values, median_m
+            )
             std_m = None
             if len(values) >= 2 and mean_m is not None:
                 variance = sum((value - mean_m) ** 2 for value in values) / (
@@ -1447,6 +1477,8 @@ class DashboardState:
                     "samples": len(values),
                     "mean_m": mean_m,
                     "median_m": median_m,
+                    "mad_m": mad_m,
+                    "robust_sigma_m": robust_sigma_m,
                     "std_m": std_m,
                     "min_m": min(values) if values else None,
                     "max_m": max(values) if values else None,
@@ -1499,6 +1531,10 @@ class DashboardState:
                 if now - float(sample.get("received_at") or 0.0) <= 10.0
             ]
             mean_m = sum(values) / len(values) if values else None
+            median_m = self.median_float(values)
+            mad_m, robust_sigma_m = self.robust_spread_float(
+                values, median_m
+            )
             std_m = None
             if len(values) >= 2 and mean_m is not None:
                 variance = sum((value - mean_m) ** 2 for value in values) / (
@@ -1524,6 +1560,9 @@ class DashboardState:
                 "stats": {
                     "samples": len(values),
                     "mean_m": mean_m,
+                    "median_m": median_m,
+                    "mad_m": mad_m,
+                    "robust_sigma_m": robust_sigma_m,
                     "std_m": std_m,
                     "min_m": min(values) if values else None,
                     "max_m": max(values) if values else None,
@@ -3173,21 +3212,20 @@ tr.status-stale td { color: #4f3b1d; }
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
             <div><b>Solver</b><span>FlexTDOA and Passive DS-TWR use receive-only tags. Native DS-TWR ranges each active tag to every anchor. Each protocol keeps independent timing profiles.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In both passive protocols every non-anchor module only listens on UWB, so additional tags consume no radio slots.</span></div>
-            <div><b>Geometry</b><span>Paper-style anchor self-localization uses batched TWR ranges and an EKF. Fix the resulting coordinates once before positioning, and restart self-localization after moving an anchor.</span></div>
+            <div><b>Geometry</b><span>Anchor-to-anchor DS-TWR continuously updates the paper-style EKF. Physical anchor movement changes the displayed geometry and every live position solver automatically; no fixed layout is required.</span></div>
             <div><b>Known reference</b><span>Use the anchor centroid while the tag is physically centered. Manual coordinates support other surveyed test points.</span></div>
           </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
-            <button id="positionRestartAnchorSelfLocalization">Restart Anchor Self-Localization</button>
-            <button id="positionFixAnchorGeometry">Fix Anchor Geometry</button>
+            <button id="positionRestartAnchorSelfLocalization">Reset Live Geometry Estimate</button>
             <button class="primary" id="positionEnableRangingSide">Enable Position Runtime</button>
           </div>
           <div id="positionToast" class="toast"></div>
           <div class="section" style="margin-top:12px;">
-            <h2>Measured Anchor Geometry</h2>
-            <div id="positionGeometryStatus" class="muted" style="margin-bottom:8px;">Waiting to learn anchor geometry.</div>
+            <h2>Live Anchor Geometry</h2>
+            <div id="positionGeometryStatus" class="muted" style="margin-bottom:8px;">Waiting for live anchor ranges.</div>
             <table>
-              <thead><tr><th>Pair</th><th>m / avg</th><th>std</th><th>age</th><th>fit</th></tr></thead>
+              <thead><tr><th>Pair</th><th>raw / stable</th><th>robust σ</th><th>age</th><th>fit</th></tr></thead>
               <tbody id="positionGeometryRows"></tbody>
             </table>
           </div>
@@ -3938,7 +3976,7 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p class="muted profile-note">Both variants use exactly POLL, RESP and FINAL. Fast Star minimizes transitions by keeping A1 as reference. Robust Rotating changes the reference after each complete frame, adding path diversity while tag count remains free.</p>
+          <p class="muted profile-note">Both variants use exactly POLL, RESP and FINAL. Fast Star keeps A1 as the position reference for three frames, then uses one rotating maintenance frame so every physical anchor pair remains observable. Robust Rotating changes the reference after every complete frame, adding maximum path diversity while tag count remains free.</p>
           <div class="profile-grid">
             <div class="profile-card passive-ds-profile-card" data-passive-ds-profile="fast">
               <h3>Fast Star</h3>
@@ -4318,8 +4356,13 @@ const state = {
   positionResults: {},
   positionModel: null,
   positionWasActive: false,
-  positionGeometry: {key: "", fixed: null, ekf: null},
+  positionGeometry: {key: "", ekf: null},
   positionSeeds: {},
+  nativeRangeDiagnostics: {
+    rejectedCount: 0,
+    lastRejected: null,
+    tokens: {},
+  },
   positionStream: null,
   positionStreamConnected: false,
   positionStreamRenderPending: false,
@@ -4577,6 +4620,8 @@ const rangingProtocolProfileFields = {
 const rangingProfileDefaultsVersion = "2026-07-26-native-ds-twr-speed-study-v3";
 const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
 const passiveDsProfileDefaultsVersion = "2026-07-27-passive-ds-validated-1ms-v4";
+const nativeDsGeometryFrameInterval = 4;
+const nativeDsGeometryCommandDelayMs = 1;
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -5083,9 +5128,16 @@ function positionRuntimeModeForSolver(solver) {
 }
 
 function positionGeometryMaxAge(settings) {
-  return positionProtocolUsesTdoa(settings.solver)
-    ? settings.maxAge
-    : Number.POSITIVE_INFINITY;
+  // Geometry is refreshed on a slower cadence than tag observations. Native
+  // DS-TWR rotates one maintenance pair across position frames, while the two
+  // passive protocols collect several pair ranges in a superframe.
+  return Math.max(3, Number(settings.maxAge) || 0);
+}
+
+function positionGeometryProtocol(solver) {
+  if (solver === "passive_ds") return "passive_ds";
+  if (solver === "ranging") return "native_ds";
+  return "flextdoa";
 }
 
 function positionSolverLabel(solver) {
@@ -5141,11 +5193,11 @@ function switchPositionProtocolSettings() {
   const restartGeometry =
     document.getElementById("positionRestartAnchorSelfLocalization");
   if (restartGeometry) {
-    const available = solver === "flextdoa";
+    const available = solver !== "hybrid";
     restartGeometry.disabled = !available;
     restartGeometry.title = available
-      ? "Clear the fixed geometry on every module and restart FlexTDOA self-localization."
-      : "Passive DS-TWR uses the shared fixed anchor geometry; learn or survey it in FlexTDOA first.";
+      ? "Clear any legacy fixed geometry and restart the live anchor estimate."
+      : "Legacy replay does not control a live geometry estimator.";
   }
 }
 
@@ -5276,6 +5328,8 @@ function moduleHttpOnline(item) {
 
 function moduleInPositionRuntime(item, solver) {
   if (!item || !moduleHttpOnline(item)) return false;
+  if (item.uwb_runtime_switching ||
+      String(item.uwb_status || "").toLowerCase() !== "ready") return false;
   const mode = String(item.runtime_mode_name || item.runtime_mode || "").toLowerCase();
   const wanted = positionRuntimeModeForSolver(solver);
   return Boolean(item.runtime_uwb_enabled) && mode.includes(wanted);
@@ -5356,6 +5410,77 @@ function trilaterate(anchors, distances) {
   return solve2x2(nxx, nxy, nxy, nyy, rhsX, rhsY);
 }
 
+function robustTrilaterate(anchors, distances, seed = null) {
+  const ids = Object.keys(distances)
+    .map(Number)
+    .filter(id =>
+      anchors[id] &&
+      Number.isFinite(Number(distances[id])) &&
+      Number(distances[id]) > 0)
+    .sort((left, right) => left - right);
+  if (ids.length < 3) return null;
+
+  const subsets = [ids];
+  if (ids.length > 3) {
+    for (let omitted = 0; omitted < ids.length; omitted++) {
+      subsets.push(ids.filter((_, index) => index !== omitted));
+    }
+  }
+  const candidates = [];
+  for (const subset of subsets) {
+    const subsetDistances = Object.fromEntries(
+      subset.map(id => [id, Number(distances[id])]));
+    const position = trilaterate(anchors, subsetDistances);
+    if (!position ||
+        !Number.isFinite(position.x) || !Number.isFinite(position.y)) continue;
+    const residuals = positionResiduals(position, anchors, distances);
+    const absolute = Object.entries(residuals)
+      .map(([id, residual]) => [Number(id), Math.abs(Number(residual))])
+      .filter(([, residual]) => Number.isFinite(residual))
+      .sort((left, right) => left[1] - right[1]);
+    const inlierLimitM = 0.12;
+    const inlierIds = absolute
+      .filter(([, residual]) => residual <= inlierLimitM)
+      .map(([id]) => id);
+    const trimmed = absolute.slice(0, Math.min(3, absolute.length));
+    const trimmedRmsM = trimmed.length
+      ? Math.sqrt(trimmed.reduce(
+        (sum, [, residual]) => sum + residual * residual, 0) / trimmed.length)
+      : Infinity;
+    const seedDistanceM = seed &&
+        Number.isFinite(Number(seed.x)) && Number.isFinite(Number(seed.y))
+      ? Math.hypot(position.x - Number(seed.x), position.y - Number(seed.y))
+      : 0;
+    candidates.push({
+      position,
+      residuals,
+      inlierIds,
+      inlierCount: inlierIds.length,
+      trimmedRmsM,
+      seedDistanceM,
+    });
+  }
+  candidates.sort((left, right) =>
+    right.inlierCount - left.inlierCount ||
+    left.trimmedRmsM - right.trimmedRmsM ||
+    left.seedDistanceM - right.seedDistanceM);
+  const best = candidates[0];
+  if (!best || best.inlierCount < 3 || best.trimmedRmsM > 0.12) return null;
+
+  const usedDistances = Object.fromEntries(
+    best.inlierIds.map(id => [id, Number(distances[id])]));
+  const refined = trilaterate(anchors, usedDistances) || best.position;
+  const residuals = positionResiduals(refined, anchors, distances);
+  const usedIds = Object.keys(usedDistances).map(Number);
+  return {
+    position: refined,
+    residuals,
+    usedDistances,
+    usedIds,
+    rejectedIds: ids.filter(id => !usedIds.includes(id)),
+  };
+}
+
 function positionResiduals(position, anchors, distances) {
   const residuals = {};
   if (!position) return residuals;
@@ -5427,29 +5552,303 @@ function anchorGeometryFitQuality(anchorIds, residuals) {
   };
 }
 
-function currentAnchorDistanceBatch(anchorIds, maxAge) {
-  const ids = anchorIds.map(Number).filter(id => Number.isInteger(id) && id > 0);
-  const liveItems = {};
-  for (const [a, b] of selectedAnchorPairs(ids)) {
-    const item = freshAnchorPairDistance(a, b, maxAge);
-    if (item) liveItems[anchorPairKey(a, b)] = item;
+const paperGeometryGuard = Object.freeze({
+  minGateM: 0.10,
+  maxGateM: 0.16,
+  candidateToleranceM: 0.08,
+  candidateConfirmations: 3,
+  candidateMinSpanSec: 0.8,
+  candidateMaxAgeSec: 4,
+  relocationMinEdges: 2,
+  relocationFitLimitM: 0.12,
+  acceptedHoldSec: 15,
+  publishedMaxStepM: 0.05,
+});
+
+function geometryMeasurementToken(item) {
+  if (!item) return "";
+  return `${item.slot_id ?? "-"}:${item.seq ?? "-"}:` +
+    `${Number(item.received_at || 0).toFixed(6)}`;
+}
+
+function geometryRobustSigma(item) {
+  const value = Number(item?.stats?.robust_sigma_m);
+  return Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function geometryMeasurementGate(item) {
+  return Math.min(
+    paperGeometryGuard.maxGateM,
+    Math.max(paperGeometryGuard.minGateM, geometryRobustSigma(item) * 6)
+  );
+}
+
+function geometryBootstrapItem(item) {
+  if (!item) return null;
+  const sampleCount = Number(item?.stats?.samples || 0);
+  const median = Number(item?.stats?.median_m);
+  const measured = Number(item.distance_m);
+  const distance = sampleCount >= 3 && Number.isFinite(median) && median > 0
+    ? median
+    : measured;
+  if (!Number.isFinite(distance) || distance <= 0) return null;
+  return {
+    ...item,
+    raw_latest_distance_m: measured,
+    accepted_distance_m: distance,
+    distance_m: distance,
+    geometry_gate_status: sampleCount >= 3 ? "robust bootstrap" : "bootstrap",
+  };
+}
+
+function geometryItemAge(item, now) {
+  const receivedAt = Number(item?.received_at);
+  if (Number.isFinite(receivedAt) && receivedAt > 0) {
+    return Math.max(0, now - receivedAt);
+  }
+  return Math.max(0, Number(item?.age_sec) || 0);
+}
+
+function createGeometryPairState(item, now) {
+  const accepted = geometryBootstrapItem(item);
+  if (!accepted) return null;
+  return {
+    acceptedDistanceM: Number(accepted.distance_m),
+    acceptedItem: accepted,
+    acceptedAt: now,
+    lastSeenToken: geometryMeasurementToken(item),
+    lastStatus: accepted.geometry_gate_status,
+    candidateDistanceM: NaN,
+    candidateItem: null,
+    candidateCount: 0,
+    candidateFirstAt: 0,
+    candidateLastAt: 0,
+    rejectedCount: 0,
+  };
+}
+
+function geometryPairStatesFromItems(distanceItems, now) {
+  const pairStates = {};
+  for (const [key, item] of Object.entries(distanceItems || {})) {
+    const pairState = createGeometryPairState(item, now);
+    if (pairState) pairStates[key] = pairState;
+  }
+  return pairStates;
+}
+
+function acceptedGeometryItems(ekf, now) {
+  const items = {};
+  for (const [key, pairState] of Object.entries(ekf?.pairStates || {})) {
+    if (!pairState?.acceptedItem) continue;
+    const ageSec = geometryItemAge(pairState.acceptedItem, now);
+    if (ageSec > paperGeometryGuard.acceptedHoldSec) continue;
+    items[key] = {
+      ...pairState.acceptedItem,
+      age_sec: ageSec,
+      distance_m: Number(pairState.acceptedDistanceM),
+      accepted_distance_m: Number(pairState.acceptedDistanceM),
+    };
+  }
+  return items;
+}
+
+function updateGeometryCandidate(pairState, item, measured, now) {
+  const tolerance = Math.max(
+    paperGeometryGuard.candidateToleranceM,
+    Math.min(0.12, geometryRobustSigma(item) * 4)
+  );
+  if (Number.isFinite(pairState.candidateDistanceM) &&
+      Math.abs(measured - pairState.candidateDistanceM) <= tolerance &&
+      now - pairState.candidateLastAt <= paperGeometryGuard.candidateMaxAgeSec) {
+    const count = pairState.candidateCount + 1;
+    pairState.candidateDistanceM +=
+      (measured - pairState.candidateDistanceM) / count;
+    pairState.candidateCount = count;
+  } else {
+    pairState.candidateDistanceM = measured;
+    pairState.candidateCount = 1;
+    pairState.candidateFirstAt = now;
+  }
+  pairState.candidateItem = {
+    ...item,
+    distance_m: pairState.candidateDistanceM,
+    accepted_distance_m: pairState.candidateDistanceM,
+  };
+  pairState.candidateLastAt = now;
+}
+
+function confirmedGeometryRelocation(ekf, anchorIds, now) {
+  const confirmed = Object.entries(ekf.pairStates || {}).filter(([, pairState]) =>
+    pairState.candidateCount >= paperGeometryGuard.candidateConfirmations &&
+    pairState.candidateLastAt - pairState.candidateFirstAt >=
+      paperGeometryGuard.candidateMinSpanSec &&
+    now - pairState.candidateLastAt <=
+      paperGeometryGuard.candidateMaxAgeSec);
+  if (confirmed.length < paperGeometryGuard.relocationMinEdges) return null;
+
+  const incident = new Map();
+  for (const [key] of confirmed) {
+    const [a, b] = key.split(":").map(Number);
+    incident.set(a, (incident.get(a) || 0) + 1);
+    incident.set(b, (incident.get(b) || 0) + 1);
+  }
+  const moving = [...incident.entries()]
+    .filter(([, count]) => count >= paperGeometryGuard.relocationMinEdges)
+    .sort((left, right) => right[1] - left[1])[0];
+  if (!moving) return null;
+
+  const movingAnchorId = moving[0];
+  const proposedItems = acceptedGeometryItems(ekf, now);
+  let changedEdges = 0;
+  for (const [key, pairState] of confirmed) {
+    const ids = key.split(":").map(Number);
+    if (!ids.includes(movingAnchorId) || !pairState.candidateItem) continue;
+    proposedItems[key] = {
+      ...pairState.candidateItem,
+      distance_m: Number(pairState.candidateDistanceM),
+      accepted_distance_m: Number(pairState.candidateDistanceM),
+      geometry_gate_status: "confirmed relocation",
+    };
+    changedEdges++;
+  }
+  if (changedEdges < paperGeometryGuard.relocationMinEdges ||
+      Object.keys(proposedItems).length !== selectedAnchorPairs(anchorIds).length) {
+    return null;
   }
 
+  const proposedAnchors = initialPaperAnchorCoordinates(
+    anchorIds, proposedItems);
+  if (!proposedAnchors) return null;
+  const residuals = anchorGeometryResiduals(proposedAnchors, proposedItems);
+  const fit = anchorGeometryFitQuality(anchorIds, residuals);
+  if (!fit.complete || !Number.isFinite(fit.rmsM) ||
+      fit.rmsM > paperGeometryGuard.relocationFitLimitM) {
+    return null;
+  }
+  return {
+    movingAnchorId,
+    distanceItems: proposedItems,
+    fit,
+  };
+}
+
+function conditionPaperAnchorBatch(ekf, batch, now) {
+  const updateItems = {};
+  const displayItems = {};
+  const expectedPairs = selectedAnchorPairs(batch.ids);
+  for (const [a, b] of expectedPairs) {
+    const key = anchorPairKey(a, b);
+    const rawItem = batch.distanceItems[key];
+    let pairState = ekf.pairStates[key];
+    if (!pairState && rawItem) {
+      pairState = createGeometryPairState(rawItem, now);
+      if (pairState) {
+        ekf.pairStates[key] = pairState;
+        updateItems[key] = pairState.acceptedItem;
+      }
+    }
+    if (!pairState) continue;
+
+    const token = geometryMeasurementToken(rawItem);
+    if (rawItem && token && token !== pairState.lastSeenToken) {
+      pairState.lastSeenToken = token;
+      const measured = Number(rawItem.distance_m);
+      const delta = measured - Number(pairState.acceptedDistanceM);
+      const gateM = geometryMeasurementGate(rawItem);
+      if (Number.isFinite(measured) && measured > 0 &&
+          Math.abs(delta) <= gateM) {
+        pairState.acceptedDistanceM = measured;
+        pairState.acceptedItem = {
+          ...rawItem,
+          raw_latest_distance_m: measured,
+          accepted_distance_m: measured,
+          distance_m: measured,
+          geometry_gate_status: "accepted",
+        };
+        pairState.acceptedAt = now;
+        pairState.lastStatus = "accepted";
+        pairState.candidateDistanceM = NaN;
+        pairState.candidateItem = null;
+        pairState.candidateCount = 0;
+        pairState.candidateFirstAt = 0;
+        pairState.candidateLastAt = 0;
+        updateItems[key] = pairState.acceptedItem;
+        ekf.lastGoodAt = now;
+      } else {
+        pairState.rejectedCount++;
+        pairState.lastStatus = "rejected spike";
+        updateGeometryCandidate(pairState, rawItem, measured, now);
+        ekf.rejectedCount++;
+        ekf.lastRejected = {
+          key,
+          measuredM: measured,
+          acceptedM: Number(pairState.acceptedDistanceM),
+          deltaM: delta,
+          at: now,
+          count: ekf.rejectedCount,
+        };
+      }
+    }
+
+    const acceptedAge = geometryItemAge(pairState.acceptedItem, now);
+    const held = !rawItem ||
+      geometryMeasurementToken(rawItem) !==
+        geometryMeasurementToken(pairState.acceptedItem);
+    displayItems[key] = {
+      ...(rawItem || pairState.acceptedItem),
+      age_sec: rawItem
+        ? geometryItemAge(rawItem, now)
+        : acceptedAge,
+      raw_latest_distance_m: Number(rawItem?.distance_m),
+      accepted_distance_m: Number(pairState.acceptedDistanceM),
+      geometry_gate_status: pairState.lastStatus,
+      geometry_held: held,
+      geometry_rejected_count: pairState.rejectedCount,
+    };
+  }
+  return {
+    updateItems,
+    displayItems,
+    acceptedItems: acceptedGeometryItems(ekf, now),
+    relocation: confirmedGeometryRelocation(ekf, batch.ids, now),
+  };
+}
+
+function currentAnchorDistanceBatch(anchorIds, maxAge, solver) {
+  const ids = anchorIds.map(Number).filter(id => Number.isInteger(id) && id > 0);
+  const expectedProtocol = positionGeometryProtocol(solver);
   const selected = new Set(ids);
+  const liveItems = {};
   const groups = new Map();
   for (const sample of state.tdoa?.recent_anchor_ranges || []) {
     const initiator = Number(sample.initiator_id);
     const responder = Number(sample.responder_id);
     const slotId = Number(sample.slot_id);
+    const protocol = String(sample.tdoa_protocol || "flextdoa");
     if (!selected.has(initiator) || !selected.has(responder) ||
-        !Number.isInteger(slotId) || Number(sample.age_sec) > maxAge) continue;
-    const passiveDs = String(sample.tdoa_protocol || "") === "passive_ds";
-    const geometryCycleSlots = passiveDs
+        !Number.isInteger(slotId) || Number(sample.age_sec) > maxAge ||
+        protocol !== expectedProtocol) continue;
+
+    const pair = anchorPairKey(initiator, responder);
+    const previous = liveItems[pair];
+    if (!previous ||
+        Number(sample.received_at || 0) > Number(previous.received_at || 0)) {
+      const summary = freshAnchorPairDistance(
+        Number(sample.anchor_a_id), Number(sample.anchor_b_id), maxAge);
+      liveItems[pair] = {
+        ...(String(summary?.tdoa_protocol || "") === expectedProtocol
+          ? summary
+          : {}),
+        ...sample,
+      };
+    }
+
+    if (expectedProtocol === "native_ds") continue;
+    const geometryCycleSlots = expectedProtocol === "passive_ds"
       ? ids.length * Math.max(1, ids.length - 1)
       : ids.length;
     const frameId = Math.floor(slotId / geometryCycleSlots);
     const group = groups.get(frameId) || {frameId, items: {}, newestAt: 0};
-    const pair = anchorPairKey(initiator, responder);
     group.items[pair] = {...(liveItems[pair] || {}), ...sample};
     group.newestAt = Math.max(group.newestAt, Number(sample.received_at) || 0);
     groups.set(frameId, group);
@@ -5462,12 +5861,21 @@ function currentAnchorDistanceBatch(anchorIds, maxAge) {
   const distanceItems = complete?.items || liveItems;
   const missingPairs = expectedPairs.filter(
     ([a, b]) => !distanceItems[anchorPairKey(a, b)]);
+  const updateToken = complete
+    ? `${expectedProtocol}:frame:${complete.frameId}`
+    : `${expectedProtocol}:live:` + expectedPairs.map(([a, b]) => {
+      const item = distanceItems[anchorPairKey(a, b)];
+      return `${a}-${b}:${item?.slot_id ?? "-"}:${item?.seq ?? "-"}:` +
+        `${Number(item?.received_at || 0).toFixed(6)}`;
+    }).join("|");
   return {
     ids,
     distanceItems,
     missingPairs,
-    coherent: Boolean(complete),
+    coherent: Boolean(complete) || missingPairs.length === 0,
     frameId: complete?.frameId ?? null,
+    updateToken,
+    protocol: expectedProtocol,
   };
 }
 
@@ -5552,6 +5960,8 @@ function multiplyMatrixVector(matrix, vector) {
 function updatePaperAnchorEkf(ekf, anchorIds, distanceItems) {
   const variables = ekf.variables;
   const n = variables.length;
+  const measurements = Object.values(distanceItems || {});
+  if (!measurements.length) return false;
   const anchors = paperAnchorCoordinatesFromState(anchorIds, variables, ekf.state);
   const indexFor = new Map(
     variables.map((variable, index) => [`${variable.id}:${variable.axis}`, index])
@@ -5566,7 +5976,7 @@ function updatePaperAnchorEkf(ekf, anchorIds, distanceItems) {
   if (!information) return false;
   const rhs = Array(n).fill(0);
 
-  for (const item of Object.values(distanceItems)) {
+  for (const item of measurements) {
     const a = anchors[Number(item.anchor_a_id)];
     const b = anchors[Number(item.anchor_b_id)];
     const measured = Number(item.distance_m);
@@ -5575,6 +5985,10 @@ function updatePaperAnchorEkf(ekf, anchorIds, distanceItems) {
     const dy = a.y - b.y;
     const predicted = Math.max(1e-6, Math.hypot(dx, dy));
     const innovation = measured - predicted;
+    const huberScaleM = 0.06;
+    const robustWeight = Math.min(
+      1, huberScaleM / Math.max(huberScaleM, Math.abs(innovation)));
+    const effectiveVariance = rVarianceM2 / robustWeight;
     const gradient = Array(n).fill(0);
     const ax = indexFor.get(`${item.anchor_a_id}:x`);
     const ay = indexFor.get(`${item.anchor_a_id}:y`);
@@ -5586,9 +6000,10 @@ function updatePaperAnchorEkf(ekf, anchorIds, distanceItems) {
     if (by !== undefined) gradient[by] = -dy / predicted;
 
     for (let r = 0; r < n; r++) {
-      rhs[r] += gradient[r] * innovation / rVarianceM2;
+      rhs[r] += gradient[r] * innovation / effectiveVariance;
       for (let c = 0; c < n; c++) {
-        information[r][c] += gradient[r] * gradient[c] / rVarianceM2;
+        information[r][c] +=
+          gradient[r] * gradient[c] / effectiveVariance;
       }
     }
   }
@@ -5619,168 +6034,104 @@ function cloneAnchorCoordinates(anchors) {
   ]));
 }
 
-function loadFixedPaperAnchorGeometry(anchorIds) {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(positionGeometryStorageKey(anchorIds)) || "null");
-    if (!parsed || positionGeometryKey(parsed.anchorIds || []) !== positionGeometryKey(anchorIds)) return null;
-    const anchors = cloneAnchorCoordinates(parsed.anchors);
-    if (Object.keys(anchors).length !== anchorIds.length) return null;
-    if (!Object.values(anchors).every(point => Number.isFinite(point.x) && Number.isFinite(point.y))) return null;
-    return {...parsed, anchors};
-  } catch (_) {
-    return null;
-  }
-}
-
-function fixedPaperAnchorGeometryFromModules(anchorIds) {
-  const ids = anchorIds.map(Number);
-  const topologyStatuses = (state.statuses || []).filter(item => {
-    if (!moduleHttpOnline(item)) return false;
-    const configuredIds = Array.isArray(item.runtime_anchor_ids)
-      ? item.runtime_anchor_ids.map(Number)
-      : [];
-    return configuredIds.length === ids.length &&
-      configuredIds.every((id, index) => id === ids[index]);
-  });
-  if (!topologyStatuses.length) return null;
-
-  const candidates = topologyStatuses.map(item => {
-    const xMm = Array.isArray(item.runtime_flex_tdoa_anchor_x_mm)
-      ? item.runtime_flex_tdoa_anchor_x_mm.map(Number)
-      : [];
-    const yMm = Array.isArray(item.runtime_flex_tdoa_anchor_y_mm)
-      ? item.runtime_flex_tdoa_anchor_y_mm.map(Number)
-      : [];
-    const generation = Number(item.runtime_flex_tdoa_geometry_generation);
-    if (item.runtime_flex_tdoa_geometry_fixed !== true ||
-        xMm.length !== ids.length || yMm.length !== ids.length ||
-        !xMm.every(Number.isFinite) || !yMm.every(Number.isFinite) ||
-        !Number.isInteger(generation) || generation < 1) {
-      return null;
-    }
-    return {generation, xMm, yMm};
-  });
-  if (candidates.some(item => item === null)) return null;
-
-  const first = candidates[0];
-  const consistent = candidates.every(candidate =>
-    candidate.generation === first.generation &&
-    candidate.xMm.every((value, index) => value === first.xMm[index]) &&
-    candidate.yMm.every((value, index) => value === first.yMm[index]));
-  if (!consistent) return null;
-
-  const anchors = {};
-  ids.forEach((id, index) => {
-    anchors[id] = {
-      x: first.xMm[index] / 1000,
-      y: first.yMm[index] / 1000,
-    };
-  });
-  return {
-    anchorIds: ids,
-    anchors,
-    fixedAt: Date.now() / 1000,
-    updates: 0,
-    geometryGeneration: first.generation,
-    source: "module_nvs",
-  };
-}
-
-function sameFixedPaperAnchorGeometry(left, right) {
-  if (!left || !right) return false;
-  if (Number(left.geometryGeneration) !== Number(right.geometryGeneration)) return false;
-  const leftIds = (left.anchorIds || []).map(Number);
-  const rightIds = (right.anchorIds || []).map(Number);
-  if (positionGeometryKey(leftIds) !== positionGeometryKey(rightIds)) return false;
-  return rightIds.every(id => {
-    const a = left.anchors?.[id];
-    const b = right.anchors?.[id];
-    return a && b && Number(a.x) === Number(b.x) && Number(a.y) === Number(b.y);
-  });
-}
-
-function persistFixedPaperAnchorGeometry(anchorIds, fixed) {
-  localStorage.setItem(
-    positionGeometryStorageKey(anchorIds), JSON.stringify(fixed));
-}
-
-function resetPaperAnchorSelfLocalization(anchorIds, forgetStored = true) {
+function resetPaperAnchorSelfLocalization(
+  anchorIds, solver, forgetStored = true
+) {
   if (forgetStored) localStorage.removeItem(positionGeometryStorageKey(anchorIds));
   state.positionGeometry = {
-    key: positionGeometryKey(anchorIds),
-    fixed: null,
+    key: `${positionGeometryProtocol(solver)}:${positionGeometryKey(anchorIds)}`,
     ekf: null,
   };
   state.positionSeeds = {};
   state.positionAnchorTrail = {};
 }
 
-function paperAnchorGeometry(anchorIds, maxAge) {
-  const key = positionGeometryKey(anchorIds);
-  const moduleFixed = fixedPaperAnchorGeometryFromModules(anchorIds);
+function createPaperAnchorEkf(batch, previous = null) {
+  const now = Date.now() / 1000;
+  const bootstrapItems = Object.fromEntries(
+    Object.entries(batch.distanceItems || {})
+      .map(([key, item]) => [key, geometryBootstrapItem(item)])
+      .filter(([, item]) => item)
+  );
+  const anchors = initialPaperAnchorCoordinates(
+    batch.ids, bootstrapItems);
+  if (!anchors) return null;
+  const variables = paperAnchorVariables(batch.ids);
+  const n = variables.length;
+  const ekf = {
+    variables,
+    state: paperAnchorStateFromCoordinates(variables, anchors),
+    covariance: Array.from({length: n}, (_, r) =>
+      Array.from({length: n}, (_, c) => r === c ? 1 : 0)),
+    lastUpdateToken: batch.updateToken,
+    lastFrameId: batch.frameId,
+    updates: Number(previous?.updates || 0),
+    startedAt: Number(previous?.startedAt || now),
+    lastUpdateAt: now,
+    lastGoodAt: now,
+    relocationCount: Number(previous?.relocationCount || 0),
+    lastRelocationAt: Number(previous?.lastRelocationAt || 0),
+    rejectedCount: Number(previous?.rejectedCount || 0),
+    lastRejected: previous?.lastRejected || null,
+    pairStates: geometryPairStatesFromItems(bootstrapItems, now),
+    publishedAnchors: previous?.publishedAnchors
+      ? cloneAnchorCoordinates(previous.publishedAnchors)
+      : cloneAnchorCoordinates(anchors),
+  };
+  // Balance all six robust bootstrap edges before the first paint. The direct
+  // coordinate construction exactly satisfies its first triangle and can
+  // otherwise leave the fourth anchor visibly biased until its next range.
+  for (let iteration = 0; iteration < 3; iteration++) {
+    if (!updatePaperAnchorEkf(ekf, batch.ids, bootstrapItems)) break;
+  }
+  ekf.publishedAnchors = previous?.publishedAnchors
+    ? cloneAnchorCoordinates(previous.publishedAnchors)
+    : paperAnchorCoordinatesFromState(
+      batch.ids, ekf.variables, ekf.state);
+  return ekf;
+}
+
+function smoothPublishedAnchorCoordinates(ekf, targetAnchors, updated) {
+  if (!ekf.publishedAnchors) {
+    ekf.publishedAnchors = cloneAnchorCoordinates(targetAnchors);
+    return ekf.publishedAnchors;
+  }
+  if (!updated) return ekf.publishedAnchors;
+  for (const [id, target] of Object.entries(targetAnchors)) {
+    const current = ekf.publishedAnchors[id];
+    if (!current) {
+      ekf.publishedAnchors[id] = {x: target.x, y: target.y};
+      continue;
+    }
+    const dx = Number(target.x) - Number(current.x);
+    const dy = Number(target.y) - Number(current.y);
+    const distance = Math.hypot(dx, dy);
+    const scale = distance > paperGeometryGuard.publishedMaxStepM
+      ? paperGeometryGuard.publishedMaxStepM / distance
+      : 1;
+    current.x += dx * scale;
+    current.y += dy * scale;
+  }
+  return ekf.publishedAnchors;
+}
+
+function paperAnchorGeometry(anchorIds, maxAge, solver) {
+  const protocol = positionGeometryProtocol(solver);
+  const key = `${protocol}:${positionGeometryKey(anchorIds)}`;
+  // Remove the browser-side fixed coordinates written by older dashboard
+  // releases. They are intentionally not a fallback for live positioning.
+  localStorage.removeItem(positionGeometryStorageKey(anchorIds));
   if (state.positionGeometry.key !== key) {
-    const fixed = moduleFixed || loadFixedPaperAnchorGeometry(anchorIds);
-    state.positionGeometry = {
-      key,
-      fixed,
-      ekf: null,
-    };
-    if (moduleFixed) {
-      persistFixedPaperAnchorGeometry(anchorIds, moduleFixed);
-    }
+    state.positionGeometry = {key, ekf: null};
     state.positionSeeds = {};
   }
 
-  const batch = currentAnchorDistanceBatch(anchorIds, maxAge);
+  const batch = currentAnchorDistanceBatch(anchorIds, maxAge, solver);
   const session = state.positionGeometry;
-  if (moduleFixed &&
-      !sameFixedPaperAnchorGeometry(session.fixed, moduleFixed)) {
-    session.fixed = moduleFixed;
-    session.ekf = null;
-    persistFixedPaperAnchorGeometry(anchorIds, moduleFixed);
-    state.positionSeeds = {};
-  }
-  if (session.fixed) {
-    const anchors = cloneAnchorCoordinates(session.fixed.anchors);
-    const residuals = anchorGeometryResiduals(anchors, batch.distanceItems);
-    const fitQuality = anchorGeometryFitQuality(anchorIds, residuals);
-    return {
-      anchors,
-      distanceItems: batch.distanceItems,
-      missingPairs: batch.missingPairs,
-      residuals,
-      fitQuality,
-      complete: true,
-      positionReady: true,
-      canFix: false,
-      status: "fixed",
-      liveInconsistent: fitQuality.complete && !fitQuality.acceptable,
-      fixedAt: Number(session.fixed.fixedAt),
-      updates: Number(session.fixed.updates || 0),
-    };
-  }
-
+  let geometryUpdated = false;
   if (!session.ekf && batch.coherent && batch.missingPairs.length === 0) {
-    const anchors = initialPaperAnchorCoordinates(batch.ids, batch.distanceItems);
-    if (anchors) {
-      const variables = paperAnchorVariables(batch.ids);
-      const n = variables.length;
-      session.ekf = {
-        variables,
-        state: paperAnchorStateFromCoordinates(variables, anchors),
-        covariance: Array.from({length: n}, (_, r) =>
-          Array.from({length: n}, (_, c) => r === c ? 1 : 0)),
-        lastFrameId: batch.frameId,
-        updates: 0,
-        startedAt: Date.now() / 1000,
-        lastUpdateAt: 0,
-      };
-    }
-  } else if (session.ekf && batch.coherent && batch.missingPairs.length === 0) {
-    if (batch.frameId !== session.ekf.lastFrameId &&
-        updatePaperAnchorEkf(session.ekf, batch.ids, batch.distanceItems)) {
-      session.ekf.lastFrameId = batch.frameId;
-    }
+    session.ekf = createPaperAnchorEkf(batch);
+    geometryUpdated = Boolean(session.ekf);
   }
 
   if (!session.ekf) {
@@ -5792,31 +6143,94 @@ function paperAnchorGeometry(anchorIds, maxAge) {
       complete: false,
       positionReady: false,
       canFix: false,
-      status: batch.missingPairs.length ? "waiting" : "inconsistent",
+      status: batch.missingPairs.length ? "waiting" : "initializing",
+      protocol,
     };
   }
 
-  const anchors = paperAnchorCoordinatesFromState(
+  const now = Date.now() / 1000;
+  let conditioned = conditionPaperAnchorBatch(session.ekf, batch, now);
+  if (conditioned.relocation) {
+    const relocationBatch = {
+      ...batch,
+      distanceItems: conditioned.relocation.distanceItems,
+      missingPairs: [],
+      coherent: true,
+      updateToken: `${batch.protocol}:relocation:${now}`,
+    };
+    const replacement = createPaperAnchorEkf(relocationBatch, session.ekf);
+    if (replacement) {
+      replacement.relocationCount++;
+      replacement.lastRelocationAt = now;
+      session.ekf = replacement;
+      state.positionSeeds = {};
+      state.positionTrail = {};
+      state.positionTrailTokens = {};
+      state.positionAnchorTrail = {};
+      conditioned = conditionPaperAnchorBatch(session.ekf, batch, now);
+      geometryUpdated = true;
+    }
+  }
+  if (Object.keys(conditioned.updateItems).length &&
+      updatePaperAnchorEkf(
+        session.ekf, batch.ids, conditioned.updateItems)) {
+    session.ekf.lastUpdateToken = batch.updateToken;
+    session.ekf.lastFrameId = batch.frameId;
+    geometryUpdated = true;
+  }
+
+  const targetAnchors = paperAnchorCoordinatesFromState(
     batch.ids, session.ekf.variables, session.ekf.state);
-  const residuals = anchorGeometryResiduals(anchors, batch.distanceItems);
+  const anchors = cloneAnchorCoordinates(
+    smoothPublishedAnchorCoordinates(
+      session.ekf, targetAnchors, geometryUpdated));
+  const acceptedItems = acceptedGeometryItems(session.ekf, now);
+  const residuals = anchorGeometryResiduals(anchors, acceptedItems);
   const fitQuality = anchorGeometryFitQuality(anchorIds, residuals);
+  const expectedPairCount = selectedAnchorPairs(anchorIds).length;
+  const acceptedComplete = Object.keys(acceptedItems).length === expectedPairCount;
+  const estimateAgeSec = Math.max(
+    0, now - Number(session.ekf.lastGoodAt || 0));
+  const positionReady = acceptedComplete &&
+    estimateAgeSec <= paperGeometryGuard.acceptedHoldSec &&
+    fitQuality.acceptable;
   const sigmaValues = session.ekf.covariance.map(
     (row, index) => Math.sqrt(Math.max(0, Number(row[index]))));
+  const candidatePairs = Object.entries(session.ekf.pairStates || {})
+    .filter(([, pairState]) => pairState.candidateCount > 0)
+    .map(([key, pairState]) => ({
+      key,
+      count: pairState.candidateCount,
+      deltaM: Number(pairState.candidateDistanceM) -
+        Number(pairState.acceptedDistanceM),
+    }));
+  const heldPairs = Object.entries(conditioned.displayItems)
+    .filter(([, item]) => item.geometry_held)
+    .map(([key]) => key);
   return {
     anchors,
-    distanceItems: batch.distanceItems,
+    distanceItems: conditioned.displayItems,
     missingPairs: batch.missingPairs,
     residuals,
     fitQuality,
     complete: true,
-    positionReady: fitQuality.acceptable && session.ekf.updates > 0,
-    canFix: batch.coherent && batch.missingPairs.length === 0 &&
-      session.ekf.updates > 0 && fitQuality.acceptable,
-    status: "self_localizing",
+    positionReady,
+    canFix: false,
+    status: "dynamic",
+    protocol,
     updates: session.ekf.updates,
     frameId: session.ekf.lastFrameId,
-    elapsedSec: Date.now() / 1000 - session.ekf.startedAt,
+    elapsedSec: now - session.ekf.startedAt,
+    lastUpdateAgeSec: Math.max(
+      0, now - Number(session.ekf.lastUpdateAt || 0)),
+    estimateAgeSec,
     maxSigmaM: sigmaValues.length ? Math.max(...sigmaValues) : NaN,
+    relocationCount: session.ekf.relocationCount,
+    lastRelocationAt: session.ekf.lastRelocationAt,
+    rejectedCount: session.ekf.rejectedCount,
+    lastRejected: session.ekf.lastRejected,
+    candidatePairs,
+    heldPairs,
   };
 }
 
@@ -6161,6 +6575,27 @@ function recordPositionTrailPoint(tagId, position, receivedAt, token, metrics = 
     .slice(-12000);
 }
 
+function recordNativeRangeRejections(
+  tagId, distanceItems, rejectedIds, now
+) {
+  const diagnostics = state.nativeRangeDiagnostics;
+  for (const anchorId of rejectedIds || []) {
+    const item = distanceItems?.[anchorId];
+    if (!item) continue;
+    const key = `${tagId}:${anchorId}`;
+    const token = `${item.seq ?? "-"}:${item.received_at ?? "-"}`;
+    if (diagnostics.tokens[key] === token) continue;
+    diagnostics.tokens[key] = token;
+    diagnostics.rejectedCount++;
+    diagnostics.lastRejected = {
+      tagId: Number(tagId),
+      anchorId: Number(anchorId),
+      distanceM: Number(item.distance_m),
+      at: now,
+    };
+  }
+}
+
 function localPositionAge(item, now = Date.now() / 1000) {
   const receivedAt = Number(item?.received_at);
   if (Number.isFinite(receivedAt) && receivedAt > 0) return Math.max(0, now - receivedAt);
@@ -6186,8 +6621,13 @@ function computePositionModel() {
   const settings = positionSettings();
   const selectedIds = selectedPositionModuleIds(settings);
   const offlineModuleIds = selectedIds.filter(id => !moduleHttpOnline(statusForModule(id)));
+  const switchingModuleIds = selectedIds.filter(id => {
+    const item = statusForModule(id);
+    return moduleHttpOnline(item) && Boolean(item?.uwb_runtime_switching);
+  });
   const active = positionRangingActive(settings);
-  const geometry = paperAnchorGeometry(settings.anchorIds, positionGeometryMaxAge(settings));
+  const geometry = paperAnchorGeometry(
+    settings.anchorIds, positionGeometryMaxAge(settings), settings.solver);
   const anchors = {...(geometry?.anchors || {})};
 
   if (!active && state.positionWasActive) {
@@ -6271,15 +6711,52 @@ function computePositionModel() {
         }
         if (position) state.positionSeeds[seedKey] = {x: position.x, y: position.y};
       } else {
+        const rawDistances = {};
+        const rawDistanceItems = {};
         for (const anchorId of settings.anchorIds) {
           const item = freshDistanceFor(tagId, anchorId, settings.maxAge);
-          if (item && anchors[anchorId]) {
-            distances[anchorId] = Number(item.distance_m);
-            distanceItems[anchorId] = item;
+          const measured = Number(item?.distance_m);
+          if (item && anchors[anchorId] &&
+              Number.isFinite(measured) && measured > 0) {
+            rawDistances[anchorId] = measured;
+            rawDistanceItems[anchorId] = item;
           }
         }
-        position = trilaterate(anchors, distances);
-        residuals = positionResiduals(position, anchors, distances);
+        const seedKey =
+          `native:${positionGeometryKey(settings.anchorIds)}:${tagId}`;
+        const fit = robustTrilaterate(
+          anchors, rawDistances, state.positionSeeds[seedKey] || null);
+        if (fit) {
+          position = fit.position;
+          Object.assign(distances, fit.usedDistances);
+          residuals = fit.residuals;
+          const used = new Set(fit.usedIds);
+          recordNativeRangeRejections(
+            tagId, rawDistanceItems, fit.rejectedIds, now);
+          for (const [anchorId, item] of Object.entries(rawDistanceItems)) {
+            distanceItems[anchorId] = {
+              ...item,
+              used_in_fit: used.has(Number(anchorId)),
+              reject_reason: used.has(Number(anchorId))
+                ? ""
+                : "range spike",
+            };
+          }
+          state.positionSeeds[seedKey] = {
+            x: position.x,
+            y: position.y,
+            t: now,
+          };
+        } else {
+          const seed = state.positionSeeds[seedKey];
+          const holdSec = Math.max(1, settings.maxAge * 2);
+          if (seed && now - Number(seed.t || 0) <= holdSec) {
+            position = {x: Number(seed.x), y: Number(seed.y)};
+          }
+          Object.assign(distanceItems, rawDistanceItems);
+          residuals = positionResiduals(
+            position, anchors, rawDistances);
+        }
         accuracy = rangingPositionAccuracy(position, anchors, distances, residuals);
       }
       tags[tagId] = {
@@ -6295,7 +6772,9 @@ function computePositionModel() {
         solverSource: localPosition &&
           localPositionAge(localPosition, now) <= settings.maxAge
             ? "ESP32 AlgMin"
-            : "PC AlgMin",
+            : positionProtocolUsesTdoa(settings.solver)
+              ? "PC AlgMin"
+              : "PC robust DS-TWR",
       };
       if (position) {
         recordPositionTrailPoint(
@@ -6318,6 +6797,7 @@ function computePositionModel() {
     tags,
     geometry,
     offlineModuleIds,
+    switchingModuleIds,
     reference,
     observedTagIds,
     unexpectedTagIds,
@@ -6567,53 +7047,74 @@ function drawPosition(model) {
 function renderPositionGeometryPanel(model) {
   const rows = document.getElementById("positionGeometryRows");
   const status = document.getElementById("positionGeometryStatus");
-  const fixButton = document.getElementById("positionFixAnchorGeometry");
   if (!rows) return;
 
   const geometry = model.geometry || {};
   if (status) {
-    if (geometry.status === "fixed") {
-      const fitText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
-        ? ` · live fit RMS ${fmtPositionCm(geometry.fitQuality.rmsM, 1)}`
-        : "";
-      const warningText = geometry.liveInconsistent
-        ? ` · diagnostic warning above ${fmtPositionCm(geometry.fitQuality?.fixLimitM, 1)}`
-        : "";
-      status.textContent = `Fixed paper geometry · ${fmtAge(Number(geometry.fixedAt || 0))} · ${geometry.updates || 0} EKF updates${fitText}${warningText}`;
-      status.className = geometry.liveInconsistent ? "muted stale" : "muted fresh";
-    } else if (geometry.status === "self_localizing") {
+    if (geometry.status === "dynamic") {
       const fitText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
         ? ` · fit RMS ${fmtPositionCm(geometry.fitQuality.rmsM, 1)}`
         : "";
-      status.textContent = `Paper TWR-EKF self-localization · ${geometry.updates || 0} updates · ${fmtFixed(geometry.elapsedSec || 0, 0)} s · max σ ${fmtPositionCm(geometry.maxSigmaM, 1)}${fitText}`;
-      status.className = geometry.fitQuality?.acceptable ? "muted" : "muted stale";
+      const relocationText = Number(geometry.relocationCount || 0) > 0
+        ? ` · ${geometry.relocationCount} automatic relocation reset(s)`
+        : "";
+      const rejectText = Number(geometry.rejectedCount || 0) > 0
+        ? ` · ${geometry.rejectedCount} rejected range spike(s)`
+        : "";
+      const heldText = Number(geometry.heldPairs?.length || 0) > 0
+        ? ` · holding ${geometry.heldPairs.length} last-good pair(s)`
+        : "";
+      const lastRejected = geometry.lastRejected;
+      const lastRejectedText = lastRejected &&
+          Number.isFinite(Number(lastRejected.at))
+        ? ` · last A${String(lastRejected.key).replace(":", "-A")} ` +
+          `${Number(lastRejected.deltaM) >= 0 ? "+" : ""}` +
+          `${fmtFixed(Number(lastRejected.deltaM) * 100, 1)} cm ` +
+          `${fmtFixed(Math.max(0, Date.now() / 1000 - Number(lastRejected.at)), 1)} s ago`
+        : "";
+      status.textContent =
+        `Live ${positionSolverLabel(model.settings.solver)} geometry · ` +
+        `${geometry.updates || 0} EKF updates · latest ${fmtFixed(geometry.lastUpdateAgeSec, 1)} s · ` +
+        `max σ ${fmtPositionCm(geometry.maxSigmaM, 1)}${fitText}` +
+        `${rejectText}${heldText}${lastRejectedText}${relocationText}`;
+      status.className = geometry.fitQuality?.acceptable
+        ? "muted fresh"
+        : "muted stale";
     } else {
-      status.textContent = "Waiting for all fresh anchor-anchor ranges.";
+      const missing = (geometry.missingPairs || [])
+        .map(([a, b]) => `A${a}-A${b}`).join(", ");
+      status.textContent = missing
+        ? `Waiting for fresh ${positionSolverLabel(model.settings.solver)} anchor ranges: ${missing}.`
+        : "Initializing the live anchor geometry.";
       status.className = "muted stale";
     }
-  }
-  if (fixButton) {
-    fixButton.disabled = !geometry.canFix && geometry.status !== "fixed";
-    fixButton.textContent = geometry.status === "fixed"
-      ? "Persist Anchor Geometry"
-      : "Fix Anchor Geometry";
   }
   const pairRows = selectedAnchorPairs(model.settings.anchorIds).map(([a, b]) => {
     const key = anchorPairKey(a, b);
     const item = geometry.distanceItems?.[key];
     const residual = geometry.residuals?.[key];
     const stats = item?.stats || {};
-    const direction = item ? `A${esc(item.initiator_id)}→A${esc(item.responder_id)}` : "waiting";
-    const mean = stats.mean_m === null || stats.mean_m === undefined
+    const gateStatus = String(item?.geometry_gate_status || "");
+    const gateLabel = item?.geometry_held
+      ? gateStatus === "rejected spike"
+        ? "rejected spike; holding stable"
+        : "holding last-good"
+      : gateStatus;
+    const direction = item
+      ? `A${esc(item.initiator_id)}→A${esc(item.responder_id)}`
+      : "waiting";
+    const gateHtml = gateLabel
+      ? `<br><span class="${gateStatus === "rejected spike" ? "stale" : "muted"}">${esc(gateLabel)}</span>`
+      : "";
+    const accepted = Number(item?.accepted_distance_m);
+    const robustSigma = stats.robust_sigma_m === null ||
+      stats.robust_sigma_m === undefined
       ? NaN
-      : Number(stats.mean_m);
-    const std = stats.std_m === null || stats.std_m === undefined
-      ? NaN
-      : Number(stats.std_m);
+      : Number(stats.robust_sigma_m);
     return `<tr>
-      <td>A${esc(a)}-A${esc(b)}<br><span class="muted">${direction}</span></td>
-      <td>${item ? fmtFixed(item.distance_m, 3) : "-"}<br><span class="muted">${Number.isFinite(mean) ? "avg " + fmtFixed(mean, 3) : ""}</span></td>
-      <td>${Number.isFinite(std) ? fmtCmFromM(std, 1) + " cm" : "-"}</td>
+      <td>A${esc(a)}-A${esc(b)}<br><span class="muted">${direction}</span>${gateHtml}</td>
+      <td>${item ? fmtFixed(item.distance_m, 3) : "-"}<br><span class="muted">${Number.isFinite(accepted) ? "stable " + fmtFixed(accepted, 3) : ""}</span></td>
+      <td>${Number.isFinite(robustSigma) ? fmtCmFromM(robustSigma, 1) + " cm" : "-"}</td>
       <td class="${item && Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${item ? fmtFixed(item.age_sec, 1) + "s" : "-"}</td>
       <td>${residual === undefined ? "-" : fmtFixed(residual * 100, 1) + " cm"}</td>
     </tr>`;
@@ -6632,10 +7133,16 @@ function fmtPositionSigma(value, digits = 1) {
 function renderPositionSolverStatus(model) {
   const settings = model.settings || {};
   if (!positionProtocolUsesTdoa(settings.solver)) {
+    const diagnostics = state.nativeRangeDiagnostics;
+    const rejectPill = diagnostics.rejectedCount > 0
+      ? `<span class="position-pill warn">${diagnostics.rejectedCount} tag-range spike(s) rejected</span>`
+      : `<span class="position-pill good">range gate clean</span>`;
     return `<div class="position-filter-card">
       <b>Solver Status</b>
       <div class="position-filter-row">
         <span class="position-pill">DS-TWR ranges</span>
+        <span class="position-pill good">robust 3-of-4 fit</span>
+        ${rejectPill}
         <span class="position-pill" id="positionStreamMetrics">position stream connecting</span>
       </div>
     </div>`;
@@ -6670,7 +7177,7 @@ function renderPositionSolverStatus(model) {
       `<span class="position-pill warn">setup ${esc(requested)} · radio ${esc(observed)}</span>`
     );
   }
-  pills.push(`<span class="position-pill ${model.geometry?.status === "fixed" ? "good" : "warn"}">geometry ${esc(model.geometry?.status || "waiting")}</span>`);
+  pills.push(`<span class="position-pill ${model.geometry?.status === "dynamic" ? "good" : "warn"}">geometry ${esc(model.geometry?.status || "waiting")}</span>`);
 
   return `<div class="position-filter-card">
     <b>Position Solver</b>
@@ -6702,7 +7209,17 @@ function renderPositionReadout(model) {
 
   if (!model.active) {
     overlay.classList.add("active");
-    if ((model.offlineModuleIds || []).length) {
+    if ((model.switchingModuleIds || []).length) {
+      overlay.querySelector("h2").textContent = "Switching UWB protocol";
+      overlay.querySelector("p").textContent =
+        `DW3000 is changing runtime on modules ${model.switchingModuleIds.join(", ")}. ` +
+        "Wi-Fi, HTTP and telemetry remain online.";
+      if (overlayButton) {
+        overlayButton.textContent = "Switching…";
+        overlayButton.disabled = true;
+        overlayButton.dataset.action = "wait";
+      }
+    } else if ((model.offlineModuleIds || []).length) {
       overlay.querySelector("h2").textContent = "Waiting for HTTP status";
       overlay.querySelector("p").textContent = `No live position is shown until these modules answer /status again: ${model.offlineModuleIds.join(", ")}.`;
     } else {
@@ -6723,10 +7240,11 @@ function renderPositionReadout(model) {
   const missingCoords = model.settings.anchorIds.filter(id => !model.anchors[id]);
   if (missingCoords.length) {
     overlay.classList.add("active");
-    overlay.querySelector("h2").textContent = "Waiting for measured anchor geometry";
-    overlay.querySelector("p").textContent = positionProtocolUsesTdoa(model.settings.solver)
-      ? `Waiting for fresh anchor-anchor ranges involving: ${missingCoords.join(", ")}.`
-      : `No measured anchor geometry is available yet for anchors: ${missingCoords.join(", ")}. Run FlexTDOA once to measure the anchor layout, then DS-TWR ranges can use the last measured geometry.`;
+    overlay.querySelector("h2").textContent = "Waiting for live anchor geometry";
+    overlay.querySelector("p").textContent =
+      `Waiting for fresh ${solverName} anchor-to-anchor ranges involving: ` +
+      `${missingCoords.join(", ")}. Positioning starts automatically when ` +
+      "the dynamic geometry is complete.";
     if (overlayButton) {
       overlayButton.textContent = "Waiting for Anchor Ranges";
       overlayButton.disabled = true;
@@ -6734,23 +7252,15 @@ function renderPositionReadout(model) {
     }
   } else if (!model.geometry?.positionReady) {
     overlay.classList.add("active");
-    const canFix = Boolean(model.geometry?.canFix);
-    const hasBadFit = model.geometry?.status === "self_localizing" &&
-      model.geometry?.fitQuality?.complete && !model.geometry?.fitQuality?.acceptable;
-    overlay.querySelector("h2").textContent = canFix
-      ? "Anchor geometry is ready"
-      : hasBadFit ? "Anchor geometry is not consistent" : "Anchor self-localization in progress";
-    overlay.querySelector("p").textContent = canFix
-      ? "Review the measured geometry, then fix it to start live FlexTDOA positioning."
-      : hasBadFit
-        ? `The current fit is ${fmtPositionCm(model.geometry.fitQuality?.rmsM, 1)} RMS. Restart self-localization if it does not recover below ${fmtPositionCm(model.geometry.fitQuality?.fixLimitM, 1)}.`
-        : "FlexTDOA positioning starts after the TWR-EKF has a complete anchor geometry.";
+    overlay.querySelector("h2").textContent =
+      "Dynamic anchor self-localization in progress";
+    overlay.querySelector("p").textContent =
+      "No geometry has to be fixed. The TWR-EKF starts positioning " +
+      "automatically after a complete live anchor-range set.";
     if (overlayButton) {
-      overlayButton.textContent = canFix
-        ? "Fix Anchor Geometry"
-        : hasBadFit ? "Restart Anchor Self-Localization" : "Waiting for Anchor Geometry";
-      overlayButton.disabled = !canFix && !hasBadFit;
-      overlayButton.dataset.action = canFix ? "fix" : hasBadFit ? "restart_geometry" : "wait";
+      overlayButton.textContent = "Waiting for Dynamic Geometry";
+      overlayButton.disabled = true;
+      overlayButton.dataset.action = "wait";
     }
   } else {
     overlay.classList.remove("active");
@@ -6788,7 +7298,7 @@ function renderPositionReadout(model) {
     return `<div class="position-tag-card"><b id="positionTagSummary${esc(tag.tagId)}">Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span id="positionTagMeta${esc(tag.tagId)}">${countText}${accuracyText}${referenceText}</span></div>`;
   });
   const emptyTagCard = !model.geometry?.positionReady
-    ? `<div class="position-tag-card"><b>waiting for fixed geometry</b><span>Fix the anchor geometry before tag positioning starts.</span></div>`
+    ? `<div class="position-tag-card"><b>waiting for live geometry</b><span>Positioning starts automatically after fresh anchor-to-anchor ranges initialize the EKF.</span></div>`
     : `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
   readout.innerHTML = `${renderPositionSolverStatus(model)}${tagCards.join("") || emptyTagCard}`;
   const accuracyTableRows = Object.values(model.tags).map(tag => {
@@ -6872,9 +7382,15 @@ function renderPositionReadout(model) {
       for (const anchorId of model.settings.anchorIds) {
         const item = tag.distanceItems?.[anchorId];
         const residual = tag.residuals?.[anchorId];
-        distanceRows.push(`<tr>
+        const used = item?.used_in_fit !== false;
+        const fitNote = item
+          ? used
+            ? ""
+            : `<br><span class="stale">skip ${esc(item.reject_reason || "unusable")}</span>`
+          : "";
+        distanceRows.push(`<tr class="${used ? "" : "position-skip"}">
           <td>T${esc(tag.tagId)}</td>
-          <td>A${esc(anchorId)}</td>
+          <td>A${esc(anchorId)}${fitNote}</td>
           <td>${item ? fmtFixed(item.distance_m, 3) : "-"}</td>
           <td class="${item && Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${item ? fmtFixed(item.age_sec, 1) + "s" : "-"}</td>
           <td>${residual === undefined ? "-" : fmtFixed(residual * 100, 1) + " cm"}</td>
@@ -9595,8 +10111,15 @@ function setRangingProfileFieldVisible(profileKey, field, visible) {
 
 function rangingProfileDescription(values, solver) {
   if (solver !== "ranging") return "";
-  const frameMs = 4 * values.slotMs + values.roundGapMs;
-  return `${fmtFixed(values.dsPositionMaxAgeSec, 1)} s distance freshness; native POLL → RESP → FINAL frame is ${fmtFixed(frameMs, 0)} ms for four anchors.`;
+  const baseFrameMs = 4 * values.slotMs + values.roundGapMs;
+  const geometryMs = values.slotMs + nativeDsGeometryCommandDelayMs;
+  const averageFrameMs =
+    baseFrameMs + geometryMs / nativeDsGeometryFrameInterval;
+  return `${fmtFixed(values.dsPositionMaxAgeSec, 1)} s distance freshness; ` +
+    `native POLL → RESP → FINAL base frame is ${fmtFixed(baseFrameMs, 0)} ms ` +
+    `for four anchors; one rotating anchor-pair geometry slot adds ` +
+    `${fmtFixed(geometryMs, 0)} ms every ${nativeDsGeometryFrameInterval} frames ` +
+    `(${fmtFixed(averageFrameMs, 1)} ms average).`;
 }
 
 function updateRangingSettingsProtocol() {
@@ -9611,14 +10134,14 @@ function updateRangingSettingsProtocol() {
     ranging: {
       title: "DS-TWR Settings",
       label: "Native DS-TWR",
-      hint: "Selected in Position Setup. The tag initiates one native POLL, RESP, FINAL exchange with each anchor.",
-      note: "Field-tested native DS-TWR profiles from 64 ms down to the 13 ms scheduling boundary. The 17 ms profile is recommended. Applying a profile persists it and reboots the selected modules; FlexTDOA, distance-test and calibration timing remain untouched.",
+      hint: "Selected in Position Setup. The tag ranges every anchor, then periodically commands one rotating anchor-pair DS-TWR exchange so physical geometry remains live.",
+      note: "Field-tested native DS-TWR profiles from 64 ms down to the 13 ms scheduling boundary. Their recorded throughput predates dynamic-geometry maintenance; one extra geometry slot every four frames adds about 6% average radio time. Applying a profile persists it and reboots the selected modules; FlexTDOA, distance-test and calibration timing remain untouched.",
     },
     passive_ds: {
       title: "Passive DS-TWR Settings",
       label: "Passive DS-TWR",
       hint: "Selected in Position Setup. Anchors exchange native three-frame DS-TWR while every non-anchor tag only receives.",
-      note: "Fast Star and Robust Rotating have independent Passive DS-TWR timing, separate from native DS-TWR and FlexTDOA.",
+      note: "Fast Star uses one rotating maintenance frame in four to keep the full anchor geometry observable. Robust Rotating changes reference every frame. Their timing remains separate from native DS-TWR and FlexTDOA.",
     },
     hybrid: {
       title: "Legacy Hybrid Settings",
@@ -10085,7 +10608,11 @@ function renderNativeDsTwrTimingDiagram() {
     : (frameStartSequence + index) % 65536;
 
   const frameMs = N * config.slotMs + config.roundGapMs;
-  const frameHz = frameMs > 0 ? 1000 / frameMs : NaN;
+  const geometryMaintenanceMs =
+    config.slotMs + nativeDsGeometryCommandDelayMs;
+  const averageFrameMs =
+    frameMs + geometryMaintenanceMs / nativeDsGeometryFrameInterval;
+  const frameHz = averageFrameMs > 0 ? 1000 / averageFrameMs : NaN;
   const exchangeHz = N * frameHz;
   const slotRemainderMs = Math.max(
     0, config.slotMs - config.respDelayMs - config.finalDelayMs
@@ -10196,16 +10723,17 @@ function renderNativeDsTwrTimingDiagram() {
     <div class="flex-timing-metrics">
       <div class="flex-timing-metric"><span>Topology</span><strong>T${esc(config.tagId)} · N=${N}</strong></div>
       <div class="flex-timing-metric"><span>Slot period</span><strong>${fmtFixed(config.slotMs, 3)} ms</strong></div>
-      <div class="flex-timing-metric"><span>Frame period</span><strong>${fmtFixed(frameMs, 3)} ms</strong></div>
-      <div class="flex-timing-metric"><span>Scheduled frame rate</span><strong>${fmtFixed(frameHz, 2)} Hz</strong></div>
+      <div class="flex-timing-metric"><span>Base position frame</span><strong>${fmtFixed(frameMs, 3)} ms</strong></div>
+      <div class="flex-timing-metric"><span>Geometry maintenance</span><strong>+${fmtFixed(geometryMaintenanceMs, 0)} ms / ${nativeDsGeometryFrameInterval} frames</strong></div>
+      <div class="flex-timing-metric"><span>Average position rate</span><strong>${fmtFixed(frameHz, 2)} Hz</strong></div>
       <div class="flex-timing-metric"><span>Exchanges / frame</span><strong>${N}</strong></div>
       <div class="flex-timing-metric"><span>Scheduled range rate</span><strong>${fmtFixed(exchangeHz, 1)} /s</strong></div>
     </div>
     <div class="flex-timing-scroll">
       <div class="flex-timing-canvas">
         <div class="flex-timing-label">
-          <strong>Frame · ${N} native DS-TWR exchanges + frame gap</strong>
-          <span>${config.live && latest ? `live result seq ${esc(latest.seq)} from A${esc(latest.anchor_id)}` : "configured topology"}</span>
+          <strong>Base frame · ${N} tag-anchor exchanges + frame gap</strong>
+          <span>${config.live && latest ? `live result seq ${esc(latest.seq)} from A${esc(latest.anchor_id)}` : "configured topology"} · rotating anchor-pair slot every ${nativeDsGeometryFrameInterval} frames</span>
         </div>
         <div class="flex-frame-track" style="grid-template-columns:${frameColumns}">${frameSlots}${gapCell}</div>
         <div class="flex-frame-axis">${frameAxis}</div>
@@ -10301,6 +10829,7 @@ const passiveDsProfileDefaults = {
     freshSec: 0.2,
   },
 };
+const passiveDsFastGeometryFrameInterval = 4;
 const passiveDsProfileFieldSuffixes = {
   slotMs: "SlotMs",
   gapMs: "GapMs",
@@ -10358,7 +10887,9 @@ function updatePassiveDsProfileSummary(key) {
   );
   const frameMs = (anchorCount - 1) * values.slotMs + values.gapMs;
   const frameHz = frameMs > 0 ? 1000 / frameMs : NaN;
-  const superframeMs = key === "robust" ? anchorCount * frameMs : frameMs;
+  const superframeMs = key === "robust"
+    ? anchorCount * frameMs
+    : (anchorCount - 1) * passiveDsFastGeometryFrameInterval * frameMs;
   const warnings = [];
   if (values.respUs + values.finalUs >= values.slotMs * 1000) {
     warnings.push("RESP + FINAL >= slot");
@@ -10367,7 +10898,7 @@ function updatePassiveDsProfileSummary(key) {
   summary.textContent =
     `${profileSummaryScheduleLabel(key)} · POLL → RESP → FINAL · ` +
     `${fmtFixed(frameMs, 0)} ms position frame · ${fmtFixed(frameHz, 2)} Hz · ` +
-    `${fmtFixed(superframeMs, 0)} ms ${key === "robust" ? "rotating superframe" : "star cycle"}` +
+    `${fmtFixed(superframeMs, 0)} ms ${key === "robust" ? "rotating superframe" : "full geometry maintenance cycle"}` +
     (warnings.length ? ` · ${warnings.join(", ")}` : "");
   summary.className = `profile-summary ${warnings.length ? "warn" : ""}`.trim();
 }
@@ -10527,7 +11058,9 @@ function renderPassiveDsTimingDiagram() {
   const frameMs = slots * config.slotMs + config.gapMs;
   const frameHz = frameMs > 0 ? 1000 / frameMs : NaN;
   const robust = config.schedule === 1;
-  const initiator = robust ? "rotates after each frame" : `A${config.anchorIds[0]}`;
+  const initiator = robust
+    ? "rotates after each frame"
+    : `A${config.anchorIds[0]} · maintenance every 4th`;
   const slotCards = config.anchorIds.slice(1).map((anchorId, index) => `
     <div class="flex-frame-slot">
       <b>frame[${index}] · ${fmtFixed(index * config.slotMs, 0)} ms</b>
@@ -10555,21 +11088,26 @@ function renderPassiveDsTimingDiagram() {
       slot ${esc(config.slotMs)} ms · gap ${esc(config.gapMs)} ms ·
       timeout ${esc(config.timeoutMs)} ms · RX slice ${esc(config.rxMs)} ms ·
       auto RX ${esc(config.autoRxUus)} UUS.
-      Robust Rotating spans ${fmtFixed(N * frameMs, 0)} ms before every anchor has served as reference.
+      ${robust
+        ? `Robust Rotating spans ${fmtFixed(N * frameMs, 0)} ms before every anchor has served as reference.`
+        : `Fast Star keeps its reference for three frames and rotates the fourth; a full maintenance cycle spans ${fmtFixed((N - 1) * passiveDsFastGeometryFrameInterval * frameMs, 0)} ms.`}
     </div>`;
 }
 
 function profileSummaryText(values, solver, anchorCount = 4) {
   if (solver !== "ranging") return "";
   const dsCycleMs = anchorCount * values.slotMs + values.roundGapMs;
-  const frameHz = dsCycleMs > 0 ? 1000 / dsCycleMs : NaN;
+  const maintenanceMs = values.slotMs + nativeDsGeometryCommandDelayMs;
+  const averageCycleMs =
+    dsCycleMs + maintenanceMs / nativeDsGeometryFrameInterval;
+  const frameHz = averageCycleMs > 0 ? 1000 / averageCycleMs : NaN;
   const warnings = [];
   if (values.timeoutMs > values.slotMs) warnings.push("timeout > slot");
   if (values.respDelayMs + values.finalDelayMs >= values.slotMs) {
     warnings.push("RESP + FINAL >= slot");
   }
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `fresh ${fmtFixed(values.dsPositionMaxAgeSec, 1)} s · POLL → RESP → FINAL · ${fmtFixed(values.slotMs, 0)} ms slot · ${fmtFixed(values.roundGapMs, 0)} ms gap · ${fmtFixed(dsCycleMs, 0)} ms frame · ${fmtFixed(frameHz, 2)} Hz${warnText}`;
+  return `fresh ${fmtFixed(values.dsPositionMaxAgeSec, 1)} s · POLL → RESP → FINAL · ${fmtFixed(values.slotMs, 0)} ms slot · ${fmtFixed(values.roundGapMs, 0)} ms gap · ${fmtFixed(dsCycleMs, 0)} ms base frame · ${fmtFixed(averageCycleMs, 1)} ms average with live geometry · ${fmtFixed(frameHz, 2)} Hz${warnText}`;
 }
 
 function updateRangingProfileSummary(profileKey) {
@@ -10827,7 +11365,7 @@ async function enablePositionRanging() {
     tag: String(tagId),
     anchors,
     uwb: "1",
-    reboot: "1",
+    hot_switch: "1",
   };
   const runtimeMode = document.getElementById("runtimeMode");
   const runtimeTag = document.getElementById("runtimeTag");
@@ -10838,20 +11376,24 @@ async function enablePositionRanging() {
   if (runtimeTag) runtimeTag.value = String(tagId);
   if (runtimeAnchors) runtimeAnchors.value = anchors;
   if (runtimeUwb) runtimeUwb.checked = true;
-  if (runtimeReboot) runtimeReboot.value = "1";
-  await postConfig({target_modules: "all", params}, "positionToast");
+  if (runtimeReboot) runtimeReboot.value = "0";
+  const result = await postConfig(
+    {target_modules: "all", params},
+    "positionToast"
+  );
+  if (!apiResponseOk(result)) return;
   state.positionTrail = {};
   state.positionTrailTokens = {};
   state.positionAnchorTrail = {};
   state.positionSeeds = {};
-  setTimeout(fetchSnapshot, 1500);
+  fetchSnapshot();
+  setTimeout(fetchSnapshot, 250);
+  setTimeout(fetchSnapshot, 750);
 }
 
 function runPositionOverlayAction(event) {
   const action = event.currentTarget?.dataset?.action || "enable";
-  if (action === "fix") {
-    fixCurrentAnchorGeometry();
-  } else if (action === "restart_geometry") {
+  if (action === "restart_geometry") {
     restartAnchorSelfLocalization();
   } else if (action === "enable") {
     enablePositionRanging();
@@ -10860,18 +11402,17 @@ function runPositionOverlayAction(event) {
 
 async function restartAnchorSelfLocalization() {
     const settings = positionSettings();
-    if (!positionProtocolUsesTdoa(settings.solver)) {
+    if (settings.solver === "hybrid") {
       setToast(
         "positionToast",
-        "Select FlexTDOA or Passive DS-TWR before restarting anchor self-localization.",
+        "Select a live protocol before resetting dynamic anchor geometry.",
         "bad"
       );
       return;
     }
     if (!window.confirm(
-      "Clear the fixed anchor geometry from this browser and every module? " +
-      "Positioning will remain unavailable until the selected passive protocol learns a new " +
-      "geometry and you press Fix Anchor Geometry."
+      "Clear any legacy fixed geometry from every module and reset the live " +
+      "anchor estimate? Positioning resumes automatically after fresh ranges arrive."
     )) {
       return;
     }
@@ -10880,59 +11421,16 @@ async function restartAnchorSelfLocalization() {
       params: {flex_geometry_clear: "1"},
     }, "positionToast");
     if (!apiResponseOk(result)) return;
-    resetPaperAnchorSelfLocalization(settings.anchorIds, true);
+    resetPaperAnchorSelfLocalization(
+      settings.anchorIds, settings.solver, true);
     state.positionTrail = {};
     state.positionTrailTokens = {};
-    setToast("positionToast", "DS-TWR anchor self-localization restarted on all modules", "good");
+    setToast(
+      "positionToast",
+      "Legacy fixed geometry cleared; live anchor tracking restarted",
+      "good"
+    );
     renderPosition();
-}
-
-async function fixCurrentAnchorGeometry() {
-  const settings = positionSettings();
-  const session = state.positionGeometry;
-  if (session.key !== positionGeometryKey(settings.anchorIds)) {
-    setToast("positionToast", "Anchor geometry does not match the selected IDs", "bad");
-    return;
-  }
-  const existingFixed = session.fixed;
-  if (!existingFixed && (!session.ekf || session.ekf.updates < 1)) {
-    setToast("positionToast", "Anchor EKF has no complete update yet", "bad");
-    return;
-  }
-  const geometry = paperAnchorGeometry(
-    settings.anchorIds, positionGeometryMaxAge(settings));
-  if (!existingFixed && !geometry.canFix) {
-    const rmsText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
-      ? `: ${fmtPositionCm(geometry.fitQuality.rmsM, 1)} RMS`
-      : "";
-    setToast("positionToast", `Anchor geometry fit is not acceptable${rmsText}`, "bad");
-    renderPosition();
-    return;
-  }
-  const anchors = cloneAnchorCoordinates(
-    existingFixed?.anchors || geometry.anchors);
-  const fixed = existingFixed || {
-    anchorIds: settings.anchorIds.map(Number),
-    anchors: cloneAnchorCoordinates(anchors),
-    fixedAt: Date.now() / 1000,
-    updates: session.ekf.updates,
-  };
-  const geometryText = settings.anchorIds.map(id => {
-    const point = anchors[id];
-    return `${id}:${Math.round(point.x * 1000)}:${Math.round(point.y * 1000)}`;
-  }).join(",");
-  const result = await postConfig({
-    target_modules: "all",
-    params: {flex_geometry: geometryText},
-  }, "positionToast");
-  if (!apiResponseOk(result)) return;
-  session.fixed = fixed;
-  persistFixedPaperAnchorGeometry(settings.anchorIds, fixed);
-  state.positionSeeds = {};
-  state.positionTrail = {};
-  state.positionTrailTokens = {};
-  setToast("positionToast", "Anchor geometry fixed and persisted on all modules", "good");
-  renderPosition();
 }
 
 function wireSettings() {
@@ -11012,7 +11510,6 @@ function wireSettings() {
     renderPosition();
   });
   document.getElementById("positionRestartAnchorSelfLocalization").addEventListener("click", restartAnchorSelfLocalization);
-  document.getElementById("positionFixAnchorGeometry").addEventListener("click", fixCurrentAnchorGeometry);
   document.getElementById("positionEnableRanging").addEventListener("click", runPositionOverlayAction);
   document.getElementById("positionEnableRangingSide").addEventListener("click", enablePositionRanging);
   document.querySelectorAll(".cm-input").forEach(el => {
