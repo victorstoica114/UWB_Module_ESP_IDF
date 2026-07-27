@@ -1,0 +1,127 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=22mm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+\graphicspath{{figures/}}
+
+\title{Passive DS-TWR Speed-Limit Study}
+\author{UWB Module ESP-IDF field validation}
+\date{27 July 2026}
+
+\begin{document}
+\maketitle
+
+\section{Purpose and method}
+
+This experiment evaluates how far the custom receive-only Passive DS-TWR
+protocol can be accelerated while retaining static accuracy. Four anchors
+formed a surveyed \(3\,\mathrm{m}\times3\,\mathrm{m}\) square with
+\(\pm2\,\mathrm{mm}\) placement tolerance. The tag was stationary at the
+surveyed centre, \((1.5,1.5)\,\mathrm{m}\).
+
+All measurements used firmware \texttt{137c2b5}. Positions were captured from
+the lossless dashboard event stream rather than from periodic snapshots.
+Raw AlgMin estimates and constant-velocity EKF estimates were retained
+separately. The reported update rate counts complete position frames that
+contain newly acquired UWB information.
+
+\section{Results}
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+Profile & pos/s & nominal & EKF RMSE & EKF P95 & raw RMSE & success\\
+ & & pos/s & cm & cm & cm & \%\\
+\midrule
+Robust 16 ms & 49.3 & 62.5 & 1.73 & 2.90 & 2.05 & 98.2\\
+Robust 13 ms & 50.6 & 76.9 & 1.89 & 3.19 & 2.21 & 93.8\\
+Robust 10 ms & 61.5 & 100.0 & 1.95 & 3.23 & 2.25 & 92.1\\
+Robust 10 ms, 0.9/0.9 ms & 62.8 & 100.0 & 2.58 & 4.14 & 2.82 & 91.1\\
+Fast Star 10 ms & 56.7 & 100.0 & 3.83 & 6.15 & 4.12 & 92.9\\
+\bottomrule
+\end{tabular}
+\caption{Controlled static measurements. Success is the aggregate
+anchor-dialogue success rate reported by the firmware.}
+\end{table}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\linewidth]{measured_update_rate.png}
+\caption{Measured position throughput. The dashed line marks the
+85 positions/s target.}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\linewidth]{raw_vs_filtered_rmse.png}
+\caption{The CV-EKF reduces dispersion at every tested operating point.}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.84\linewidth]{speed_accuracy_tradeoff.png}
+\caption{Speed--accuracy trade-off for the tested profiles.}
+\end{figure}
+
+\section{Interpretation}
+
+The best fast operating point is \textbf{Robust Rotating with a configured
+10 ms frame and 1.0/1.0 ms RESP/FINAL delays}. It delivered
+\textbf{61.5 positions/s}, \textbf{1.95 cm 2-D RMSE}, and
+\textbf{3.23 cm P95}. Robust 16 ms remains the most accurate profile at
+1.73 cm RMSE, but the 10 ms profile adds 24.8\% update throughput for only
+0.23 cm additional RMSE.
+
+Fast Star did not improve speed in this geometry. Its asymmetric initiator
+load produced 56.7 positions/s and 3.83 cm RMSE, so Robust Rotating is the
+better optimization base.
+
+The 0.9/0.9 ms delay experiment was also rejected. It improved throughput by
+only 2.1\%, while RMSE rose from 1.95 to 2.58 cm and P95 from 3.23 to
+4.14 cm. The live modules were therefore restored to the 1.0/1.0 ms control
+timing.
+
+\section{Why 85 positions/s was not reached}
+
+The nominal 10 ms frame implies 300 directed slots/s. Anchor logs measured
+approximately 196.7 slots/s, or 5.08 ms per effective slot. A complete
+independent position frame uses three directed anchor dialogues, so
+85 positions/s requires at least 255 successful slots/s before allowing for
+rejections. Accepted position throughput must therefore improve by
+approximately 38.2\%.
+
+The present bottleneck is the radio transaction and scheduling path rather
+than the dashboard or EKF. Re-solving after every observation could display
+more than 85 updates/s, but consecutive results would reuse nearly all the
+same measurements. Such a mode may reduce visual latency, but it must be
+reported separately from independent frame throughput.
+
+\section{Recommended next phase}
+
+\begin{enumerate}
+\item Instrument POLL TX, delayed RESP TX, FINAL TX/RX, CIA readout, and RX
+re-arm with per-stage timestamps and failure counters.
+\item Replace millisecond receive-loop scheduling with DW3000 delayed-TX and
+delayed-RX deadlines in a non-blocking slot state machine.
+\item Retain Robust Rotating at 1.0/1.0 ms as the control. Accept each timing
+change only if RMSE and P95 remain inside the control confidence band.
+\item Evaluate a rolling solve on every new observation as a distinct
+low-latency display mode, exposing both solver updates/s and independent
+frames/s.
+\end{enumerate}
+
+\section{Reproducibility}
+
+The repository contains the raw JSONL event streams, status snapshots,
+firmware timing logs, machine-readable metrics, and the analysis script
+\texttt{tools/uwb\_passive\_speed\_analyze.py}.
+
+\end{document}

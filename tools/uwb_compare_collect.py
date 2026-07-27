@@ -211,6 +211,7 @@ def relevant_timing_log(item: dict[str, Any]) -> bool:
             )
         )
         or "PASSIVE_DS anchor schedule=" in message
+        or "PASSIVE_DS solver pos=" in message
         or "PASSIVE_DS runtime source=" in message
         or "PASSIVE_DS receive-only tag active" in message
         or (
