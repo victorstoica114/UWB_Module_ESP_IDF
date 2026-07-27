@@ -124,3 +124,57 @@ the anchor and tag coordinates were not surveyed.
 An earlier 750 us trial reached only about 72% successful protocol operations
 and produced four consecutive bad estimates in a 4000-result window. This is
 why 1000 us, rather than 750 us, is the validated default.
+
+## Hardware-bias calibration
+
+Passive DS-TWR keeps two calibration layers separate:
+
+- one observation bias per configured anchor, with the first anchor fixed to
+  zero; a directed `I -> R` observation is corrected by subtracting
+  `bias(R) - bias(I)`;
+- one DS range bias per unordered anchor pair; the piggybacked range is
+  corrected before it updates the autonomous geometry or enters the passive
+  observation equation.
+
+This is compact and scalable. `N` anchors require `N - 1` independent
+observation biases and `N(N - 1)/2` range biases, rather than two values for
+every directed path. Values are signed integer millimeters.
+
+The dashboard exposes both lists under **Ranging Settings → Passive DS-TWR
+Frame Profiles**. The calibration target is intentionally separate from the
+frame-profile target and defaults to module 1, the current passive tag.
+Calibration belongs on every passive tag that calculates a position; anchors
+do not need it to perform the radio exchange.
+
+The runtime API accepts:
+
+```text
+passive_ds_anchor_bias_mm=0,34,-16,-55
+passive_ds_range_bias_mm=71,56,-49,67,66,-29
+```
+
+Range pairs follow compact upper-triangle order: A1-A2, A1-A3, ..., A2-A3,
+... . `passive_ds_calibration_clear=1` disables and clears both lists. A
+successful update increments the calibration generation and reboots the
+selected tag.
+
+New firmware stores only the configured anchor count and pair count in NVS,
+while remaining backward-compatible with the original fixed-size blobs. For
+four anchors this reduces the two calibration blobs from 220 bytes to 40
+bytes, avoiding unnecessary NVS fragmentation.
+
+## Known-geometry validation
+
+On 2026-07-27, A2-A5 were restored to a surveyed 3.000 m square and tag 1 was
+placed at `(1.500, 1.500)` m. Two independent 120 s Robust Rotating captures
+were recorded before and after calibration.
+
+The embedded autonomous-geometry result improved from 4.12 cm to 3.33 cm
+2-D RMSE, while its bias magnitude fell from 3.51 cm to 0.96 cm. Re-solving
+the calibrated observations with the surveyed square produced 1.89 cm RMSE
+and 3.11 cm P95 at 49.17 complete frames/s. This isolates autonomous anchor
+geometry as the largest remaining accuracy penalty.
+
+All raw captures, metrics, figures, limitations, and reproduction instructions
+are in
+[`reports/passive_ds_known_geometry_20260727`](../reports/passive_ds_known_geometry_20260727/README.md).

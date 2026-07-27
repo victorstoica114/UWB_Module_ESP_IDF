@@ -658,6 +658,74 @@ static bool read_blob_exact(nvs_handle_t handle, const char *key, void *value,
            size == expected_size;
 }
 
+static bool read_passive_ds_anchor_bias(
+    nvs_handle_t handle, app_runtime_config_t *config)
+{
+    size_t size = 0;
+    if (config->anchor_count > APP_RUNTIME_CONFIG_MAX_ANCHORS ||
+        nvs_get_blob(handle, KEY_PDS_ABIAS, NULL, &size) != ESP_OK) {
+        return false;
+    }
+    if (size == sizeof(config->passive_ds_anchor_bias_mm)) {
+        return read_blob_exact(
+            handle, KEY_PDS_ABIAS,
+            config->passive_ds_anchor_bias_mm, size);
+    }
+    const size_t compact_size =
+        (size_t)config->anchor_count * sizeof(int32_t);
+    if (size != compact_size) {
+        return false;
+    }
+    size_t read_size = compact_size;
+    return nvs_get_blob(
+               handle, KEY_PDS_ABIAS,
+               config->passive_ds_anchor_bias_mm,
+               &read_size) == ESP_OK &&
+           read_size == compact_size;
+}
+
+static bool read_passive_ds_range_bias(
+    nvs_handle_t handle, app_runtime_config_t *config)
+{
+    size_t size = 0;
+    if (config->anchor_count > APP_RUNTIME_CONFIG_MAX_ANCHORS ||
+        nvs_get_blob(handle, KEY_PDS_RBIAS, NULL, &size) != ESP_OK) {
+        return false;
+    }
+    if (size == sizeof(config->passive_ds_range_bias_mm)) {
+        return read_blob_exact(
+            handle, KEY_PDS_RBIAS,
+            config->passive_ds_range_bias_mm, size);
+    }
+    const size_t pair_count =
+        (size_t)config->anchor_count *
+        ((size_t)config->anchor_count - 1U) / 2U;
+    const size_t compact_size = pair_count * sizeof(int32_t);
+    if (size != compact_size) {
+        return false;
+    }
+    int32_t compact[APP_RUNTIME_CONFIG_MAX_ANCHOR_PAIRS] = {0};
+    size_t read_size = compact_size;
+    if (nvs_get_blob(handle, KEY_PDS_RBIAS, compact, &read_size) !=
+            ESP_OK ||
+        read_size != compact_size) {
+        return false;
+    }
+    size_t compact_pair = 0;
+    for (size_t a = 0; a < config->anchor_count; ++a) {
+        for (size_t b = a + 1U; b < config->anchor_count; ++b) {
+            const size_t stored_pair =
+                app_runtime_config_anchor_pair_index(a, b);
+            if (stored_pair == SIZE_MAX) {
+                return false;
+            }
+            config->passive_ds_range_bias_mm[stored_pair] =
+                compact[compact_pair++];
+        }
+    }
+    return true;
+}
+
 static void read_config_from_nvs(app_runtime_config_t *config)
 {
     nvs_handle_t handle = 0;
@@ -747,12 +815,8 @@ static void read_config_from_nvs(app_runtime_config_t *config)
                        &config->passive_ds_calibration_enabled);
     found |= read_u32(handle, KEY_PDS_CGEN,
                       &config->passive_ds_calibration_generation);
-    found |= read_blob_exact(handle, KEY_PDS_ABIAS,
-                             config->passive_ds_anchor_bias_mm,
-                             sizeof(config->passive_ds_anchor_bias_mm));
-    found |= read_blob_exact(handle, KEY_PDS_RBIAS,
-                             config->passive_ds_range_bias_mm,
-                             sizeof(config->passive_ds_range_bias_mm));
+    found |= read_passive_ds_anchor_bias(handle, config);
+    found |= read_passive_ds_range_bias(handle, config);
     found |= read_u8(handle, KEY_DT_PEER, &config->distance_test_peer_id);
     found |= read_u8(handle, KEY_DT_INIT, &config->distance_test_initiator_id);
     found |= read_u8(handle, KEY_DT_RESP, &config->distance_test_responder_id);
@@ -878,6 +942,22 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
 
+    int32_t compact_passive_ds_range_bias[
+        APP_RUNTIME_CONFIG_MAX_ANCHOR_PAIRS] = {0};
+    size_t compact_passive_ds_pair_count = 0;
+    for (size_t a = 0; a < config->anchor_count; ++a) {
+        for (size_t b = a + 1U; b < config->anchor_count; ++b) {
+            const size_t stored_pair =
+                app_runtime_config_anchor_pair_index(a, b);
+            if (stored_pair == SIZE_MAX) {
+                return ESP_ERR_INVALID_ARG;
+            }
+            compact_passive_ds_range_bias[
+                compact_passive_ds_pair_count++] =
+                config->passive_ds_range_bias_mm[stored_pair];
+        }
+    }
+
     nvs_handle_t handle = 0;
     ESP_RETURN_ON_ERROR(
         nvs_open(APP_RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &handle),
@@ -979,10 +1059,12 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
                             config->passive_ds_calibration_generation));
     WRITE_OR_GOTO(nvs_set_blob(handle, KEY_PDS_ABIAS,
                                config->passive_ds_anchor_bias_mm,
-                               sizeof(config->passive_ds_anchor_bias_mm)));
+                               (size_t)config->anchor_count *
+                                   sizeof(int32_t)));
     WRITE_OR_GOTO(nvs_set_blob(handle, KEY_PDS_RBIAS,
-                               config->passive_ds_range_bias_mm,
-                               sizeof(config->passive_ds_range_bias_mm)));
+                               compact_passive_ds_range_bias,
+                               compact_passive_ds_pair_count *
+                                   sizeof(int32_t)));
     WRITE_OR_GOTO(write_u8(handle, KEY_DT_PEER,
                            config->distance_test_peer_id));
     WRITE_OR_GOTO(write_u8(handle, KEY_DT_INIT,

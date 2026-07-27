@@ -3977,8 +3977,17 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div class="profile-card" style="margin-top:12px">
             <h3>Passive DS-TWR calibration</h3>
-            <p class="muted">Optional hardware-bias calibration. Anchor bias values are ordered like the configured anchors. Range bias values use unordered pair order: A1-A2, A1-A3, …, A2-A3, … . The first anchor bias must be zero.</p>
+            <p class="muted">Optional hardware-bias calibration for receive-only tags. Apply it to each passive tag, not to the ranging anchors. Anchor bias values are ordered like the configured anchors. Range bias values use unordered pair order: A1-A2, A1-A3, …, A2-A3, … . The first anchor bias must be zero.</p>
             <div class="form-grid">
+              <label for="passiveDsCalibrationTargets">Passive tag target</label>
+              <select id="passiveDsCalibrationTargets">
+                <option value="1" selected>module 1 (current tag)</option>
+                <option value="2">module 2</option>
+                <option value="3">module 3</option>
+                <option value="4">module 4</option>
+                <option value="5">module 5</option>
+                <option value="all">all modules (advanced)</option>
+              </select>
               <label for="passiveDsAnchorBiasMm">Anchor observation bias mm</label>
               <input id="passiveDsAnchorBiasMm" value="0,34,-16,-55">
               <label for="passiveDsRangeBiasMm">Anchor-pair range bias mm</label>
@@ -10473,7 +10482,7 @@ async function applyPassiveDsCalibration(clear = false) {
     false
   );
   const data = await postConfig({
-    target_modules: document.getElementById("passiveDsProfileTargets").value,
+    target_modules: document.getElementById("passiveDsCalibrationTargets").value,
     params,
   }, "passiveDsProfileToast");
   if (apiResponseOk(data)) setTimeout(fetchSnapshot, 500);
@@ -10641,6 +10650,7 @@ function persistedSettingIds() {
     "calAutoApply", "calMinApplyDtu", "calReferenceGuardCm", "calTimeoutSec",
     ...rangingProfileIds(),
     "passiveDsProfileTargets",
+    "passiveDsCalibrationTargets",
     "passiveDsAnchorBiasMm", "passiveDsRangeBiasMm",
     ...passiveDsProfileIds(),
   ];
