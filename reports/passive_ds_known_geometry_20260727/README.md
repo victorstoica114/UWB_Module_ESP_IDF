@@ -102,8 +102,10 @@ cd /home/pi/Documents/UWB
 python3 tools/uwb_passive_ds_known_geometry_analyze.py
 ```
 
-The analyzer reads either the committed `*.jsonl.xz` files or decompressed
-`*.jsonl` files and regenerates:
+The ready-to-read report is
+`Passive_DS-TWR_known_geometry_report_2026-07-27.pdf`. The analyzer reads
+either the committed `*.jsonl.xz` files or decompressed `*.jsonl` files and
+regenerates its supporting outputs:
 
 - `analysis_summary.json`
 - `position_metrics.csv`
@@ -112,3 +114,11 @@ The analyzer reads either the committed `*.jsonl.xz` files or decompressed
 - `protocol_metrics.csv`
 - `raw_data_manifest.csv`
 - `figures/*.png` and `figures/*.pdf`
+
+Rebuild the PDF with:
+
+```bash
+cd reports/passive_ds_known_geometry_20260727
+latexmk -pdf -interaction=nonstopmode -halt-on-error \
+  -jobname=Passive_DS-TWR_known_geometry_report_2026-07-27 report.tex
+```
