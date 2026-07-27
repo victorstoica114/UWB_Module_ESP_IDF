@@ -182,6 +182,119 @@ def runtime_url(target: str) -> str:
     return f"http://{target}/config/runtime"
 
 
+RUNTIME_MODE_STATUS_NAMES = {
+    "beacon": "uwb_beacon_smoke",
+    "beacon_smoke": "uwb_beacon_smoke",
+    "uwb_beacon_smoke": "uwb_beacon_smoke",
+    "distance": "uwb_distance_test",
+    "distance_test": "uwb_distance_test",
+    "uwb_distance_test": "uwb_distance_test",
+    "calibration": "uwb_antenna_delay_calibration",
+    "uwb_antenna_delay_calibration": "uwb_antenna_delay_calibration",
+    "ranging": "uwb_ranging",
+    "uwb_ranging": "uwb_ranging",
+    "survey": "uwb_anchor_survey",
+    "anchor_survey": "uwb_anchor_survey",
+    "uwb_anchor_survey": "uwb_anchor_survey",
+    "flex_tdoa": "uwb_flex_tdoa",
+    "flextdoa": "uwb_flex_tdoa",
+    "uwb_flex_tdoa": "uwb_flex_tdoa",
+    "passive_ds": "uwb_passive_ds_twr",
+    "passive_ds_twr": "uwb_passive_ds_twr",
+    "uwb_passive_ds_twr": "uwb_passive_ds_twr",
+}
+
+RUNTIME_PARAM_STATUS_FIELDS = {
+    "tag": "runtime_tag_id",
+    "anchor_count": "runtime_anchor_count",
+    "flex_k": "runtime_flex_tdoa_responder_count",
+    "flex_guard_us": "runtime_flex_tdoa_guard_us",
+    "flex_req_us": "runtime_flex_tdoa_request_subslot_us",
+    "flex_req_process_us": "runtime_flex_tdoa_request_process_us",
+    "flex_resp_us": "runtime_flex_tdoa_response_subslot_us",
+    "flex_resp_process_us": "runtime_flex_tdoa_response_process_us",
+    "coordinator": "runtime_anchor_survey_coordinator_id",
+    "coord": "runtime_anchor_survey_coordinator_id",
+    "survey_rx_ms": "runtime_anchor_survey_rx_slice_ms",
+    "survey_delay_ms": "runtime_anchor_survey_command_delay_ms",
+    "survey_slot_ms": "runtime_anchor_survey_slot_ms",
+    "survey_gap_ms": "runtime_anchor_survey_round_gap_ms",
+    "survey_log_every": "runtime_anchor_survey_passive_tag_log_every",
+    "ranging_slot_ms": "runtime_ranging_slot_ms",
+    "ranging_gap_ms": "runtime_ranging_round_gap_ms",
+    "ranging_rx_ms": "runtime_ranging_rx_slice_ms",
+    "ranging_timeout_ms": "runtime_ranging_rx_timeout_ms",
+    "ranging_resp_delay_ms": "runtime_ranging_resp_delay_ms",
+    "ranging_final_delay_ms": "runtime_ranging_final_delay_ms",
+    "ranging_auto_rx_delay_uus": "runtime_ranging_auto_rx_delay_uus",
+    "passive_ds_schedule": "runtime_passive_ds_schedule",
+    "passive_ds_slot_ms": "runtime_passive_ds_slot_ms",
+    "passive_ds_gap_ms": "runtime_passive_ds_round_gap_ms",
+    "passive_ds_rx_ms": "runtime_passive_ds_rx_slice_ms",
+    "passive_ds_timeout_ms": "runtime_passive_ds_rx_timeout_ms",
+    "passive_ds_resp_delay_ms": "runtime_passive_ds_resp_delay_ms",
+    "passive_ds_final_delay_ms": "runtime_passive_ds_final_delay_ms",
+    "passive_ds_auto_rx_delay_uus":
+        "runtime_passive_ds_auto_rx_delay_uus",
+    "radio_channel": "runtime_radio_channel",
+    "uwb_channel": "runtime_radio_channel",
+    "telemetry_port": "runtime_wireless_telemetry_port",
+    "tel_port": "runtime_wireless_telemetry_port",
+}
+
+
+def runtime_config_matches_status(
+    params: dict[str, str], status: dict[str, Any]
+) -> bool:
+    checked = 0
+    mode = params.get("mode")
+    if mode is not None:
+        expected_mode = RUNTIME_MODE_STATUS_NAMES.get(str(mode).lower())
+        if expected_mode is None or status.get("runtime_mode_name") != expected_mode:
+            return False
+        checked += 1
+
+    anchors = params.get("anchors")
+    if anchors is not None:
+        expected_anchors = [
+            int(value)
+            for value in re.split(r"[\s,]+", str(anchors))
+            if value.strip()
+        ]
+        actual_anchors = [
+            int(value) for value in status.get("runtime_anchor_ids") or []
+        ]
+        if actual_anchors != expected_anchors:
+            return False
+        checked += 1
+
+    for key, field in RUNTIME_PARAM_STATUS_FIELDS.items():
+        if key not in params:
+            continue
+        try:
+            expected = int(str(params[key]), 0)
+            actual = int(status.get(field))
+        except (TypeError, ValueError):
+            return False
+        if actual != expected:
+            return False
+        checked += 1
+
+    for key, field in (
+        ("uwb", "runtime_uwb_enabled"),
+        ("bno085", "runtime_bno085_accel_enabled"),
+        ("gps", "runtime_gps_enabled"),
+    ):
+        if key not in params:
+            continue
+        expected = str(params[key]).lower() in ("1", "true", "yes", "on")
+        if bool(status.get(field)) != expected:
+            return False
+        checked += 1
+
+    return checked > 0
+
+
 def charger_url(target: str) -> str:
     if re.match(r"^https?://", target):
         return target.rstrip("/") + "/config/charger"
@@ -1229,6 +1342,9 @@ class DashboardState:
                 "log_id": item.get("log_id"),
                 "source_module_id": item.get("source_module_id"),
                 "raw": item.get("raw") or "",
+                "tdoa_protocol": str(
+                    item.get("tdoa_protocol") or "flextdoa"
+                ),
                 "stats": {
                     "samples": len(values),
                     "mean_m": mean_m,
@@ -3720,10 +3836,10 @@ tr.status-stale td { color: #4f3b1d; }
               <p class="muted">A1 initiates one exchange to every other anchor. Lowest coordination overhead and fastest steady-state position frame.</p>
               <div class="profile-validation">implementation baseline · hardware validation pending</div>
               <div class="form-grid compact">
-                <label for="passiveDsFastSlotMs">Slot ms</label><input id="passiveDsFastSlotMs" value="3" type="number" min="1" max="60000" step="1">
+                <label for="passiveDsFastSlotMs">Slot ms</label><input id="passiveDsFastSlotMs" value="5" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsFastGapMs">Frame gap ms</label><input id="passiveDsFastGapMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsFastRxMs">Anchor RX slice ms</label><input id="passiveDsFastRxMs" value="100" type="number" min="1" max="60000" step="1">
-                <label for="passiveDsFastTimeoutMs">RX timeout ms</label><input id="passiveDsFastTimeoutMs" value="3" type="number" min="1" max="60000" step="1">
+                <label for="passiveDsFastTimeoutMs">RX timeout ms</label><input id="passiveDsFastTimeoutMs" value="4" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsFastRespMs">RESP delay ms</label><input id="passiveDsFastRespMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsFastFinalMs">FINAL delay ms</label><input id="passiveDsFastFinalMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsFastAutoRxUus">Auto RX delay UUS</label><input id="passiveDsFastAutoRxUus" value="500" type="number" min="0" max="65535" step="10">
@@ -3737,10 +3853,10 @@ tr.status-stale td { color: #4f3b1d; }
               <p class="muted">The reference rotates A1 → A2 → A3 → A4 after each frame. Every position frame remains solvable, with diversified directed paths over a superframe.</p>
               <div class="profile-validation">diversity profile · hardware validation pending</div>
               <div class="form-grid compact">
-                <label for="passiveDsRobustSlotMs">Slot ms</label><input id="passiveDsRobustSlotMs" value="3" type="number" min="1" max="60000" step="1">
+                <label for="passiveDsRobustSlotMs">Slot ms</label><input id="passiveDsRobustSlotMs" value="5" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsRobustGapMs">Frame gap ms</label><input id="passiveDsRobustGapMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsRobustRxMs">Anchor RX slice ms</label><input id="passiveDsRobustRxMs" value="100" type="number" min="1" max="60000" step="1">
-                <label for="passiveDsRobustTimeoutMs">RX timeout ms</label><input id="passiveDsRobustTimeoutMs" value="3" type="number" min="1" max="60000" step="1">
+                <label for="passiveDsRobustTimeoutMs">RX timeout ms</label><input id="passiveDsRobustTimeoutMs" value="4" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsRobustRespMs">RESP delay ms</label><input id="passiveDsRobustRespMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsRobustFinalMs">FINAL delay ms</label><input id="passiveDsRobustFinalMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsRobustAutoRxUus">Auto RX delay UUS</label><input id="passiveDsRobustAutoRxUus" value="500" type="number" min="0" max="65535" step="10">
@@ -4204,10 +4320,10 @@ const rangingProfileDefaults = {
     validationText: "maximum · 74.68 positions/s · 98.71% complete",
     buttonLabel: "Apply 13 ms Maximum",
     dsPositionMaxAgeSec: 0.1,
-    slotMs: 3,
+    slotMs: 5,
     roundGapMs: 1,
     dsRxSliceMs: 100,
-    timeoutMs: 3,
+    timeoutMs: 4,
     respDelayMs: 1,
     finalDelayMs: 1,
     autoRxDelayUus: 500,
@@ -4327,6 +4443,7 @@ const rangingProtocolProfileFields = {
 };
 const rangingProfileDefaultsVersion = "2026-07-26-native-ds-twr-speed-study-v3";
 const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
+const passiveDsProfileDefaultsVersion = "2026-07-27-passive-ds-safe-baseline-v2";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -10014,10 +10131,10 @@ const passiveDsProfileDefaults = {
     prefix: "passiveDsFast",
     label: "Fast Star",
     schedule: 0,
-    slotMs: 3,
+    slotMs: 5,
     gapMs: 1,
     rxMs: 100,
-    timeoutMs: 3,
+    timeoutMs: 4,
     respMs: 1,
     finalMs: 1,
     autoRxUus: 500,
@@ -10174,10 +10291,10 @@ function passiveDsRuntimeConfig() {
   return {
     anchorIds,
     schedule: Number(status.runtime_passive_ds_schedule || 0),
-    slotMs: Number(status.runtime_passive_ds_slot_ms || 3),
+    slotMs: Number(status.runtime_passive_ds_slot_ms || 5),
     gapMs: Number(status.runtime_passive_ds_round_gap_ms ?? 1),
     rxMs: Number(status.runtime_passive_ds_rx_slice_ms || 100),
-    timeoutMs: Number(status.runtime_passive_ds_rx_timeout_ms || 3),
+    timeoutMs: Number(status.runtime_passive_ds_rx_timeout_ms || 4),
     respMs: Number(status.runtime_passive_ds_resp_delay_ms || 1),
     finalMs: Number(status.runtime_passive_ds_final_delay_ms || 1),
     autoRxUus: Number(status.runtime_passive_ds_auto_rx_delay_uus || 500),
@@ -10345,6 +10462,7 @@ function restoreSettings() {
   }
   migrateRangingProfileDefaults();
   migrateFlexProfileDefaults();
+  migratePassiveDsProfileDefaults();
   migrateCalibrationPairSetting();
   migratePositionSolverSetting();
 }
@@ -10365,6 +10483,15 @@ function migrateFlexProfileDefaults() {
     writeFlexProfile(profile, flexProfileDefaults[profile]);
   }
   localStorage.setItem(key, flexProfileDefaultsVersion);
+}
+
+function migratePassiveDsProfileDefaults() {
+  const key = "uwbDash.passiveDsProfileDefaultsVersion";
+  if (localStorage.getItem(key) === passiveDsProfileDefaultsVersion) return;
+  for (const profile of Object.keys(passiveDsProfileDefaults)) {
+    writePassiveDsProfile(profile, passiveDsProfileDefaults[profile]);
+  }
+  localStorage.setItem(key, passiveDsProfileDefaultsVersion);
 }
 
 function migrateCalibrationPairSetting() {
@@ -11252,7 +11379,13 @@ class DashboardHttpServer(ThreadingHTTPServer):
         if not params:
             raise RuntimeError("No runtime config parameters provided")
         targets = self.resolve_targets(target_modules)
-        return [self.send_runtime_config(target, params) for target in targets]
+        with ThreadPoolExecutor(max_workers=min(5, len(targets))) as executor:
+            return list(
+                executor.map(
+                    lambda target: self.send_runtime_config(target, params),
+                    targets,
+                )
+            )
 
     def stop_all_uwb(
         self,
@@ -12165,30 +12298,112 @@ class DashboardHttpServer(ThreadingHTTPServer):
             )
         return targets
 
+    def wait_for_runtime_config(
+        self, target: str, params: dict[str, str]
+    ) -> dict[str, Any] | None:
+        # A runtime write may reboot the module before the HTTP response is
+        # transmitted. Allow enough time for ESP-IDF to boot and reconnect to
+        # Wi-Fi, then verify the persisted settings through /status.
+        deadline = time.monotonic() + max(30.0, self.timeout_sec * 3.0)
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(
+                    status_url(target), timeout=2.0
+                ) as response:
+                    status = json.loads(
+                        response.read().decode("utf-8", errors="replace")
+                    )
+                if runtime_config_matches_status(params, status):
+                    return status
+            except (
+                json.JSONDecodeError,
+                urllib.error.URLError,
+                TimeoutError,
+                ConnectionError,
+                OSError,
+            ):
+                pass
+            time.sleep(0.4)
+        return None
+
     def send_runtime_config(self, target: str, params: dict[str, str]) -> dict[str, Any]:
         query = urllib.parse.urlencode(params, safe=",:")
-        request = urllib.request.Request(
-            f"{runtime_url(target)}?{query}",
-            data=b"",
-            method="POST",
-            headers={"Content-Length": "0", "X-OTA-Token": self.token},
-        )
         started = time.monotonic()
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_sec) as response:
-                body = response.read().decode("utf-8", errors="replace").strip()
+        reboot_requested = str(params.get("reboot") or "") == "1"
+        attempts = 2 if reboot_requested else 1
+        last_error = ""
+        for attempt in range(1, attempts + 1):
+            request = urllib.request.Request(
+                f"{runtime_url(target)}?{query}",
+                data=b"",
+                method="POST",
+                headers={
+                    "Content-Length": "0",
+                    "X-OTA-Token": self.token,
+                },
+            )
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=self.timeout_sec
+                ) as response:
+                    body = response.read().decode(
+                        "utf-8", errors="replace"
+                    ).strip()
+                    return {
+                        "target": target,
+                        "ok": 200 <= response.status < 300,
+                        "status": response.status,
+                        "elapsed_sec": round(
+                            time.monotonic() - started, 3
+                        ),
+                        "body": body,
+                        "attempt": attempt,
+                    }
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode(
+                    "utf-8", errors="replace"
+                ).strip()
                 return {
                     "target": target,
-                    "ok": 200 <= response.status < 300,
-                    "status": response.status,
-                    "elapsed_sec": round(time.monotonic() - started, 3),
-                    "body": body,
+                    "ok": False,
+                    "status": exc.code,
+                    "body": body or exc.reason,
+                    "attempt": attempt,
                 }
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace").strip()
-            return {"target": target, "ok": False, "status": exc.code, "body": body or exc.reason}
-        except (urllib.error.URLError, TimeoutError) as exc:
-            return {"target": target, "ok": False, "error": str(exc)}
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                ConnectionError,
+                OSError,
+            ) as exc:
+                last_error = str(exc)
+                if reboot_requested:
+                    verified = self.wait_for_runtime_config(
+                        target, params
+                    )
+                    if verified is not None:
+                        return {
+                            "target": target,
+                            "ok": True,
+                            "status": 200,
+                            "elapsed_sec": round(
+                                time.monotonic() - started, 3
+                            ),
+                            "body": (
+                                "configuration verified after reboot"
+                            ),
+                            "verified_after_reboot": True,
+                            "module_id": verified.get("module_id"),
+                            "attempt": attempt,
+                        }
+                if attempt < attempts:
+                    continue
+        return {
+            "target": target,
+            "ok": False,
+            "error": last_error or "runtime config verification failed",
+            "attempt": attempts,
+        }
 
     def send_antenna_delay(self, target: str, params: dict[str, str]) -> dict[str, Any]:
         query = urllib.parse.urlencode(params)

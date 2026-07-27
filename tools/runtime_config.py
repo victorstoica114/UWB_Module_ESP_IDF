@@ -94,8 +94,9 @@ def send_runtime_config(
         return target, False, f"HTTP {exc.code}: {message}", time.monotonic() - started_at
     except urllib.error.URLError as exc:
         return target, False, str(exc.reason), time.monotonic() - started_at
-    except TimeoutError:
-        return target, False, "timed out", time.monotonic() - started_at
+    except (TimeoutError, ConnectionError, OSError) as exc:
+        message = str(exc) or "connection interrupted"
+        return target, False, message, time.monotonic() - started_at
 
 
 def add_optional(params: dict[str, str], key: str, value: str | None) -> None:
