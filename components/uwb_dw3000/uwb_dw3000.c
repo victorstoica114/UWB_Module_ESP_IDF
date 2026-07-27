@@ -7102,24 +7102,39 @@ static bool uwb_passive_ds_anchor_distance_mm(
         range_age_slots == NULL) {
         return false;
     }
-    const struct uwb_flex_tdoa_anchor_distance *cached =
-        uwb_flex_tdoa_cached_anchor_distance(anchor_a_id, anchor_b_id);
-    if (cached != NULL && cached->distance_mm > 0) {
-        *distance_mm = cached->distance_mm;
-        *range_source = UWB_PASSIVE_DS_RANGE_PIGGYBACK_DS;
-        *range_age_slots = current_slot_id - cached->slot_id;
-        return true;
-    }
-
     const app_runtime_config_t *config = app_runtime_config_get();
-    if (!config->flex_tdoa_geometry_fixed) {
-        return false;
-    }
     const size_t a =
         uwb_anchor_survey_id_index(anchor_ids, anchor_count, anchor_a_id);
     const size_t b =
         uwb_anchor_survey_id_index(anchor_ids, anchor_count, anchor_b_id);
     if (a == SIZE_MAX || b == SIZE_MAX) {
+        return false;
+    }
+    int32_t range_bias_mm = 0;
+    if (config->passive_ds_calibration_enabled) {
+        const size_t pair =
+            app_runtime_config_anchor_pair_index(a, b);
+        if (pair == SIZE_MAX) {
+            return false;
+        }
+        range_bias_mm = config->passive_ds_range_bias_mm[pair];
+    }
+
+    const struct uwb_flex_tdoa_anchor_distance *cached =
+        uwb_flex_tdoa_cached_anchor_distance(anchor_a_id, anchor_b_id);
+    if (cached != NULL && cached->distance_mm > 0) {
+        const int32_t corrected_distance =
+            cached->distance_mm - range_bias_mm;
+        if (corrected_distance <= 0) {
+            return false;
+        }
+        *distance_mm = corrected_distance;
+        *range_source = UWB_PASSIVE_DS_RANGE_PIGGYBACK_DS;
+        *range_age_slots = current_slot_id - cached->slot_id;
+        return true;
+    }
+
+    if (!config->flex_tdoa_geometry_fixed) {
         return false;
     }
     const double dx =
@@ -7432,7 +7447,7 @@ static void uwb_passive_ds_tag_process_frame(
         (double)rx_delta_raw - (double)reply_dtu - anchor_tof_dtu;
     const double difference_dtu =
         (double)rx_delta_raw - corrected_reply_dtu - anchor_tof_dtu;
-    const int32_t difference_mm = uwb_distance_meters_to_mm(
+    int32_t difference_mm = uwb_distance_meters_to_mm(
         uwb_distance_tof_to_meters(difference_dtu));
     const int32_t raw_difference_mm = uwb_distance_meters_to_mm(
         uwb_distance_tof_to_meters(raw_difference_dtu));
@@ -7440,6 +7455,22 @@ static void uwb_passive_ds_tag_process_frame(
         raw_difference_mm - difference_mm;
     const int32_t clock_offset_ppb =
         (int32_t)lround(clock_offset_ratio * 1000000000.0);
+    if (config->passive_ds_calibration_enabled) {
+        const size_t initiator_index = uwb_anchor_survey_id_index(
+            anchor_ids, anchor_count, initiator_id);
+        const size_t responder_index_value =
+            uwb_anchor_survey_id_index(
+                anchor_ids, anchor_count, responder_id);
+        if (initiator_index == SIZE_MAX ||
+            responder_index_value == SIZE_MAX) {
+            memset(observation, 0, sizeof(*observation));
+            return;
+        }
+        difference_mm -=
+            config->passive_ds_anchor_bias_mm[
+                responder_index_value] -
+            config->passive_ds_anchor_bias_mm[initiator_index];
+    }
     const int64_t reply_delay_us_i64 =
         uwb_dw3000_dtu_to_us((uint64_t)reply_dtu);
     const uint32_t reply_delay_us =

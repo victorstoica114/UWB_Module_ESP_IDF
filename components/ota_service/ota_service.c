@@ -87,6 +87,8 @@ typedef struct {
     char runtime_flex_masks_json[72];
     char runtime_flex_anchor_x_json[128];
     char runtime_flex_anchor_y_json[128];
+    char runtime_passive_ds_anchor_bias_json[128];
+    char runtime_passive_ds_range_bias_json[512];
     char response[OTA_SERVICE_STATUS_RESPONSE_SIZE];
 } ota_status_context_t;
 
@@ -582,6 +584,86 @@ static bool ota_parse_u16_list(const char *text, uint16_t *values,
     return parsed_count > 0U;
 }
 
+static bool ota_parse_i32_list(const char *text, int32_t *values,
+                               size_t max_count, uint8_t *count)
+{
+    if (text == NULL || text[0] == '\0' || values == NULL ||
+        count == NULL || max_count == 0U || max_count > UINT8_MAX) {
+        return false;
+    }
+
+    const char *cursor = text;
+    uint8_t parsed_count = 0;
+    while (*cursor != '\0') {
+        while (*cursor == ' ') {
+            cursor++;
+        }
+        errno = 0;
+        char *end = NULL;
+        const long parsed = strtol(cursor, &end, 0);
+        if (errno != 0 || end == cursor || parsed < INT32_MIN ||
+            parsed > INT32_MAX || parsed_count >= max_count) {
+            return false;
+        }
+        values[parsed_count++] = (int32_t)parsed;
+        cursor = end;
+        while (*cursor == ' ') {
+            cursor++;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+        if (*cursor != ',' && *cursor != ';') {
+            return false;
+        }
+        cursor++;
+    }
+    *count = parsed_count;
+    return parsed_count > 0U;
+}
+
+static void format_passive_ds_range_bias_json(
+    const app_runtime_config_t *config, char *buffer, size_t buffer_size)
+{
+    if (config == NULL || buffer == NULL || buffer_size == 0U) {
+        return;
+    }
+    size_t used = 0;
+    int written = snprintf(buffer, buffer_size, "[");
+    if (written < 0 || (size_t)written >= buffer_size) {
+        buffer[0] = '\0';
+        return;
+    }
+    used = (size_t)written;
+    bool first = true;
+    for (size_t a = 0; a < config->anchor_count; ++a) {
+        for (size_t b = a + 1U; b < config->anchor_count; ++b) {
+            const size_t pair =
+                app_runtime_config_anchor_pair_index(a, b);
+            if (pair == SIZE_MAX) {
+                buffer[0] = '\0';
+                return;
+            }
+            written = snprintf(
+                buffer + used, buffer_size - used, "%s%ld",
+                first ? "" : ",",
+                (long)config->passive_ds_range_bias_mm[pair]);
+            if (written < 0 || (size_t)written >= buffer_size - used) {
+                buffer[0] = '\0';
+                return;
+            }
+            used += (size_t)written;
+            first = false;
+        }
+    }
+    if (used + 2U > buffer_size) {
+        buffer[0] = '\0';
+        return;
+    }
+    buffer[used++] = ']';
+    buffer[used] = '\0';
+}
+
 static bool ota_parse_flex_geometry(
     const char *text, const app_runtime_config_t *config,
     int32_t x_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS],
@@ -805,6 +887,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #define runtime_flex_masks_json (ctx->runtime_flex_masks_json)
 #define runtime_flex_anchor_x_json (ctx->runtime_flex_anchor_x_json)
 #define runtime_flex_anchor_y_json (ctx->runtime_flex_anchor_y_json)
+#define runtime_passive_ds_anchor_bias_json \
+    (ctx->runtime_passive_ds_anchor_bias_json)
+#define runtime_passive_ds_range_bias_json \
+    (ctx->runtime_passive_ds_range_bias_json)
 
     const esp_app_desc_t *app = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -856,6 +942,13 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                           runtime_config->anchor_count,
                           runtime_flex_anchor_y_json,
                           sizeof(runtime_flex_anchor_y_json));
+    format_i32_array_json(runtime_config->passive_ds_anchor_bias_mm,
+                          runtime_config->anchor_count,
+                          runtime_passive_ds_anchor_bias_json,
+                          sizeof(runtime_passive_ds_anchor_bias_json));
+    format_passive_ds_range_bias_json(
+        runtime_config, runtime_passive_ds_range_bias_json,
+        sizeof(runtime_passive_ds_range_bias_json));
 
     char *response = ctx->response;
 
@@ -943,6 +1036,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_passive_ds_resp_delay_us\":%lu,"
         "\"runtime_passive_ds_final_delay_us\":%lu,"
         "\"runtime_passive_ds_auto_rx_delay_uus\":%lu,"
+        "\"runtime_passive_ds_calibration_enabled\":%s,"
+        "\"runtime_passive_ds_calibration_generation\":%lu,"
+        "\"runtime_passive_ds_anchor_bias_mm\":%s,"
+        "\"runtime_passive_ds_range_bias_mm\":%s,"
         "\"runtime_distance_test_peer_id\":%u,"
         "\"runtime_distance_test_initiator_id\":%u,"
         "\"runtime_distance_test_responder_id\":%u,"
@@ -1441,6 +1538,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)runtime_config->passive_ds_resp_delay_us,
         (unsigned long)runtime_config->passive_ds_final_delay_us,
         (unsigned long)runtime_config->passive_ds_auto_rx_delay_uus,
+        runtime_config->passive_ds_calibration_enabled ? "true" : "false",
+        (unsigned long)runtime_config->passive_ds_calibration_generation,
+        runtime_passive_ds_anchor_bias_json,
+        runtime_passive_ds_range_bias_json,
         (unsigned)runtime_config->distance_test_peer_id,
         (unsigned)runtime_config->distance_test_initiator_id,
         (unsigned)runtime_config->distance_test_responder_id,
@@ -1900,6 +2001,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #undef runtime_flex_masks_json
 #undef runtime_flex_anchor_x_json
 #undef runtime_flex_anchor_y_json
+#undef runtime_passive_ds_anchor_bias_json
+#undef runtime_passive_ds_range_bias_json
     return response_err;
 }
 
@@ -3185,6 +3288,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
                 memcpy(config.anchor_ids, ids, sizeof(config.anchor_ids));
                 config.anchor_count = count;
                 app_runtime_config_reset_flex_tdoa(&config);
+                app_runtime_config_reset_passive_ds_calibration(&config);
                 changed = true;
             }
         } else if (query_err != ESP_ERR_NOT_FOUND) {
@@ -3271,6 +3375,92 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
                 before_config.flex_tdoa_geometry_generation == UINT32_MAX
                     ? 1U
                     : before_config.flex_tdoa_geometry_generation + 1U;
+            changed = true;
+        }
+
+        const bool passive_ds_calibration_clear =
+            ota_query_option_enabled(
+                query, "passive_ds_calibration_clear");
+        char passive_ds_anchor_bias_text[256] = {0};
+        char passive_ds_range_bias_text[512] = {0};
+        const esp_err_t passive_ds_anchor_bias_err =
+            httpd_query_key_value(
+                query, "passive_ds_anchor_bias_mm",
+                passive_ds_anchor_bias_text,
+                sizeof(passive_ds_anchor_bias_text));
+        const esp_err_t passive_ds_range_bias_err =
+            httpd_query_key_value(
+                query, "passive_ds_range_bias_mm",
+                passive_ds_range_bias_text,
+                sizeof(passive_ds_range_bias_text));
+        if (passive_ds_anchor_bias_err == ESP_OK ||
+            passive_ds_range_bias_err == ESP_OK) {
+            if (passive_ds_anchor_bias_err != ESP_OK ||
+                passive_ds_range_bias_err != ESP_OK ||
+                passive_ds_calibration_clear) {
+                return httpd_resp_send_err(
+                    req, HTTPD_400_BAD_REQUEST,
+                    "Passive DS calibration requires both bias lists");
+            }
+            int32_t anchor_bias[
+                APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+            int32_t range_bias[
+                APP_RUNTIME_CONFIG_MAX_ANCHOR_PAIRS] = {0};
+            uint8_t anchor_bias_count = 0;
+            uint8_t range_bias_count = 0;
+            const size_t expected_pair_count =
+                (size_t)config.anchor_count *
+                ((size_t)config.anchor_count - 1U) / 2U;
+            if (!ota_parse_i32_list(
+                    passive_ds_anchor_bias_text, anchor_bias,
+                    APP_RUNTIME_CONFIG_MAX_ANCHORS,
+                    &anchor_bias_count) ||
+                !ota_parse_i32_list(
+                    passive_ds_range_bias_text, range_bias,
+                    APP_RUNTIME_CONFIG_MAX_ANCHOR_PAIRS,
+                    &range_bias_count) ||
+                anchor_bias_count != config.anchor_count ||
+                range_bias_count != expected_pair_count ||
+                anchor_bias[0] != 0) {
+                return httpd_resp_send_err(
+                    req, HTTPD_400_BAD_REQUEST,
+                    "Invalid Passive DS calibration lists");
+            }
+            memset(config.passive_ds_anchor_bias_mm, 0,
+                   sizeof(config.passive_ds_anchor_bias_mm));
+            memset(config.passive_ds_range_bias_mm, 0,
+                   sizeof(config.passive_ds_range_bias_mm));
+            memcpy(config.passive_ds_anchor_bias_mm, anchor_bias,
+                   (size_t)anchor_bias_count * sizeof(anchor_bias[0]));
+            size_t compact_pair = 0;
+            for (size_t a = 0; a < config.anchor_count; ++a) {
+                for (size_t b = a + 1U; b < config.anchor_count; ++b) {
+                    const size_t stored_pair =
+                        app_runtime_config_anchor_pair_index(a, b);
+                    if (stored_pair == SIZE_MAX) {
+                        return httpd_resp_send_err(
+                            req, HTTPD_400_BAD_REQUEST,
+                            "Invalid Passive DS pair index");
+                    }
+                    config.passive_ds_range_bias_mm[stored_pair] =
+                        range_bias[compact_pair++];
+                }
+            }
+            config.passive_ds_calibration_enabled = true;
+            config.passive_ds_calibration_generation =
+                before_config.passive_ds_calibration_generation ==
+                        UINT32_MAX
+                    ? 1U
+                    : before_config.passive_ds_calibration_generation +
+                          1U;
+            changed = true;
+        } else if (passive_ds_anchor_bias_err != ESP_ERR_NOT_FOUND ||
+                   passive_ds_range_bias_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(
+                req, HTTPD_400_BAD_REQUEST,
+                "Invalid Passive DS calibration");
+        } else if (passive_ds_calibration_clear) {
+            app_runtime_config_reset_passive_ds_calibration(&config);
             changed = true;
         }
 

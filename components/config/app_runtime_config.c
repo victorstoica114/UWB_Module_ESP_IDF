@@ -57,6 +57,10 @@ static const char *TAG = "app_runtime_config";
 #define KEY_PDS_RESP_US "pds_rsp_us"
 #define KEY_PDS_FINAL_US "pds_fin_us"
 #define KEY_PDS_ARX "pds_arx"
+#define KEY_PDS_CAL "pds_cal"
+#define KEY_PDS_CGEN "pds_cgen"
+#define KEY_PDS_ABIAS "pds_abias"
+#define KEY_PDS_RBIAS "pds_rbias"
 #define KEY_DT_PEER "dt_peer"
 #define KEY_DT_INIT "dt_init"
 #define KEY_DT_RESP "dt_resp"
@@ -229,6 +233,53 @@ static bool flex_tdoa_geometry_valid(const app_runtime_config_t *config)
     return true;
 }
 
+size_t app_runtime_config_anchor_pair_index(size_t first_index,
+                                            size_t second_index)
+{
+    if (first_index == second_index ||
+        first_index >= APP_RUNTIME_CONFIG_MAX_ANCHORS ||
+        second_index >= APP_RUNTIME_CONFIG_MAX_ANCHORS) {
+        return SIZE_MAX;
+    }
+    if (first_index > second_index) {
+        const size_t temporary = first_index;
+        first_index = second_index;
+        second_index = temporary;
+    }
+    return first_index * (2U * APP_RUNTIME_CONFIG_MAX_ANCHORS -
+                          first_index - 1U) /
+               2U +
+           second_index - first_index - 1U;
+}
+
+static bool passive_ds_calibration_valid(
+    const app_runtime_config_t *config)
+{
+    if (!config->passive_ds_calibration_enabled) {
+        return true;
+    }
+    if (config->passive_ds_calibration_generation == 0U ||
+        config->passive_ds_anchor_bias_mm[0] != 0) {
+        return false;
+    }
+    for (size_t i = 0; i < config->anchor_count; ++i) {
+        if (config->passive_ds_anchor_bias_mm[i] < -5000 ||
+            config->passive_ds_anchor_bias_mm[i] > 5000) {
+            return false;
+        }
+        for (size_t j = i + 1U; j < config->anchor_count; ++j) {
+            const size_t pair =
+                app_runtime_config_anchor_pair_index(i, j);
+            if (pair == SIZE_MAX ||
+                config->passive_ds_range_bias_mm[pair] < -5000 ||
+                config->passive_ds_range_bias_mm[pair] > 5000) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool app_runtime_config_runtime_mode_valid(uint8_t mode)
 {
     return mode == APP_RUNTIME_MODE_UWB_BEACON_SMOKE ||
@@ -385,6 +436,7 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->passive_ds_final_delay_us = APP_UWB_PASSIVE_DS_FINAL_DELAY_US;
     config->passive_ds_auto_rx_delay_uus =
         APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS;
+    app_runtime_config_reset_passive_ds_calibration(config);
     config->distance_test_peer_id = (uint8_t)APP_UWB_DISTANCE_TEST_PEER_ID;
     config->distance_test_initiator_id =
         (uint8_t)APP_UWB_DISTANCE_TEST_INITIATOR_ID;
@@ -466,6 +518,23 @@ void app_runtime_config_reset_flex_tdoa(app_runtime_config_t *config)
             : config->flex_tdoa_geometry_generation + 1U;
 }
 
+void app_runtime_config_reset_passive_ds_calibration(
+    app_runtime_config_t *config)
+{
+    if (config == NULL) {
+        return;
+    }
+    config->passive_ds_calibration_enabled = false;
+    memset(config->passive_ds_anchor_bias_mm, 0,
+           sizeof(config->passive_ds_anchor_bias_mm));
+    memset(config->passive_ds_range_bias_mm, 0,
+           sizeof(config->passive_ds_range_bias_mm));
+    config->passive_ds_calibration_generation =
+        config->passive_ds_calibration_generation == UINT32_MAX
+            ? 1U
+            : config->passive_ds_calibration_generation + 1U;
+}
+
 bool app_runtime_config_validate(const app_runtime_config_t *config)
 {
     if (config == NULL ||
@@ -498,6 +567,7 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
                 config->passive_ds_final_delay_us >=
             config->passive_ds_slot_ms * 1000U ||
         config->passive_ds_auto_rx_delay_uus == 0 ||
+        !passive_ds_calibration_valid(config) ||
         !id_valid(config->distance_test_initiator_id) ||
         !id_valid(config->distance_test_responder_id) ||
         config->distance_test_initiator_id ==
@@ -673,6 +743,16 @@ static void read_config_from_nvs(app_runtime_config_t *config)
                       &config->passive_ds_final_delay_us);
     found |= read_u32(handle, KEY_PDS_ARX,
                       &config->passive_ds_auto_rx_delay_uus);
+    found |= read_bool(handle, KEY_PDS_CAL,
+                       &config->passive_ds_calibration_enabled);
+    found |= read_u32(handle, KEY_PDS_CGEN,
+                      &config->passive_ds_calibration_generation);
+    found |= read_blob_exact(handle, KEY_PDS_ABIAS,
+                             config->passive_ds_anchor_bias_mm,
+                             sizeof(config->passive_ds_anchor_bias_mm));
+    found |= read_blob_exact(handle, KEY_PDS_RBIAS,
+                             config->passive_ds_range_bias_mm,
+                             sizeof(config->passive_ds_range_bias_mm));
     found |= read_u8(handle, KEY_DT_PEER, &config->distance_test_peer_id);
     found |= read_u8(handle, KEY_DT_INIT, &config->distance_test_initiator_id);
     found |= read_u8(handle, KEY_DT_RESP, &config->distance_test_responder_id);
@@ -893,6 +973,16 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
                             config->passive_ds_final_delay_us));
     WRITE_OR_GOTO(write_u32(handle, KEY_PDS_ARX,
                             config->passive_ds_auto_rx_delay_uus));
+    WRITE_OR_GOTO(write_bool(handle, KEY_PDS_CAL,
+                             config->passive_ds_calibration_enabled));
+    WRITE_OR_GOTO(write_u32(handle, KEY_PDS_CGEN,
+                            config->passive_ds_calibration_generation));
+    WRITE_OR_GOTO(nvs_set_blob(handle, KEY_PDS_ABIAS,
+                               config->passive_ds_anchor_bias_mm,
+                               sizeof(config->passive_ds_anchor_bias_mm)));
+    WRITE_OR_GOTO(nvs_set_blob(handle, KEY_PDS_RBIAS,
+                               config->passive_ds_range_bias_mm,
+                               sizeof(config->passive_ds_range_bias_mm)));
     WRITE_OR_GOTO(write_u8(handle, KEY_DT_PEER,
                            config->distance_test_peer_id));
     WRITE_OR_GOTO(write_u8(handle, KEY_DT_INIT,

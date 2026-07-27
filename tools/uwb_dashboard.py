@@ -275,6 +275,34 @@ def runtime_config_matches_status(
             return False
         checked += 1
 
+    for key, field in (
+        ("passive_ds_anchor_bias_mm",
+         "runtime_passive_ds_anchor_bias_mm"),
+        ("passive_ds_range_bias_mm",
+         "runtime_passive_ds_range_bias_mm"),
+    ):
+        if key not in params:
+            continue
+        try:
+            expected_values = [
+                int(value, 0)
+                for value in re.split(r"[\s,;]+", str(params[key]))
+                if value.strip()
+            ]
+            actual_values = [
+                int(value) for value in status.get(field) or []
+            ]
+        except (TypeError, ValueError):
+            return False
+        if actual_values != expected_values:
+            return False
+        checked += 1
+
+    if "passive_ds_calibration_clear" in params:
+        if bool(status.get("runtime_passive_ds_calibration_enabled")):
+            return False
+        checked += 1
+
     for key, field in RUNTIME_PARAM_STATUS_FIELDS.items():
         if key not in params:
             continue
@@ -3945,6 +3973,21 @@ tr.status-stale td { color: #4f3b1d; }
               </div>
               <div class="profile-summary" id="passiveDsRobustSummary"></div>
               <div class="form-actions"><button class="primary apply-passive-ds-profile" data-passive-ds-profile="robust">Apply Robust Rotating</button><button class="reset-passive-ds-profile" data-passive-ds-profile="robust">Reset Defaults</button></div>
+            </div>
+          </div>
+          <div class="profile-card" style="margin-top:12px">
+            <h3>Passive DS-TWR calibration</h3>
+            <p class="muted">Optional hardware-bias calibration. Anchor bias values are ordered like the configured anchors. Range bias values use unordered pair order: A1-A2, A1-A3, …, A2-A3, … . The first anchor bias must be zero.</p>
+            <div class="form-grid">
+              <label for="passiveDsAnchorBiasMm">Anchor observation bias mm</label>
+              <input id="passiveDsAnchorBiasMm" value="0,34,-16,-55">
+              <label for="passiveDsRangeBiasMm">Anchor-pair range bias mm</label>
+              <input id="passiveDsRangeBiasMm" value="71,56,-49,67,66,-29">
+            </div>
+            <div id="passiveDsCalibrationStatus" class="profile-summary">calibration status unavailable</div>
+            <div class="form-actions">
+              <button id="applyPassiveDsCalibration" class="primary">Apply Calibration</button>
+              <button id="clearPassiveDsCalibration">Clear Calibration</button>
             </div>
           </div>
           <div id="passiveDsProfileToast" class="toast"></div>
@@ -8327,6 +8370,7 @@ function renderInfo(snapshot) {
   renderFlexTdoaTimingDiagram();
   renderNativeDsTwrTimingDiagram();
   renderPassiveDsTimingDiagram();
+  renderPassiveDsCalibration();
   scheduleAccelRender();
   updateAccelEnabledControl();
   hydrateSettingsFromStatus(freshStatus);
@@ -10373,6 +10417,68 @@ async function applyPassiveDsProfile(key) {
   }
 }
 
+function passiveDsCalibrationStatus() {
+  const candidates = state.statuses || [];
+  return candidates.find(item =>
+    statusIsFresh(item) &&
+    String(item.runtime_mode_name || "").includes("passive_ds")
+  ) || candidates.find(statusIsFresh) || candidates[0] || {};
+}
+
+function renderPassiveDsCalibration() {
+  const root = document.getElementById("passiveDsCalibrationStatus");
+  if (!root) return;
+  const status = passiveDsCalibrationStatus();
+  const anchorIds = (status.runtime_anchor_ids || []).map(Number);
+  const anchorBias = status.runtime_passive_ds_anchor_bias_mm || [];
+  const rangeBias = status.runtime_passive_ds_range_bias_mm || [];
+  const pairLabels = [];
+  for (let a = 0; a < anchorIds.length; a += 1) {
+    for (let b = a + 1; b < anchorIds.length; b += 1) {
+      pairLabels.push(`A${anchorIds[a]}-A${anchorIds[b]}`);
+    }
+  }
+  if (!statusIsFresh(status)) {
+    root.textContent = "calibration status unavailable";
+    root.className = "profile-summary warn";
+    return;
+  }
+  if (!status.runtime_passive_ds_calibration_enabled) {
+    root.textContent = "disabled · raw piggybacked DS ranges and passive observations";
+    root.className = "profile-summary";
+    return;
+  }
+  root.textContent =
+    `enabled · generation ${status.runtime_passive_ds_calibration_generation || 0} · ` +
+    `anchors [${anchorIds.map((id, index) => `A${id}:${anchorBias[index] || 0}`).join(", ")}] mm · ` +
+    `ranges [${pairLabels.map((label, index) => `${label}:${rangeBias[index] || 0}`).join(", ")}] mm`;
+  root.className = "profile-summary";
+}
+
+async function applyPassiveDsCalibration(clear = false) {
+  const params = clear
+    ? {passive_ds_calibration_clear: "1", reboot: "1"}
+    : {
+        passive_ds_anchor_bias_mm:
+          document.getElementById("passiveDsAnchorBiasMm").value,
+        passive_ds_range_bias_mm:
+          document.getElementById("passiveDsRangeBiasMm").value,
+        reboot: "1",
+      };
+  setToast(
+    "passiveDsProfileToast",
+    clear ? "clearing Passive DS-TWR calibration..." : "applying Passive DS-TWR calibration...",
+    "",
+    null,
+    false
+  );
+  const data = await postConfig({
+    target_modules: document.getElementById("passiveDsProfileTargets").value,
+    params,
+  }, "passiveDsProfileToast");
+  if (apiResponseOk(data)) setTimeout(fetchSnapshot, 500);
+}
+
 function passiveDsRuntimeConfig() {
   const candidates = state.statuses || [];
   const status = candidates.find(item =>
@@ -10535,6 +10641,7 @@ function persistedSettingIds() {
     "calAutoApply", "calMinApplyDtu", "calReferenceGuardCm", "calTimeoutSec",
     ...rangingProfileIds(),
     "passiveDsProfileTargets",
+    "passiveDsAnchorBiasMm", "passiveDsRangeBiasMm",
     ...passiveDsProfileIds(),
   ];
 }
@@ -11005,6 +11112,12 @@ function wireSettings() {
       );
     });
   });
+  document.getElementById("applyPassiveDsCalibration")?.addEventListener(
+    "click", () => applyPassiveDsCalibration(false)
+  );
+  document.getElementById("clearPassiveDsCalibration")?.addEventListener(
+    "click", () => applyPassiveDsCalibration(true)
+  );
   Object.keys(passiveDsProfileDefaults).forEach(updatePassiveDsProfileSummary);
   updateAllRangingProfileSummaries();
   updateAllFlexProfileSummaries();

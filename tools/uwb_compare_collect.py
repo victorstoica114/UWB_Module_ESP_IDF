@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect deduplicated field data for native DS-TWR/FlexTDOA comparison."""
+"""Collect deduplicated field data for DS-TWR, FlexTDOA, or Passive DS-TWR."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from typing import Any
 PROTOCOL_MODES = {
     "ds_twr": "uwb_ranging",
     "flextdoa": "uwb_flex_tdoa",
+    "passive_ds": "uwb_passive_ds_twr",
 }
 
 RANGING_RESULT_RE = re.compile(
@@ -52,6 +53,14 @@ STATUS_KEYS = (
     "runtime_flex_tdoa_request_process_us",
     "runtime_flex_tdoa_response_subslot_us",
     "runtime_flex_tdoa_response_process_us",
+    "runtime_passive_ds_schedule",
+    "runtime_passive_ds_slot_ms",
+    "runtime_passive_ds_round_gap_ms",
+    "runtime_passive_ds_rx_slice_ms",
+    "runtime_passive_ds_rx_timeout_ms",
+    "runtime_passive_ds_resp_delay_us",
+    "runtime_passive_ds_final_delay_us",
+    "runtime_passive_ds_auto_rx_delay_uus",
     "runtime_radio_channel",
     "uwb_active_antenna_delay",
     "resource_temperature_c",
@@ -195,6 +204,16 @@ def relevant_timing_log(item: dict[str, Any]) -> bool:
             and (
                 "failed" in message
                 or "mismatch" in message
+            )
+        )
+        or "PASSIVE_DS anchor schedule=" in message
+        or "PASSIVE_DS runtime source=" in message
+        or "PASSIVE_DS receive-only tag active" in message
+        or (
+            "PASSIVE_DS" in message
+            and (
+                "failed" in message
+                or "timeout" in message
             )
         )
     )
