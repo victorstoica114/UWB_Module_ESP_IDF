@@ -293,6 +293,25 @@ enum {
     (UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET + 5U)
 #define UWB_DISTANCE_FRAME_BROADCAST_ID 255U
 
+/*
+ * Passive DS-TWR keeps the native three-message exchange, but makes the
+ * responder turnaround explicit so any receive-only tag can form a TDOA
+ * observation from POLL_RX -> RESP_RX. FINAL still completes a genuine
+ * anchor-to-anchor DS-TWR measurement.
+ */
+#define UWB_PASSIVE_DS_SLOT_ID_OFFSET UWB_DISTANCE_FRAME_HEADER_LEN
+#define UWB_PASSIVE_DS_REPLY_DTU_OFFSET \
+    (UWB_PASSIVE_DS_SLOT_ID_OFFSET + 4U)
+#define UWB_PASSIVE_DS_POLL_LEN (UWB_PASSIVE_DS_SLOT_ID_OFFSET + 4U)
+#define UWB_PASSIVE_DS_RESP_LEN (UWB_PASSIVE_DS_REPLY_DTU_OFFSET + 4U)
+#define UWB_PASSIVE_DS_FINAL_SLOT_ID_OFFSET \
+    UWB_DISTANCE_FRAME_NATIVE_FINAL_LEN
+#define UWB_PASSIVE_DS_FINAL_LEN \
+    (UWB_PASSIVE_DS_FINAL_SLOT_ID_OFFSET + 4U)
+#define UWB_PASSIVE_DS_BOOTSTRAP_LISTEN_US 2000000LL
+#define UWB_PASSIVE_DS_MAX_OBSERVATIONS \
+    (UWB_ANCHOR_SURVEY_MAX_ANCHORS * 2U)
+
 #define UWB_ANCHOR_SURVEY_MAX_ANCHORS APP_RUNTIME_CONFIG_MAX_ANCHORS
 #define UWB_ANCHOR_SURVEY_MAX_PAIRS \
     ((UWB_ANCHOR_SURVEY_MAX_ANCHORS * (UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U)) / 2U)
@@ -369,6 +388,9 @@ enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_FLEX_TDOA_RESP = 12,
     UWB_DISTANCE_FRAME_FLEX_TDOA_CONFIG = 13,
     UWB_DISTANCE_FRAME_FLEX_TDOA_GEOMETRY = 14,
+    UWB_DISTANCE_FRAME_PASSIVE_DS_POLL = 15,
+    UWB_DISTANCE_FRAME_PASSIVE_DS_RESP = 16,
+    UWB_DISTANCE_FRAME_PASSIVE_DS_FINAL = 17,
 };
 
 enum uwb_dw3000_runtime_mode {
@@ -378,6 +400,7 @@ enum uwb_dw3000_runtime_mode {
     UWB_DW3000_RUNTIME_ANCHOR_SURVEY,
     UWB_DW3000_RUNTIME_RANGING,
     UWB_DW3000_RUNTIME_FLEX_TDOA,
+    UWB_DW3000_RUNTIME_PASSIVE_DS_TWR,
 };
 
 struct uwb_rx_diagnostics {
@@ -541,6 +564,27 @@ struct uwb_flex_tdoa_geometry_staging {
     uint16_t received_mask;
     int32_t anchor_x_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS];
     int32_t anchor_y_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS];
+};
+
+struct uwb_passive_ds_schedule {
+    bool synced;
+    uint32_t next_owned_slot_id;
+    int64_t next_owned_poll_host_us;
+    int64_t last_poll_host_us;
+    uint32_t bootstrap_count;
+    uint32_t late_count;
+};
+
+struct uwb_passive_ds_observation {
+    bool in_use;
+    bool have_poll;
+    uint16_t sequence;
+    uint32_t slot_id;
+    uint8_t initiator_id;
+    uint8_t responder_id;
+    uint64_t poll_rx_tag_ts;
+    int64_t poll_rx_host_us;
+    TickType_t updated_tick;
 };
 
 static struct uwb_flex_tdoa_geometry_staging s_flex_tdoa_geometry_staging;
@@ -4000,6 +4044,14 @@ static const char *uwb_distance_type_name(uint8_t type)
         return "FLEX_TDOA_RESP";
     case UWB_DISTANCE_FRAME_FLEX_TDOA_CONFIG:
         return "FLEX_TDOA_CONFIG";
+    case UWB_DISTANCE_FRAME_FLEX_TDOA_GEOMETRY:
+        return "FLEX_TDOA_GEOMETRY";
+    case UWB_DISTANCE_FRAME_PASSIVE_DS_POLL:
+        return "PASSIVE_DS_POLL";
+    case UWB_DISTANCE_FRAME_PASSIVE_DS_RESP:
+        return "PASSIVE_DS_RESP";
+    case UWB_DISTANCE_FRAME_PASSIVE_DS_FINAL:
+        return "PASSIVE_DS_FINAL";
     default:
         return "UNKNOWN";
     }
@@ -6877,6 +6929,617 @@ static void uwb_dw3000_flex_tdoa_loop(void)
     uwb_flex_tdoa_tag_loop(anchor_ids, anchor_count);
 }
 
+static bool uwb_passive_ds_slot_pair(
+    uint32_t slot_id, const uint8_t *anchor_ids, size_t anchor_count,
+    uint8_t schedule_mode, uint8_t *initiator_id, uint8_t *responder_id,
+    uint8_t *responder_index)
+{
+    if (anchor_ids == NULL || anchor_count < 2U ||
+        anchor_count > UWB_ANCHOR_SURVEY_MAX_ANCHORS ||
+        initiator_id == NULL || responder_id == NULL) {
+        return false;
+    }
+
+    const uint32_t slots_per_frame = (uint32_t)anchor_count - 1U;
+    const uint32_t frame_id = slot_id / slots_per_frame;
+    const uint32_t index = slot_id % slots_per_frame;
+    const size_t initiator_index =
+        schedule_mode == APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING
+            ? (size_t)(frame_id % (uint32_t)anchor_count)
+            : 0U;
+    size_t candidate = 0U;
+    for (size_t i = 0; i < anchor_count; ++i) {
+        if (i == initiator_index) {
+            continue;
+        }
+        if (candidate == index) {
+            *initiator_id = anchor_ids[initiator_index];
+            *responder_id = anchor_ids[i];
+            if (responder_index != NULL) {
+                *responder_index = (uint8_t)candidate;
+            }
+            return true;
+        }
+        candidate++;
+    }
+    return false;
+}
+
+static int64_t uwb_passive_ds_next_slot_delta_us(
+    uint32_t slot_id, const app_runtime_config_t *config,
+    size_t anchor_count)
+{
+    const uint32_t slots_per_frame = (uint32_t)anchor_count - 1U;
+    int64_t delta_us = (int64_t)config->passive_ds_slot_ms * 1000LL;
+    if ((slot_id % slots_per_frame) == slots_per_frame - 1U) {
+        delta_us += (int64_t)config->passive_ds_round_gap_ms * 1000LL;
+    }
+    return delta_us;
+}
+
+static void uwb_passive_ds_schedule_from_poll(
+    struct uwb_passive_ds_schedule *schedule, uint32_t slot_id,
+    int64_t poll_host_us, const uint8_t *anchor_ids, size_t anchor_count,
+    const app_runtime_config_t *config)
+{
+    if (schedule == NULL || config == NULL || anchor_count < 2U) {
+        return;
+    }
+
+    int64_t due_us = poll_host_us;
+    uint32_t candidate_slot = slot_id;
+    const uint32_t search_limit =
+        (uint32_t)(anchor_count * (anchor_count - 1U)) + 1U;
+    for (uint32_t i = 0; i < search_limit; ++i) {
+        due_us += uwb_passive_ds_next_slot_delta_us(
+            candidate_slot, config, anchor_count);
+        candidate_slot++;
+        uint8_t initiator_id = 0;
+        uint8_t responder_id = 0;
+        if (uwb_passive_ds_slot_pair(
+                candidate_slot, anchor_ids, anchor_count,
+                config->passive_ds_schedule, &initiator_id, &responder_id,
+                NULL) &&
+            initiator_id == s_source_id) {
+            schedule->synced = true;
+            schedule->next_owned_slot_id = candidate_slot;
+            schedule->next_owned_poll_host_us = due_us;
+            schedule->last_poll_host_us = poll_host_us;
+            return;
+        }
+    }
+
+    schedule->synced = false;
+}
+
+static bool uwb_passive_ds_anchor_geometry_distance_mm(
+    uint8_t anchor_a_id, uint8_t anchor_b_id, const uint8_t *anchor_ids,
+    size_t anchor_count, int32_t *distance_mm)
+{
+    if (distance_mm == NULL) {
+        return false;
+    }
+    const app_runtime_config_t *config = app_runtime_config_get();
+    if (!config->flex_tdoa_geometry_fixed) {
+        return false;
+    }
+    const size_t a =
+        uwb_anchor_survey_id_index(anchor_ids, anchor_count, anchor_a_id);
+    const size_t b =
+        uwb_anchor_survey_id_index(anchor_ids, anchor_count, anchor_b_id);
+    if (a == SIZE_MAX || b == SIZE_MAX) {
+        return false;
+    }
+    const double dx =
+        (double)config->flex_tdoa_anchor_x_mm[a] -
+        (double)config->flex_tdoa_anchor_x_mm[b];
+    const double dy =
+        (double)config->flex_tdoa_anchor_y_mm[a] -
+        (double)config->flex_tdoa_anchor_y_mm[b];
+    const double distance = sqrt(dx * dx + dy * dy);
+    if (!isfinite(distance) || distance <= 0.0 ||
+        distance > (double)INT32_MAX) {
+        return false;
+    }
+    *distance_mm = (int32_t)lround(distance);
+    return true;
+}
+
+static esp_err_t uwb_passive_ds_initiate_once(
+    uint8_t responder_id, uint16_t sequence, uint32_t slot_id,
+    int64_t *poll_host_us)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+    uint64_t poll_tx_ts = 0;
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_PASSIVE_DS_POLL,
+                             responder_id, sequence, payload);
+    uwb_distance_put_u32(payload, UWB_PASSIVE_DS_SLOT_ID_OFFSET, slot_id);
+    esp_err_t err = uwb_dw3000_send_payload_expect_rx(
+        payload, UWB_PASSIVE_DS_POLL_LEN,
+        config->passive_ds_auto_rx_delay_uus,
+        config->passive_ds_rx_timeout_ms, &poll_tx_ts);
+    const int64_t local_poll_host_us = esp_timer_get_time();
+    if (poll_host_us != NULL) {
+        *poll_host_us = local_poll_host_us;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "PASSIVE_DS POLL TX failed slot=%lu seq=%u responder=%u: %s",
+                 (unsigned long)slot_id, (unsigned)sequence,
+                 (unsigned)responder_id, esp_err_to_name(err));
+        return err;
+    }
+
+    struct uwb_distance_frame response = {0};
+    err = uwb_distance_receive_matching(
+        UWB_DISTANCE_FRAME_PASSIVE_DS_RESP, responder_id, true, sequence,
+        &response, config->passive_ds_rx_timeout_ms);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "PASSIVE_DS RESP wait failed slot=%lu seq=%u responder=%u: %s",
+                 (unsigned long)slot_id, (unsigned)sequence,
+                 (unsigned)responder_id, esp_err_to_name(err));
+        return err;
+    }
+    if (response.payload_len < UWB_PASSIVE_DS_RESP_LEN ||
+        uwb_distance_get_u32(response.payload,
+                             UWB_PASSIVE_DS_SLOT_ID_OFFSET) != slot_id ||
+        uwb_distance_get_u32(response.payload,
+                             UWB_PASSIVE_DS_REPLY_DTU_OFFSET) == 0U) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    const uint64_t final_tx_due = uwb_dw3000_add_timestamp_delta(
+        response.rx_timestamp,
+        uwb_dw3000_ms_to_dtu(config->passive_ds_final_delay_ms));
+    const uint64_t expected_final_tx_ts = uwb_dw3000_programmed_tx_timestamp(
+        uwb_dw3000_delayed_time_word(final_tx_due));
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_PASSIVE_DS_FINAL,
+                             responder_id, sequence, payload);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_POLL_TX_TS_OFFSET,
+                          poll_tx_ts);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_RESP_RX_TS_OFFSET,
+                          response.rx_timestamp);
+    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET,
+                          expected_final_tx_ts);
+    uwb_distance_put_u32(payload, UWB_PASSIVE_DS_FINAL_SLOT_ID_OFFSET,
+                         slot_id);
+    uint64_t programmed_final_tx_ts = 0;
+    uint64_t actual_final_tx_ts = 0;
+    err = uwb_dw3000_send_payload_delayed(
+        payload, UWB_PASSIVE_DS_FINAL_LEN, final_tx_due,
+        &programmed_final_tx_ts, &actual_final_tx_ts);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "PASSIVE_DS FINAL TX failed slot=%lu seq=%u responder=%u: %s",
+                 (unsigned long)slot_id, (unsigned)sequence,
+                 (unsigned)responder_id, esp_err_to_name(err));
+        return err;
+    }
+    return programmed_final_tx_ts == expected_final_tx_ts
+               ? ESP_OK
+               : ESP_ERR_INVALID_STATE;
+}
+
+static esp_err_t uwb_passive_ds_respond_to_poll(
+    const struct uwb_distance_frame *poll, uint32_t slot_id,
+    struct uwb_distance_measurement *measurement)
+{
+    if (poll == NULL || measurement == NULL ||
+        poll->type != UWB_DISTANCE_FRAME_PASSIVE_DS_POLL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint64_t resp_tx_due = uwb_dw3000_add_timestamp_delta(
+        poll->rx_timestamp,
+        uwb_dw3000_ms_to_dtu(config->passive_ds_resp_delay_ms));
+    const uint64_t expected_resp_tx_ts = uwb_dw3000_programmed_tx_timestamp(
+        uwb_dw3000_delayed_time_word(resp_tx_due));
+    const uint64_t reply_dtu = uwb_distance_delta_ts(
+        expected_resp_tx_ts, poll->rx_timestamp);
+    if (reply_dtu == 0U || reply_dtu > UINT32_MAX) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_PASSIVE_DS_RESP,
+                             poll->source_id, poll->sequence, payload);
+    uwb_distance_put_u32(payload, UWB_PASSIVE_DS_SLOT_ID_OFFSET, slot_id);
+    uwb_distance_put_u32(payload, UWB_PASSIVE_DS_REPLY_DTU_OFFSET,
+                         (uint32_t)reply_dtu);
+    uint64_t programmed_resp_tx_ts = 0;
+    uint64_t actual_resp_tx_ts = 0;
+    esp_err_t err = uwb_dw3000_send_payload_delayed_expect_rx(
+        payload, UWB_PASSIVE_DS_RESP_LEN, resp_tx_due,
+        config->passive_ds_auto_rx_delay_uus,
+        config->passive_ds_rx_timeout_ms, &programmed_resp_tx_ts,
+        &actual_resp_tx_ts);
+    if (err != ESP_OK || programmed_resp_tx_ts != expected_resp_tx_ts) {
+        return err == ESP_OK ? ESP_ERR_INVALID_STATE : err;
+    }
+
+    struct uwb_distance_frame final = {0};
+    err = uwb_distance_receive_matching(
+        UWB_DISTANCE_FRAME_PASSIVE_DS_FINAL, poll->source_id, true,
+        poll->sequence, &final, config->passive_ds_rx_timeout_ms);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (final.payload_len < UWB_PASSIVE_DS_FINAL_LEN ||
+        uwb_distance_get_u32(final.payload,
+                             UWB_PASSIVE_DS_FINAL_SLOT_ID_OFFSET) != slot_id) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    uwb_distance_fill_measurement_from_timestamps(
+        poll->source_id, s_source_id, poll->sequence,
+        uwb_distance_get_ts40(final.payload,
+                              UWB_DISTANCE_FRAME_POLL_TX_TS_OFFSET),
+        poll->rx_timestamp, programmed_resp_tx_ts,
+        uwb_distance_get_ts40(final.payload,
+                              UWB_DISTANCE_FRAME_RESP_RX_TS_OFFSET),
+        uwb_distance_get_ts40(final.payload,
+                              UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET),
+        final.rx_timestamp, final.clock_offset_valid,
+        final.clock_offset_raw, measurement);
+    measurement->poll_rx_diagnostics = poll->diagnostics;
+    measurement->final_rx_diagnostics = final.diagnostics;
+    (void)actual_resp_tx_ts;
+    return ESP_OK;
+}
+
+static struct uwb_passive_ds_observation *
+uwb_passive_ds_find_observation(
+    struct uwb_passive_ds_observation *observations, uint32_t slot_id,
+    uint16_t sequence, uint8_t initiator_id, uint8_t responder_id,
+    bool create)
+{
+    struct uwb_passive_ds_observation *oldest = NULL;
+    for (size_t i = 0; i < UWB_PASSIVE_DS_MAX_OBSERVATIONS; ++i) {
+        struct uwb_passive_ds_observation *item = &observations[i];
+        if (item->in_use && item->slot_id == slot_id &&
+            item->sequence == sequence &&
+            item->initiator_id == initiator_id &&
+            item->responder_id == responder_id) {
+            return item;
+        }
+        if (!item->in_use) {
+            oldest = item;
+            break;
+        }
+        if (oldest == NULL ||
+            (int32_t)(item->updated_tick - oldest->updated_tick) < 0) {
+            oldest = item;
+        }
+    }
+    if (!create || oldest == NULL) {
+        return NULL;
+    }
+    memset(oldest, 0, sizeof(*oldest));
+    oldest->in_use = true;
+    oldest->slot_id = slot_id;
+    oldest->sequence = sequence;
+    oldest->initiator_id = initiator_id;
+    oldest->responder_id = responder_id;
+    return oldest;
+}
+
+static void uwb_passive_ds_tag_process_frame(
+    const struct uwb_distance_frame *frame,
+    struct uwb_passive_ds_observation *observations, uint8_t tag_id,
+    const uint8_t *anchor_ids, size_t anchor_count)
+{
+    if (frame == NULL) {
+        return;
+    }
+    const app_runtime_config_t *config = app_runtime_config_get();
+    if (frame->type == UWB_DISTANCE_FRAME_PASSIVE_DS_POLL) {
+        if (frame->payload_len < UWB_PASSIVE_DS_POLL_LEN) {
+            return;
+        }
+        const uint32_t slot_id = uwb_distance_get_u32(
+            frame->payload, UWB_PASSIVE_DS_SLOT_ID_OFFSET);
+        uint8_t initiator_id = 0;
+        uint8_t responder_id = 0;
+        if (!uwb_passive_ds_slot_pair(
+                slot_id, anchor_ids, anchor_count,
+                config->passive_ds_schedule, &initiator_id, &responder_id,
+                NULL) ||
+            frame->source_id != initiator_id ||
+            frame->destination_id != responder_id) {
+            return;
+        }
+        struct uwb_passive_ds_observation *observation =
+            uwb_passive_ds_find_observation(
+                observations, slot_id, frame->sequence, initiator_id,
+                responder_id, true);
+        if (observation != NULL) {
+            observation->have_poll = true;
+            observation->poll_rx_tag_ts = frame->rx_timestamp;
+            observation->poll_rx_host_us = frame->rx_host_time_us;
+            observation->updated_tick = xTaskGetTickCount();
+        }
+        return;
+    }
+
+    if (frame->type != UWB_DISTANCE_FRAME_PASSIVE_DS_RESP ||
+        frame->payload_len < UWB_PASSIVE_DS_RESP_LEN) {
+        return;
+    }
+    const uint32_t slot_id = uwb_distance_get_u32(
+        frame->payload, UWB_PASSIVE_DS_SLOT_ID_OFFSET);
+    const uint32_t reply_dtu = uwb_distance_get_u32(
+        frame->payload, UWB_PASSIVE_DS_REPLY_DTU_OFFSET);
+    uint8_t initiator_id = 0;
+    uint8_t responder_id = 0;
+    uint8_t responder_index = 0;
+    if (reply_dtu == 0U ||
+        !uwb_passive_ds_slot_pair(
+            slot_id, anchor_ids, anchor_count,
+            config->passive_ds_schedule, &initiator_id, &responder_id,
+            &responder_index) ||
+        frame->source_id != responder_id ||
+        frame->destination_id != initiator_id) {
+        return;
+    }
+    struct uwb_passive_ds_observation *observation =
+        uwb_passive_ds_find_observation(
+            observations, slot_id, frame->sequence, initiator_id,
+            responder_id, false);
+    if (observation == NULL || !observation->have_poll ||
+        !frame->clock_offset_valid) {
+        if (observation != NULL) {
+            memset(observation, 0, sizeof(*observation));
+        }
+        return;
+    }
+    const uint64_t rx_delta_raw = uwb_distance_delta_ts(
+        frame->rx_timestamp, observation->poll_rx_tag_ts);
+    if (uwb_dw3000_dtu_to_us(rx_delta_raw) > 20000) {
+        memset(observation, 0, sizeof(*observation));
+        return;
+    }
+    int32_t anchor_distance_mm = 0;
+    if (!uwb_passive_ds_anchor_geometry_distance_mm(
+            initiator_id, responder_id, anchor_ids, anchor_count,
+            &anchor_distance_mm)) {
+        memset(observation, 0, sizeof(*observation));
+        return;
+    }
+    const double clock_offset_ratio =
+        frame->clock_offset_from_cia
+            ? uwb_dw3000_cia_clock_offset_ratio(frame->clock_offset_raw)
+            : uwb_dw3000_clock_offset_ratio(frame->clock_offset_raw);
+    const double corrected_reply_dtu =
+        uwb_dw3000_remote_interval_in_local_dtu(
+            (double)reply_dtu, clock_offset_ratio);
+    const double anchor_tof_dtu =
+        ((double)anchor_distance_mm / 1000.0) /
+        (UWB_DW3000_TIME_UNIT_SECONDS * UWB_DW3000_SPEED_OF_LIGHT_MPS);
+    const double raw_difference_dtu =
+        (double)rx_delta_raw - (double)reply_dtu - anchor_tof_dtu;
+    const double difference_dtu =
+        (double)rx_delta_raw - corrected_reply_dtu - anchor_tof_dtu;
+    const int32_t difference_mm = uwb_distance_meters_to_mm(
+        uwb_distance_tof_to_meters(difference_dtu));
+    const int32_t raw_difference_mm = uwb_distance_meters_to_mm(
+        uwb_distance_tof_to_meters(raw_difference_dtu));
+    (void)wireless_telemetry_service_submit_passive_ds_observation(
+        tag_id, initiator_id, responder_id, responder_index,
+        frame->sequence, slot_id, difference_mm, raw_difference_mm,
+        anchor_distance_mm);
+    (void)flextdoa_solver_service_submit_anchor_range(
+        initiator_id, responder_id, slot_id, anchor_distance_mm);
+    (void)flextdoa_solver_service_submit_observation(
+        tag_id, initiator_id, responder_id, slot_id, difference_mm);
+    memset(observation, 0, sizeof(*observation));
+}
+
+static void uwb_passive_ds_tag_loop(const uint8_t *anchor_ids,
+                                    size_t anchor_count)
+{
+    struct uwb_passive_ds_observation
+        observations[UWB_PASSIVE_DS_MAX_OBSERVATIONS] = {0};
+    const esp_err_t solver_err = flextdoa_solver_service_start();
+    if (solver_err != ESP_OK) {
+        ESP_LOGW(TAG, "PASSIVE_DS local solver unavailable: %s",
+                 esp_err_to_name(solver_err));
+    }
+    s_status = UWB_DW3000_STATUS_READY;
+    ESP_LOGI(TAG,
+             "PASSIVE_DS receive-only tag active: tag_id=%u geometry=%s",
+             (unsigned)s_source_id,
+             app_runtime_config_get()->flex_tdoa_geometry_fixed
+                 ? "fixed"
+                 : "unavailable");
+    while (true) {
+        const app_runtime_config_t *config = app_runtime_config_get();
+        struct uwb_distance_frame frame = {0};
+        const esp_err_t err = uwb_distance_receive_next(
+            &frame, config->passive_ds_rx_slice_ms);
+        if (err == ESP_OK) {
+            uwb_passive_ds_tag_process_frame(
+                &frame, observations, s_source_id, anchor_ids, anchor_count);
+        } else if (err != ESP_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "PASSIVE_DS tag RX failed: %s",
+                     esp_err_to_name(err));
+            uwb_dw3000_delay_ms(2);
+        }
+    }
+}
+
+static void uwb_passive_ds_anchor_loop(const uint8_t *anchor_ids,
+                                       size_t anchor_count)
+{
+    struct uwb_passive_ds_schedule schedule = {
+        .last_poll_host_us = esp_timer_get_time(),
+    };
+    uint32_t completed = 0;
+    uint32_t failed = 0;
+    int64_t summary_started_us = esp_timer_get_time();
+    s_status = UWB_DW3000_STATUS_READY;
+
+    while (true) {
+        const app_runtime_config_t *config = app_runtime_config_get();
+        int64_t now_us = esp_timer_get_time();
+        bool initiate = schedule.synced &&
+                        now_us >= schedule.next_owned_poll_host_us;
+        uint32_t slot_id = schedule.next_owned_slot_id;
+        if (!schedule.synced && s_source_id == anchor_ids[0] &&
+            now_us - schedule.last_poll_host_us >=
+                UWB_PASSIVE_DS_BOOTSTRAP_LISTEN_US) {
+            initiate = true;
+            slot_id = 0U;
+            schedule.bootstrap_count++;
+        }
+
+        if (initiate) {
+            uint8_t initiator_id = 0;
+            uint8_t responder_id = 0;
+            if (!uwb_passive_ds_slot_pair(
+                    slot_id, anchor_ids, anchor_count,
+                    config->passive_ds_schedule, &initiator_id,
+                    &responder_id, NULL) ||
+                initiator_id != s_source_id) {
+                schedule.synced = false;
+                schedule.last_poll_host_us = now_us;
+                continue;
+            }
+            if (schedule.synced &&
+                now_us - schedule.next_owned_poll_host_us >
+                    (int64_t)config->passive_ds_slot_ms * 1000LL) {
+                schedule.late_count++;
+            }
+            int64_t poll_host_us = now_us;
+            const esp_err_t err = uwb_passive_ds_initiate_once(
+                responder_id, (uint16_t)(slot_id & 0xFFFFU), slot_id,
+                &poll_host_us);
+            if (err == ESP_OK) {
+                completed++;
+            } else {
+                failed++;
+            }
+            uwb_passive_ds_schedule_from_poll(
+                &schedule, slot_id, poll_host_us, anchor_ids, anchor_count,
+                config);
+            continue;
+        }
+
+        uint32_t rx_timeout_ms = config->passive_ds_rx_slice_ms;
+        if (schedule.synced) {
+            const int64_t until_due_us =
+                schedule.next_owned_poll_host_us - now_us;
+            if (until_due_us <= 1000LL) {
+                rx_timeout_ms = 1U;
+            } else {
+                const uint32_t until_due_ms =
+                    (uint32_t)(until_due_us / 1000LL);
+                if (until_due_ms < rx_timeout_ms) {
+                    rx_timeout_ms = until_due_ms;
+                }
+            }
+        }
+        struct uwb_distance_frame frame = {0};
+        const esp_err_t rx_err =
+            uwb_distance_receive_next(&frame, rx_timeout_ms);
+        if (rx_err == ESP_OK &&
+            frame.type == UWB_DISTANCE_FRAME_PASSIVE_DS_POLL &&
+            frame.payload_len >= UWB_PASSIVE_DS_POLL_LEN) {
+            const uint32_t received_slot_id = uwb_distance_get_u32(
+                frame.payload, UWB_PASSIVE_DS_SLOT_ID_OFFSET);
+            uint8_t initiator_id = 0;
+            uint8_t responder_id = 0;
+            if (!uwb_passive_ds_slot_pair(
+                    received_slot_id, anchor_ids, anchor_count,
+                    config->passive_ds_schedule, &initiator_id,
+                    &responder_id, NULL) ||
+                frame.source_id != initiator_id ||
+                frame.destination_id != responder_id) {
+                continue;
+            }
+            uwb_passive_ds_schedule_from_poll(
+                &schedule, received_slot_id, frame.rx_host_time_us,
+                anchor_ids, anchor_count, config);
+            if (responder_id == s_source_id) {
+                struct uwb_distance_measurement measurement = {0};
+                const esp_err_t err = uwb_passive_ds_respond_to_poll(
+                    &frame, received_slot_id, &measurement);
+                if (err == ESP_OK) {
+                    completed++;
+                    (void)wireless_telemetry_service_submit_passive_ds_anchor_range(
+                        measurement.initiator_id,
+                        measurement.responder_id, measurement.sequence,
+                        received_slot_id,
+                        uwb_distance_meters_to_mm(measurement.distance_m),
+                        uwb_distance_meters_to_mm(
+                            measurement.raw_distance_m));
+                } else {
+                    failed++;
+                }
+            }
+        } else if (rx_err != ESP_OK && rx_err != ESP_ERR_TIMEOUT) {
+            ESP_LOGD(TAG, "PASSIVE_DS anchor RX: %s",
+                     esp_err_to_name(rx_err));
+        }
+
+        now_us = esp_timer_get_time();
+        if (now_us - summary_started_us >= 1000000LL) {
+            ESP_LOGI(TAG,
+                     "PASSIVE_DS anchor schedule=%s ok=%lu fail=%lu "
+                     "bootstrap=%lu late=%lu next_slot=%lu",
+                     config->passive_ds_schedule ==
+                             APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING
+                         ? "robust_rotating"
+                         : "fast_star",
+                     (unsigned long)completed, (unsigned long)failed,
+                     (unsigned long)schedule.bootstrap_count,
+                     (unsigned long)schedule.late_count,
+                     (unsigned long)schedule.next_owned_slot_id);
+            completed = 0;
+            failed = 0;
+            summary_started_us = now_us;
+        }
+    }
+}
+
+static void uwb_dw3000_passive_ds_twr_loop(void)
+{
+    uint8_t anchor_ids[UWB_ANCHOR_SURVEY_MAX_ANCHORS] = {0};
+    const size_t anchor_count =
+        uwb_anchor_survey_anchor_ids(anchor_ids);
+    const app_runtime_config_t *config = app_runtime_config_get();
+    if (anchor_count < 3U ||
+        !uwb_anchor_survey_ids_valid(anchor_ids, anchor_count,
+                                     anchor_ids[0])) {
+        s_status = UWB_DW3000_STATUS_FAILED;
+        ESP_LOGE(TAG, "PASSIVE_DS invalid anchor configuration");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    const uint32_t slots_per_frame = (uint32_t)anchor_count - 1U;
+    const uint32_t frame_ms =
+        slots_per_frame * config->passive_ds_slot_ms +
+        config->passive_ds_round_gap_ms;
+    ESP_LOGI(TAG,
+             "PASSIVE_DS runtime source=%u schedule=%s anchors=%u "
+             "frame=%lu ms slot=%lu ms; non-anchors are receive-only tags",
+             (unsigned)s_source_id,
+             config->passive_ds_schedule ==
+                     APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING
+                 ? "robust_rotating"
+                 : "fast_star",
+             (unsigned)anchor_count, (unsigned long)frame_ms,
+             (unsigned long)config->passive_ds_slot_ms);
+    if (uwb_anchor_survey_id_in_set(
+            anchor_ids, anchor_count, s_source_id)) {
+        uwb_passive_ds_anchor_loop(anchor_ids, anchor_count);
+        return;
+    }
+    uwb_passive_ds_tag_loop(anchor_ids, anchor_count);
+}
+
 static void uwb_anchor_survey_anchor_loop(uint8_t coordinator_id,
                                           const uint8_t *anchor_ids,
                                           size_t anchor_count)
@@ -7756,6 +8419,8 @@ static void uwb_dw3000_task(void *arg)
         uwb_dw3000_ranging_loop();
     } else if (s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
         uwb_dw3000_flex_tdoa_loop();
+    } else if (s_runtime_mode == UWB_DW3000_RUNTIME_PASSIVE_DS_TWR) {
+        uwb_dw3000_passive_ds_twr_loop();
     } else {
         uwb_dw3000_radio_loop();
     }
@@ -7813,6 +8478,12 @@ esp_err_t uwb_dw3000_start_ranging(void)
 esp_err_t uwb_dw3000_start_flex_tdoa(void)
 {
     return uwb_dw3000_start_runtime(UWB_DW3000_RUNTIME_FLEX_TDOA);
+}
+
+esp_err_t uwb_dw3000_start_passive_ds_twr(void)
+{
+    return uwb_dw3000_start_runtime(
+        UWB_DW3000_RUNTIME_PASSIVE_DS_TWR);
 }
 
 bool uwb_dw3000_is_ready(void)

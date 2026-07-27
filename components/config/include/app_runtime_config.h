@@ -14,6 +14,8 @@ extern "C" {
 #define APP_RUNTIME_CONFIG_MAX_ANCHORS 10U
 #define APP_RUNTIME_CONFIG_CAL_THREE_COUNT 3U
 #define APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS 10U
+#define APP_RUNTIME_PASSIVE_DS_FAST_STAR 0U
+#define APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING 1U
 
 typedef struct {
     uint8_t runtime_mode;
@@ -47,6 +49,14 @@ typedef struct {
     uint32_t ranging_resp_delay_ms;
     uint32_t ranging_final_delay_ms;
     uint32_t ranging_auto_rx_delay_uus;
+    uint8_t passive_ds_schedule;
+    uint32_t passive_ds_slot_ms;
+    uint32_t passive_ds_round_gap_ms;
+    uint32_t passive_ds_rx_slice_ms;
+    uint32_t passive_ds_rx_timeout_ms;
+    uint32_t passive_ds_resp_delay_ms;
+    uint32_t passive_ds_final_delay_ms;
+    uint32_t passive_ds_auto_rx_delay_uus;
     uint8_t distance_test_peer_id;
     uint8_t distance_test_initiator_id;
     uint8_t distance_test_responder_id;

@@ -24,6 +24,7 @@ esp_err_t uwb_dw3000_start_calibration(void);
 esp_err_t uwb_dw3000_start_anchor_survey(void);
 esp_err_t uwb_dw3000_start_ranging(void);
 esp_err_t uwb_dw3000_start_flex_tdoa(void);
+esp_err_t uwb_dw3000_start_passive_ds_twr(void);
 esp_err_t uwb_dw3000_hold_in_reset(void);
 bool uwb_dw3000_is_ready(void);
 enum uwb_dw3000_status uwb_dw3000_get_status(void);

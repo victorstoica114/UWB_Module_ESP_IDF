@@ -119,6 +119,43 @@
 #define APP_UWB_RANGING_AUTO_RX_DELAY_UUS 500
 #endif
 
+/*
+ * Passive DS-TWR keeps the three POLL/RESP/FINAL packets but schedules
+ * anchor-to-anchor exchanges. Any module outside the anchor set only listens
+ * and derives TDOA observations without consuming radio airtime.
+ */
+#ifndef APP_UWB_PASSIVE_DS_SCHEDULE
+#define APP_UWB_PASSIVE_DS_SCHEDULE 0
+#endif
+
+#ifndef APP_UWB_PASSIVE_DS_SLOT_MS
+#define APP_UWB_PASSIVE_DS_SLOT_MS 3
+#endif
+
+#ifndef APP_UWB_PASSIVE_DS_ROUND_GAP_MS
+#define APP_UWB_PASSIVE_DS_ROUND_GAP_MS 1
+#endif
+
+#ifndef APP_UWB_PASSIVE_DS_RX_SLICE_MS
+#define APP_UWB_PASSIVE_DS_RX_SLICE_MS 100
+#endif
+
+#ifndef APP_UWB_PASSIVE_DS_RX_TIMEOUT_MS
+#define APP_UWB_PASSIVE_DS_RX_TIMEOUT_MS 3
+#endif
+
+#ifndef APP_UWB_PASSIVE_DS_RESP_DELAY_MS
+#define APP_UWB_PASSIVE_DS_RESP_DELAY_MS 1
+#endif
+
+#ifndef APP_UWB_PASSIVE_DS_FINAL_DELAY_MS
+#define APP_UWB_PASSIVE_DS_FINAL_DELAY_MS 1
+#endif
+
+#ifndef APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS
+#define APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS 500
+#endif
+
 #ifndef APP_UWB_ANTENNA_DELAY_DEFAULT
 #define APP_UWB_ANTENNA_DELAY_DEFAULT 0x3FCA
 #endif

@@ -217,6 +217,8 @@ static esp_err_t app_manager_start_selected_runtime(void)
         return uwb_anchor_survey_service_start();
     case APP_RUNTIME_MODE_UWB_FLEX_TDOA:
         return uwb_dw3000_start_flex_tdoa();
+    case APP_RUNTIME_MODE_UWB_PASSIVE_DS_TWR:
+        return uwb_dw3000_start_passive_ds_twr();
     default:
         ESP_LOGE(TAG, "Unsupported application runtime mode: %d",
                  (int)runtime_mode);

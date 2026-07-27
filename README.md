@@ -245,6 +245,10 @@ The expected UWB workflow split is:
    rotate as short-slot initiators, continuously refresh live anchor geometry,
    and the tag only listens on UWB while sending range-difference observations
    to the dashboard over Wi-Fi logs.
+7. `APP_RUNTIME_MODE_UWB_PASSIVE_DS_TWR`: project-specific three-frame
+   anchor-to-anchor DS-TWR with receive-only tags. It provides independent
+   Fast Star and Robust Rotating schedules; see
+   [`docs/PASSIVE_DS_TWR.md`](docs/PASSIVE_DS_TWR.md).
 
 The beacon smoke mode, distance-test mode, antenna-delay calibration workflows,
 anchor survey, multi-anchor ranging, and experimental FlexTDOA runtimes are

@@ -3,6 +3,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "app_config.h"
 #include "app_runtime_config.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -87,6 +88,18 @@ struct flex_solver_position_batch {
 static QueueHandle_t s_queue;
 static bool s_started;
 static uint32_t s_dropped;
+
+static uint32_t flex_solver_slots_per_position_frame(
+    const app_runtime_config_t *config)
+{
+    if (config->runtime_mode == APP_RUNTIME_MODE_UWB_PASSIVE_DS_TWR &&
+        config->anchor_count >= 2U) {
+        return (uint32_t)config->anchor_count - 1U;
+    }
+    return config->flex_tdoa_slot_count > 0U
+               ? config->flex_tdoa_slot_count
+               : 1U;
+}
 
 static void flex_solver_apply_runtime_geometry(struct flex_solver_state *state)
 {
@@ -519,11 +532,22 @@ static void flex_solver_update_position(struct flex_solver_state *state,
     state->position_x = x;
     state->position_y = y;
     state->position_valid = true;
-    (void)wireless_telemetry_service_submit_flex_position(
-        tag_id, slot_id, (int32_t)lroundf(x * 1000.0f),
-        (int32_t)lroundf(y * 1000.0f), (int32_t)lroundf(sigma * 1000.0f),
-        (int32_t)lroundf(rms * 1000.0f), (uint16_t)used_count,
-        state->anchor_count, state->geometry_version);
+    const app_runtime_config_t *config = app_runtime_config_get();
+    if (config->runtime_mode == APP_RUNTIME_MODE_UWB_PASSIVE_DS_TWR) {
+        (void)wireless_telemetry_service_submit_passive_ds_position(
+            tag_id, slot_id, (int32_t)lroundf(x * 1000.0f),
+            (int32_t)lroundf(y * 1000.0f),
+            (int32_t)lroundf(sigma * 1000.0f),
+            (int32_t)lroundf(rms * 1000.0f), (uint16_t)used_count,
+            state->anchor_count, state->geometry_version);
+    } else {
+        (void)wireless_telemetry_service_submit_flex_position(
+            tag_id, slot_id, (int32_t)lroundf(x * 1000.0f),
+            (int32_t)lroundf(y * 1000.0f),
+            (int32_t)lroundf(sigma * 1000.0f),
+            (int32_t)lroundf(rms * 1000.0f), (uint16_t)used_count,
+            state->anchor_count, state->geometry_version);
+    }
 }
 
 static void flex_solver_task(void *arg)
@@ -571,10 +595,12 @@ static void flex_solver_task(void *arg)
                 state.last_geometry_tick = now;
             }
         } else if (item.type == FLEX_SOLVER_ITEM_OBSERVATION) {
+            const uint32_t slots_per_frame =
+                flex_solver_slots_per_position_frame(config);
             const uint32_t pending_frame =
-                state.pending_position_slot_id / config->flex_tdoa_slot_count;
+                state.pending_position_slot_id / slots_per_frame;
             const uint32_t item_frame =
-                item.slot_id / config->flex_tdoa_slot_count;
+                item.slot_id / slots_per_frame;
             if (state.position_pending && item_frame != pending_frame) {
                 flex_solver_update_position(
                     &state, state.pending_tag_id,
