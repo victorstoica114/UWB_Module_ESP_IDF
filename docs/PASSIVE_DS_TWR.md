@@ -96,6 +96,13 @@ therefore low-latency updates, not additional independent radio frames. The
 position telemetry and dashboard report `solver updates/s` separately from
 `independent frames/s`.
 
+The dashboard also keeps the two roles visually separate. Every rolling
+solution updates the live marker, while the retained EKF and raw-solver trails
+contain independent frames only. Their point counts and retained time span are
+shown alongside the measured browser `event -> render` latency. Drawing is
+downsampled when necessary, without removing points from the retained trail or
+its statistics.
+
 The deadline pipeline accumulates stage counters and host execution time for
 POLL TX, delayed RESP TX, FINAL TX/RX, CIA readout, and RX re-arm. Counters are
 held in RAM and returned by the existing low-rate `/status` request; the radio

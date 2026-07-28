@@ -3323,7 +3323,7 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div class="section">
             <h2>Live Position</h2>
-            <div class="position-legend"><span style="color:#d7352a">EKF tag</span><span style="color:#7b8798">raw solver</span><span style="color:#2b64d8">filtered trail</span><span style="color:#6d4c9f">known reference</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
+            <div class="position-legend"><span style="color:#d7352a">live marker (all updates)</span><span style="color:#7b8798">raw current</span><span style="color:#2b64d8">EKF independent trail</span><span style="color:#7b8798">raw independent trail</span><span style="color:#6d4c9f">known reference</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
             <div id="positionReadout" class="position-readout"></div>
             <table>
               <thead><tr><th>Tag</th><th>solver σaxis</th><th>TDOA RMS</th><th>TDOA max</th></tr></thead>
@@ -4481,6 +4481,7 @@ const state = {
   ranging: {distances: {}, max_age_sec: 3},
   tdoa: {observations: {}, anchor_distances: {}, local_positions: {}, max_age_sec: 3},
   positionTrail: {},
+  positionRawTrail: {},
   positionTrailTokens: {},
   positionAnchorTrail: {},
   positionResults: {},
@@ -4499,6 +4500,9 @@ const state = {
   positionStreamRxTimes: [],
   positionStreamIndependentTimes: [],
   positionStreamRenderTimes: [],
+  positionStreamRenderLatencies: [],
+  positionStreamLatestEvent: null,
+  positionStreamLastRenderedEventToken: "",
   dsPositionFrameBuckets: new Map(),
   positionSettingsSolver: null,
   flexTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.flexTimingSlotSelect") || 0),
@@ -4508,6 +4512,9 @@ const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?
 const maxAccelSamples = 30000;
 const maxSeriesPoints = 1600;
 const maxTerminalRenderLines = 1000;
+const positionTrailMaxAgeSec = 120;
+const positionTrailMaxPoints = 12000;
+const positionTrailMaxDrawPoints = 2500;
 const plot = {left: 52, right: 704, top: 14, bottom: 166, width: 652, height: 152};
 const toastTimers = new Map();
 let calibrationPollTimer = null;
@@ -5307,6 +5314,8 @@ function switchPositionProtocolSettings() {
   if (state.positionSettingsSolver &&
       state.positionSettingsSolver !== solver) {
     savePositionProtocolSettings(state.positionSettingsSolver);
+    resetPositionTagTrails();
+    state.positionAnchorTrail = {};
     state.positionStreamRxTimes = [];
     state.positionStreamIndependentTimes = [];
     state.positionStreamRenderTimes = [];
@@ -6296,8 +6305,7 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
       replacement.lastRelocationAt = now;
       session.ekf = replacement;
       state.positionSeeds = {};
-      state.positionTrail = {};
-      state.positionTrailTokens = {};
+      resetPositionTagTrails();
       state.positionAnchorTrail = {};
       conditioned = conditionPaperAnchorBatch(session.ekf, batch, now);
       geometryUpdated = true;
@@ -6687,14 +6695,11 @@ function updatePositionAnchorTrail(anchors, now) {
   }
 }
 
-function recordPositionTrailPoint(tagId, position, receivedAt, token, metrics = null) {
-  if (!position || !Number.isFinite(Number(position.x)) || !Number.isFinite(Number(position.y))) return;
-  const key = String(tagId);
-  const pointToken = String(token ?? `${receivedAt}:${position.x}:${position.y}`);
-  if (state.positionTrailTokens[key] === pointToken) return;
-  state.positionTrailTokens[key] = pointToken;
-  const timestamp = Number.isFinite(Number(receivedAt)) ? Number(receivedAt) : Date.now() / 1000;
-  const trail = state.positionTrail[key] || [];
+function appendPositionTrailPoint(store, key, position, timestamp, metrics = null) {
+  if (!position ||
+      !Number.isFinite(Number(position.x)) ||
+      !Number.isFinite(Number(position.y))) return;
+  const trail = store[key] || [];
   trail.push({
     x: Number(position.x),
     y: Number(position.y),
@@ -6702,9 +6707,56 @@ function recordPositionTrailPoint(tagId, position, receivedAt, token, metrics = 
     sigma_m: Number(metrics?.sigma_m),
     rms_m: Number(metrics?.rms_m),
   });
-  state.positionTrail[key] = trail
-    .filter(point => timestamp - point.t <= 120)
-    .slice(-12000);
+  let staleCount = 0;
+  while (staleCount < trail.length &&
+         timestamp - trail[staleCount].t > positionTrailMaxAgeSec) {
+    staleCount++;
+  }
+  if (staleCount > 0) trail.splice(0, staleCount);
+  if (trail.length > positionTrailMaxPoints) {
+    trail.splice(0, trail.length - positionTrailMaxPoints);
+  }
+  store[key] = trail;
+}
+
+function recordPositionTrailPoint(
+  tagId, position, receivedAt, token, metrics = null, rawPosition = null
+) {
+  if (!position || !Number.isFinite(Number(position.x)) || !Number.isFinite(Number(position.y))) return;
+  const key = String(tagId);
+  const pointToken = String(token ?? `${receivedAt}:${position.x}:${position.y}`);
+  if (state.positionTrailTokens[key] === pointToken) return;
+  state.positionTrailTokens[key] = pointToken;
+  const timestamp = Number.isFinite(Number(receivedAt)) ? Number(receivedAt) : Date.now() / 1000;
+  appendPositionTrailPoint(
+    state.positionTrail, key, position, timestamp, metrics);
+  appendPositionTrailPoint(
+    state.positionRawTrail, key, rawPosition, timestamp, metrics);
+}
+
+function resetPositionTagTrails() {
+  state.positionTrail = {};
+  state.positionRawTrail = {};
+  state.positionTrailTokens = {};
+  state.positionStreamRenderLatencies = [];
+  state.positionStreamLatestEvent = null;
+  state.positionStreamLastRenderedEventToken = "";
+}
+
+function positionTrailDrawSamples(trail) {
+  if (!Array.isArray(trail) || trail.length <= positionTrailMaxDrawPoints) {
+    return trail || [];
+  }
+  const stride = Math.max(
+    1, Math.ceil(trail.length / positionTrailMaxDrawPoints));
+  const samples = [];
+  for (let index = 0; index < trail.length; index += stride) {
+    samples.push(trail[index]);
+  }
+  if (samples[samples.length - 1] !== trail[trail.length - 1]) {
+    samples.push(trail[trail.length - 1]);
+  }
+  return samples;
 }
 
 function recordNativeRangeRejections(
@@ -6763,8 +6815,7 @@ function computePositionModel() {
   const anchors = {...(geometry?.anchors || {})};
 
   if (!active && state.positionWasActive) {
-    state.positionTrail = {};
-    state.positionTrailTokens = {};
+    resetPositionTagTrails();
     state.positionAnchorTrail = {};
     state.positionResults = {};
     state.positionSeeds = {};
@@ -6917,13 +6968,20 @@ function computePositionModel() {
               ? "PC AlgMin"
               : "PC robust DS-TWR",
       };
-      if (position) {
+      const streamedPositionIsLive = Boolean(
+        localPosition &&
+        localPositionAge(localPosition, now) <= settings.maxAge &&
+        Number.isFinite(Number(localPosition.x_m)) &&
+        Number.isFinite(Number(localPosition.y_m))
+      );
+      if (position && !streamedPositionIsLive) {
         recordPositionTrailPoint(
           tagId,
           position,
-          localPosition?.received_at || now,
-          localPosition?.position_event_id ?? localPosition?.slot_id ?? `pc:${now}`,
-          localPosition
+          now,
+          `pc:${now}`,
+          accuracy,
+          rawPosition
         );
       }
     }
@@ -7058,6 +7116,24 @@ function drawAnchorStabilityRings(ctx, tx, anchorIds, anchors) {
   ctx.restore();
 }
 
+function drawTagTrail(ctx, tx, trail, color, dashed = false) {
+  const samples = positionTrailDrawSamples(trail);
+  if (samples.length < 2) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = dashed ? 1.15 : 1.6;
+  ctx.setLineDash(dashed ? [4, 3] : []);
+  samples.forEach((point, index) => {
+    const x = tx.x(point.x);
+    const y = tx.y(point.y);
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawPosition(model) {
   const canvas = document.getElementById("positionCanvas");
   if (!canvas) return;
@@ -7119,18 +7195,19 @@ function drawPosition(model) {
   }
 
   for (const tagId of Object.keys(model.tags)) {
-    const trail = state.positionTrail[tagId] || [];
-    if (trail.length < 2) continue;
-    ctx.beginPath();
-    ctx.strokeStyle = "rgba(43, 100, 216, 0.72)";
-    ctx.lineWidth = 1.5;
-    trail.forEach((point, index) => {
-      const x = tx.x(point.x);
-      const y = tx.y(point.y);
-      if (index === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
+    drawTagTrail(
+      ctx,
+      tx,
+      state.positionRawTrail[tagId] || [],
+      "rgba(123, 135, 152, 0.62)",
+      true
+    );
+    drawTagTrail(
+      ctx,
+      tx,
+      state.positionTrail[tagId] || [],
+      "rgba(43, 100, 216, 0.76)"
+    );
   }
 
   if (model.reference) {
@@ -7302,6 +7379,7 @@ function renderPositionSolverStatus(model) {
         <span class="position-pill good">robust 3-of-4 fit</span>
         ${rejectPill}
         <span class="position-pill" id="positionStreamMetrics">position stream connecting</span>
+        <span class="position-pill" id="positionTrailMetrics">trail waiting</span>
       </div>
     </div>`;
   }
@@ -7311,6 +7389,7 @@ function renderPositionSolverStatus(model) {
     `<span class="position-pill good">raw observations</span>`,
     `<span class="position-pill">fresh ${fmtFixed(settings.maxAge, 1)} s</span>`,
     `<span class="position-pill" id="positionStreamMetrics">position stream connecting</span>`,
+    `<span class="position-pill" id="positionTrailMetrics">trail waiting</span>`,
   ];
   const firstTag = Object.values(model.tags || {})[0];
   if (firstTag?.solverSource) {
@@ -7564,6 +7643,54 @@ function trimPositionRateWindow(times, nowMs) {
   return times.length;
 }
 
+function recordPositionRenderLatency() {
+  const pending = state.positionStreamLatestEvent;
+  if (!pending ||
+      pending.token === state.positionStreamLastRenderedEventToken) return;
+  const nowMs = performance.now();
+  state.positionStreamLastRenderedEventToken = pending.token;
+  state.positionStreamRenderLatencies.push({
+    atMs: nowMs,
+    valueMs: Math.max(0, nowMs - Number(pending.arrivalMs || nowMs)),
+  });
+}
+
+function trimPositionRenderLatencies(nowMs) {
+  state.positionStreamRenderLatencies =
+    state.positionStreamRenderLatencies.filter(
+      sample => nowMs - Number(sample.atMs) <= 10000);
+  return state.positionStreamRenderLatencies;
+}
+
+function positionTrailSummary() {
+  const keys = new Set([
+    ...Object.keys(state.positionTrail || {}),
+    ...Object.keys(state.positionRawTrail || {}),
+  ]);
+  let ekfCount = 0;
+  let rawCount = 0;
+  let oldest = Infinity;
+  let newest = -Infinity;
+  for (const key of keys) {
+    const ekf = state.positionTrail[key] || [];
+    const raw = state.positionRawTrail[key] || [];
+    ekfCount += ekf.length;
+    rawCount += raw.length;
+    const representative = ekf.length ? ekf : raw;
+    if (!representative.length) continue;
+    oldest = Math.min(oldest, Number(representative[0].t));
+    newest = Math.max(
+      newest, Number(representative[representative.length - 1].t));
+  }
+  return {
+    ekfCount,
+    rawCount,
+    spanSec: Number.isFinite(oldest) && Number.isFinite(newest)
+      ? Math.max(0, newest - oldest)
+      : 0,
+  };
+}
+
 function updatePositionStreamMetrics() {
   const nowMs = performance.now();
   const rxRate = trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
@@ -7573,16 +7700,42 @@ function updatePositionStreamMetrics() {
   );
   const renderRate = trimPositionRateWindow(state.positionStreamRenderTimes, nowMs);
   const element = document.getElementById("positionStreamMetrics");
+  const trailElement = document.getElementById("positionTrailMetrics");
   if (!element) return;
   if (!state.positionStreamConnected) {
     element.textContent = "position stream reconnecting";
     element.className = "position-pill warn";
+    if (trailElement) {
+      trailElement.textContent = "trail waiting for stream";
+      trailElement.className = "position-pill warn";
+    }
     return;
   }
+  const updatesPerRender = renderRate > 0 ? rxRate / renderRate : 0;
   element.textContent =
     `${rxRate} solver updates/s · ${independentRate} independent frames/s · ` +
-    `${renderRate} fps`;
+    `${renderRate} fps · ${fmtFixed(updatesPerRender, 1)} updates/render`;
   element.className = "position-pill good";
+  if (trailElement) {
+    const trail = positionTrailSummary();
+    const latencySamples = trimPositionRenderLatencies(nowMs);
+    const latencyValues = latencySamples.map(sample => sample.valueMs);
+    const latestLatency = latencyValues.length
+      ? latencyValues[latencyValues.length - 1]
+      : NaN;
+    const p95Latency = percentile(latencyValues, 0.95);
+    const latencyText = Number.isFinite(latestLatency)
+      ? ` · event→render ${fmtFixed(latestLatency, 1)} ms` +
+        ` / p95 ${fmtFixed(p95Latency, 1)} ms`
+      : "";
+    const usesTdoa = positionProtocolUsesTdoa(positionSettings().solver);
+    trailElement.textContent = usesTdoa
+      ? `independent trail: EKF ${trail.ekfCount} · raw ${trail.rawCount} · ` +
+        `${fmtFixed(trail.spanSec, 1)} s${latencyText}`
+      : `frame trail: ${trail.ekfCount} points · ` +
+        `${fmtFixed(trail.spanSec, 1)} s${latencyText}`;
+    trailElement.className = "position-pill good";
+  }
 }
 
 function positionTdoaProtocolMatches(item, solver) {
@@ -7684,8 +7837,10 @@ function renderPositionStreamFrame() {
   state.positionStreamRenderPending = false;
   if (state.activeTab !== "position") return;
   if (positionSettings().solver === "ranging") {
-    state.positionStreamRenderTimes.push(performance.now());
     renderPosition();
+    recordPositionRenderLatency();
+    state.positionStreamRenderTimes.push(performance.now());
+    updatePositionStreamMetrics();
     return;
   }
   if (!state.positionModel) {
@@ -7715,6 +7870,7 @@ function renderPositionStreamFrame() {
   }
   drawPosition(state.positionModel);
   updatePositionLiveMetrics(state.positionModel);
+  recordPositionRenderLatency();
   const nowMs = performance.now();
   state.positionStreamRenderTimes.push(nowMs);
   updatePositionStreamMetrics();
@@ -7771,6 +7927,10 @@ function ingestDsTwrStreamSample(item) {
       !settings.anchorIds.every(id => frame.anchors.has(id))) return;
 
   frame.complete = true;
+  state.positionStreamLatestEvent = {
+    token: `ds:${frameKey}`,
+    arrivalMs: nowMs,
+  };
   state.positionStreamRxTimes.push(nowMs);
   state.positionStreamIndependentTimes.push(nowMs);
   trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
@@ -7792,17 +7952,28 @@ function ingestPositionStreamSample(item) {
   if (!state.tdoa.local_positions) state.tdoa.local_positions = {};
   item.age_sec = localPositionAge(item);
   state.tdoa.local_positions[key] = item;
-  recordPositionTrailPoint(
-    tagId,
-    {x: Number(item.x_m), y: Number(item.y_m)},
-    item.received_at,
-    eventId,
-    item
-  );
   const nowMs = performance.now();
   const settings = positionSettings();
   if (positionProtocolUsesTdoa(settings.solver) &&
       positionTdoaProtocolMatches(item, settings.solver)) {
+    state.positionStreamLatestEvent = {
+      token: `position:${eventId}`,
+      arrivalMs: nowMs,
+    };
+    if (item.independent_frame !== false) {
+      const rawX = Number(item.raw_x_m);
+      const rawY = Number(item.raw_y_m);
+      recordPositionTrailPoint(
+        tagId,
+        {x: Number(item.x_m), y: Number(item.y_m)},
+        item.received_at,
+        eventId,
+        item,
+        Number.isFinite(rawX) && Number.isFinite(rawY)
+          ? {x: rawX, y: rawY}
+          : null
+      );
+    }
     state.positionStreamRxTimes.push(nowMs);
     trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
     if (item.independent_frame !== false) {
@@ -11737,8 +11908,7 @@ async function enablePositionRanging() {
     "positionToast"
   );
   if (!apiResponseOk(result)) return;
-  state.positionTrail = {};
-  state.positionTrailTokens = {};
+  resetPositionTagTrails();
   state.positionAnchorTrail = {};
   state.positionSeeds = {};
   fetchSnapshot();
@@ -11778,8 +11948,7 @@ async function restartAnchorSelfLocalization() {
     if (!apiResponseOk(result)) return;
     resetPaperAnchorSelfLocalization(
       settings.anchorIds, settings.solver, true);
-    state.positionTrail = {};
-    state.positionTrailTokens = {};
+    resetPositionTagTrails();
     setToast(
       "positionToast",
       "Legacy fixed geometry cleared; live anchor tracking restarted",
@@ -11859,8 +12028,7 @@ function wireSettings() {
     "change", updatePositionReferenceControls);
   updatePositionReferenceControls();
   document.getElementById("positionResetTrail").addEventListener("click", () => {
-    state.positionTrail = {};
-    state.positionTrailTokens = {};
+    resetPositionTagTrails();
     state.positionAnchorTrail = {};
     renderPosition();
   });
