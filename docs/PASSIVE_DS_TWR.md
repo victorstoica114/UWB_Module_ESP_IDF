@@ -87,27 +87,32 @@ experiments to be evaluated without changing that radio profile:
   DW3000 delayed POLL/RESP/FINAL transmission, hardware RX-after-TX, a
   microsecond host alarm for the next owned slot, and explicit response/final
   deadlines.
-- `passive_ds_solve_mode=0` emits one independent solution when a complete
-  frame closes.
-- `passive_ds_solve_mode=1` is the original rolling control: every accepted
-  frame and rolling solution also corrects the constant-velocity EKF.
-- `passive_ds_solve_mode=2` keeps every rolling raw solve, but only an
-  independent frame may perform an EKF measurement correction. Other rolling
-  results advance and publish the EKF prediction without treating reused
-  observations as new independent evidence.
-- `passive_ds_solve_mode=3` corrects the EKF only after a complete Robust
-  Rotating superframe. Rolling and intermediate frame events remain
-  predict-only. Outside Robust Rotating this falls back to the
-  independent-frame policy.
+- `passive_ds_solve_mode=0` emits one solution only when the three directed
+  observations belonging to the same four-anchor frame are present.
+- `passive_ds_solve_mode=1` preserves the previous mixed-age rolling
+  implementation as an explicit A/B control. Every accepted solve also
+  corrects the constant-velocity EKF.
+- `passive_ds_solve_mode=2` corrects the EKF only from an exact coherent
+  three-observation frame. Intermediate radio events advance and publish the
+  EKF prediction without solving a mixed-age observation batch.
+- `passive_ds_solve_mode=3` uses the same coherent frames, but corrects the
+  EKF only after a complete Robust Rotating superframe. Intermediate frame and
+  radio events remain predict-only. Outside Robust Rotating this falls back
+  to the coherent-frame policy.
+- `passive_ds_solve_mode=4` is an optional experimental path. It compensates
+  the position of each rolling observation with the current EKF velocity
+  before solving. It is compiled into the same firmware but remains inactive
+  unless selected explicitly.
 
 All rolling modes are capped by `passive_ds_rolling_max_hz`. Changing the
 policy with the existing hot-switch path resets the solver and filter, but
 keeps Wi-Fi, HTTP, and telemetry online.
 
-Rolling solutions reuse observations inside the freshness window and are
-therefore low-latency updates, not additional independent radio frames. The
-position telemetry and dashboard report `solver updates/s` separately from
-`independent frames/s`.
+In modes 2 and 3, rolling events are low-latency EKF predictions rather than
+additional multilateration solves. This prevents stale observations measured
+at different tag positions from being combined as if they were simultaneous.
+The position telemetry and dashboard report `solver updates/s` separately
+from `independent frames/s`.
 
 The dashboard also keeps the two roles visually separate. Every rolling
 solution updates the live marker, while the retained EKF and raw-solver trails
@@ -116,18 +121,26 @@ shown alongside the measured browser `event -> render` latency. Drawing is
 downsampled when necessary, without removing points from the retained trail or
 its statistics. Position telemetry also marks complete superframes and actual
 EKF corrections so the dashboard can report the true correction rate
-separately from the raw solver rate.
+separately from the raw solver rate. Passive DS-TWR telemetry V4 additionally
+carries the coherent batch span, maximum observation age, observation mask,
+cumulative rejection count, and the recent rejection-reason mask. These fields
+are attached to the existing position event, so they do not add per-packet
+logging to the radio path.
 
 The deadline pipeline accumulates stage counters and host execution time for
 POLL TX, delayed RESP TX, FINAL TX/RX, CIA readout, and RX re-arm. Counters are
 held in RAM and returned by the existing low-rate `/status` request; the radio
 path does not produce a log for every packet.
 
+The one-second solver summary reports coherent-frame rejection deltas in this
+order: incomplete frame, frame mismatch, too few observations, singular solve,
+bounds failure, residual RMS failure, and out-of-order slot.
+
 For A/B validation, change only one switch at a time. A candidate is accepted
 only when position RMSE and P95 remain inside the confidence band of a new
 control capture made in the same surveyed geometry. Code verification alone
-does not establish that result. The gate uses only V3 positions marked as
-independent frames and a moving-block bootstrap:
+does not establish that result. The gate uses only positions marked as
+independent coherent frames and a moving-block bootstrap:
 
 ```bash
 python3 tools/uwb_passive_ab_validate.py \

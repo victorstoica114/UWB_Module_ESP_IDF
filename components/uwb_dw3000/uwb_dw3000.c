@@ -7242,6 +7242,8 @@ static const char *uwb_passive_ds_solve_mode_name(uint8_t solve_mode)
         return "rolling_ekf_independent";
     case APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_SUPERFRAME:
         return "rolling_ekf_superframe";
+    case APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_MOTION:
+        return "rolling_motion_compensated";
     case APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME:
     default:
         return "frame";

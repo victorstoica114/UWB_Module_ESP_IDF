@@ -44,6 +44,7 @@ enum {
     WIRELESS_TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32,
     WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V2_SAMPLE_LEN = 40,
     WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V3_SAMPLE_LEN = 49,
+    WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V4_SAMPLE_LEN = 63,
     WIRELESS_TELEMETRY_FRAME_VERSION = 1,
     WIRELESS_TELEMETRY_STREAM_BNO085_ACCEL = 1,
     WIRELESS_TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION = 2,
@@ -56,6 +57,7 @@ enum {
     WIRELESS_TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE = 9,
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2 = 10,
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3 = 11,
+    WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V4 = 12,
     WIRELESS_TELEMETRY_RECONNECT_MS = 2000,
     WIRELESS_TELEMETRY_WIFI_WAIT_MS = 500,
     WIRELESS_TELEMETRY_QUEUE_WAIT_MS = 20,
@@ -126,6 +128,12 @@ typedef struct {
     uint16_t observation_count;
     uint32_t solver_update_count;
     uint32_t independent_frame_count;
+    uint32_t position_rejected_count;
+    uint16_t batch_span_ms;
+    uint16_t batch_max_age_ms;
+    uint16_t observation_mask;
+    uint16_t rejection_reason_mask;
+    uint16_t rejected_since_last;
     uint8_t tag_id;
     uint8_t anchor_count;
     uint8_t solution_flags;
@@ -530,9 +538,9 @@ static bool wireless_telemetry_binary_item_info(
         return true;
     case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_POSITION:
         *stream_type =
-            WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3;
+            WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V4;
         *sample_len =
-            WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V3_SAMPLE_LEN;
+            WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V4_SAMPLE_LEN;
         return true;
     case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_ANCHOR_RANGE:
         *stream_type = WIRELESS_TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE;
@@ -719,6 +727,18 @@ static bool wireless_telemetry_append_binary_sample(
             &sample[44],
             item->data.flex_position.independent_frame_count);
         sample[48] = item->data.flex_position.solution_flags;
+        wireless_telemetry_write_u16_le(
+            &sample[49], item->data.flex_position.batch_span_ms);
+        wireless_telemetry_write_u16_le(
+            &sample[51], item->data.flex_position.batch_max_age_ms);
+        wireless_telemetry_write_u16_le(
+            &sample[53], item->data.flex_position.observation_mask);
+        wireless_telemetry_write_u16_le(
+            &sample[55], item->data.flex_position.rejection_reason_mask);
+        wireless_telemetry_write_u16_le(
+            &sample[57], item->data.flex_position.rejected_since_last);
+        wireless_telemetry_write_u32_le(
+            &sample[59], item->data.flex_position.position_rejected_count);
         break;
     default:
         return false;
@@ -1385,7 +1405,10 @@ bool wireless_telemetry_service_submit_passive_ds_position(
     uint8_t anchor_count, uint32_t geometry_version,
     bool independent_frame, bool complete_superframe,
     bool filter_correction, uint32_t solver_update_count,
-    uint32_t independent_frame_count)
+    uint32_t independent_frame_count, uint16_t batch_span_ms,
+    uint16_t batch_max_age_ms, uint16_t observation_mask,
+    uint16_t rejection_reason_mask, uint16_t rejected_since_last,
+    uint32_t position_rejected_count)
 {
     if (!s_connected) {
         return false;
@@ -1408,6 +1431,12 @@ bool wireless_telemetry_service_submit_passive_ds_position(
                 .observation_count = observation_count,
                 .solver_update_count = solver_update_count,
                 .independent_frame_count = independent_frame_count,
+                .position_rejected_count = position_rejected_count,
+                .batch_span_ms = batch_span_ms,
+                .batch_max_age_ms = batch_max_age_ms,
+                .observation_mask = observation_mask,
+                .rejection_reason_mask = rejection_reason_mask,
+                .rejected_since_last = rejected_since_last,
                 .tag_id = tag_id,
                 .anchor_count = anchor_count,
                 .solution_flags =

@@ -129,6 +129,87 @@ def trajectory_metrics(
     }
 
 
+def telemetry_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {"count": 0}
+    ordered = sorted(
+        rows,
+        key=lambda row: int(
+            row.get("position_event_id")
+            or row.get("position_stream_event_id")
+            or 0
+        ),
+    )
+    gaps_ms = [
+        (int(current.get("uptime_ms") or 0) -
+         int(previous.get("uptime_ms") or 0)) & 0xFFFFFFFF
+        for previous, current in zip(ordered, ordered[1:])
+    ]
+    coherent = [
+        row
+        for row in ordered
+        if row.get("independent_frame") is True
+        and row.get("coherent_batch_telemetry") is True
+    ]
+    spans = [
+        float(row["batch_span_ms"])
+        for row in coherent
+        if row.get("batch_span_ms") is not None
+    ]
+    ages = [
+        float(row["batch_max_age_ms"])
+        for row in coherent
+        if row.get("batch_max_age_ms") is not None
+    ]
+    reason_labels = {
+        1: "frame_incomplete",
+        2: "frame_mismatch",
+        3: "too_few",
+        4: "singular",
+        5: "bounds",
+        6: "rms",
+        7: "out_of_order",
+    }
+    reason_events = {
+        label: sum(
+            bool(int(row.get("rejection_reason_mask") or 0) & (1 << bit))
+            for row in ordered
+        )
+        for bit, label in reason_labels.items()
+    }
+    return {
+        "count": len(ordered),
+        "same_tick_pct": (
+            100.0 * sum(gap == 0 for gap in gaps_ms) / len(gaps_ms)
+            if gaps_ms else 0.0
+        ),
+        "gap_p50_ms": percentile(gaps_ms, 0.50),
+        "gap_p95_ms": percentile(gaps_ms, 0.95),
+        "gap_p99_ms": percentile(gaps_ms, 0.99),
+        "gap_max_ms": max(gaps_ms, default=0),
+        "gaps_over_100ms": sum(gap > 100 for gap in gaps_ms),
+        "coherent_count": len(coherent),
+        "batch_span_p50_ms": percentile(spans, 0.50),
+        "batch_span_p95_ms": percentile(spans, 0.95),
+        "batch_span_max_ms": max(spans, default=float("nan")),
+        "batch_age_p50_ms": percentile(ages, 0.50),
+        "batch_age_p95_ms": percentile(ages, 0.95),
+        "batch_age_max_ms": max(ages, default=float("nan")),
+        "rejected_since_last_sum": sum(
+            int(row.get("rejected_since_last") or 0)
+            for row in ordered
+        ),
+        "position_rejected_total": max(
+            (
+                int(row.get("position_rejected_count") or 0)
+                for row in ordered
+            ),
+            default=0,
+        ),
+        "rejection_reason_events": reason_events,
+    }
+
+
 def capture_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {"count": 0}
@@ -159,6 +240,7 @@ def capture_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "geometry_version_rate_hz": max(
             0, len(geometry_versions) - 1
         ) / duration,
+        "telemetry": telemetry_metrics(rows),
         "all_filtered": trajectory_metrics(rows, "x_m", "y_m"),
         "all_raw": trajectory_metrics(rows, "raw_x_m", "raw_y_m"),
         "independent_filtered": trajectory_metrics(

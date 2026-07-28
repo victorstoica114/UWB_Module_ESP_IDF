@@ -92,6 +92,7 @@ TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2 = 8
 TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE = 9
 TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2 = 10
 TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3 = 11
+TELEMETRY_STREAM_PASSIVE_DS_POSITION_V4 = 12
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
 TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
@@ -99,6 +100,7 @@ TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32
 TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN = 41
 TELEMETRY_PASSIVE_DS_POSITION_V2_SAMPLE_LEN = 40
 TELEMETRY_PASSIVE_DS_POSITION_V3_SAMPLE_LEN = 49
+TELEMETRY_PASSIVE_DS_POSITION_V4_SAMPLE_LEN = 63
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
 TELEMETRY_FLEX_OBSERVATION_STRUCT = struct.Struct("<IIiiiHBBBB")
 TELEMETRY_FLEX_ANCHOR_RANGE_STRUCT = struct.Struct("<IIiiHBB")
@@ -111,6 +113,9 @@ TELEMETRY_PASSIVE_DS_POSITION_V2_STRUCT = struct.Struct(
 )
 TELEMETRY_PASSIVE_DS_POSITION_V3_STRUCT = struct.Struct(
     "<IIiiiiiiIHBBIIB"
+)
+TELEMETRY_PASSIVE_DS_POSITION_V4_STRUCT = struct.Struct(
+    "<IIiiiiiiIHBBIIBHHHHHI"
 )
 TELEMETRY_STREAM_SAMPLE_SIZES = {
     TELEMETRY_STREAM_BNO085_ACCEL: TELEMETRY_ACCEL_SAMPLE_LEN,
@@ -133,6 +138,8 @@ TELEMETRY_STREAM_SAMPLE_SIZES = {
         TELEMETRY_PASSIVE_DS_POSITION_V2_SAMPLE_LEN,
     TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3:
         TELEMETRY_PASSIVE_DS_POSITION_V3_SAMPLE_LEN,
+    TELEMETRY_STREAM_PASSIVE_DS_POSITION_V4:
+        TELEMETRY_PASSIVE_DS_POSITION_V4_SAMPLE_LEN,
 }
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
 
@@ -792,8 +799,35 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
         elif stream_type in (
             TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2,
             TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3,
+            TELEMETRY_STREAM_PASSIVE_DS_POSITION_V4,
         ):
-            if stream_type == TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3:
+            if stream_type == TELEMETRY_STREAM_PASSIVE_DS_POSITION_V4:
+                (
+                    uptime_ms,
+                    slot_id,
+                    x_mm,
+                    y_mm,
+                    raw_x_mm,
+                    raw_y_mm,
+                    sigma_mm,
+                    rms_mm,
+                    geometry_version,
+                    observation_count,
+                    tag_id,
+                    anchor_count,
+                    solver_update_count,
+                    independent_frame_count,
+                    solution_flags,
+                    batch_span_ms,
+                    batch_max_age_ms,
+                    observation_mask,
+                    rejection_reason_mask,
+                    rejected_since_last,
+                    position_rejected_count,
+                ) = TELEMETRY_PASSIVE_DS_POSITION_V4_STRUCT.unpack_from(
+                    frame, offset
+                )
+            elif stream_type == TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3:
                 (
                     uptime_ms,
                     slot_id,
@@ -813,6 +847,12 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                 ) = TELEMETRY_PASSIVE_DS_POSITION_V3_STRUCT.unpack_from(
                     frame, offset
                 )
+                batch_span_ms = 0
+                batch_max_age_ms = 0
+                observation_mask = 0
+                rejection_reason_mask = 0
+                rejected_since_last = 0
+                position_rejected_count = 0
             else:
                 (
                     uptime_ms,
@@ -833,6 +873,12 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                 solver_update_count = 0
                 independent_frame_count = 0
                 solution_flags = 1 | 4
+                batch_span_ms = 0
+                batch_max_age_ms = 0
+                observation_mask = 0
+                rejection_reason_mask = 0
+                rejected_since_last = 0
+                position_rejected_count = 0
             samples.append(
                 {
                     **common,
@@ -871,6 +917,20 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "solver_update_count": int(solver_update_count),
                     "independent_frame_count": int(
                         independent_frame_count
+                    ),
+                    "batch_span_ms": int(batch_span_ms),
+                    "batch_max_age_ms": int(batch_max_age_ms),
+                    "observation_mask": int(observation_mask),
+                    "rejection_reason_mask": int(
+                        rejection_reason_mask
+                    ),
+                    "rejected_since_last": int(rejected_since_last),
+                    "position_rejected_count": int(
+                        position_rejected_count
+                    ),
+                    "coherent_batch_telemetry": (
+                        stream_type ==
+                        TELEMETRY_STREAM_PASSIVE_DS_POSITION_V4
                     ),
                 }
             )
@@ -3886,7 +3946,7 @@ tr.status-stale td { color: #4f3b1d; }
           <div id="passiveDsTimingDiagram" class="muted">Waiting for Passive DS-TWR runtime status...</div>
           <div class="profile-card" style="margin-top:12px">
             <h3>Experimental pipeline and EKF policy</h3>
-            <p class="muted">The validated Robust Rotating 1.0/1.0 ms radio timing remains untouched. Rolling always keeps the low-latency raw solve; the selected policy decides which statistically independent event may correct the EKF.</p>
+            <p class="muted">The validated Robust Rotating 1.0/1.0 ms radio timing remains untouched. Coherent modes solve only the three observations from one native frame; rolling publishes low-latency EKF prediction without reusing stale measurements.</p>
             <div class="form-grid">
               <label for="passiveDsExperimentTargets">Targets</label>
               <select id="passiveDsExperimentTargets">
@@ -3904,10 +3964,11 @@ tr.status-stale td { color: #4f3b1d; }
               </select>
               <label for="passiveDsSolveMode">Solve / EKF policy</label>
               <select id="passiveDsSolveMode">
-                <option value="0">Independent frame control</option>
-                <option value="1">Rolling · correct every solve (control)</option>
-                <option value="2">Rolling · correct independent frames</option>
-                <option value="3">Rolling · correct complete superframes</option>
+                <option value="0">Coherent frame only</option>
+                <option value="1">Legacy mixed rolling (A/B control)</option>
+                <option value="2">Coherent frame + rolling prediction</option>
+                <option value="3">Coherent superframe correction + prediction</option>
+                <option value="4">Motion-compensated rolling (experimental)</option>
               </select>
               <label for="passiveDsRollingMaxHz">Rolling cap Hz</label>
               <input id="passiveDsRollingMaxHz" value="100" type="number" min="1" max="500" step="1">
@@ -7382,6 +7443,22 @@ function fmtPositionSigma(value, digits = 1) {
   return Number.isFinite(Number(value)) ? `±${fmtCmFromM(value, digits)} cm` : "-";
 }
 
+function passiveDsRejectionReasonText(mask) {
+  const reasons = [
+    [1, "incomplete"],
+    [2, "frame mismatch"],
+    [3, "too few"],
+    [4, "singular"],
+    [5, "bounds"],
+    [6, "RMS"],
+    [7, "out of order"],
+  ];
+  return reasons
+    .filter(([bit]) => Number(mask) & (1 << bit))
+    .map(([, label]) => label)
+    .join(", ");
+}
+
 function renderPositionSolverStatus(model) {
   const settings = model.settings || {};
   if (!positionProtocolUsesTdoa(settings.solver)) {
@@ -7411,6 +7488,23 @@ function renderPositionSolverStatus(model) {
   const firstTag = Object.values(model.tags || {})[0];
   if (firstTag?.solverSource) {
     pills.push(`<span class="position-pill good">${esc(firstTag.solverSource)}</span>`);
+  }
+  const liveItem = firstTag
+    ? state.tdoa?.local_positions?.[String(firstTag.tagId)]
+    : null;
+  if (liveItem?.tdoa_protocol === "passive_ds" &&
+      liveItem.coherent_batch_telemetry) {
+    const rejectText = passiveDsRejectionReasonText(
+      liveItem.rejection_reason_mask
+    );
+    pills.push(
+      `<span class="position-pill good">batch ${esc(liveItem.batch_span_ms)} ms · age ${esc(liveItem.batch_max_age_ms)} ms · mask 0x${Number(liveItem.observation_mask || 0).toString(16)}</span>`
+    );
+    if (Number(liveItem.rejected_since_last || 0) > 0 || rejectText) {
+      pills.push(
+        `<span class="position-pill warn">${esc(liveItem.rejected_since_last || 0)} rejected · ${esc(rejectText || "reason pending")}</span>`
+      );
+    }
   }
   const coherence = firstTag?.coherence;
   if (coherence) {
@@ -7843,9 +7937,21 @@ function updatePositionLiveMetrics(model) {
             ? " · independent frame"
             : " · rolling")
         : "";
+      const rejectionText = passiveDsRejectionReasonText(
+        item.rejection_reason_mask
+      );
+      const batchText = item.tdoa_protocol === "passive_ds" &&
+        item.coherent_batch_telemetry
+        ? ` · batch ${item.batch_span_ms} ms / age ${item.batch_max_age_ms} ms` +
+          ` / mask 0x${Number(item.observation_mask || 0).toString(16)}` +
+          (Number(item.rejected_since_last || 0) > 0
+            ? ` · rejected ${item.rejected_since_last}` +
+              `${rejectionText ? " (" + rejectionText + ")" : ""}`
+            : "")
+        : "";
       meta.textContent =
         `${item.observation_count || 0} raw obs${sigmaText}${referenceText}` +
-        `${filterText} · live`;
+        `${filterText}${batchText} · live`;
     }
     const solverSigma = document.getElementById(`positionSolverSigma${tag.tagId}`);
     const tdoaRms = document.getElementById(`positionTdoaRms${tag.tagId}`);
@@ -11516,15 +11622,18 @@ function passiveDsRuntimeConfig() {
 
 function passiveDsSolveModeLabel(mode, rollingMaxHz = 100) {
   if (mode === 1) {
-    return `rolling ≤ ${rollingMaxHz} Hz · EKF every solve`;
+    return `legacy mixed rolling ≤ ${rollingMaxHz} Hz`;
   }
   if (mode === 2) {
-    return `rolling ≤ ${rollingMaxHz} Hz · EKF independent frames`;
+    return `coherent frames · prediction ≤ ${rollingMaxHz} Hz`;
   }
   if (mode === 3) {
-    return `rolling ≤ ${rollingMaxHz} Hz · EKF complete superframes`;
+    return `coherent superframes · prediction ≤ ${rollingMaxHz} Hz`;
   }
-  return "independent frame control";
+  if (mode === 4) {
+    return `motion-compensated rolling ≤ ${rollingMaxHz} Hz`;
+  }
+  return "coherent frame only";
 }
 
 async function applyPassiveDsExperimentMode() {

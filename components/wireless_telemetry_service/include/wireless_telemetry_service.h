@@ -79,7 +79,10 @@ bool wireless_telemetry_service_submit_passive_ds_position(
     uint8_t anchor_count, uint32_t geometry_version,
     bool independent_frame, bool complete_superframe,
     bool filter_correction, uint32_t solver_update_count,
-    uint32_t independent_frame_count);
+    uint32_t independent_frame_count, uint16_t batch_span_ms,
+    uint16_t batch_max_age_ms, uint16_t observation_mask,
+    uint16_t rejection_reason_mask, uint16_t rejected_since_last,
+    uint32_t position_rejected_count);
 
 #ifdef __cplusplus
 }
