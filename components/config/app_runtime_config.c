@@ -57,6 +57,9 @@ static const char *TAG = "app_runtime_config";
 #define KEY_PDS_RESP_US "pds_rsp_us"
 #define KEY_PDS_FINAL_US "pds_fin_us"
 #define KEY_PDS_ARX "pds_arx"
+#define KEY_PDS_PIPE "pds_pipe"
+#define KEY_PDS_SOLVE "pds_solve"
+#define KEY_PDS_ROLL_HZ "pds_roll_hz"
 #define KEY_PDS_CAL "pds_cal"
 #define KEY_PDS_CGEN "pds_cgen"
 #define KEY_PDS_ABIAS "pds_abias"
@@ -436,6 +439,11 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->passive_ds_final_delay_us = APP_UWB_PASSIVE_DS_FINAL_DELAY_US;
     config->passive_ds_auto_rx_delay_uus =
         APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS;
+    config->passive_ds_pipeline_mode =
+        APP_UWB_PASSIVE_DS_PIPELINE_MODE;
+    config->passive_ds_solve_mode = APP_UWB_PASSIVE_DS_SOLVE_MODE;
+    config->passive_ds_rolling_max_hz =
+        APP_UWB_PASSIVE_DS_ROLLING_MAX_HZ;
     app_runtime_config_reset_passive_ds_calibration(config);
     config->distance_test_peer_id = (uint8_t)APP_UWB_DISTANCE_TEST_PEER_ID;
     config->distance_test_initiator_id =
@@ -567,6 +575,16 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
                 config->passive_ds_final_delay_us >=
             config->passive_ds_slot_ms * 1000U ||
         config->passive_ds_auto_rx_delay_uus == 0 ||
+        (config->passive_ds_pipeline_mode !=
+             APP_RUNTIME_PASSIVE_DS_PIPELINE_LEGACY &&
+         config->passive_ds_pipeline_mode !=
+             APP_RUNTIME_PASSIVE_DS_PIPELINE_DEADLINE) ||
+        (config->passive_ds_solve_mode !=
+             APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME &&
+         config->passive_ds_solve_mode !=
+             APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING) ||
+        config->passive_ds_rolling_max_hz == 0U ||
+        config->passive_ds_rolling_max_hz > 500U ||
         !passive_ds_calibration_valid(config) ||
         !id_valid(config->distance_test_initiator_id) ||
         !id_valid(config->distance_test_responder_id) ||
@@ -811,6 +829,12 @@ static void read_config_from_nvs(app_runtime_config_t *config)
                       &config->passive_ds_final_delay_us);
     found |= read_u32(handle, KEY_PDS_ARX,
                       &config->passive_ds_auto_rx_delay_uus);
+    found |= read_u8(handle, KEY_PDS_PIPE,
+                     &config->passive_ds_pipeline_mode);
+    found |= read_u8(handle, KEY_PDS_SOLVE,
+                     &config->passive_ds_solve_mode);
+    found |= read_u32(handle, KEY_PDS_ROLL_HZ,
+                      &config->passive_ds_rolling_max_hz);
     found |= read_bool(handle, KEY_PDS_CAL,
                        &config->passive_ds_calibration_enabled);
     found |= read_u32(handle, KEY_PDS_CGEN,
@@ -1053,6 +1077,12 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
                             config->passive_ds_final_delay_us));
     WRITE_OR_GOTO(write_u32(handle, KEY_PDS_ARX,
                             config->passive_ds_auto_rx_delay_uus));
+    WRITE_OR_GOTO(write_u8(handle, KEY_PDS_PIPE,
+                           config->passive_ds_pipeline_mode));
+    WRITE_OR_GOTO(write_u8(handle, KEY_PDS_SOLVE,
+                           config->passive_ds_solve_mode));
+    WRITE_OR_GOTO(write_u32(handle, KEY_PDS_ROLL_HZ,
+                            config->passive_ds_rolling_max_hz));
     WRITE_OR_GOTO(write_bool(handle, KEY_PDS_CAL,
                              config->passive_ds_calibration_enabled));
     WRITE_OR_GOTO(write_u32(handle, KEY_PDS_CGEN,

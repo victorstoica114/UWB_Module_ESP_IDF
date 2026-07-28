@@ -46,7 +46,9 @@ ANCHOR_SUMMARY_RE = re.compile(
 )
 SOLVER_SUMMARY_RE = re.compile(
     r"PASSIVE_DS solver pos=(?P<rate>\d+(?:\.\d+)?)/s "
-    r"accept=(?P<accept>\d+) reject=(?P<reject>\d+) "
+    r"accept=(?P<accept>\d+)"
+    r"(?: frames=(?P<frames>\d+) rolling=(?P<rolling>\d+))? "
+    r"reject=(?P<reject>\d+) "
     r"obs=(?P<obs_accept>\d+)/(?P<obs_reject>\d+) "
     r"range=(?P<range_accept>\d+)/(?P<range_reject>\d+) "
     r"reloc=(?P<reloc>\d+)"
@@ -138,7 +140,7 @@ def timing_metrics(path: pathlib.Path) -> dict[str, float | int | str]:
                     key: (
                         float(value)
                         if key == "rate"
-                        else int(value)
+                        else int(value) if value is not None else 0
                     )
                     for key, value in solver_match.groupdict().items()
                 }
@@ -199,6 +201,12 @@ def timing_metrics(path: pathlib.Path) -> dict[str, float | int | str]:
                     float(row["rate"]) for row in solver_rows
                 ),
                 "solver_accept": accepted,
+                "independent_frame_accept": sum(
+                    int(row["frames"]) for row in solver_rows
+                ),
+                "rolling_accept": sum(
+                    int(row["rolling"]) for row in solver_rows
+                ),
                 "solver_reject": rejected,
                 "solver_accept_pct": (
                     100.0 * accepted / (accepted + rejected)

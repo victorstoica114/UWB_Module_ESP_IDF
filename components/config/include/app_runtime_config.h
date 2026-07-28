@@ -19,6 +19,10 @@ extern "C" {
 #define APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS 10U
 #define APP_RUNTIME_PASSIVE_DS_FAST_STAR 0U
 #define APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING 1U
+#define APP_RUNTIME_PASSIVE_DS_PIPELINE_LEGACY 0U
+#define APP_RUNTIME_PASSIVE_DS_PIPELINE_DEADLINE 1U
+#define APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME 0U
+#define APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING 1U
 
 typedef struct {
     uint8_t runtime_mode;
@@ -60,6 +64,9 @@ typedef struct {
     uint32_t passive_ds_resp_delay_us;
     uint32_t passive_ds_final_delay_us;
     uint32_t passive_ds_auto_rx_delay_uus;
+    uint8_t passive_ds_pipeline_mode;
+    uint8_t passive_ds_solve_mode;
+    uint32_t passive_ds_rolling_max_hz;
     bool passive_ds_calibration_enabled;
     uint32_t passive_ds_calibration_generation;
     int32_t passive_ds_anchor_bias_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS];

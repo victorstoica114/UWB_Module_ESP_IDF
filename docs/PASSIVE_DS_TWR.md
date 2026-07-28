@@ -76,6 +76,46 @@ tag transmissions or protocol control frames.
 All anchors derive the next slot from the received slot ID and POLL arrival
 time. The first anchor bootstraps slot zero after a silent startup interval.
 
+## Experimental low-latency modes
+
+The validated control remains Robust Rotating with 1000 us RESP and FINAL
+delays. Two independent runtime switches allow the scheduling and display
+experiments to be evaluated without changing that radio profile:
+
+- `passive_ds_pipeline_mode=0` keeps the original blocking control;
+  `passive_ds_pipeline_mode=1` uses a non-blocking exchange state machine,
+  DW3000 delayed POLL/RESP/FINAL transmission, hardware RX-after-TX, a
+  microsecond host alarm for the next owned slot, and explicit response/final
+  deadlines.
+- `passive_ds_solve_mode=0` emits one independent solution when a complete
+  frame closes; `passive_ds_solve_mode=1` additionally solves after each new
+  usable observation, capped by `passive_ds_rolling_max_hz`.
+
+Rolling solutions reuse observations inside the freshness window and are
+therefore low-latency updates, not additional independent radio frames. The
+position telemetry and dashboard report `solver updates/s` separately from
+`independent frames/s`.
+
+The deadline pipeline accumulates stage counters and host execution time for
+POLL TX, delayed RESP TX, FINAL TX/RX, CIA readout, and RX re-arm. Counters are
+held in RAM and returned by the existing low-rate `/status` request; the radio
+path does not produce a log for every packet.
+
+For A/B validation, change only one switch at a time. A candidate is accepted
+only when position RMSE and P95 remain inside the confidence band of a new
+control capture made in the same surveyed geometry. Code verification alone
+does not establish that result. The gate uses only V3 positions marked as
+independent frames and a moving-block bootstrap:
+
+```bash
+python3 tools/uwb_passive_ab_validate.py \
+  --control control.jsonl --candidate candidate.jsonl \
+  --truth-x 1.5 --truth-y 1.5 --output ab_gate.json
+```
+
+The command exits with status 2 when either candidate metric exceeds the
+upper 95% confidence limit of the control.
+
 ## Geometry and current validation status
 
 Passive positioning requires anchor coordinates, but they do not have to be

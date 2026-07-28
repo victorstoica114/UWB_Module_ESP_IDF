@@ -90,6 +90,8 @@ typedef struct {
     char runtime_flex_anchor_y_json[128];
     char runtime_passive_ds_anchor_bias_json[128];
     char runtime_passive_ds_range_bias_json[512];
+    struct uwb_passive_ds_pipeline_stats passive_ds_pipeline_stats;
+    char passive_ds_pipeline_stats_json[1536];
     char response[OTA_SERVICE_STATUS_RESPONSE_SIZE];
 } ota_status_context_t;
 
@@ -665,6 +667,73 @@ static void format_passive_ds_range_bias_json(
     buffer[used] = '\0';
 }
 
+static void format_passive_ds_stage_stats_json(
+    const struct uwb_passive_ds_stage_stats *stats, char *buffer,
+    size_t buffer_size)
+{
+    if (stats == NULL || buffer == NULL || buffer_size == 0U) {
+        return;
+    }
+    const uint64_t average_us =
+        stats->count != 0U ? stats->total_duration_us / stats->count : 0U;
+    (void)snprintf(
+        buffer, buffer_size,
+        "{\"count\":%lu,\"fail\":%lu,\"last_us\":%lu,"
+        "\"avg_us\":%llu,\"max_us\":%lu,\"last_event_us\":%lld}",
+        (unsigned long)stats->count,
+        (unsigned long)stats->failure_count,
+        (unsigned long)stats->last_duration_us,
+        (unsigned long long)average_us,
+        (unsigned long)stats->max_duration_us,
+        (long long)stats->last_event_host_us);
+}
+
+static void format_passive_ds_pipeline_stats_json(
+    const struct uwb_passive_ds_pipeline_stats *stats, char *buffer,
+    size_t buffer_size)
+{
+    if (stats == NULL || buffer == NULL || buffer_size == 0U) {
+        return;
+    }
+    char poll[192] = {0};
+    char response[192] = {0};
+    char final_tx[192] = {0};
+    char final_rx[192] = {0};
+    char cia[192] = {0};
+    char rearm[192] = {0};
+    format_passive_ds_stage_stats_json(
+        &stats->poll_tx, poll, sizeof(poll));
+    format_passive_ds_stage_stats_json(
+        &stats->response_tx, response, sizeof(response));
+    format_passive_ds_stage_stats_json(
+        &stats->final_tx, final_tx, sizeof(final_tx));
+    format_passive_ds_stage_stats_json(
+        &stats->final_rx, final_rx, sizeof(final_rx));
+    format_passive_ds_stage_stats_json(
+        &stats->cia_read, cia, sizeof(cia));
+    format_passive_ds_stage_stats_json(
+        &stats->rx_rearm, rearm, sizeof(rearm));
+    (void)snprintf(
+        buffer, buffer_size,
+        "{\"deadline_active\":%s,\"completed\":%lu,"
+        "\"response_timeouts\":%lu,\"final_timeouts\":%lu,"
+        "\"invalid_frames\":%lu,\"state_collisions\":%lu,"
+        "\"schedule_alarms\":%lu,\"schedule_overruns\":%lu,"
+        "\"rx_rearm_failures\":%lu,\"stages\":{"
+        "\"poll_tx\":%s,\"response_tx\":%s,\"final_tx\":%s,"
+        "\"final_rx\":%s,\"cia_read\":%s,\"rx_rearm\":%s}}",
+        stats->deadline_pipeline_active ? "true" : "false",
+        (unsigned long)stats->completed_exchange_count,
+        (unsigned long)stats->response_timeout_count,
+        (unsigned long)stats->final_timeout_count,
+        (unsigned long)stats->invalid_frame_count,
+        (unsigned long)stats->state_collision_count,
+        (unsigned long)stats->schedule_alarm_count,
+        (unsigned long)stats->schedule_overrun_count,
+        (unsigned long)stats->rx_rearm_failure_count,
+        poll, response, final_tx, final_rx, cia, rearm);
+}
+
 static bool ota_parse_flex_geometry(
     const char *text, const app_runtime_config_t *config,
     int32_t x_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS],
@@ -803,6 +872,12 @@ static bool runtime_config_reboot_recommended(
                after->passive_ds_final_delay_us ||
            before->passive_ds_auto_rx_delay_uus !=
                after->passive_ds_auto_rx_delay_uus ||
+           before->passive_ds_pipeline_mode !=
+               after->passive_ds_pipeline_mode ||
+           before->passive_ds_solve_mode !=
+               after->passive_ds_solve_mode ||
+           before->passive_ds_rolling_max_hz !=
+               after->passive_ds_rolling_max_hz ||
            before->anchor_survey_coordinator_id !=
                after->anchor_survey_coordinator_id ||
            before->uwb_enabled != after->uwb_enabled ||
@@ -841,6 +916,12 @@ static bool runtime_config_hot_switch_eligible(
             after->passive_ds_final_delay_us;
         allowed.passive_ds_auto_rx_delay_uus =
             after->passive_ds_auto_rx_delay_uus;
+        allowed.passive_ds_pipeline_mode =
+            after->passive_ds_pipeline_mode;
+        allowed.passive_ds_solve_mode =
+            after->passive_ds_solve_mode;
+        allowed.passive_ds_rolling_max_hz =
+            after->passive_ds_rolling_max_hz;
         allowed.from_nvs = after->from_nvs;
         return memcmp(&allowed, after, sizeof(allowed)) == 0;
     }
@@ -950,6 +1031,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     (ctx->runtime_passive_ds_anchor_bias_json)
 #define runtime_passive_ds_range_bias_json \
     (ctx->runtime_passive_ds_range_bias_json)
+#define passive_ds_pipeline_stats (ctx->passive_ds_pipeline_stats)
+#define passive_ds_pipeline_stats_json \
+    (ctx->passive_ds_pipeline_stats_json)
 
     const esp_app_desc_t *app = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -1008,6 +1092,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     format_passive_ds_range_bias_json(
         runtime_config, runtime_passive_ds_range_bias_json,
         sizeof(runtime_passive_ds_range_bias_json));
+    uwb_dw3000_get_passive_ds_pipeline_stats(
+        &passive_ds_pipeline_stats);
+    format_passive_ds_pipeline_stats_json(
+        &passive_ds_pipeline_stats, passive_ds_pipeline_stats_json,
+        sizeof(passive_ds_pipeline_stats_json));
 
     char *response = ctx->response;
 
@@ -1095,6 +1184,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_passive_ds_resp_delay_us\":%lu,"
         "\"runtime_passive_ds_final_delay_us\":%lu,"
         "\"runtime_passive_ds_auto_rx_delay_uus\":%lu,"
+        "\"runtime_passive_ds_pipeline_mode\":%u,"
+        "\"runtime_passive_ds_solve_mode\":%u,"
+        "\"runtime_passive_ds_rolling_max_hz\":%lu,"
+        "\"passive_ds_pipeline_stats\":%s,"
         "\"runtime_passive_ds_calibration_enabled\":%s,"
         "\"runtime_passive_ds_calibration_generation\":%lu,"
         "\"runtime_passive_ds_anchor_bias_mm\":%s,"
@@ -1600,6 +1693,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)runtime_config->passive_ds_resp_delay_us,
         (unsigned long)runtime_config->passive_ds_final_delay_us,
         (unsigned long)runtime_config->passive_ds_auto_rx_delay_uus,
+        (unsigned)runtime_config->passive_ds_pipeline_mode,
+        (unsigned)runtime_config->passive_ds_solve_mode,
+        (unsigned long)runtime_config->passive_ds_rolling_max_hz,
+        passive_ds_pipeline_stats_json,
         runtime_config->passive_ds_calibration_enabled ? "true" : "false",
         (unsigned long)runtime_config->passive_ds_calibration_generation,
         runtime_passive_ds_anchor_bias_json,
@@ -2068,6 +2165,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #undef runtime_flex_anchor_y_json
 #undef runtime_passive_ds_anchor_bias_json
 #undef runtime_passive_ds_range_bias_json
+#undef passive_ds_pipeline_stats
+#undef passive_ds_pipeline_stats_json
     return response_err;
 }
 
@@ -3680,6 +3779,11 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
                         passive_ds_final_delay_us);
         APPLY_U32_PARAM("passive_ds_auto_rx_delay_uus",
                         passive_ds_auto_rx_delay_uus);
+        APPLY_U8_PARAM("passive_ds_pipeline_mode",
+                       passive_ds_pipeline_mode);
+        APPLY_U8_PARAM("passive_ds_solve_mode", passive_ds_solve_mode);
+        APPLY_U32_PARAM("passive_ds_rolling_max_hz",
+                        passive_ds_rolling_max_hz);
         APPLY_U8_PARAM("dt_peer", distance_test_peer_id);
         APPLY_U8_PARAM("dt_initiator", distance_test_initiator_id);
         APPLY_U8_PARAM("dt_responder", distance_test_responder_id);
@@ -3934,6 +4038,9 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         "\"runtime_passive_ds_resp_delay_us\":%lu,"
         "\"runtime_passive_ds_final_delay_us\":%lu,"
         "\"runtime_passive_ds_auto_rx_delay_uus\":%lu,"
+        "\"runtime_passive_ds_pipeline_mode\":%u,"
+        "\"runtime_passive_ds_solve_mode\":%u,"
+        "\"runtime_passive_ds_rolling_max_hz\":%lu,"
         "\"runtime_anchor_survey_slot_ms\":%lu,"
         "\"runtime_anchor_survey_round_gap_ms\":%lu,"
         "\"runtime_calibration_method\":%u,"
@@ -3987,6 +4094,9 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         (unsigned long)active_config->passive_ds_resp_delay_us,
         (unsigned long)active_config->passive_ds_final_delay_us,
         (unsigned long)active_config->passive_ds_auto_rx_delay_uus,
+        (unsigned)active_config->passive_ds_pipeline_mode,
+        (unsigned)active_config->passive_ds_solve_mode,
+        (unsigned long)active_config->passive_ds_rolling_max_hz,
         (unsigned long)active_config->anchor_survey_slot_ms,
         (unsigned long)active_config->anchor_survey_round_gap_ms,
         (unsigned)active_config->calibration_method,

@@ -43,6 +43,7 @@ enum {
     WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20,
     WIRELESS_TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32,
     WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V2_SAMPLE_LEN = 40,
+    WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V3_SAMPLE_LEN = 49,
     WIRELESS_TELEMETRY_FRAME_VERSION = 1,
     WIRELESS_TELEMETRY_STREAM_BNO085_ACCEL = 1,
     WIRELESS_TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION = 2,
@@ -54,6 +55,7 @@ enum {
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2 = 8,
     WIRELESS_TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE = 9,
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2 = 10,
+    WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3 = 11,
     WIRELESS_TELEMETRY_RECONNECT_MS = 2000,
     WIRELESS_TELEMETRY_WIFI_WAIT_MS = 500,
     WIRELESS_TELEMETRY_QUEUE_WAIT_MS = 20,
@@ -122,8 +124,11 @@ typedef struct {
     int32_t sigma_mm;
     int32_t rms_mm;
     uint16_t observation_count;
+    uint32_t solver_update_count;
+    uint32_t independent_frame_count;
     uint8_t tag_id;
     uint8_t anchor_count;
+    uint8_t solution_flags;
 } wireless_telemetry_flex_position_t;
 
 typedef struct {
@@ -525,9 +530,9 @@ static bool wireless_telemetry_binary_item_info(
         return true;
     case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_POSITION:
         *stream_type =
-            WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2;
+            WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3;
         *sample_len =
-            WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V2_SAMPLE_LEN;
+            WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V3_SAMPLE_LEN;
         return true;
     case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_ANCHOR_RANGE:
         *stream_type = WIRELESS_TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE;
@@ -708,6 +713,12 @@ static bool wireless_telemetry_append_binary_sample(
             &sample[36], item->data.flex_position.observation_count);
         sample[38] = item->data.flex_position.tag_id;
         sample[39] = item->data.flex_position.anchor_count;
+        wireless_telemetry_write_u32_le(
+            &sample[40], item->data.flex_position.solver_update_count);
+        wireless_telemetry_write_u32_le(
+            &sample[44],
+            item->data.flex_position.independent_frame_count);
+        sample[48] = item->data.flex_position.solution_flags;
         break;
     default:
         return false;
@@ -1371,7 +1382,9 @@ bool wireless_telemetry_service_submit_passive_ds_position(
     uint8_t tag_id, uint32_t slot_id, int32_t filtered_x_mm,
     int32_t filtered_y_mm, int32_t raw_x_mm, int32_t raw_y_mm,
     int32_t sigma_mm, int32_t rms_mm, uint16_t observation_count,
-    uint8_t anchor_count, uint32_t geometry_version)
+    uint8_t anchor_count, uint32_t geometry_version,
+    bool independent_frame, uint32_t solver_update_count,
+    uint32_t independent_frame_count)
 {
     if (!s_connected) {
         return false;
@@ -1392,8 +1405,11 @@ bool wireless_telemetry_service_submit_passive_ds_position(
                 .sigma_mm = sigma_mm,
                 .rms_mm = rms_mm,
                 .observation_count = observation_count,
+                .solver_update_count = solver_update_count,
+                .independent_frame_count = independent_frame_count,
                 .tag_id = tag_id,
                 .anchor_count = anchor_count,
+                .solution_flags = independent_frame ? 1U : 0U,
             },
         },
     };

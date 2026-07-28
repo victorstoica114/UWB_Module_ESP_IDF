@@ -102,13 +102,16 @@ struct flex_solver_state {
     uint32_t observation_accepted;
     uint32_t observation_rejected;
     uint32_t position_accepted;
+    uint32_t independent_frame_accepted;
     uint32_t position_rejected;
     uint32_t previous_range_accepted;
     uint32_t previous_range_rejected;
     uint32_t previous_observation_accepted;
     uint32_t previous_observation_rejected;
     uint32_t previous_position_accepted;
+    uint32_t previous_independent_frame_accepted;
     uint32_t previous_position_rejected;
+    TickType_t last_rolling_attempt_tick;
     TickType_t summary_tick;
     bool position_filter_valid;
     float position_filter_state[4];
@@ -870,7 +873,8 @@ static void flex_solver_filter_position(
 }
 
 static void flex_solver_update_position(struct flex_solver_state *state,
-                                        uint8_t tag_id, uint32_t slot_id)
+                                        uint8_t tag_id, uint32_t slot_id,
+                                        bool independent_frame)
 {
     if (!state->geometry_ready) {
         return;
@@ -881,7 +885,6 @@ static void flex_solver_update_position(struct flex_solver_state *state,
     if (batch.count < 3U) {
         return;
     }
-
     float min_x = (float)state->anchor_x[0];
     float max_x = (float)state->anchor_x[0];
     float min_y = (float)state->anchor_y[0];
@@ -1022,6 +1025,9 @@ static void flex_solver_update_position(struct flex_solver_state *state,
     state->position_y = filtered_y;
     state->position_valid = true;
     state->position_accepted++;
+    if (independent_frame) {
+        state->independent_frame_accepted++;
+    }
     if (config->runtime_mode == APP_RUNTIME_MODE_UWB_PASSIVE_DS_TWR) {
         (void)wireless_telemetry_service_submit_passive_ds_position(
             tag_id, slot_id, (int32_t)lroundf(filtered_x * 1000.0f),
@@ -1030,7 +1036,9 @@ static void flex_solver_update_position(struct flex_solver_state *state,
             (int32_t)lroundf(y * 1000.0f),
             (int32_t)lroundf(sigma * 1000.0f),
             (int32_t)lroundf(rms * 1000.0f), (uint16_t)used_count,
-            state->anchor_count, state->geometry_version);
+            state->anchor_count, state->geometry_version,
+            independent_frame, state->position_accepted,
+            state->independent_frame_accepted);
     } else {
         (void)wireless_telemetry_service_submit_flex_position(
             tag_id, slot_id, (int32_t)lroundf(x * 1000.0f),
@@ -1110,7 +1118,7 @@ static void flex_solver_task(void *arg)
             if (state.position_pending && item_frame != pending_frame) {
                 flex_solver_update_position(
                     &state, state.pending_tag_id,
-                    state.pending_position_slot_id);
+                    state.pending_position_slot_id, true);
             }
             state.observations[first][second] =
                 (struct flex_solver_measurement){
@@ -1123,6 +1131,32 @@ static void flex_solver_task(void *arg)
             state.position_pending = true;
             state.pending_tag_id = item.tag_id;
             state.pending_position_slot_id = item.slot_id;
+            if (config->runtime_mode ==
+                    APP_RUNTIME_MODE_UWB_PASSIVE_DS_TWR &&
+                config->passive_ds_solve_mode ==
+                    APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING) {
+                const uint32_t rolling_hz =
+                    config->passive_ds_rolling_max_hz;
+                const uint32_t interval_ms =
+                    rolling_hz >= 1000U
+                        ? 1U
+                        : (1000U + rolling_hz - 1U) / rolling_hz;
+                const TickType_t interval_ticks =
+                    pdMS_TO_TICKS(interval_ms) > 0
+                        ? pdMS_TO_TICKS(interval_ms)
+                        : 1;
+                if (state.last_rolling_attempt_tick == 0 ||
+                    now - state.last_rolling_attempt_tick >=
+                        interval_ticks) {
+                    // Cap rolling work independently. The frame-boundary
+                    // control solve uses the previous complete frame; this
+                    // solve includes the newly stored observation and is not
+                    // a duplicate.
+                    state.last_rolling_attempt_tick = now;
+                    flex_solver_update_position(
+                        &state, item.tag_id, item.slot_id, false);
+                }
+            }
         }
 
         // A continuously fed queue must still let the core-0 idle task run;
@@ -1141,6 +1175,9 @@ static void flex_solver_task(void *arg)
             const uint32_t position_delta =
                 state.position_accepted -
                 state.previous_position_accepted;
+            const uint32_t independent_frame_delta =
+                state.independent_frame_accepted -
+                state.previous_independent_frame_accepted;
             const uint32_t position_rate_milli_hz =
                 elapsed_ms > 0U
                     ? (uint32_t)(((uint64_t)position_delta * 1000000ULL) /
@@ -1148,7 +1185,8 @@ static void flex_solver_task(void *arg)
                     : 0U;
             (void)wireless_log_service_submit(
                 'I', TAG,
-                "%s solver pos=%lu.%03lu/s accept=%lu reject=%lu "
+                "%s solver pos=%lu.%03lu/s accept=%lu frames=%lu "
+                "rolling=%lu reject=%lu "
                 "obs=%lu/%lu range=%lu/%lu reloc=%lu",
                 config->runtime_mode ==
                         APP_RUNTIME_MODE_UWB_PASSIVE_DS_TWR
@@ -1158,6 +1196,11 @@ static void flex_solver_task(void *arg)
                 (unsigned long)(position_rate_milli_hz % 1000U),
                 (unsigned long)(state.position_accepted -
                                 state.previous_position_accepted),
+                (unsigned long)independent_frame_delta,
+                (unsigned long)(
+                    position_delta >= independent_frame_delta
+                        ? position_delta - independent_frame_delta
+                        : 0U),
                 (unsigned long)(state.position_rejected -
                                 state.previous_position_rejected),
                 (unsigned long)(state.observation_accepted -
@@ -1177,6 +1220,8 @@ static void flex_solver_task(void *arg)
                 state.observation_rejected;
             state.previous_position_accepted =
                 state.position_accepted;
+            state.previous_independent_frame_accepted =
+                state.independent_frame_accepted;
             state.previous_position_rejected =
                 state.position_rejected;
             state.summary_tick = now;

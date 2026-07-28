@@ -156,6 +156,23 @@
 #define APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS 500
 #endif
 
+/*
+ * The established blocking exchange and one-solve-per-frame behavior remain
+ * the firmware defaults. The deadline pipeline and rolling solver are
+ * independent A/B controls selected at runtime.
+ */
+#ifndef APP_UWB_PASSIVE_DS_PIPELINE_MODE
+#define APP_UWB_PASSIVE_DS_PIPELINE_MODE 0
+#endif
+
+#ifndef APP_UWB_PASSIVE_DS_SOLVE_MODE
+#define APP_UWB_PASSIVE_DS_SOLVE_MODE 0
+#endif
+
+#ifndef APP_UWB_PASSIVE_DS_ROLLING_MAX_HZ
+#define APP_UWB_PASSIVE_DS_ROLLING_MAX_HZ 100
+#endif
+
 #ifndef APP_UWB_ANTENNA_DELAY_DEFAULT
 #define APP_UWB_ANTENNA_DELAY_DEFAULT 0x3FCA
 #endif

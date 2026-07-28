@@ -91,12 +91,14 @@ TELEMETRY_STREAM_PASSIVE_DS_POSITION = 7
 TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2 = 8
 TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE = 9
 TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2 = 10
+TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3 = 11
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
 TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
 TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32
 TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN = 41
 TELEMETRY_PASSIVE_DS_POSITION_V2_SAMPLE_LEN = 40
+TELEMETRY_PASSIVE_DS_POSITION_V3_SAMPLE_LEN = 49
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
 TELEMETRY_FLEX_OBSERVATION_STRUCT = struct.Struct("<IIiiiHBBBB")
 TELEMETRY_FLEX_ANCHOR_RANGE_STRUCT = struct.Struct("<IIiiHBB")
@@ -106,6 +108,9 @@ TELEMETRY_PASSIVE_DS_OBSERVATION_V2_STRUCT = struct.Struct(
 )
 TELEMETRY_PASSIVE_DS_POSITION_V2_STRUCT = struct.Struct(
     "<IIiiiiiiIHBB"
+)
+TELEMETRY_PASSIVE_DS_POSITION_V3_STRUCT = struct.Struct(
+    "<IIiiiiiiIHBBIIB"
 )
 TELEMETRY_STREAM_SAMPLE_SIZES = {
     TELEMETRY_STREAM_BNO085_ACCEL: TELEMETRY_ACCEL_SAMPLE_LEN,
@@ -126,6 +131,8 @@ TELEMETRY_STREAM_SAMPLE_SIZES = {
         TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN,
     TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2:
         TELEMETRY_PASSIVE_DS_POSITION_V2_SAMPLE_LEN,
+    TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3:
+        TELEMETRY_PASSIVE_DS_POSITION_V3_SAMPLE_LEN,
 }
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
 
@@ -253,6 +260,10 @@ RUNTIME_PARAM_STATUS_FIELDS = {
     "passive_ds_final_delay_us": "runtime_passive_ds_final_delay_us",
     "passive_ds_auto_rx_delay_uus":
         "runtime_passive_ds_auto_rx_delay_uus",
+    "passive_ds_pipeline_mode": "runtime_passive_ds_pipeline_mode",
+    "passive_ds_solve_mode": "runtime_passive_ds_solve_mode",
+    "passive_ds_rolling_max_hz":
+        "runtime_passive_ds_rolling_max_hz",
     "radio_channel": "runtime_radio_channel",
     "uwb_channel": "runtime_radio_channel",
     "telemetry_port": "runtime_wireless_telemetry_port",
@@ -778,23 +789,50 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "anchor_count": int(anchor_count),
                 }
             )
-        elif stream_type == TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2:
-            (
-                uptime_ms,
-                slot_id,
-                x_mm,
-                y_mm,
-                raw_x_mm,
-                raw_y_mm,
-                sigma_mm,
-                rms_mm,
-                geometry_version,
-                observation_count,
-                tag_id,
-                anchor_count,
-            ) = TELEMETRY_PASSIVE_DS_POSITION_V2_STRUCT.unpack_from(
-                frame, offset
-            )
+        elif stream_type in (
+            TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2,
+            TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3,
+        ):
+            if stream_type == TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3:
+                (
+                    uptime_ms,
+                    slot_id,
+                    x_mm,
+                    y_mm,
+                    raw_x_mm,
+                    raw_y_mm,
+                    sigma_mm,
+                    rms_mm,
+                    geometry_version,
+                    observation_count,
+                    tag_id,
+                    anchor_count,
+                    solver_update_count,
+                    independent_frame_count,
+                    solution_flags,
+                ) = TELEMETRY_PASSIVE_DS_POSITION_V3_STRUCT.unpack_from(
+                    frame, offset
+                )
+            else:
+                (
+                    uptime_ms,
+                    slot_id,
+                    x_mm,
+                    y_mm,
+                    raw_x_mm,
+                    raw_y_mm,
+                    sigma_mm,
+                    rms_mm,
+                    geometry_version,
+                    observation_count,
+                    tag_id,
+                    anchor_count,
+                ) = TELEMETRY_PASSIVE_DS_POSITION_V2_STRUCT.unpack_from(
+                    frame, offset
+                )
+                solver_update_count = 0
+                independent_frame_count = 0
+                solution_flags = 1
             samples.append(
                 {
                     **common,
@@ -813,6 +851,16 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "tag_id": int(tag_id),
                     "anchor_count": int(anchor_count),
                     "position_filter": "ekf_cv",
+                    "solution_kind": (
+                        "independent_frame"
+                        if solution_flags & 1
+                        else "rolling"
+                    ),
+                    "independent_frame": bool(solution_flags & 1),
+                    "solver_update_count": int(solver_update_count),
+                    "independent_frame_count": int(
+                        independent_frame_count
+                    ),
                 }
             )
         offset += sample_size
@@ -3825,6 +3873,42 @@ tr.status-stale td { color: #4f3b1d; }
             </div>
           </div>
           <div id="passiveDsTimingDiagram" class="muted">Waiting for Passive DS-TWR runtime status...</div>
+          <div class="profile-card" style="margin-top:12px">
+            <h3>Experimental pipeline and solve mode</h3>
+            <p class="muted">The validated Robust Rotating 1.0/1.0 ms radio timing remains untouched. Change one layer at a time: deadline scheduling affects anchors; rolling solve affects the receive-only tag and the dashboard update rate.</p>
+            <div class="form-grid">
+              <label for="passiveDsExperimentTargets">Targets</label>
+              <select id="passiveDsExperimentTargets">
+                <option value="all">all modules</option>
+                <option value="1">module 1</option>
+                <option value="2">module 2</option>
+                <option value="3">module 3</option>
+                <option value="4">module 4</option>
+                <option value="5">module 5</option>
+              </select>
+              <label for="passiveDsPipelineMode">Anchor pipeline</label>
+              <select id="passiveDsPipelineMode">
+                <option value="0">Legacy control</option>
+                <option value="1">DW3000 deadline state machine</option>
+              </select>
+              <label for="passiveDsSolveMode">Position solve</label>
+              <select id="passiveDsSolveMode">
+                <option value="0">Independent frame control</option>
+                <option value="1">Rolling low-latency</option>
+              </select>
+              <label for="passiveDsRollingMaxHz">Rolling cap Hz</label>
+              <input id="passiveDsRollingMaxHz" value="100" type="number" min="1" max="500" step="1">
+            </div>
+            <div class="form-actions">
+              <button id="applyPassiveDsExperimentMode" class="primary">Apply without timing changes</button>
+            </div>
+            <div id="passiveDsExperimentToast" class="toast"></div>
+          </div>
+          <div class="profile-card" style="margin-top:12px">
+            <h3>Pipeline diagnostics</h3>
+            <p class="muted">Cumulative in-RAM counters. Stage timing is measured locally and exported only through the normal status poll; no per-packet log is generated.</p>
+            <div id="passiveDsPipelineDiagnostics" class="muted">Waiting for instrumented firmware status...</div>
+          </div>
         </div>
         <div id="flexTdoaProfilesSection" class="section">
           <h2>FlexTDOA Frame Profiles</h2>
@@ -4413,6 +4497,7 @@ const state = {
   positionStreamConnected: false,
   positionStreamRenderPending: false,
   positionStreamRxTimes: [],
+  positionStreamIndependentTimes: [],
   positionStreamRenderTimes: [],
   dsPositionFrameBuckets: new Map(),
   positionSettingsSolver: null,
@@ -5223,6 +5308,7 @@ function switchPositionProtocolSettings() {
       state.positionSettingsSolver !== solver) {
     savePositionProtocolSettings(state.positionSettingsSolver);
     state.positionStreamRxTimes = [];
+    state.positionStreamIndependentTimes = [];
     state.positionStreamRenderTimes = [];
     state.dsPositionFrameBuckets.clear();
   }
@@ -7481,6 +7567,10 @@ function trimPositionRateWindow(times, nowMs) {
 function updatePositionStreamMetrics() {
   const nowMs = performance.now();
   const rxRate = trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
+  const independentRate = trimPositionRateWindow(
+    state.positionStreamIndependentTimes,
+    nowMs
+  );
   const renderRate = trimPositionRateWindow(state.positionStreamRenderTimes, nowMs);
   const element = document.getElementById("positionStreamMetrics");
   if (!element) return;
@@ -7489,7 +7579,9 @@ function updatePositionStreamMetrics() {
     element.className = "position-pill warn";
     return;
   }
-  element.textContent = `${rxRate} results/s · ${renderRate} fps`;
+  element.textContent =
+    `${rxRate} solver updates/s · ${independentRate} independent frames/s · ` +
+    `${renderRate} fps`;
   element.className = "position-pill good";
 }
 
@@ -7680,7 +7772,9 @@ function ingestDsTwrStreamSample(item) {
 
   frame.complete = true;
   state.positionStreamRxTimes.push(nowMs);
+  state.positionStreamIndependentTimes.push(nowMs);
   trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
+  trimPositionRateWindow(state.positionStreamIndependentTimes, nowMs);
   schedulePositionStreamRender();
 }
 
@@ -7711,6 +7805,10 @@ function ingestPositionStreamSample(item) {
       positionTdoaProtocolMatches(item, settings.solver)) {
     state.positionStreamRxTimes.push(nowMs);
     trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
+    if (item.independent_frame !== false) {
+      state.positionStreamIndependentTimes.push(nowMs);
+      trimPositionRateWindow(state.positionStreamIndependentTimes, nowMs);
+    }
     schedulePositionStreamRender();
   }
 }
@@ -8985,6 +9083,7 @@ function renderInfo(snapshot) {
   renderFlexTdoaTimingDiagram();
   renderNativeDsTwrTimingDiagram();
   renderPassiveDsTimingDiagram();
+  renderPassiveDsExperimentControls();
   renderPassiveDsCalibration();
   scheduleAccelRender();
   updateAccelEnabledControl();
@@ -10266,7 +10365,10 @@ function updateRangingSettingsProtocol() {
   updateAllFlexProfileSummaries();
   if (solver === "flextdoa") renderFlexTdoaTimingDiagram();
   if (solver === "ranging") renderNativeDsTwrTimingDiagram();
-  if (solver === "passive_ds") renderPassiveDsTimingDiagram();
+  if (solver === "passive_ds") {
+    renderPassiveDsTimingDiagram();
+    renderPassiveDsExperimentControls();
+  }
 }
 
 const flexTimingFallback = {
@@ -11184,11 +11286,116 @@ function passiveDsRuntimeConfig() {
     respUs: Number(status.runtime_passive_ds_resp_delay_us || 1000),
     finalUs: Number(status.runtime_passive_ds_final_delay_us || 1000),
     autoRxUus: Number(status.runtime_passive_ds_auto_rx_delay_uus || 500),
+    pipelineMode: Number(status.runtime_passive_ds_pipeline_mode || 0),
+    solveMode: Number(status.runtime_passive_ds_solve_mode || 0),
+    rollingMaxHz: Number(status.runtime_passive_ds_rolling_max_hz || 100),
     live: Boolean(
       statusIsFresh(status) &&
       String(status.runtime_mode_name || "").includes("passive_ds")
     ),
   };
+}
+
+async function applyPassiveDsExperimentMode() {
+  const rollingMaxHz = Number(
+    document.getElementById("passiveDsRollingMaxHz")?.value
+  );
+  if (!Number.isInteger(rollingMaxHz) ||
+      rollingMaxHz < 1 || rollingMaxHz > 500) {
+    setToast(
+      "passiveDsExperimentToast",
+      "Rolling cap must be an integer between 1 and 500 Hz.",
+      "bad"
+    );
+    return;
+  }
+  setToast(
+    "passiveDsExperimentToast",
+    "applying pipeline and solve mode...",
+    "",
+    null,
+    false
+  );
+  const data = await postConfig({
+    target_modules:
+      document.getElementById("passiveDsExperimentTargets").value,
+    params: {
+      passive_ds_pipeline_mode:
+        document.getElementById("passiveDsPipelineMode").value,
+      passive_ds_solve_mode:
+        document.getElementById("passiveDsSolveMode").value,
+      passive_ds_rolling_max_hz: String(rollingMaxHz),
+      hot_switch: "1",
+    },
+  }, "passiveDsExperimentToast");
+  if (apiResponseOk(data)) setTimeout(fetchSnapshot, 500);
+}
+
+function passiveDsStageMetric(stage) {
+  if (!stage) return "—";
+  return `${esc(stage.avg_us ?? 0)}/${esc(stage.max_us ?? 0)} µs` +
+    ` · ${esc(stage.fail ?? 0)}/${esc(stage.count ?? 0)} fail`;
+}
+
+function renderPassiveDsExperimentControls() {
+  const candidates = state.statuses || [];
+  const status = candidates.find(item =>
+    statusIsFresh(item) &&
+    String(item.runtime_mode_name || "").includes("passive_ds")
+  ) || candidates.find(statusIsFresh) || candidates[0] || {};
+  const config = {
+    pipelineMode: Number(status.runtime_passive_ds_pipeline_mode || 0),
+    solveMode: Number(status.runtime_passive_ds_solve_mode || 0),
+    rollingMaxHz: Number(status.runtime_passive_ds_rolling_max_hz || 100),
+  };
+  [
+    ["passiveDsPipelineMode", config.pipelineMode],
+    ["passiveDsSolveMode", config.solveMode],
+    ["passiveDsRollingMaxHz", config.rollingMaxHz],
+  ].forEach(([id, value]) => {
+    const el = document.getElementById(id);
+    if (el && document.activeElement !== el) el.value = String(value);
+  });
+
+  const root = document.getElementById("passiveDsPipelineDiagnostics");
+  if (!root) return;
+  const rows = candidates
+    .filter(statusIsFresh)
+    .map(item => {
+      const stats = item.passive_ds_pipeline_stats;
+      if (!stats || !stats.stages) return "";
+      const stages = stats.stages;
+      return `<tr>
+        <td>M${esc(item.module_id)}</td>
+        <td>${stats.deadline_active ? "deadline" : "legacy"}</td>
+        <td>${esc(stats.completed ?? 0)}</td>
+        <td>${esc(stats.response_timeouts ?? 0)}/${esc(stats.final_timeouts ?? 0)}</td>
+        <td>${esc(stats.invalid_frames ?? 0)}/${esc(stats.state_collisions ?? 0)}/${esc(stats.schedule_overruns ?? 0)}</td>
+        <td>${passiveDsStageMetric(stages.poll_tx)}</td>
+        <td>${passiveDsStageMetric(stages.response_tx)}</td>
+        <td>${passiveDsStageMetric(stages.final_tx)}</td>
+        <td>${passiveDsStageMetric(stages.final_rx)}</td>
+        <td>${passiveDsStageMetric(stages.cia_read)}</td>
+        <td>${passiveDsStageMetric(stages.rx_rearm)}</td>
+      </tr>`;
+    })
+    .filter(Boolean)
+    .join("");
+  if (!rows) {
+    root.className = "muted";
+    root.textContent = "Waiting for instrumented firmware status...";
+    return;
+  }
+  root.className = "table-wrap";
+  root.innerHTML = `<table>
+    <thead><tr>
+      <th>Module</th><th>Pipeline</th><th>Complete</th>
+      <th>RESP/FINAL timeout</th><th>invalid/collision/overrun</th>
+      <th>POLL TX avg/max</th><th>RESP TX avg/max</th>
+      <th>FINAL TX avg/max</th><th>FINAL RX avg/max</th>
+      <th>CIA avg/max</th><th>RX re-arm avg/max</th>
+    </tr></thead><tbody>${rows}</tbody>
+  </table>`;
 }
 
 function renderPassiveDsTimingDiagram() {
@@ -11220,6 +11427,8 @@ function renderPassiveDsTimingDiagram() {
       <div class="flex-timing-metric"><span>Reference</span><strong>${esc(initiator)}</strong></div>
       <div class="flex-timing-metric"><span>Position frame</span><strong>${fmtFixed(frameMs, 0)} ms</strong></div>
       <div class="flex-timing-metric"><span>Nominal FPS</span><strong>${fmtFixed(frameHz, 2)}</strong></div>
+      <div class="flex-timing-metric"><span>Anchor pipeline</span><strong>${config.pipelineMode === 1 ? "deadline" : "legacy control"}</strong></div>
+      <div class="flex-timing-metric"><span>Position updates</span><strong>${config.solveMode === 1 ? `rolling ≤ ${esc(config.rollingMaxHz)} Hz` : "independent frames"}</strong></div>
       <div class="flex-timing-metric"><span>Tag airtime</span><strong>0 packets</strong></div>
     </div>
     <div class="flex-frame-track" style="grid-template-columns:repeat(${slots}, minmax(190px, 1fr))">${slotCards}</div>
@@ -11780,6 +11989,8 @@ function wireSettings() {
   document.getElementById("clearPassiveDsCalibration")?.addEventListener(
     "click", () => applyPassiveDsCalibration(true)
   );
+  document.getElementById("applyPassiveDsExperimentMode")
+    ?.addEventListener("click", applyPassiveDsExperimentMode);
   Object.keys(passiveDsProfileDefaults).forEach(updatePassiveDsProfileSummary);
   updateAllRangingProfileSummaries();
   updateAllFlexProfileSummaries();

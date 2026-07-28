@@ -18,6 +18,33 @@ enum uwb_dw3000_status {
     UWB_DW3000_STATUS_FAILED,
 };
 
+struct uwb_passive_ds_stage_stats {
+    uint32_t count;
+    uint32_t failure_count;
+    uint32_t last_duration_us;
+    uint32_t max_duration_us;
+    uint64_t total_duration_us;
+    int64_t last_event_host_us;
+};
+
+struct uwb_passive_ds_pipeline_stats {
+    bool deadline_pipeline_active;
+    uint32_t completed_exchange_count;
+    uint32_t response_timeout_count;
+    uint32_t final_timeout_count;
+    uint32_t invalid_frame_count;
+    uint32_t state_collision_count;
+    uint32_t schedule_alarm_count;
+    uint32_t schedule_overrun_count;
+    uint32_t rx_rearm_failure_count;
+    struct uwb_passive_ds_stage_stats poll_tx;
+    struct uwb_passive_ds_stage_stats response_tx;
+    struct uwb_passive_ds_stage_stats final_tx;
+    struct uwb_passive_ds_stage_stats final_rx;
+    struct uwb_passive_ds_stage_stats cia_read;
+    struct uwb_passive_ds_stage_stats rx_rearm;
+};
+
 esp_err_t uwb_dw3000_start(void);
 esp_err_t uwb_dw3000_start_distance_test(void);
 esp_err_t uwb_dw3000_start_calibration(void);
@@ -45,6 +72,8 @@ uint32_t uwb_dw3000_get_rx_ignored_count(void);
 uint8_t uwb_dw3000_get_last_rx_source_id(void);
 uint32_t uwb_dw3000_get_last_rx_sequence(void);
 uint16_t uwb_dw3000_get_antenna_delay(void);
+void uwb_dw3000_get_passive_ds_pipeline_stats(
+    struct uwb_passive_ds_pipeline_stats *stats);
 
 #ifdef __cplusplus
 }
