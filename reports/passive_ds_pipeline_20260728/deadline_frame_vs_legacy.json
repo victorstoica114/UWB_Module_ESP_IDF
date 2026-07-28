@@ -1,0 +1,40 @@
+{
+  "accepted": true,
+  "bootstrap_iterations": 3000,
+  "candidate_count": 5053,
+  "confidence": 0.95,
+  "control_count": 3753,
+  "gates": {
+    "p95_cm": {
+      "accepted": true,
+      "candidate": 5.093721262552306,
+      "candidate_ci": [
+        4.904079934095688,
+        5.292447448959691
+      ],
+      "control": 5.512349484663121,
+      "control_ci": [
+        5.24976189936268,
+        5.755866572463257
+      ],
+      "control_upper_limit": 5.755866572463257
+    },
+    "rmse_cm": {
+      "accepted": true,
+      "candidate": 3.2333991980631165,
+      "candidate_ci": [
+        3.114158337164934,
+        3.360494738978959
+      ],
+      "control": 3.5870017286788984,
+      "control_ci": [
+        3.4610793322016713,
+        3.7135096530769944
+      ],
+      "control_upper_limit": 3.7135096530769944
+    }
+  },
+  "moving_block_length": 50,
+  "position_source": "filtered",
+  "rule": "candidate point RMSE and P95 must each be no greater than the upper confidence bound of the same-geometry control"
+}
