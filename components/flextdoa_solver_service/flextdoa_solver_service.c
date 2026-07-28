@@ -103,6 +103,8 @@ struct flex_solver_state {
     uint32_t observation_rejected;
     uint32_t position_accepted;
     uint32_t independent_frame_accepted;
+    uint32_t complete_superframe_accepted;
+    uint32_t filter_correction_accepted;
     uint32_t position_rejected;
     uint32_t previous_range_accepted;
     uint32_t previous_range_rejected;
@@ -110,6 +112,8 @@ struct flex_solver_state {
     uint32_t previous_observation_rejected;
     uint32_t previous_position_accepted;
     uint32_t previous_independent_frame_accepted;
+    uint32_t previous_complete_superframe_accepted;
+    uint32_t previous_filter_correction_accepted;
     uint32_t previous_position_rejected;
     TickType_t last_rolling_attempt_tick;
     TickType_t summary_tick;
@@ -728,11 +732,51 @@ static float flex_solver_position_raw_sse(
     return sse;
 }
 
+static bool flex_solver_rolling_enabled(uint8_t solve_mode)
+{
+    return solve_mode != APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME;
+}
+
+static bool flex_solver_filter_correction_requested(
+    uint8_t solve_mode, bool independent_frame, bool complete_superframe)
+{
+    switch (solve_mode) {
+    case APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_INDEPENDENT:
+        return independent_frame;
+    case APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_SUPERFRAME:
+        return complete_superframe;
+    case APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME:
+    case APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_ALL:
+    default:
+        return true;
+    }
+}
+
+static bool flex_solver_complete_superframe(
+    const app_runtime_config_t *config, uint32_t completed_frame)
+{
+    if (config == NULL || config->anchor_count < 2U) {
+        return false;
+    }
+    if (config->passive_ds_schedule !=
+        APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING) {
+        // Fast Star does not refresh every directed path in one compact
+        // superframe. Keep this experimental policy equivalent to the
+        // independent-frame policy outside Robust Rotating.
+        return true;
+    }
+    return completed_frame % (uint32_t)config->anchor_count ==
+           (uint32_t)config->anchor_count - 1U;
+}
+
 static void flex_solver_filter_position(
     struct flex_solver_state *state, float raw_x, float raw_y,
-    float measurement_sigma, TickType_t now, float *filtered_x,
-    float *filtered_y)
+    float measurement_sigma, TickType_t now, bool measurement_update,
+    float *filtered_x, float *filtered_y, bool *correction_applied)
 {
+    if (correction_applied != NULL) {
+        *correction_applied = false;
+    }
     if (!state->position_filter_valid ||
         !isfinite(state->position_filter_state[0]) ||
         hypotf(raw_x - state->position_filter_state[0],
@@ -751,13 +795,16 @@ static void flex_solver_filter_position(
         state->position_filter_valid = true;
         *filtered_x = raw_x;
         *filtered_y = raw_y;
+        if (correction_applied != NULL) {
+            *correction_applied = true;
+        }
         return;
     }
 
     float dt =
         (float)((now - state->position_filter_tick) * portTICK_PERIOD_MS) /
         1000.0f;
-    dt = fminf(0.2f, fmaxf(0.002f, dt));
+    dt = fminf(0.2f, fmaxf(0.0f, dt));
     state->position_filter_tick = now;
 
     float transition[4][4] = {
@@ -810,6 +857,14 @@ static void flex_solver_filter_position(
     predicted_covariance[3][1] += q_cross;
     predicted_covariance[2][2] += q_velocity;
     predicted_covariance[3][3] += q_velocity;
+
+    if (!measurement_update) {
+        memcpy(state->position_filter_covariance, predicted_covariance,
+               sizeof(state->position_filter_covariance));
+        *filtered_x = state->position_filter_state[0];
+        *filtered_y = state->position_filter_state[1];
+        return;
+    }
 
     const float measurement_variance = fminf(
         0.01f,
@@ -870,11 +925,15 @@ static void flex_solver_filter_position(
     }
     *filtered_x = state->position_filter_state[0];
     *filtered_y = state->position_filter_state[1];
+    if (correction_applied != NULL) {
+        *correction_applied = true;
+    }
 }
 
 static void flex_solver_update_position(struct flex_solver_state *state,
                                         uint8_t tag_id, uint32_t slot_id,
-                                        bool independent_frame)
+                                        bool independent_frame,
+                                        bool complete_superframe)
 {
     if (!state->geometry_ready) {
         return;
@@ -1017,9 +1076,15 @@ static void flex_solver_update_position(struct flex_solver_state *state,
     const app_runtime_config_t *config = app_runtime_config_get();
     float filtered_x = x;
     float filtered_y = y;
+    bool filter_correction_applied = false;
     if (config->runtime_mode == APP_RUNTIME_MODE_UWB_PASSIVE_DS_TWR) {
+        const bool filter_correction_requested =
+            flex_solver_filter_correction_requested(
+                config->passive_ds_solve_mode, independent_frame,
+                complete_superframe);
         flex_solver_filter_position(
-            state, x, y, sigma, now, &filtered_x, &filtered_y);
+            state, x, y, sigma, now, filter_correction_requested,
+            &filtered_x, &filtered_y, &filter_correction_applied);
     }
     state->position_x = filtered_x;
     state->position_y = filtered_y;
@@ -1027,6 +1092,12 @@ static void flex_solver_update_position(struct flex_solver_state *state,
     state->position_accepted++;
     if (independent_frame) {
         state->independent_frame_accepted++;
+    }
+    if (complete_superframe) {
+        state->complete_superframe_accepted++;
+    }
+    if (filter_correction_applied) {
+        state->filter_correction_accepted++;
     }
     if (config->runtime_mode == APP_RUNTIME_MODE_UWB_PASSIVE_DS_TWR) {
         (void)wireless_telemetry_service_submit_passive_ds_position(
@@ -1037,7 +1108,8 @@ static void flex_solver_update_position(struct flex_solver_state *state,
             (int32_t)lroundf(sigma * 1000.0f),
             (int32_t)lroundf(rms * 1000.0f), (uint16_t)used_count,
             state->anchor_count, state->geometry_version,
-            independent_frame, state->position_accepted,
+            independent_frame, complete_superframe,
+            filter_correction_applied, state->position_accepted,
             state->independent_frame_accepted);
     } else {
         (void)wireless_telemetry_service_submit_flex_position(
@@ -1116,9 +1188,12 @@ static void flex_solver_task(void *arg)
             const uint32_t item_frame =
                 item.slot_id / slots_per_frame;
             if (state.position_pending && item_frame != pending_frame) {
+                const bool complete_superframe =
+                    flex_solver_complete_superframe(config, pending_frame);
                 flex_solver_update_position(
                     &state, state.pending_tag_id,
-                    state.pending_position_slot_id, true);
+                    state.pending_position_slot_id, true,
+                    complete_superframe);
             }
             state.observations[first][second] =
                 (struct flex_solver_measurement){
@@ -1133,8 +1208,8 @@ static void flex_solver_task(void *arg)
             state.pending_position_slot_id = item.slot_id;
             if (config->runtime_mode ==
                     APP_RUNTIME_MODE_UWB_PASSIVE_DS_TWR &&
-                config->passive_ds_solve_mode ==
-                    APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING) {
+                flex_solver_rolling_enabled(
+                    config->passive_ds_solve_mode)) {
                 const uint32_t rolling_hz =
                     config->passive_ds_rolling_max_hz;
                 const uint32_t interval_ms =
@@ -1154,7 +1229,7 @@ static void flex_solver_task(void *arg)
                     // a duplicate.
                     state.last_rolling_attempt_tick = now;
                     flex_solver_update_position(
-                        &state, item.tag_id, item.slot_id, false);
+                        &state, item.tag_id, item.slot_id, false, false);
                 }
             }
         }
@@ -1178,6 +1253,12 @@ static void flex_solver_task(void *arg)
             const uint32_t independent_frame_delta =
                 state.independent_frame_accepted -
                 state.previous_independent_frame_accepted;
+            const uint32_t complete_superframe_delta =
+                state.complete_superframe_accepted -
+                state.previous_complete_superframe_accepted;
+            const uint32_t filter_correction_delta =
+                state.filter_correction_accepted -
+                state.previous_filter_correction_accepted;
             const uint32_t position_rate_milli_hz =
                 elapsed_ms > 0U
                     ? (uint32_t)(((uint64_t)position_delta * 1000000ULL) /
@@ -1186,7 +1267,7 @@ static void flex_solver_task(void *arg)
             (void)wireless_log_service_submit(
                 'I', TAG,
                 "%s solver pos=%lu.%03lu/s accept=%lu frames=%lu "
-                "rolling=%lu reject=%lu "
+                "superframes=%lu rolling=%lu corrections=%lu reject=%lu "
                 "obs=%lu/%lu range=%lu/%lu reloc=%lu",
                 config->runtime_mode ==
                         APP_RUNTIME_MODE_UWB_PASSIVE_DS_TWR
@@ -1197,10 +1278,12 @@ static void flex_solver_task(void *arg)
                 (unsigned long)(state.position_accepted -
                                 state.previous_position_accepted),
                 (unsigned long)independent_frame_delta,
+                (unsigned long)complete_superframe_delta,
                 (unsigned long)(
                     position_delta >= independent_frame_delta
                         ? position_delta - independent_frame_delta
                         : 0U),
+                (unsigned long)filter_correction_delta,
                 (unsigned long)(state.position_rejected -
                                 state.previous_position_rejected),
                 (unsigned long)(state.observation_accepted -
@@ -1222,6 +1305,10 @@ static void flex_solver_task(void *arg)
                 state.position_accepted;
             state.previous_independent_frame_accepted =
                 state.independent_frame_accepted;
+            state.previous_complete_superframe_accepted =
+                state.complete_superframe_accepted;
+            state.previous_filter_correction_accepted =
+                state.filter_correction_accepted;
             state.previous_position_rejected =
                 state.position_rejected;
             state.summary_tick = now;

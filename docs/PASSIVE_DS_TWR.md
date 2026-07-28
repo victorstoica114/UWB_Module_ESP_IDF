@@ -88,8 +88,21 @@ experiments to be evaluated without changing that radio profile:
   microsecond host alarm for the next owned slot, and explicit response/final
   deadlines.
 - `passive_ds_solve_mode=0` emits one independent solution when a complete
-  frame closes; `passive_ds_solve_mode=1` additionally solves after each new
-  usable observation, capped by `passive_ds_rolling_max_hz`.
+  frame closes.
+- `passive_ds_solve_mode=1` is the original rolling control: every accepted
+  frame and rolling solution also corrects the constant-velocity EKF.
+- `passive_ds_solve_mode=2` keeps every rolling raw solve, but only an
+  independent frame may perform an EKF measurement correction. Other rolling
+  results advance and publish the EKF prediction without treating reused
+  observations as new independent evidence.
+- `passive_ds_solve_mode=3` corrects the EKF only after a complete Robust
+  Rotating superframe. Rolling and intermediate frame events remain
+  predict-only. Outside Robust Rotating this falls back to the
+  independent-frame policy.
+
+All rolling modes are capped by `passive_ds_rolling_max_hz`. Changing the
+policy with the existing hot-switch path resets the solver and filter, but
+keeps Wi-Fi, HTTP, and telemetry online.
 
 Rolling solutions reuse observations inside the freshness window and are
 therefore low-latency updates, not additional independent radio frames. The
@@ -101,7 +114,9 @@ solution updates the live marker, while the retained EKF and raw-solver trails
 contain independent frames only. Their point counts and retained time span are
 shown alongside the measured browser `event -> render` latency. Drawing is
 downsampled when necessary, without removing points from the retained trail or
-its statistics.
+its statistics. Position telemetry also marks complete superframes and actual
+EKF corrections so the dashboard can report the true correction rate
+separately from the raw solver rate.
 
 The deadline pipeline accumulates stage counters and host execution time for
 POLL TX, delayed RESP TX, FINAL TX/RX, CIA readout, and RX re-arm. Counters are

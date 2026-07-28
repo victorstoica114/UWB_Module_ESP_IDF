@@ -832,7 +832,7 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                 )
                 solver_update_count = 0
                 independent_frame_count = 0
-                solution_flags = 1
+                solution_flags = 1 | 4
             samples.append(
                 {
                     **common,
@@ -852,11 +852,22 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "anchor_count": int(anchor_count),
                     "position_filter": "ekf_cv",
                     "solution_kind": (
-                        "independent_frame"
+                        "complete_superframe"
+                        if solution_flags & 2
+                        else "independent_frame"
                         if solution_flags & 1
                         else "rolling"
                     ),
                     "independent_frame": bool(solution_flags & 1),
+                    "complete_superframe": bool(solution_flags & 2),
+                    "filter_correction": (
+                        bool(solution_flags & 4)
+                        if solution_flags & 8
+                        else True
+                    ),
+                    "selective_filter_telemetry": bool(
+                        solution_flags & 8
+                    ),
                     "solver_update_count": int(solver_update_count),
                     "independent_frame_count": int(
                         independent_frame_count
@@ -3874,8 +3885,8 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div id="passiveDsTimingDiagram" class="muted">Waiting for Passive DS-TWR runtime status...</div>
           <div class="profile-card" style="margin-top:12px">
-            <h3>Experimental pipeline and solve mode</h3>
-            <p class="muted">The validated Robust Rotating 1.0/1.0 ms radio timing remains untouched. Change one layer at a time: deadline scheduling affects anchors; rolling solve affects the receive-only tag and the dashboard update rate.</p>
+            <h3>Experimental pipeline and EKF policy</h3>
+            <p class="muted">The validated Robust Rotating 1.0/1.0 ms radio timing remains untouched. Rolling always keeps the low-latency raw solve; the selected policy decides which statistically independent event may correct the EKF.</p>
             <div class="form-grid">
               <label for="passiveDsExperimentTargets">Targets</label>
               <select id="passiveDsExperimentTargets">
@@ -3891,10 +3902,12 @@ tr.status-stale td { color: #4f3b1d; }
                 <option value="0">Legacy control</option>
                 <option value="1">DW3000 deadline state machine</option>
               </select>
-              <label for="passiveDsSolveMode">Position solve</label>
+              <label for="passiveDsSolveMode">Solve / EKF policy</label>
               <select id="passiveDsSolveMode">
                 <option value="0">Independent frame control</option>
-                <option value="1">Rolling low-latency</option>
+                <option value="1">Rolling · correct every solve (control)</option>
+                <option value="2">Rolling · correct independent frames</option>
+                <option value="3">Rolling · correct complete superframes</option>
               </select>
               <label for="passiveDsRollingMaxHz">Rolling cap Hz</label>
               <input id="passiveDsRollingMaxHz" value="100" type="number" min="1" max="500" step="1">
@@ -4499,6 +4512,8 @@ const state = {
   positionStreamRenderPending: false,
   positionStreamRxTimes: [],
   positionStreamIndependentTimes: [],
+  positionStreamSuperframeTimes: [],
+  positionStreamCorrectionTimes: [],
   positionStreamRenderTimes: [],
   positionStreamRenderLatencies: [],
   positionStreamLatestEvent: null,
@@ -5318,6 +5333,8 @@ function switchPositionProtocolSettings() {
     state.positionAnchorTrail = {};
     state.positionStreamRxTimes = [];
     state.positionStreamIndependentTimes = [];
+    state.positionStreamSuperframeTimes = [];
+    state.positionStreamCorrectionTimes = [];
     state.positionStreamRenderTimes = [];
     state.dsPositionFrameBuckets.clear();
   }
@@ -7698,6 +7715,14 @@ function updatePositionStreamMetrics() {
     state.positionStreamIndependentTimes,
     nowMs
   );
+  const superframeRate = trimPositionRateWindow(
+    state.positionStreamSuperframeTimes,
+    nowMs
+  );
+  const correctionRate = trimPositionRateWindow(
+    state.positionStreamCorrectionTimes,
+    nowMs
+  );
   const renderRate = trimPositionRateWindow(state.positionStreamRenderTimes, nowMs);
   const element = document.getElementById("positionStreamMetrics");
   const trailElement = document.getElementById("positionTrailMetrics");
@@ -7712,9 +7737,13 @@ function updatePositionStreamMetrics() {
     return;
   }
   const updatesPerRender = renderRate > 0 ? rxRate / renderRate : 0;
-  element.textContent =
-    `${rxRate} solver updates/s · ${independentRate} independent frames/s · ` +
-    `${renderRate} fps · ${fmtFixed(updatesPerRender, 1)} updates/render`;
+  const passiveDs = positionSettings().solver === "passive_ds";
+  element.textContent = passiveDs
+    ? `${rxRate} solver/s · ${independentRate} frames/s · ` +
+      `${superframeRate} superframes/s · ${correctionRate} EKF corrections/s · ` +
+      `${renderRate} fps · ${fmtFixed(updatesPerRender, 1)} updates/render`
+    : `${rxRate} solver updates/s · ${independentRate} independent frames/s · ` +
+      `${renderRate} fps · ${fmtFixed(updatesPerRender, 1)} updates/render`;
   element.className = "position-pill good";
   if (trailElement) {
     const trail = positionTrailSummary();
@@ -7806,7 +7835,17 @@ function updatePositionLiveMetrics(model) {
       const referenceText = referenceStats
         ? ` · actual ${fmtPositionCm(referenceStats.currentErrorM, 1)}`
         : "";
-      meta.textContent = `${item.observation_count || 0} raw obs${sigmaText}${referenceText} · live`;
+      const filterText = item.tdoa_protocol === "passive_ds"
+        ? ` · ${item.filter_correction ? "EKF correction" : "EKF predict-only"}` +
+          (item.complete_superframe
+            ? " · complete superframe"
+            : item.independent_frame
+            ? " · independent frame"
+            : " · rolling")
+        : "";
+      meta.textContent =
+        `${item.observation_count || 0} raw obs${sigmaText}${referenceText}` +
+        `${filterText} · live`;
     }
     const solverSigma = document.getElementById(`positionSolverSigma${tag.tagId}`);
     const tdoaRms = document.getElementById(`positionTdoaRms${tag.tagId}`);
@@ -7979,6 +8018,14 @@ function ingestPositionStreamSample(item) {
     if (item.independent_frame !== false) {
       state.positionStreamIndependentTimes.push(nowMs);
       trimPositionRateWindow(state.positionStreamIndependentTimes, nowMs);
+    }
+    if (item.complete_superframe === true) {
+      state.positionStreamSuperframeTimes.push(nowMs);
+      trimPositionRateWindow(state.positionStreamSuperframeTimes, nowMs);
+    }
+    if (item.filter_correction === true) {
+      state.positionStreamCorrectionTimes.push(nowMs);
+      trimPositionRateWindow(state.positionStreamCorrectionTimes, nowMs);
     }
     schedulePositionStreamRender();
   }
@@ -11467,6 +11514,19 @@ function passiveDsRuntimeConfig() {
   };
 }
 
+function passiveDsSolveModeLabel(mode, rollingMaxHz = 100) {
+  if (mode === 1) {
+    return `rolling ≤ ${rollingMaxHz} Hz · EKF every solve`;
+  }
+  if (mode === 2) {
+    return `rolling ≤ ${rollingMaxHz} Hz · EKF independent frames`;
+  }
+  if (mode === 3) {
+    return `rolling ≤ ${rollingMaxHz} Hz · EKF complete superframes`;
+  }
+  return "independent frame control";
+}
+
 async function applyPassiveDsExperimentMode() {
   const rollingMaxHz = Number(
     document.getElementById("passiveDsRollingMaxHz")?.value
@@ -11482,7 +11542,7 @@ async function applyPassiveDsExperimentMode() {
   }
   setToast(
     "passiveDsExperimentToast",
-    "applying pipeline and solve mode...",
+    "applying pipeline and EKF policy...",
     "",
     null,
     false
@@ -11499,7 +11559,15 @@ async function applyPassiveDsExperimentMode() {
       hot_switch: "1",
     },
   }, "passiveDsExperimentToast");
-  if (apiResponseOk(data)) setTimeout(fetchSnapshot, 500);
+  if (apiResponseOk(data)) {
+    resetPositionTagTrails();
+    state.positionStreamRxTimes = [];
+    state.positionStreamIndependentTimes = [];
+    state.positionStreamSuperframeTimes = [];
+    state.positionStreamCorrectionTimes = [];
+    state.positionStreamRenderTimes = [];
+    setTimeout(fetchSnapshot, 500);
+  }
 }
 
 function passiveDsStageMetric(stage) {
@@ -11599,7 +11667,7 @@ function renderPassiveDsTimingDiagram() {
       <div class="flex-timing-metric"><span>Position frame</span><strong>${fmtFixed(frameMs, 0)} ms</strong></div>
       <div class="flex-timing-metric"><span>Nominal FPS</span><strong>${fmtFixed(frameHz, 2)}</strong></div>
       <div class="flex-timing-metric"><span>Anchor pipeline</span><strong>${config.pipelineMode === 1 ? "deadline" : "legacy control"}</strong></div>
-      <div class="flex-timing-metric"><span>Position updates</span><strong>${config.solveMode === 1 ? `rolling ≤ ${esc(config.rollingMaxHz)} Hz` : "independent frames"}</strong></div>
+      <div class="flex-timing-metric"><span>Position / EKF</span><strong>${esc(passiveDsSolveModeLabel(config.solveMode, config.rollingMaxHz))}</strong></div>
       <div class="flex-timing-metric"><span>Tag airtime</span><strong>0 packets</strong></div>
     </div>
     <div class="flex-frame-track" style="grid-template-columns:repeat(${slots}, minmax(190px, 1fr))">${slotCards}</div>

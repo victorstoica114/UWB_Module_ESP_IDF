@@ -582,7 +582,11 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         (config->passive_ds_solve_mode !=
              APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME &&
          config->passive_ds_solve_mode !=
-             APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING) ||
+             APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_ALL &&
+         config->passive_ds_solve_mode !=
+             APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_INDEPENDENT &&
+         config->passive_ds_solve_mode !=
+             APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_SUPERFRAME) ||
         config->passive_ds_rolling_max_hz == 0U ||
         config->passive_ds_rolling_max_hz > 500U ||
         !passive_ds_calibration_valid(config) ||

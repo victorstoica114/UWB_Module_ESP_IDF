@@ -7233,6 +7233,21 @@ static bool uwb_passive_ds_slot_pair(
     return false;
 }
 
+static const char *uwb_passive_ds_solve_mode_name(uint8_t solve_mode)
+{
+    switch (solve_mode) {
+    case APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_ALL:
+        return "rolling_ekf_all";
+    case APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_INDEPENDENT:
+        return "rolling_ekf_independent";
+    case APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_SUPERFRAME:
+        return "rolling_ekf_superframe";
+    case APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME:
+    default:
+        return "frame";
+    }
+}
+
 static int64_t uwb_passive_ds_next_slot_delta_us(
     uint32_t slot_id, const app_runtime_config_t *config,
     size_t anchor_count)
@@ -8542,10 +8557,8 @@ static void uwb_dw3000_passive_ds_twr_loop(void)
                      APP_RUNTIME_PASSIVE_DS_PIPELINE_DEADLINE
                  ? "deadline"
                  : "legacy",
-             config->passive_ds_solve_mode ==
-                     APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING
-                 ? "rolling"
-                 : "frame");
+             uwb_passive_ds_solve_mode_name(
+                 config->passive_ds_solve_mode));
     if (uwb_anchor_survey_id_in_set(
             anchor_ids, anchor_count, s_source_id)) {
         uwb_passive_ds_anchor_loop(anchor_ids, anchor_count);

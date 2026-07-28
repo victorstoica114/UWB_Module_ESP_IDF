@@ -1383,7 +1383,8 @@ bool wireless_telemetry_service_submit_passive_ds_position(
     int32_t filtered_y_mm, int32_t raw_x_mm, int32_t raw_y_mm,
     int32_t sigma_mm, int32_t rms_mm, uint16_t observation_count,
     uint8_t anchor_count, uint32_t geometry_version,
-    bool independent_frame, uint32_t solver_update_count,
+    bool independent_frame, bool complete_superframe,
+    bool filter_correction, uint32_t solver_update_count,
     uint32_t independent_frame_count)
 {
     if (!s_connected) {
@@ -1409,7 +1410,11 @@ bool wireless_telemetry_service_submit_passive_ds_position(
                 .independent_frame_count = independent_frame_count,
                 .tag_id = tag_id,
                 .anchor_count = anchor_count,
-                .solution_flags = independent_frame ? 1U : 0U,
+                .solution_flags =
+                    8U |
+                    (independent_frame ? 1U : 0U) |
+                    (complete_superframe ? 2U : 0U) |
+                    (filter_correction ? 4U : 0U),
             },
         },
     };
