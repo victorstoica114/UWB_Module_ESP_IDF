@@ -169,6 +169,7 @@ def telemetry_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         5: "bounds",
         6: "rms",
         7: "out_of_order",
+        8: "prediction_stale",
     }
     reason_events = {
         label: sum(

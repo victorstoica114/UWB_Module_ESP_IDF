@@ -7452,6 +7452,7 @@ function passiveDsRejectionReasonText(mask) {
     [5, "bounds"],
     [6, "RMS"],
     [7, "out of order"],
+    [8, "stale prediction"],
   ];
   return reasons
     .filter(([bit]) => Number(mask) & (1 << bit))

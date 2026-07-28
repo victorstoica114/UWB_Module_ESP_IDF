@@ -111,6 +111,10 @@ keeps Wi-Fi, HTTP, and telemetry online.
 In modes 2 and 3, rolling events are low-latency EKF predictions rather than
 additional multilateration solves. This prevents stale observations measured
 at different tag positions from being combined as if they were simultaneous.
+Up to eight frame IDs may be assembled concurrently, which tolerates bounded
+reordering and briefly interleaved scheduler epochs without mixing their
+observations. Incomplete buckets expire after 150 ms. Prediction publication
+stops 250 ms after the last accepted coherent correction.
 The position telemetry and dashboard report `solver updates/s` separately
 from `independent frames/s`.
 
@@ -134,7 +138,7 @@ path does not produce a log for every packet.
 
 The one-second solver summary reports coherent-frame rejection deltas in this
 order: incomplete frame, frame mismatch, too few observations, singular solve,
-bounds failure, residual RMS failure, and out-of-order slot.
+bounds failure, residual RMS failure, out-of-order slot, and stale prediction.
 
 For A/B validation, change only one switch at a time. A candidate is accepted
 only when position RMSE and P95 remain inside the confidence band of a new
