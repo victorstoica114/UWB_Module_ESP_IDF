@@ -1,0 +1,1404 @@
+{
+  "block": "ekf_all_motion_a2",
+  "duration_sec": 25.06336760520935,
+  "ended_at": 1785265967.2179184,
+  "event_counts": {
+    "anchor_range": 5830,
+    "ds_range": 0,
+    "local_position": 3358,
+    "poll_error": 0,
+    "status": 26,
+    "tdoa_observation": 5923,
+    "timing_log": 25,
+    "timing_log_error": 0
+  },
+  "events_file": "ekf_all_motion_a2.jsonl",
+  "expected_modules": 5,
+  "final_status": [
+    {
+      "boot_guard_boot_count": 158,
+      "boot_guard_validated": true,
+      "hostname": "uwb-module-1",
+      "http_status_online": true,
+      "module_id": 1,
+      "passive_ds_pipeline_stats": {
+        "completed": 0,
+        "deadline_active": true,
+        "final_timeouts": 0,
+        "invalid_frames": 0,
+        "response_timeouts": 0,
+        "rx_rearm_failures": 0,
+        "schedule_alarms": 0,
+        "schedule_overruns": 0,
+        "stages": {
+          "cia_read": {
+            "avg_us": 40,
+            "count": 21135,
+            "fail": 0,
+            "last_event_us": 882668597,
+            "last_us": 48,
+            "max_us": 76
+          },
+          "final_rx": {
+            "avg_us": 0,
+            "count": 0,
+            "fail": 0,
+            "last_event_us": 0,
+            "last_us": 0,
+            "max_us": 0
+          },
+          "final_tx": {
+            "avg_us": 0,
+            "count": 0,
+            "fail": 0,
+            "last_event_us": 0,
+            "last_us": 0,
+            "max_us": 0
+          },
+          "poll_tx": {
+            "avg_us": 0,
+            "count": 0,
+            "fail": 0,
+            "last_event_us": 0,
+            "last_us": 0,
+            "max_us": 0
+          },
+          "response_tx": {
+            "avg_us": 0,
+            "count": 0,
+            "fail": 0,
+            "last_event_us": 0,
+            "last_us": 0,
+            "max_us": 0
+          },
+          "rx_rearm": {
+            "avg_us": 42,
+            "count": 21155,
+            "fail": 0,
+            "last_event_us": 882669017,
+            "last_us": 44,
+            "max_us": 67
+          }
+        },
+        "state_collisions": 0
+      },
+      "resource_temperature_c": 37.8,
+      "runtime_anchor_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "runtime_flex_tdoa_anchor_x_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_anchor_y_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_geometry_fixed": false,
+      "runtime_flex_tdoa_geometry_generation": 55,
+      "runtime_flex_tdoa_guard_us": 250,
+      "runtime_flex_tdoa_request_process_us": 1000,
+      "runtime_flex_tdoa_request_subslot_us": 250,
+      "runtime_flex_tdoa_response_process_us": 250,
+      "runtime_flex_tdoa_response_subslot_us": 250,
+      "runtime_mode_name": "uwb_passive_ds_twr",
+      "runtime_passive_ds_anchor_bias_mm": [
+        0,
+        34,
+        -16,
+        -55
+      ],
+      "runtime_passive_ds_auto_rx_delay_uus": 500,
+      "runtime_passive_ds_calibration_enabled": true,
+      "runtime_passive_ds_calibration_generation": 2,
+      "runtime_passive_ds_final_delay_us": 1000,
+      "runtime_passive_ds_pipeline_mode": 1,
+      "runtime_passive_ds_range_bias_mm": [
+        71,
+        56,
+        -49,
+        67,
+        66,
+        -29
+      ],
+      "runtime_passive_ds_resp_delay_us": 1000,
+      "runtime_passive_ds_rolling_max_hz": 200,
+      "runtime_passive_ds_round_gap_ms": 1,
+      "runtime_passive_ds_rx_slice_ms": 100,
+      "runtime_passive_ds_rx_timeout_ms": 3,
+      "runtime_passive_ds_schedule": 1,
+      "runtime_passive_ds_slot_ms": 3,
+      "runtime_passive_ds_solve_mode": 1,
+      "runtime_radio_channel": 5,
+      "runtime_ranging_auto_rx_delay_uus": 500,
+      "runtime_ranging_final_delay_ms": 1,
+      "runtime_ranging_resp_delay_ms": 1,
+      "runtime_ranging_round_gap_ms": 1,
+      "runtime_ranging_rx_slice_ms": 100,
+      "runtime_ranging_rx_timeout_ms": 3,
+      "runtime_ranging_slot_ms": 3,
+      "runtime_tag_id": 1,
+      "uwb_active_antenna_delay": 16363,
+      "version": "f8878d9",
+      "wifi_connected": true,
+      "wifi_connected_rssi": -53
+    },
+    {
+      "boot_guard_boot_count": 203,
+      "boot_guard_validated": true,
+      "hostname": "uwb-module-2",
+      "http_status_online": true,
+      "module_id": 2,
+      "passive_ds_pipeline_stats": {
+        "completed": 3440,
+        "deadline_active": true,
+        "final_timeouts": 25,
+        "invalid_frames": 0,
+        "response_timeouts": 28,
+        "rx_rearm_failures": 0,
+        "schedule_alarms": 1964,
+        "schedule_overruns": 10,
+        "stages": {
+          "cia_read": {
+            "avg_us": 27,
+            "count": 14390,
+            "fail": 0,
+            "last_event_us": 880720343,
+            "last_us": 49,
+            "max_us": 74
+          },
+          "final_rx": {
+            "avg_us": 1305,
+            "count": 1646,
+            "fail": 25,
+            "last_event_us": 880714398,
+            "last_us": 1201,
+            "max_us": 11567
+          },
+          "final_tx": {
+            "avg_us": 849,
+            "count": 1820,
+            "fail": 1,
+            "last_event_us": 880710171,
+            "last_us": 901,
+            "max_us": 5114
+          },
+          "poll_tx": {
+            "avg_us": 1123,
+            "count": 1970,
+            "fail": 50,
+            "last_event_us": 880708153,
+            "last_us": 677,
+            "max_us": 130546
+          },
+          "response_tx": {
+            "avg_us": 1238,
+            "count": 1676,
+            "fail": 30,
+            "last_event_us": 880713193,
+            "last_us": 570,
+            "max_us": 129466
+          },
+          "rx_rearm": {
+            "avg_us": 36,
+            "count": 14760,
+            "fail": 0,
+            "last_event_us": 880723989,
+            "last_us": 43,
+            "max_us": 59
+          }
+        },
+        "state_collisions": 72
+      },
+      "resource_temperature_c": 36.6,
+      "runtime_anchor_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "runtime_flex_tdoa_anchor_x_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_anchor_y_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_geometry_fixed": false,
+      "runtime_flex_tdoa_geometry_generation": 54,
+      "runtime_flex_tdoa_guard_us": 250,
+      "runtime_flex_tdoa_request_process_us": 1000,
+      "runtime_flex_tdoa_request_subslot_us": 250,
+      "runtime_flex_tdoa_response_process_us": 250,
+      "runtime_flex_tdoa_response_subslot_us": 250,
+      "runtime_mode_name": "uwb_passive_ds_twr",
+      "runtime_passive_ds_anchor_bias_mm": [
+        0,
+        34,
+        -16,
+        -55
+      ],
+      "runtime_passive_ds_auto_rx_delay_uus": 500,
+      "runtime_passive_ds_calibration_enabled": true,
+      "runtime_passive_ds_calibration_generation": 2,
+      "runtime_passive_ds_final_delay_us": 1000,
+      "runtime_passive_ds_pipeline_mode": 1,
+      "runtime_passive_ds_range_bias_mm": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_passive_ds_resp_delay_us": 1000,
+      "runtime_passive_ds_rolling_max_hz": 200,
+      "runtime_passive_ds_round_gap_ms": 1,
+      "runtime_passive_ds_rx_slice_ms": 100,
+      "runtime_passive_ds_rx_timeout_ms": 3,
+      "runtime_passive_ds_schedule": 1,
+      "runtime_passive_ds_slot_ms": 3,
+      "runtime_passive_ds_solve_mode": 1,
+      "runtime_radio_channel": 5,
+      "runtime_ranging_auto_rx_delay_uus": 500,
+      "runtime_ranging_final_delay_ms": 1,
+      "runtime_ranging_resp_delay_ms": 1,
+      "runtime_ranging_round_gap_ms": 1,
+      "runtime_ranging_rx_slice_ms": 100,
+      "runtime_ranging_rx_timeout_ms": 3,
+      "runtime_ranging_slot_ms": 3,
+      "runtime_tag_id": 1,
+      "uwb_active_antenna_delay": 16368,
+      "version": "f8878d9",
+      "wifi_connected": true,
+      "wifi_connected_rssi": -53
+    },
+    {
+      "boot_guard_boot_count": 221,
+      "boot_guard_validated": true,
+      "hostname": "uwb-module-3",
+      "http_status_online": true,
+      "module_id": 3,
+      "passive_ds_pipeline_stats": {
+        "completed": 3512,
+        "deadline_active": true,
+        "final_timeouts": 30,
+        "invalid_frames": 0,
+        "response_timeouts": 25,
+        "rx_rearm_failures": 0,
+        "schedule_alarms": 2047,
+        "schedule_overruns": 5,
+        "stages": {
+          "cia_read": {
+            "avg_us": 27,
+            "count": 14706,
+            "fail": 0,
+            "last_event_us": 881229586,
+            "last_us": 41,
+            "max_us": 71
+          },
+          "final_rx": {
+            "avg_us": 1313,
+            "count": 1653,
+            "fail": 30,
+            "last_event_us": 881223613,
+            "last_us": 1170,
+            "max_us": 6217
+          },
+          "final_tx": {
+            "avg_us": 850,
+            "count": 1889,
+            "fail": 0,
+            "last_event_us": 881199439,
+            "last_us": 911,
+            "max_us": 2526
+          },
+          "poll_tx": {
+            "avg_us": 963,
+            "count": 2048,
+            "fail": 44,
+            "last_event_us": 881197421,
+            "last_us": 673,
+            "max_us": 127701
+          },
+          "response_tx": {
+            "avg_us": 976,
+            "count": 1668,
+            "fail": 15,
+            "last_event_us": 881222441,
+            "last_us": 684,
+            "max_us": 123724
+          },
+          "rx_rearm": {
+            "avg_us": 36,
+            "count": 15202,
+            "fail": 0,
+            "last_event_us": 881229713,
+            "last_us": 38,
+            "max_us": 60
+          }
+        },
+        "state_collisions": 90
+      },
+      "resource_temperature_c": 39.2,
+      "runtime_anchor_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "runtime_flex_tdoa_anchor_x_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_anchor_y_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_geometry_fixed": false,
+      "runtime_flex_tdoa_geometry_generation": 54,
+      "runtime_flex_tdoa_guard_us": 250,
+      "runtime_flex_tdoa_request_process_us": 1000,
+      "runtime_flex_tdoa_request_subslot_us": 250,
+      "runtime_flex_tdoa_response_process_us": 250,
+      "runtime_flex_tdoa_response_subslot_us": 250,
+      "runtime_mode_name": "uwb_passive_ds_twr",
+      "runtime_passive_ds_anchor_bias_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_passive_ds_auto_rx_delay_uus": 500,
+      "runtime_passive_ds_calibration_enabled": false,
+      "runtime_passive_ds_calibration_generation": 1,
+      "runtime_passive_ds_final_delay_us": 1000,
+      "runtime_passive_ds_pipeline_mode": 1,
+      "runtime_passive_ds_range_bias_mm": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_passive_ds_resp_delay_us": 1000,
+      "runtime_passive_ds_rolling_max_hz": 200,
+      "runtime_passive_ds_round_gap_ms": 1,
+      "runtime_passive_ds_rx_slice_ms": 100,
+      "runtime_passive_ds_rx_timeout_ms": 3,
+      "runtime_passive_ds_schedule": 1,
+      "runtime_passive_ds_slot_ms": 3,
+      "runtime_passive_ds_solve_mode": 1,
+      "runtime_radio_channel": 5,
+      "runtime_ranging_auto_rx_delay_uus": 500,
+      "runtime_ranging_final_delay_ms": 1,
+      "runtime_ranging_resp_delay_ms": 1,
+      "runtime_ranging_round_gap_ms": 1,
+      "runtime_ranging_rx_slice_ms": 100,
+      "runtime_ranging_rx_timeout_ms": 3,
+      "runtime_ranging_slot_ms": 3,
+      "runtime_tag_id": 1,
+      "uwb_active_antenna_delay": 16362,
+      "version": "f8878d9",
+      "wifi_connected": true,
+      "wifi_connected_rssi": -56
+    },
+    {
+      "boot_guard_boot_count": 3,
+      "boot_guard_validated": true,
+      "hostname": "uwb-module-4",
+      "http_status_online": true,
+      "module_id": 4,
+      "passive_ds_pipeline_stats": {
+        "completed": 3333,
+        "deadline_active": true,
+        "final_timeouts": 29,
+        "invalid_frames": 0,
+        "response_timeouts": 17,
+        "rx_rearm_failures": 0,
+        "schedule_alarms": 1864,
+        "schedule_overruns": 1,
+        "stages": {
+          "cia_read": {
+            "avg_us": 26,
+            "count": 14993,
+            "fail": 0,
+            "last_event_us": 882018094,
+            "last_us": 57,
+            "max_us": 72
+          },
+          "final_rx": {
+            "avg_us": 1306,
+            "count": 1698,
+            "fail": 29,
+            "last_event_us": 882009108,
+            "last_us": 1175,
+            "max_us": 13202
+          },
+          "final_tx": {
+            "avg_us": 851,
+            "count": 1665,
+            "fail": 1,
+            "last_event_us": 882018952,
+            "last_us": 701,
+            "max_us": 3389
+          },
+          "poll_tx": {
+            "avg_us": 1761,
+            "count": 1869,
+            "fail": 131,
+            "last_event_us": 882016964,
+            "last_us": 598,
+            "max_us": 130679
+          },
+          "response_tx": {
+            "avg_us": 852,
+            "count": 1707,
+            "fail": 9,
+            "last_event_us": 882007930,
+            "last_us": 898,
+            "max_us": 10150
+          },
+          "rx_rearm": {
+            "avg_us": 36,
+            "count": 15284,
+            "fail": 0,
+            "last_event_us": 882019040,
+            "last_us": 43,
+            "max_us": 58
+          }
+        },
+        "state_collisions": 56
+      },
+      "resource_temperature_c": 41.0,
+      "runtime_anchor_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "runtime_flex_tdoa_anchor_x_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_anchor_y_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_geometry_fixed": false,
+      "runtime_flex_tdoa_geometry_generation": 55,
+      "runtime_flex_tdoa_guard_us": 250,
+      "runtime_flex_tdoa_request_process_us": 1000,
+      "runtime_flex_tdoa_request_subslot_us": 250,
+      "runtime_flex_tdoa_response_process_us": 250,
+      "runtime_flex_tdoa_response_subslot_us": 250,
+      "runtime_mode_name": "uwb_passive_ds_twr",
+      "runtime_passive_ds_anchor_bias_mm": [
+        0,
+        34,
+        -16,
+        -55
+      ],
+      "runtime_passive_ds_auto_rx_delay_uus": 500,
+      "runtime_passive_ds_calibration_enabled": true,
+      "runtime_passive_ds_calibration_generation": 2,
+      "runtime_passive_ds_final_delay_us": 1000,
+      "runtime_passive_ds_pipeline_mode": 1,
+      "runtime_passive_ds_range_bias_mm": [
+        71,
+        56,
+        -49,
+        67,
+        66,
+        -29
+      ],
+      "runtime_passive_ds_resp_delay_us": 1000,
+      "runtime_passive_ds_rolling_max_hz": 200,
+      "runtime_passive_ds_round_gap_ms": 1,
+      "runtime_passive_ds_rx_slice_ms": 100,
+      "runtime_passive_ds_rx_timeout_ms": 3,
+      "runtime_passive_ds_schedule": 1,
+      "runtime_passive_ds_slot_ms": 3,
+      "runtime_passive_ds_solve_mode": 1,
+      "runtime_radio_channel": 5,
+      "runtime_ranging_auto_rx_delay_uus": 500,
+      "runtime_ranging_final_delay_ms": 1,
+      "runtime_ranging_resp_delay_ms": 1,
+      "runtime_ranging_round_gap_ms": 1,
+      "runtime_ranging_rx_slice_ms": 100,
+      "runtime_ranging_rx_timeout_ms": 3,
+      "runtime_ranging_slot_ms": 3,
+      "runtime_tag_id": 1,
+      "uwb_active_antenna_delay": 16371,
+      "version": "f8878d9",
+      "wifi_connected": true,
+      "wifi_connected_rssi": -43
+    },
+    {
+      "boot_guard_boot_count": 228,
+      "boot_guard_validated": true,
+      "hostname": "uwb-module-5",
+      "http_status_online": true,
+      "module_id": 5,
+      "passive_ds_pipeline_stats": {
+        "completed": 3219,
+        "deadline_active": true,
+        "final_timeouts": 30,
+        "invalid_frames": 0,
+        "response_timeouts": 44,
+        "rx_rearm_failures": 0,
+        "schedule_alarms": 1730,
+        "schedule_overruns": 21,
+        "stages": {
+          "cia_read": {
+            "avg_us": 25,
+            "count": 15886,
+            "fail": 0,
+            "last_event_us": 882377957,
+            "last_us": 24,
+            "max_us": 69
+          },
+          "final_rx": {
+            "avg_us": 1295,
+            "count": 1812,
+            "fail": 30,
+            "last_event_us": 882370081,
+            "last_us": 1186,
+            "max_us": 6380
+          },
+          "final_tx": {
+            "avg_us": 834,
+            "count": 1438,
+            "fail": 1,
+            "last_event_us": 882359907,
+            "last_us": 684,
+            "max_us": 4519
+          },
+          "poll_tx": {
+            "avg_us": 1489,
+            "count": 1730,
+            "fail": 194,
+            "last_event_us": 882357898,
+            "last_us": 659,
+            "max_us": 127302
+          },
+          "response_tx": {
+            "avg_us": 915,
+            "count": 1824,
+            "fail": 10,
+            "last_event_us": 882378927,
+            "last_us": 820,
+            "max_us": 129263
+          },
+          "rx_rearm": {
+            "avg_us": 36,
+            "count": 16142,
+            "fail": 0,
+            "last_event_us": 882377418,
+            "last_us": 38,
+            "max_us": 56
+          }
+        },
+        "state_collisions": 55
+      },
+      "resource_temperature_c": 39.4,
+      "runtime_anchor_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "runtime_flex_tdoa_anchor_x_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_anchor_y_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_geometry_fixed": false,
+      "runtime_flex_tdoa_geometry_generation": 54,
+      "runtime_flex_tdoa_guard_us": 250,
+      "runtime_flex_tdoa_request_process_us": 1000,
+      "runtime_flex_tdoa_request_subslot_us": 250,
+      "runtime_flex_tdoa_response_process_us": 250,
+      "runtime_flex_tdoa_response_subslot_us": 250,
+      "runtime_mode_name": "uwb_passive_ds_twr",
+      "runtime_passive_ds_anchor_bias_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_passive_ds_auto_rx_delay_uus": 500,
+      "runtime_passive_ds_calibration_enabled": false,
+      "runtime_passive_ds_calibration_generation": 1,
+      "runtime_passive_ds_final_delay_us": 1000,
+      "runtime_passive_ds_pipeline_mode": 1,
+      "runtime_passive_ds_range_bias_mm": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_passive_ds_resp_delay_us": 1000,
+      "runtime_passive_ds_rolling_max_hz": 200,
+      "runtime_passive_ds_round_gap_ms": 1,
+      "runtime_passive_ds_rx_slice_ms": 100,
+      "runtime_passive_ds_rx_timeout_ms": 3,
+      "runtime_passive_ds_schedule": 1,
+      "runtime_passive_ds_slot_ms": 3,
+      "runtime_passive_ds_solve_mode": 1,
+      "runtime_radio_channel": 5,
+      "runtime_ranging_auto_rx_delay_uus": 500,
+      "runtime_ranging_final_delay_ms": 1,
+      "runtime_ranging_resp_delay_ms": 1,
+      "runtime_ranging_round_gap_ms": 1,
+      "runtime_ranging_rx_slice_ms": 100,
+      "runtime_ranging_rx_timeout_ms": 3,
+      "runtime_ranging_slot_ms": 3,
+      "runtime_tag_id": 1,
+      "uwb_active_antenna_delay": 16371,
+      "version": "f8878d9",
+      "wifi_connected": true,
+      "wifi_connected_rssi": -47
+    }
+  ],
+  "ground_truth": {
+    "anchors_m": {
+      "2": [
+        0.0,
+        0.0
+      ],
+      "3": [
+        0.0,
+        3.0
+      ],
+      "4": [
+        3.0,
+        0.0
+      ],
+      "5": [
+        3.0,
+        3.0
+      ]
+    },
+    "coordinate_convention": "A2=(0,0), A3=(0,3), A4=(3,0), A5=(3,3)",
+    "survey_tolerance_m": 0.002,
+    "tag_m": [
+      1.5,
+      1.5
+    ]
+  },
+  "initial_status": [
+    {
+      "boot_guard_boot_count": 158,
+      "boot_guard_validated": true,
+      "hostname": "uwb-module-1",
+      "http_status_online": true,
+      "module_id": 1,
+      "passive_ds_pipeline_stats": {
+        "completed": 0,
+        "deadline_active": true,
+        "final_timeouts": 0,
+        "invalid_frames": 0,
+        "response_timeouts": 0,
+        "rx_rearm_failures": 0,
+        "schedule_alarms": 0,
+        "schedule_overruns": 0,
+        "stages": {
+          "cia_read": {
+            "avg_us": 43,
+            "count": 1626,
+            "fail": 0,
+            "last_event_us": 855266916,
+            "last_us": 39,
+            "max_us": 73
+          },
+          "final_rx": {
+            "avg_us": 0,
+            "count": 0,
+            "fail": 0,
+            "last_event_us": 0,
+            "last_us": 0,
+            "max_us": 0
+          },
+          "final_tx": {
+            "avg_us": 0,
+            "count": 0,
+            "fail": 0,
+            "last_event_us": 0,
+            "last_us": 0,
+            "max_us": 0
+          },
+          "poll_tx": {
+            "avg_us": 0,
+            "count": 0,
+            "fail": 0,
+            "last_event_us": 0,
+            "last_us": 0,
+            "max_us": 0
+          },
+          "response_tx": {
+            "avg_us": 0,
+            "count": 0,
+            "fail": 0,
+            "last_event_us": 0,
+            "last_us": 0,
+            "max_us": 0
+          },
+          "rx_rearm": {
+            "avg_us": 43,
+            "count": 1646,
+            "fail": 0,
+            "last_event_us": 855267316,
+            "last_us": 40,
+            "max_us": 62
+          }
+        },
+        "state_collisions": 0
+      },
+      "resource_temperature_c": 37.8,
+      "runtime_anchor_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "runtime_flex_tdoa_anchor_x_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_anchor_y_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_geometry_fixed": false,
+      "runtime_flex_tdoa_geometry_generation": 55,
+      "runtime_flex_tdoa_guard_us": 250,
+      "runtime_flex_tdoa_request_process_us": 1000,
+      "runtime_flex_tdoa_request_subslot_us": 250,
+      "runtime_flex_tdoa_response_process_us": 250,
+      "runtime_flex_tdoa_response_subslot_us": 250,
+      "runtime_mode_name": "uwb_passive_ds_twr",
+      "runtime_passive_ds_anchor_bias_mm": [
+        0,
+        34,
+        -16,
+        -55
+      ],
+      "runtime_passive_ds_auto_rx_delay_uus": 500,
+      "runtime_passive_ds_calibration_enabled": true,
+      "runtime_passive_ds_calibration_generation": 2,
+      "runtime_passive_ds_final_delay_us": 1000,
+      "runtime_passive_ds_pipeline_mode": 1,
+      "runtime_passive_ds_range_bias_mm": [
+        71,
+        56,
+        -49,
+        67,
+        66,
+        -29
+      ],
+      "runtime_passive_ds_resp_delay_us": 1000,
+      "runtime_passive_ds_rolling_max_hz": 200,
+      "runtime_passive_ds_round_gap_ms": 1,
+      "runtime_passive_ds_rx_slice_ms": 100,
+      "runtime_passive_ds_rx_timeout_ms": 3,
+      "runtime_passive_ds_schedule": 1,
+      "runtime_passive_ds_slot_ms": 3,
+      "runtime_passive_ds_solve_mode": 1,
+      "runtime_radio_channel": 5,
+      "runtime_ranging_auto_rx_delay_uus": 500,
+      "runtime_ranging_final_delay_ms": 1,
+      "runtime_ranging_resp_delay_ms": 1,
+      "runtime_ranging_round_gap_ms": 1,
+      "runtime_ranging_rx_slice_ms": 100,
+      "runtime_ranging_rx_timeout_ms": 3,
+      "runtime_ranging_slot_ms": 3,
+      "runtime_tag_id": 1,
+      "uwb_active_antenna_delay": 16363,
+      "version": "f8878d9",
+      "wifi_connected": true,
+      "wifi_connected_rssi": -53
+    },
+    {
+      "boot_guard_boot_count": 203,
+      "boot_guard_validated": true,
+      "hostname": "uwb-module-2",
+      "http_status_online": true,
+      "module_id": 2,
+      "passive_ds_pipeline_stats": {
+        "completed": 318,
+        "deadline_active": true,
+        "final_timeouts": 3,
+        "invalid_frames": 0,
+        "response_timeouts": 3,
+        "rx_rearm_failures": 0,
+        "schedule_alarms": 183,
+        "schedule_overruns": 1,
+        "stages": {
+          "cia_read": {
+            "avg_us": 28,
+            "count": 1305,
+            "fail": 0,
+            "last_event_us": 854895844,
+            "last_us": 54,
+            "max_us": 62
+          },
+          "final_rx": {
+            "avg_us": 1318,
+            "count": 154,
+            "fail": 3,
+            "last_event_us": 854892852,
+            "last_us": 1183,
+            "max_us": 5737
+          },
+          "final_tx": {
+            "avg_us": 852,
+            "count": 167,
+            "fail": 0,
+            "last_event_us": 854868667,
+            "last_us": 729,
+            "max_us": 933
+          },
+          "poll_tx": {
+            "avg_us": 1393,
+            "count": 189,
+            "fail": 5,
+            "last_event_us": 854866642,
+            "last_us": 676,
+            "max_us": 126909
+          },
+          "response_tx": {
+            "avg_us": 1635,
+            "count": 155,
+            "fail": 1,
+            "last_event_us": 854891667,
+            "last_us": 717,
+            "max_us": 129466
+          },
+          "rx_rearm": {
+            "avg_us": 35,
+            "count": 1932,
+            "fail": 0,
+            "last_event_us": 854896026,
+            "last_us": 43,
+            "max_us": 55
+          }
+        },
+        "state_collisions": 14
+      },
+      "resource_temperature_c": 36.6,
+      "runtime_anchor_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "runtime_flex_tdoa_anchor_x_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_anchor_y_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_geometry_fixed": false,
+      "runtime_flex_tdoa_geometry_generation": 54,
+      "runtime_flex_tdoa_guard_us": 250,
+      "runtime_flex_tdoa_request_process_us": 1000,
+      "runtime_flex_tdoa_request_subslot_us": 250,
+      "runtime_flex_tdoa_response_process_us": 250,
+      "runtime_flex_tdoa_response_subslot_us": 250,
+      "runtime_mode_name": "uwb_passive_ds_twr",
+      "runtime_passive_ds_anchor_bias_mm": [
+        0,
+        34,
+        -16,
+        -55
+      ],
+      "runtime_passive_ds_auto_rx_delay_uus": 500,
+      "runtime_passive_ds_calibration_enabled": true,
+      "runtime_passive_ds_calibration_generation": 2,
+      "runtime_passive_ds_final_delay_us": 1000,
+      "runtime_passive_ds_pipeline_mode": 1,
+      "runtime_passive_ds_range_bias_mm": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_passive_ds_resp_delay_us": 1000,
+      "runtime_passive_ds_rolling_max_hz": 200,
+      "runtime_passive_ds_round_gap_ms": 1,
+      "runtime_passive_ds_rx_slice_ms": 100,
+      "runtime_passive_ds_rx_timeout_ms": 3,
+      "runtime_passive_ds_schedule": 1,
+      "runtime_passive_ds_slot_ms": 3,
+      "runtime_passive_ds_solve_mode": 1,
+      "runtime_radio_channel": 5,
+      "runtime_ranging_auto_rx_delay_uus": 500,
+      "runtime_ranging_final_delay_ms": 1,
+      "runtime_ranging_resp_delay_ms": 1,
+      "runtime_ranging_round_gap_ms": 1,
+      "runtime_ranging_rx_slice_ms": 100,
+      "runtime_ranging_rx_timeout_ms": 3,
+      "runtime_ranging_slot_ms": 3,
+      "runtime_tag_id": 1,
+      "uwb_active_antenna_delay": 16368,
+      "version": "f8878d9",
+      "wifi_connected": true,
+      "wifi_connected_rssi": -53
+    },
+    {
+      "boot_guard_boot_count": 221,
+      "boot_guard_validated": true,
+      "hostname": "uwb-module-3",
+      "http_status_online": true,
+      "module_id": 3,
+      "passive_ds_pipeline_stats": {
+        "completed": 188,
+        "deadline_active": true,
+        "final_timeouts": 2,
+        "invalid_frames": 0,
+        "response_timeouts": 3,
+        "rx_rearm_failures": 0,
+        "schedule_alarms": 117,
+        "schedule_overruns": 0,
+        "stages": {
+          "cia_read": {
+            "avg_us": 27,
+            "count": 748,
+            "fail": 0,
+            "last_event_us": 853867848,
+            "last_us": 20,
+            "max_us": 63
+          },
+          "final_rx": {
+            "avg_us": 1311,
+            "count": 87,
+            "fail": 2,
+            "last_event_us": 853862004,
+            "last_us": 1214,
+            "max_us": 5038
+          },
+          "final_tx": {
+            "avg_us": 852,
+            "count": 103,
+            "fail": 0,
+            "last_event_us": 853837786,
+            "last_us": 906,
+            "max_us": 921
+          },
+          "poll_tx": {
+            "avg_us": 730,
+            "count": 117,
+            "fail": 3,
+            "last_event_us": 853873473,
+            "last_us": 4171,
+            "max_us": 4171
+          },
+          "response_tx": {
+            "avg_us": 801,
+            "count": 87,
+            "fail": 0,
+            "last_event_us": 853860787,
+            "last_us": 886,
+            "max_us": 889
+          },
+          "rx_rearm": {
+            "avg_us": 35,
+            "count": 1418,
+            "fail": 0,
+            "last_event_us": 853873573,
+            "last_us": 39,
+            "max_us": 56
+          }
+        },
+        "state_collisions": 8
+      },
+      "resource_temperature_c": 39.2,
+      "runtime_anchor_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "runtime_flex_tdoa_anchor_x_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_anchor_y_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_geometry_fixed": false,
+      "runtime_flex_tdoa_geometry_generation": 54,
+      "runtime_flex_tdoa_guard_us": 250,
+      "runtime_flex_tdoa_request_process_us": 1000,
+      "runtime_flex_tdoa_request_subslot_us": 250,
+      "runtime_flex_tdoa_response_process_us": 250,
+      "runtime_flex_tdoa_response_subslot_us": 250,
+      "runtime_mode_name": "uwb_passive_ds_twr",
+      "runtime_passive_ds_anchor_bias_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_passive_ds_auto_rx_delay_uus": 500,
+      "runtime_passive_ds_calibration_enabled": false,
+      "runtime_passive_ds_calibration_generation": 1,
+      "runtime_passive_ds_final_delay_us": 1000,
+      "runtime_passive_ds_pipeline_mode": 1,
+      "runtime_passive_ds_range_bias_mm": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_passive_ds_resp_delay_us": 1000,
+      "runtime_passive_ds_rolling_max_hz": 200,
+      "runtime_passive_ds_round_gap_ms": 1,
+      "runtime_passive_ds_rx_slice_ms": 100,
+      "runtime_passive_ds_rx_timeout_ms": 3,
+      "runtime_passive_ds_schedule": 1,
+      "runtime_passive_ds_slot_ms": 3,
+      "runtime_passive_ds_solve_mode": 1,
+      "runtime_radio_channel": 5,
+      "runtime_ranging_auto_rx_delay_uus": 500,
+      "runtime_ranging_final_delay_ms": 1,
+      "runtime_ranging_resp_delay_ms": 1,
+      "runtime_ranging_round_gap_ms": 1,
+      "runtime_ranging_rx_slice_ms": 100,
+      "runtime_ranging_rx_timeout_ms": 3,
+      "runtime_ranging_slot_ms": 3,
+      "runtime_tag_id": 1,
+      "uwb_active_antenna_delay": 16362,
+      "version": "f8878d9",
+      "wifi_connected": true,
+      "wifi_connected_rssi": -56
+    },
+    {
+      "boot_guard_boot_count": 3,
+      "boot_guard_validated": true,
+      "hostname": "uwb-module-4",
+      "http_status_online": true,
+      "module_id": 4,
+      "passive_ds_pipeline_stats": {
+        "completed": 185,
+        "deadline_active": true,
+        "final_timeouts": 2,
+        "invalid_frames": 0,
+        "response_timeouts": 1,
+        "rx_rearm_failures": 0,
+        "schedule_alarms": 111,
+        "schedule_overruns": 0,
+        "stages": {
+          "cia_read": {
+            "avg_us": 26,
+            "count": 828,
+            "fail": 0,
+            "last_event_us": 854600360,
+            "last_us": 19,
+            "max_us": 63
+          },
+          "final_rx": {
+            "avg_us": 1299,
+            "count": 97,
+            "fail": 2,
+            "last_event_us": 854597536,
+            "last_us": 1204,
+            "max_us": 5238
+          },
+          "final_tx": {
+            "avg_us": 859,
+            "count": 90,
+            "fail": 0,
+            "last_event_us": 854580305,
+            "last_us": 914,
+            "max_us": 918
+          },
+          "poll_tx": {
+            "avg_us": 3049,
+            "count": 111,
+            "fail": 9,
+            "last_event_us": 854578284,
+            "last_us": 569,
+            "max_us": 128698
+          },
+          "response_tx": {
+            "avg_us": 828,
+            "count": 97,
+            "fail": 0,
+            "last_event_us": 854596324,
+            "last_us": 874,
+            "max_us": 897
+          },
+          "rx_rearm": {
+            "avg_us": 35,
+            "count": 1461,
+            "fail": 0,
+            "last_event_us": 854609943,
+            "last_us": 33,
+            "max_us": 58
+          }
+        },
+        "state_collisions": 11
+      },
+      "resource_temperature_c": 40.0,
+      "runtime_anchor_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "runtime_flex_tdoa_anchor_x_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_anchor_y_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_geometry_fixed": false,
+      "runtime_flex_tdoa_geometry_generation": 55,
+      "runtime_flex_tdoa_guard_us": 250,
+      "runtime_flex_tdoa_request_process_us": 1000,
+      "runtime_flex_tdoa_request_subslot_us": 250,
+      "runtime_flex_tdoa_response_process_us": 250,
+      "runtime_flex_tdoa_response_subslot_us": 250,
+      "runtime_mode_name": "uwb_passive_ds_twr",
+      "runtime_passive_ds_anchor_bias_mm": [
+        0,
+        34,
+        -16,
+        -55
+      ],
+      "runtime_passive_ds_auto_rx_delay_uus": 500,
+      "runtime_passive_ds_calibration_enabled": true,
+      "runtime_passive_ds_calibration_generation": 2,
+      "runtime_passive_ds_final_delay_us": 1000,
+      "runtime_passive_ds_pipeline_mode": 1,
+      "runtime_passive_ds_range_bias_mm": [
+        71,
+        56,
+        -49,
+        67,
+        66,
+        -29
+      ],
+      "runtime_passive_ds_resp_delay_us": 1000,
+      "runtime_passive_ds_rolling_max_hz": 200,
+      "runtime_passive_ds_round_gap_ms": 1,
+      "runtime_passive_ds_rx_slice_ms": 100,
+      "runtime_passive_ds_rx_timeout_ms": 3,
+      "runtime_passive_ds_schedule": 1,
+      "runtime_passive_ds_slot_ms": 3,
+      "runtime_passive_ds_solve_mode": 1,
+      "runtime_radio_channel": 5,
+      "runtime_ranging_auto_rx_delay_uus": 500,
+      "runtime_ranging_final_delay_ms": 1,
+      "runtime_ranging_resp_delay_ms": 1,
+      "runtime_ranging_round_gap_ms": 1,
+      "runtime_ranging_rx_slice_ms": 100,
+      "runtime_ranging_rx_timeout_ms": 3,
+      "runtime_ranging_slot_ms": 3,
+      "runtime_tag_id": 1,
+      "uwb_active_antenna_delay": 16371,
+      "version": "f8878d9",
+      "wifi_connected": true,
+      "wifi_connected_rssi": -43
+    },
+    {
+      "boot_guard_boot_count": 228,
+      "boot_guard_validated": true,
+      "hostname": "uwb-module-5",
+      "http_status_online": true,
+      "module_id": 5,
+      "passive_ds_pipeline_stats": {
+        "completed": 225,
+        "deadline_active": true,
+        "final_timeouts": 2,
+        "invalid_frames": 0,
+        "response_timeouts": 5,
+        "rx_rearm_failures": 0,
+        "schedule_alarms": 131,
+        "schedule_overruns": 1,
+        "stages": {
+          "cia_read": {
+            "avg_us": 25,
+            "count": 1040,
+            "fail": 0,
+            "last_event_us": 855025435,
+            "last_us": 35,
+            "max_us": 64
+          },
+          "final_rx": {
+            "avg_us": 1278,
+            "count": 123,
+            "fail": 2,
+            "last_event_us": 855018697,
+            "last_us": 1393,
+            "max_us": 5293
+          },
+          "final_tx": {
+            "avg_us": 830,
+            "count": 104,
+            "fail": 0,
+            "last_event_us": 854998293,
+            "last_us": 903,
+            "max_us": 965
+          },
+          "poll_tx": {
+            "avg_us": 1882,
+            "count": 131,
+            "fail": 13,
+            "last_event_us": 854996274,
+            "last_us": 675,
+            "max_us": 127302
+          },
+          "response_tx": {
+            "avg_us": 856,
+            "count": 124,
+            "fail": 1,
+            "last_event_us": 855017300,
+            "last_us": 885,
+            "max_us": 4131
+          },
+          "rx_rearm": {
+            "avg_us": 35,
+            "count": 1695,
+            "fail": 0,
+            "last_event_us": 855025754,
+            "last_us": 43,
+            "max_us": 54
+          }
+        },
+        "state_collisions": 9
+      },
+      "resource_temperature_c": 39.4,
+      "runtime_anchor_ids": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "runtime_flex_tdoa_anchor_x_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_anchor_y_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_flex_tdoa_geometry_fixed": false,
+      "runtime_flex_tdoa_geometry_generation": 54,
+      "runtime_flex_tdoa_guard_us": 250,
+      "runtime_flex_tdoa_request_process_us": 1000,
+      "runtime_flex_tdoa_request_subslot_us": 250,
+      "runtime_flex_tdoa_response_process_us": 250,
+      "runtime_flex_tdoa_response_subslot_us": 250,
+      "runtime_mode_name": "uwb_passive_ds_twr",
+      "runtime_passive_ds_anchor_bias_mm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_passive_ds_auto_rx_delay_uus": 500,
+      "runtime_passive_ds_calibration_enabled": false,
+      "runtime_passive_ds_calibration_generation": 1,
+      "runtime_passive_ds_final_delay_us": 1000,
+      "runtime_passive_ds_pipeline_mode": 1,
+      "runtime_passive_ds_range_bias_mm": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "runtime_passive_ds_resp_delay_us": 1000,
+      "runtime_passive_ds_rolling_max_hz": 200,
+      "runtime_passive_ds_round_gap_ms": 1,
+      "runtime_passive_ds_rx_slice_ms": 100,
+      "runtime_passive_ds_rx_timeout_ms": 3,
+      "runtime_passive_ds_schedule": 1,
+      "runtime_passive_ds_slot_ms": 3,
+      "runtime_passive_ds_solve_mode": 1,
+      "runtime_radio_channel": 5,
+      "runtime_ranging_auto_rx_delay_uus": 500,
+      "runtime_ranging_final_delay_ms": 1,
+      "runtime_ranging_resp_delay_ms": 1,
+      "runtime_ranging_round_gap_ms": 1,
+      "runtime_ranging_rx_slice_ms": 100,
+      "runtime_ranging_rx_timeout_ms": 3,
+      "runtime_ranging_slot_ms": 3,
+      "runtime_tag_id": 1,
+      "uwb_active_antenna_delay": 16371,
+      "version": "f8878d9",
+      "wifi_connected": true,
+      "wifi_connected_rssi": -47
+    }
+  ],
+  "poll_hz": 50.0,
+  "protocol": "passive_ds",
+  "runtime_mode": "uwb_passive_ds_twr",
+  "schema_version": 1,
+  "started_at": 1785265942.1545508,
+  "timing_log_file": "ekf_all_motion_a2.logs.jsonl",
+  "warmup_sec": 2.0
+}
