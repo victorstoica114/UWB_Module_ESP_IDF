@@ -4580,6 +4580,17 @@ const state = {
   positionStreamLatestEvent: null,
   positionStreamLastRenderedEventToken: "",
   dsPositionFrameBuckets: new Map(),
+  nativeDsCoherentFrames: {},
+  nativeDsRangeFilters: {},
+  nativeDsFrameDiagnostics: {
+    completedCount: 0,
+    publishedCount: 0,
+    expiredCount: 0,
+    mixedLatestAvoided: 0,
+    lateCompleteRejected: 0,
+    lastSpanMs: NaN,
+    lastFrameKey: null,
+  },
   positionSettingsSolver: null,
   flexTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.flexTimingSlotSelect") || 0),
   dsTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.dsTimingSlotSelect") || 0),
@@ -5397,7 +5408,7 @@ function switchPositionProtocolSettings() {
     state.positionStreamSuperframeTimes = [];
     state.positionStreamCorrectionTimes = [];
     state.positionStreamRenderTimes = [];
-    state.dsPositionFrameBuckets.clear();
+    resetNativeDsFrameAssembler();
   }
   const maxAge = document.getElementById("positionMaxAgeSec");
   const saved = Number(localStorage.getItem(positionProtocolMaxAgeKey(solver)));
@@ -6821,6 +6832,104 @@ function resetPositionTagTrails() {
   state.positionStreamLastRenderedEventToken = "";
 }
 
+function resetNativeDsFrameAssembler() {
+  state.dsPositionFrameBuckets.clear();
+  state.nativeDsCoherentFrames = {};
+  state.nativeDsRangeFilters = {};
+  state.nativeDsFrameDiagnostics = {
+    completedCount: 0,
+    publishedCount: 0,
+    expiredCount: 0,
+    mixedLatestAvoided: 0,
+    lateCompleteRejected: 0,
+    lastSpanMs: NaN,
+    lastFrameKey: null,
+  };
+  state.nativeRangeDiagnostics = {
+    rejectedCount: 0,
+    lastRejected: null,
+    tokens: {},
+  };
+}
+
+function filterNativeDsCoherentItems(tagId, anchorIds, items) {
+  const filteredItems = {};
+  for (const anchorId of anchorIds) {
+    const source = items?.[String(anchorId)] || {};
+    const item = {...source};
+    const distanceM = Number(item.distance_m);
+    const filterKey = `${tagId}:${anchorId}`;
+    const filter = state.nativeDsRangeFilters[filterKey] || {
+      acceptedDistances: [],
+      acceptedDeltas: [],
+    };
+    const history = filter.acceptedDistances
+      .map(Number)
+      .filter(Number.isFinite);
+    const deltaHistory = (filter.acceptedDeltas || [])
+      .map(Number)
+      .filter(Number.isFinite);
+    let accepted = Number.isFinite(distanceM) &&
+      distanceM >= 0.05 && distanceM <= 100;
+    let rejectReason = accepted ? "" : "invalid range";
+    const medianM = history.length
+      ? percentile(history, 0.5)
+      : NaN;
+    let predictedM = Number(filter.lastAcceptedM);
+    let robustSigmaM = NaN;
+    let thresholdM = NaN;
+
+    if (accepted && Number.isFinite(predictedM)) {
+      const medianDeltaM = deltaHistory.length >= 3
+        ? percentile(deltaHistory, 0.5)
+        : 0;
+      predictedM += medianDeltaM;
+      const deviations = deltaHistory.map(
+        value => Math.abs(value - medianDeltaM));
+      const madM = percentile(deviations, 0.5);
+      robustSigmaM = Number.isFinite(madM)
+        ? Math.max(0.005, 1.4826 * madM)
+        : 0.005;
+      thresholdM = Math.max(0.15, 6 * robustSigmaM);
+      if (Math.abs(distanceM - predictedM) > thresholdM) {
+        accepted = false;
+        rejectReason = "temporal spike";
+      }
+    }
+
+    if (accepted) {
+      const previousAcceptedM = Number(filter.lastAcceptedM);
+      if (Number.isFinite(previousAcceptedM)) {
+        deltaHistory.push(distanceM - previousAcceptedM);
+        if (deltaHistory.length > 31) {
+          deltaHistory.splice(0, deltaHistory.length - 31);
+        }
+      }
+      history.push(distanceM);
+      if (history.length > 31) {
+        history.splice(0, history.length - 31);
+      }
+      filter.acceptedDistances = history;
+      filter.acceptedDeltas = deltaHistory;
+      filter.lastAcceptedM = distanceM;
+      filter.lastAcceptedAt = Number(item.received_at);
+    } else {
+      filter.rejectedCount = Number(filter.rejectedCount || 0) + 1;
+    }
+    state.nativeDsRangeFilters[filterKey] = filter;
+    filteredItems[String(anchorId)] = {
+      ...item,
+      temporal_accepted: accepted,
+      temporal_reject_reason: rejectReason,
+      temporal_median_m: medianM,
+      temporal_predicted_m: predictedM,
+      temporal_robust_sigma_m: robustSigmaM,
+      temporal_threshold_m: thresholdM,
+    };
+  }
+  return filteredItems;
+}
+
 function positionTrailDrawSamples(trail) {
   if (!Array.isArray(trail) || trail.length <= positionTrailMaxDrawPoints) {
     return trail || [];
@@ -6922,6 +7031,9 @@ function computePositionModel() {
       let coherence = null;
       let localPosition = null;
       let rawPosition = null;
+      let nativeFrame = null;
+      let positionEventTime = now;
+      let positionEventToken = `pc:${now}`;
       if (positionProtocolUsesTdoa(settings.solver)) {
         coherence = coherentTdoaBatch(
           tagId,
@@ -6982,33 +7094,67 @@ function computePositionModel() {
       } else {
         const rawDistances = {};
         const rawDistanceItems = {};
-        for (const anchorId of settings.anchorIds) {
-          const item = freshDistanceFor(tagId, anchorId, settings.maxAge);
+        const allRawDistances = {};
+        let nativeSolveAnchors = anchors;
+        const candidateFrame =
+          state.nativeDsCoherentFrames?.[String(tagId)] || null;
+        const frameAnchorIds = (candidateFrame?.anchorIds || []).map(Number);
+        const expectedAnchorIds = settings.anchorIds.map(Number);
+        const frameAnchorSetMatches =
+          frameAnchorIds.length === expectedAnchorIds.length &&
+          expectedAnchorIds.every(id => frameAnchorIds.includes(id));
+        const frameReceivedAt = Number(candidateFrame?.receivedAt);
+        if (candidateFrame && frameAnchorSetMatches &&
+            Number.isFinite(frameReceivedAt) &&
+            now - frameReceivedAt <= settings.maxAge) {
+          if (!candidateFrame.geometryAnchors) {
+            candidateFrame.geometryAnchors =
+              cloneAnchorCoordinates(anchors);
+            candidateFrame.geometryFrameId =
+              Number(geometry?.frameId);
+          }
+          nativeFrame = candidateFrame;
+          nativeSolveAnchors =
+            cloneAnchorCoordinates(candidateFrame.geometryAnchors);
+          positionEventTime = frameReceivedAt;
+          positionEventToken =
+            `native:${tagId}:${candidateFrame.frameStartSequence}`;
+        }
+        for (const anchorId of expectedAnchorIds) {
+          const item = nativeFrame?.items?.[String(anchorId)] || null;
           const measured = Number(item?.distance_m);
-          if (item && anchors[anchorId] &&
+          if (item && nativeSolveAnchors[anchorId] &&
               Number.isFinite(measured) && measured > 0) {
-            rawDistances[anchorId] = measured;
             rawDistanceItems[anchorId] = item;
+            allRawDistances[anchorId] = measured;
+            if (item.temporal_accepted !== false) {
+              rawDistances[anchorId] = measured;
+            }
           }
         }
         const seedKey =
           `native:${positionGeometryKey(settings.anchorIds)}:${tagId}`;
-        const fit = robustTrilaterate(
-          anchors, rawDistances, state.positionSeeds[seedKey] || null);
-        if (fit) {
-          position = fit.position;
-          Object.assign(distances, fit.usedDistances);
-          residuals = fit.residuals;
-          const used = new Set(fit.usedIds);
+        const solvedPosition = trilaterate(
+          nativeSolveAnchors, rawDistances);
+        if (solvedPosition) {
+          position = solvedPosition;
+          Object.assign(distances, rawDistances);
+          residuals = positionResiduals(
+            position, nativeSolveAnchors, allRawDistances);
+          const used = new Set(Object.keys(rawDistances).map(Number));
+          const rejectedIds = Object.keys(rawDistanceItems)
+            .map(Number)
+            .filter(anchorId => !used.has(anchorId));
           recordNativeRangeRejections(
-            tagId, rawDistanceItems, fit.rejectedIds, now);
+            tagId, rawDistanceItems, rejectedIds, now);
           for (const [anchorId, item] of Object.entries(rawDistanceItems)) {
             distanceItems[anchorId] = {
               ...item,
               used_in_fit: used.has(Number(anchorId)),
               reject_reason: used.has(Number(anchorId))
                 ? ""
-                : "range spike",
+                : String(
+                  item.temporal_reject_reason || "temporal spike"),
             };
           }
           state.positionSeeds[seedKey] = {
@@ -7024,9 +7170,10 @@ function computePositionModel() {
           }
           Object.assign(distanceItems, rawDistanceItems);
           residuals = positionResiduals(
-            position, anchors, rawDistances);
+            position, nativeSolveAnchors, allRawDistances);
         }
-        accuracy = rangingPositionAccuracy(position, anchors, distances, residuals);
+        accuracy = rangingPositionAccuracy(
+          position, nativeSolveAnchors, distances, residuals);
       }
       tags[tagId] = {
         tagId,
@@ -7039,6 +7186,7 @@ function computePositionModel() {
         accuracy,
         coherence,
         rawPosition,
+        nativeFrame,
         solverSource: localPosition &&
           localPositionAge(localPosition, now) <= settings.maxAge
             ? "ESP32 AlgMin"
@@ -7056,8 +7204,8 @@ function computePositionModel() {
         recordPositionTrailPoint(
           tagId,
           position,
-          now,
-          `pc:${now}`,
+          positionEventTime,
+          positionEventToken,
           accuracy,
           rawPosition
         );
@@ -7464,14 +7612,33 @@ function renderPositionSolverStatus(model) {
   const settings = model.settings || {};
   if (!positionProtocolUsesTdoa(settings.solver)) {
     const diagnostics = state.nativeRangeDiagnostics;
+    const frameDiagnostics = state.nativeDsFrameDiagnostics;
+    const firstTag = Object.values(model.tags || {})[0];
+    const frame = firstTag?.nativeFrame;
     const rejectPill = diagnostics.rejectedCount > 0
       ? `<span class="position-pill warn">${diagnostics.rejectedCount} tag-range spike(s) rejected</span>`
       : `<span class="position-pill good">range gate clean</span>`;
+    const coherentPill = frame
+      ? `<span class="position-pill good">coherent 4/4 · frame ${esc(frame.frameStartSequence)} · span ${fmtFixed(frame.spanMs, 1)} ms</span>`
+      : `<span class="position-pill warn">waiting for coherent 4/4 frame</span>`;
+    const avoidedPill = frameDiagnostics.mixedLatestAvoided > 0
+      ? `<span class="position-pill good">${frameDiagnostics.mixedLatestAvoided} mixed-latest solve(s) prevented</span>`
+      : `<span class="position-pill good">no mixed-latest solve</span>`;
+    const assemblyWarnings =
+      Number(frameDiagnostics.expiredCount || 0) +
+      Number(frameDiagnostics.lateCompleteRejected || 0);
+    const assemblyPill = assemblyWarnings > 0
+      ? `<span class="position-pill warn">${frameDiagnostics.expiredCount} incomplete expired · ${frameDiagnostics.lateCompleteRejected} late complete rejected</span>`
+      : `<span class="position-pill good">frame assembler clean</span>`;
     return `<div class="position-filter-card">
       <b>Solver Status</b>
       <div class="position-filter-row">
         <span class="position-pill">DS-TWR ranges</span>
-        <span class="position-pill good">robust 3-of-4 fit</span>
+        <span class="position-pill good">coherent all-anchor fit</span>
+        <span class="position-pill good">motion-aware temporal gate</span>
+        ${coherentPill}
+        ${avoidedPill}
+        ${assemblyPill}
         ${rejectPill}
         <span class="position-pill" id="positionStreamMetrics">position stream connecting</span>
         <span class="position-pill" id="positionTrailMetrics">trail waiting</span>
@@ -8028,6 +8195,11 @@ function schedulePositionStreamRender() {
   requestAnimationFrame(renderPositionStreamFrame);
 }
 
+function sequence16IsNewer(candidate, reference) {
+  const delta = (Number(candidate) - Number(reference) + 65536) % 65536;
+  return delta > 0 && delta < 32768;
+}
+
 function ingestDsTwrStreamSample(item) {
   const tagId = Number(item?.tag_id);
   const anchorId = Number(item?.anchor_id);
@@ -8059,20 +8231,74 @@ function ingestDsTwrStreamSample(item) {
   const nowMs = performance.now();
   let frame = state.dsPositionFrameBuckets.get(frameKey);
   if (!frame) {
-    frame = {anchors: new Set(), createdAtMs: nowMs, complete: false};
+    frame = {
+      anchorIds: [...settings.anchorIds],
+      items: {},
+      createdAtMs: nowMs,
+      updatedAtMs: nowMs,
+    };
     state.dsPositionFrameBuckets.set(frameKey, frame);
   }
-  frame.anchors.add(anchorId);
+  frame.items[String(anchorId)] = {...item};
+  frame.updatedAtMs = nowMs;
 
   for (const [key, candidate] of state.dsPositionFrameBuckets) {
-    if (nowMs - candidate.createdAtMs > 2000) {
+    if (nowMs - candidate.updatedAtMs > 500) {
       state.dsPositionFrameBuckets.delete(key);
+      state.nativeDsFrameDiagnostics.expiredCount++;
     }
   }
-  if (frame.complete ||
-      !settings.anchorIds.every(id => frame.anchors.has(id))) return;
+  const coherent = settings.anchorIds.every((id, index) => {
+    const sample = frame.items[String(id)];
+    return sample &&
+      Number(sample.seq) ===
+        (frameStartSequence + index) % sequenceModulus;
+  });
+  if (!coherent) return;
 
-  frame.complete = true;
+  state.dsPositionFrameBuckets.delete(frameKey);
+  state.nativeDsFrameDiagnostics.completedCount++;
+  const receivedTimes = settings.anchorIds
+    .map(id => Number(frame.items[String(id)]?.received_at))
+    .filter(Number.isFinite);
+  const receivedAt = receivedTimes.length
+    ? Math.max(...receivedTimes)
+    : Date.now() / 1000;
+  const spanMs = receivedTimes.length > 1
+    ? Math.max(0, (Math.max(...receivedTimes) - Math.min(...receivedTimes)) * 1000)
+    : 0;
+  const latestValuesWouldMix = settings.anchorIds.some((id, index) =>
+    Number(state.ranging.distances[`${tagId}:${id}`]?.seq) !==
+      (frameStartSequence + index) % sequenceModulus
+  );
+  if (latestValuesWouldMix) {
+    state.nativeDsFrameDiagnostics.mixedLatestAvoided++;
+  }
+  const tagKey = String(tagId);
+  const previousFrame = state.nativeDsCoherentFrames[tagKey] || null;
+  const previousIsStale =
+    previousFrame &&
+    nowMs - Number(previousFrame.completedAtMs || 0) > 2000;
+  if (previousFrame && !previousIsStale &&
+      !sequence16IsNewer(
+        frameStartSequence, previousFrame.frameStartSequence)) {
+    state.nativeDsFrameDiagnostics.lateCompleteRejected++;
+    return;
+  }
+  const publishedFrame = {
+    tagId,
+    frameStartSequence,
+    anchorIds: [...settings.anchorIds],
+    items: filterNativeDsCoherentItems(
+      tagId, settings.anchorIds, frame.items),
+    receivedAt,
+    completedAtMs: nowMs,
+    spanMs,
+  };
+  state.nativeDsCoherentFrames[tagKey] = publishedFrame;
+  state.nativeDsFrameDiagnostics.publishedCount++;
+  state.nativeDsFrameDiagnostics.lastSpanMs = spanMs;
+  state.nativeDsFrameDiagnostics.lastFrameKey = frameStartSequence;
   state.positionStreamLatestEvent = {
     token: `ds:${frameKey}`,
     arrivalMs: nowMs,
@@ -12087,6 +12313,7 @@ async function enablePositionRanging() {
   );
   if (!apiResponseOk(result)) return;
   resetPositionTagTrails();
+  resetNativeDsFrameAssembler();
   state.positionAnchorTrail = {};
   state.positionSeeds = {};
   fetchSnapshot();
