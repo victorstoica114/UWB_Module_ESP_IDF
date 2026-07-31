@@ -53,6 +53,11 @@ RANGING_RE = re.compile(
     r"\bUWB_RANGING result\s+tag=(?P<tag>\d+)\s+anchor=(?P<anchor>\d+)\s+"
     r"seq=(?P<seq>\d+)\s+distance=(?P<distance>[-+]?\d+(?:\.\d+)?)\s+m"
 )
+RANGING_CONTEXT_RE = re.compile(
+    r"\btoken=0x(?P<token>[0-9a-fA-F]+)\s+"
+    r"round=(?P<round>\d+)\s+slot=(?P<slot>\d+)\s+"
+    r"first=(?P<first>\d+)\s+flags=0x(?P<flags>[0-9a-fA-F]+)"
+)
 FLOAT_TEXT_RE = r"[-+]?(?:\d+(?:\.\d+)?|nan|inf)"
 FLEX_TDOA_RE = re.compile(
     r"\bUWB_FLEX_TDOA obs\s+tag=(?P<tag>\d+)\s+"
@@ -1197,7 +1202,8 @@ class DashboardState:
         self.accel_samples.append(sample)
 
     def record_ranging_locked(self, item: dict[str, Any]) -> None:
-        match = RANGING_RE.search(str(item.get("message") or item.get("raw") or ""))
+        raw_message = str(item.get("message") or item.get("raw") or "")
+        match = RANGING_RE.search(raw_message)
         if match is None:
             return
 
@@ -1221,6 +1227,17 @@ class DashboardState:
             "source_module_id": item.get("module_id"),
             "raw": item.get("raw") or item.get("message") or "",
         }
+        context_match = RANGING_CONTEXT_RE.search(raw_message)
+        if context_match is not None:
+            sample.update(
+                {
+                    "context_token": int(context_match.group("token"), 16),
+                    "round_index": int(context_match.group("round")),
+                    "slot_index": int(context_match.group("slot")),
+                    "first_anchor_id": int(context_match.group("first")),
+                    "boundary_flags": int(context_match.group("flags"), 16),
+                }
+            )
         self.ranging_distances[key] = sample
         self.ranging_history.setdefault(
             key, deque(maxlen=self.max_ranging_samples)
@@ -1565,6 +1582,11 @@ class DashboardState:
                 "tdoa_protocol": str(
                     item.get("tdoa_protocol") or "flextdoa"
                 ),
+                "context_token": item.get("context_token"),
+                "round_index": item.get("round_index"),
+                "slot_index": item.get("slot_index"),
+                "first_anchor_id": item.get("first_anchor_id"),
+                "boundary_flags": item.get("boundary_flags"),
                 "stats": {
                     "samples": len(values),
                     "mean_m": mean_m,
@@ -4275,6 +4297,7 @@ tr.status-stale td { color: #4f3b1d; }
             </select>
           </div>
           <p id="rangingProfileNote" class="muted profile-note">Each slot contains exactly POLL, RESP and FINAL. A complete frame ranges the tag to every configured anchor, then applies the frame gap.</p>
+          <div id="rangingActiveProfile" class="profile-validation">Waiting for live Native DS-TWR timing...</div>
           <div id="rangingProfileGrid" class="profile-grid"></div>
           <div class="form-actions">
             <button id="resetAllRangingProfiles">Reset All Profile Defaults</button>
@@ -4603,9 +4626,12 @@ const state = {
   nativeDsFrameDiagnostics: {
     completedCount: 0,
     publishedCount: 0,
+    publishedTimes: [],
     expiredCount: 0,
+    expiredTimes: [],
     mixedLatestAvoided: 0,
     lateCompleteRejected: 0,
+    lateCompleteTimes: [],
     lastSpanMs: NaN,
     lastFrameKey: null,
   },
@@ -4635,6 +4661,22 @@ const rangingProfileFields = [
   {key: "autoRxDelayUus", suffix: "AutoRxDelayUus", label: "Auto RX delay UUS", min: 1, step: 1},
 ];
 const rangingProfileDefaults = {
+  frame53: {
+    prefix: "profileFrame53",
+    label: "53 ms Guarded Fast Profile",
+    description: "Fastest profile validated with explicit 5 ms isolation on both sides of the periodic anchor-geometry exchange.",
+    validationClass: "good",
+    validationText: "recommended · 0 source rejects / 1 h · 65.35 valid ranges/s",
+    buttonLabel: "Apply 53 ms Guarded",
+    dsPositionMaxAgeSec: 0.2,
+    slotMs: 13,
+    roundGapMs: 1,
+    dsRxSliceMs: 100,
+    timeoutMs: 8,
+    respDelayMs: 2,
+    finalDelayMs: 2,
+    autoRxDelayUus: 500,
+  },
   legacyPrecision: {
     prefix: "profileLegacyPrecision",
     label: "410 ms Legacy Precision Reference",
@@ -4653,11 +4695,11 @@ const rangingProfileDefaults = {
   },
   frame60: {
     prefix: "profileFrame60",
-    label: "60 ms Precision-Speed Limit",
-    description: "Fastest profile that passed the complete 180 s raw-range validation on the unchanged reference setup. The 59 ms candidate produced an impossible negative range.",
+    label: "60 ms Validated Precision Profile",
+    description: "Conservative high-speed reference retained from the precision study, with four 14 ms slots and a 4 ms frame gap.",
     validationClass: "good",
-    validationText: "recommended · 0 raw anomalies / 180 s · RMS 1.38 cm · 11.63 coherent frames/s",
-    buttonLabel: "Apply 60 ms Recommended",
+    validationText: "validated 180 s · 0 raw anomalies · RMS 1.38 cm · 11.63 coherent frames/s",
+    buttonLabel: "Apply 60 ms Validated",
     dsPositionMaxAgeSec: 0.2,
     slotMs: 14,
     roundGapMs: 4,
@@ -4685,11 +4727,11 @@ const rangingProfileDefaults = {
   },
   frame33: {
     prefix: "profileFrame33",
-    label: "33 ms Frame",
-    description: "The central position distribution remains tight, but rare impossible raw ranges make this timing unsafe without masking protocol failures.",
+    label: "33 ms Experimental Candidate",
+    description: "Intermediate limit-search profile retained for controlled experiments. It has not yet received a full guarded one-hour qualification.",
     validationClass: "warn",
-    validationText: "rejected · 9 raw spikes / 180 s · 7 negative ranges",
-    buttonLabel: "Apply 33 ms",
+    validationText: "experimental · boundary guard active · long validation pending",
+    buttonLabel: "Apply 33 ms Experimental",
     dsPositionMaxAgeSec: 0.1,
     slotMs: 8,
     roundGapMs: 1,
@@ -4699,76 +4741,12 @@ const rangingProfileDefaults = {
     finalDelayMs: 2,
     autoRxDelayUus: 500,
   },
-  frame29: {
-    prefix: "profileFrame29",
-    label: "29 ms Frame",
-    description: "A 60 s screen looked clean, but the decisive 180 s validation exposed recurrent impossible raw ranges.",
-    validationClass: "warn",
-    validationText: "rejected · 19 raw spikes / 180 s · 13 negative ranges",
-    buttonLabel: "Apply 29 ms",
-    dsPositionMaxAgeSec: 0.1,
-    slotMs: 7,
-    roundGapMs: 1,
-    dsRxSliceMs: 100,
-    timeoutMs: 5,
-    respDelayMs: 2,
-    finalDelayMs: 2,
-    autoRxDelayUus: 500,
-  },
-  frame25: {
-    prefix: "profileFrame25",
-    label: "25 ms Frame",
-    description: "Fast 2+2 ms turnaround profile retained for controlled experiments; impossible ranges appeared during the fresh verification.",
-    validationClass: "warn",
-    validationText: "rejected · 2 raw spikes / 60 s · 2 negative ranges",
-    buttonLabel: "Apply 25 ms",
-    dsPositionMaxAgeSec: 0.1,
-    slotMs: 6,
-    roundGapMs: 1,
-    dsRxSliceMs: 100,
-    timeoutMs: 5,
-    respDelayMs: 2,
-    finalDelayMs: 2,
-    autoRxDelayUus: 500,
-  },
-  frame21: {
-    prefix: "profileFrame21",
-    label: "21 ms Conservative Fast Frame",
-    description: "Fast profile retained for controlled experiments; its apparently precise position output hides occasional impossible raw ranges.",
-    validationClass: "warn",
-    validationText: "rejected · 4 raw spikes / 60 s · 4 negative ranges",
-    buttonLabel: "Apply 21 ms",
-    dsPositionMaxAgeSec: 0.1,
-    slotMs: 5,
-    roundGapMs: 1,
-    dsRxSliceMs: 100,
-    timeoutMs: 5,
-    respDelayMs: 2,
-    finalDelayMs: 2,
-    autoRxDelayUus: 500,
-  },
-  frame17: {
-    prefix: "profileFrame17",
-    label: "17 ms Balanced Frame",
-    description: "Very high apparent update rate, but recurrent impossible raw measurements disqualify it as a precision profile.",
-    validationClass: "warn",
-    validationText: "rejected · 15 raw spikes / 60 s · 13 negative ranges",
-    buttonLabel: "Apply 17 ms Experimental",
-    dsPositionMaxAgeSec: 0.1,
-    slotMs: 4,
-    roundGapMs: 1,
-    dsRxSliceMs: 100,
-    timeoutMs: 4,
-    respDelayMs: 1,
-    finalDelayMs: 1,
-    autoRxDelayUus: 500,
-  },
   frame13: {
     prefix: "profileFrame13",
-    label: "13 ms Maximum Frame",
-    description: "True 13 ms timing retained only for stress testing. The previous dashboard card accidentally used the 21 ms timing values.",
+    label: "13 ms Extreme Stress Test",
+    description: "Minimum three-millisecond slot retained only for boundary and failure-path experiments; it is not a precision profile.",
     validationClass: "warn",
-    validationText: "rejected · 22 raw spikes / 60 s · 20 negative ranges",
+    validationText: "stress only · boundary guard active · not qualified",
     buttonLabel: "Apply 13 ms Stress Test",
     dsPositionMaxAgeSec: 0.1,
     slotMs: 3,
@@ -4780,6 +4758,45 @@ const rangingProfileDefaults = {
     autoRxDelayUus: 500,
   },
 };
+
+function renderNativeDsActiveProfile() {
+  const root = document.getElementById("rangingActiveProfile");
+  if (!root) return;
+  const statuses = state.statuses.filter(item =>
+    statusIsFresh(item) && item.runtime_mode_name === "uwb_ranging"
+  );
+  if (!statuses.length) {
+    root.textContent = "Native DS-TWR is not active on any fresh module.";
+    root.className = "profile-validation warn";
+    return;
+  }
+  const timing = item => ({
+    slotMs: Number(item.runtime_ranging_slot_ms),
+    roundGapMs: Number(item.runtime_ranging_round_gap_ms),
+    dsRxSliceMs: Number(item.runtime_ranging_rx_slice_ms),
+    timeoutMs: Number(item.runtime_ranging_rx_timeout_ms),
+    respDelayMs: Number(item.runtime_ranging_resp_delay_ms),
+    finalDelayMs: Number(item.runtime_ranging_final_delay_ms),
+    autoRxDelayUus: Number(item.runtime_ranging_auto_rx_delay_uus),
+  });
+  const live = timing(statuses[0]);
+  const fields = [
+    "slotMs", "roundGapMs", "dsRxSliceMs", "timeoutMs",
+    "respDelayMs", "finalDelayMs", "autoRxDelayUus",
+  ];
+  const consistent = statuses.every(item => {
+    const candidate = timing(item);
+    return fields.every(field => candidate[field] === live[field]);
+  });
+  const match = Object.values(rangingProfileDefaults).find(profile =>
+    fields.every(field => Number(profile[field]) === live[field])
+  );
+  const profileLabel = match?.label || "Custom Native DS-TWR timing";
+  root.textContent = consistent
+    ? `Active on ${statuses.length}/${state.statuses.length || statuses.length} modules: ${profileLabel} · slot ${live.slotMs} ms · gap ${live.roundGapMs} ms · timeout ${live.timeoutMs} ms · RESP/FINAL ${live.respDelayMs}+${live.finalDelayMs} ms.`
+    : `Native DS-TWR timing differs between the ${statuses.length} active modules.`;
+  root.className = `profile-validation ${consistent && match ? match.validationClass : "warn"}`;
+}
 
 function renderRangingProfileCards() {
   const grid = document.getElementById("rangingProfileGrid");
@@ -4892,11 +4909,12 @@ const rangingProtocolProfileFields = {
   ]),
   hybrid: new Set(),
 };
-const rangingProfileDefaultsVersion = "2026-07-31-native-ds-twr-speed-revalidation-v5";
+const rangingProfileDefaultsVersion = "2026-07-31-native-ds-round-boundary-v6";
 const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
 const passiveDsProfileDefaultsVersion = "2026-07-27-passive-ds-speed-sweep-v5";
 const nativeDsGeometryFrameInterval = 4;
 const nativeDsGeometryCommandDelayMs = 1;
+const nativeDsGeometryGuardMs = 5;
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -5428,11 +5446,12 @@ function positionGeometryMaxAge(settings) {
   const effectiveGapMs = roundGapMs > 0 ? roundGapMs : 10;
   const pairCount = anchorCount * (anchorCount - 1) / 2;
   const framesPerPair = 4;
-  const geometryCommandDelayMs = 5;
+  const geometryBoundaryMs = nativeDsGeometryCommandDelayMs +
+    2 * nativeDsGeometryGuardMs;
   const frameMs = anchorCount * effectiveSlotMs + effectiveGapMs;
   const sweepMs =
     pairCount * framesPerPair * frameMs +
-    pairCount * (effectiveSlotMs + geometryCommandDelayMs);
+    pairCount * (effectiveSlotMs + geometryBoundaryMs);
   const sweepWithMarginSec = sweepMs / 1000 * 1.35 + 1;
   return Math.min(
     positionAnchorRangeHistoryMaxAgeSec,
@@ -7119,9 +7138,12 @@ function resetNativeDsFrameAssembler() {
   state.nativeDsFrameDiagnostics = {
     completedCount: 0,
     publishedCount: 0,
+    publishedTimes: [],
     expiredCount: 0,
+    expiredTimes: [],
     mixedLatestAvoided: 0,
     lateCompleteRejected: 0,
+    lateCompleteTimes: [],
     lastSpanMs: NaN,
     lastFrameKey: null,
   };
@@ -7502,8 +7524,9 @@ function computePositionModel() {
             };
           }
           positionEventTime = frameReceivedAt;
-          positionEventToken =
-            `native:${tagId}:${candidateFrame.frameStartSequence}`;
+          positionEventToken = Number.isInteger(Number(candidateFrame.roundIndex))
+            ? `native:${tagId}:round:${candidateFrame.roundIndex}`
+            : `native:${tagId}:seq:${candidateFrame.frameStartSequence}`;
         }
 
         const rollingItems = {};
@@ -8026,7 +8049,7 @@ function renderPositionSolverStatus(model) {
       ? `<span class="position-pill warn">${diagnostics.rejectedCount} tag range(s) rejected</span>`
       : `<span class="position-pill good">range gate clean</span>`;
     const coherentPill = frame
-      ? `<span class="position-pill good">coherent 4/4 · frame ${esc(frame.frameStartSequence)} · span ${fmtFixed(frame.spanMs, 1)} ms</span>`
+      ? `<span class="position-pill good">coherent 4/4 · ${Number.isInteger(Number(frame.roundIndex)) ? `round ${esc(frame.roundIndex)}` : `seq ${esc(frame.frameStartSequence)}`} · span ${fmtFixed(frame.spanMs, 1)} ms</span>`
       : `<span class="position-pill warn">waiting for coherent 4/4 frame</span>`;
     const rollingMode = settings.nativeDsUpdateMode === "rolling";
     const avoidedPill = rollingMode
@@ -8034,12 +8057,30 @@ function renderPositionSolverStatus(model) {
       : frameDiagnostics.mixedLatestAvoided > 0
         ? `<span class="position-pill good">${frameDiagnostics.mixedLatestAvoided} mixed-latest metric solve(s) prevented</span>`
         : `<span class="position-pill good">coherent metric source</span>`;
-    const assemblyWarnings =
-      Number(frameDiagnostics.expiredCount || 0) +
-      Number(frameDiagnostics.lateCompleteRejected || 0);
-    const assemblyPill = assemblyWarnings > 0
-      ? `<span class="position-pill warn">${frameDiagnostics.expiredCount} incomplete expired · ${frameDiagnostics.lateCompleteRejected} late complete rejected</span>`
-      : `<span class="position-pill good">frame assembler clean</span>`;
+    const diagnosticsNowMs = performance.now();
+    const recentPublishedTimes = (frameDiagnostics.publishedTimes || []).filter(
+      value => diagnosticsNowMs - Number(value) <= 60000);
+    const recentExpired = (frameDiagnostics.expiredTimes || []).filter(
+      value => diagnosticsNowMs - Number(value) <= 60000).length;
+    const recentLate = (frameDiagnostics.lateCompleteTimes || []).filter(
+      value => diagnosticsNowMs - Number(value) <= 60000).length;
+    const recentAttempts = recentPublishedTimes.length +
+      recentExpired + recentLate;
+    const recentDeliveryPct = recentAttempts > 0
+      ? 100 * recentPublishedTimes.length / recentAttempts
+      : NaN;
+    const publishedSpanSec = recentPublishedTimes.length > 1
+      ? (recentPublishedTimes[recentPublishedTimes.length - 1] -
+          recentPublishedTimes[0]) / 1000
+      : NaN;
+    const publishedHz = publishedSpanSec > 0
+      ? (recentPublishedTimes.length - 1) / publishedSpanSec
+      : NaN;
+    const assemblyHealthy = Number.isFinite(recentDeliveryPct) &&
+      recentDeliveryPct >= 90 && recentLate === 0;
+    const assemblyPill = recentAttempts > 0
+      ? `<span class="position-pill ${assemblyHealthy ? "good" : "warn"}" title="last 60 s: ${recentExpired} incomplete; session totals: ${esc(frameDiagnostics.expiredCount)} incomplete, ${esc(frameDiagnostics.lateCompleteRejected)} late">coherent delivery ${fmtFixed(recentDeliveryPct, 1)}% · ${fmtFixed(publishedHz, 1)} frames/s · ${recentLate} late/min</span>`
+      : `<span class="position-pill">frame delivery warming up</span>`;
     return `<div class="position-filter-card">
       <b>Position Calculation</b>
       <div class="position-filter-row">
@@ -8619,6 +8660,12 @@ function sequence16IsNewer(candidate, reference) {
   return delta > 0 && delta < 32768;
 }
 
+function sequence32IsNewer(candidate, reference) {
+  const modulus = 4294967296;
+  const delta = (Number(candidate) - Number(reference) + modulus) % modulus;
+  return delta > 0 && delta < modulus / 2;
+}
+
 function ingestDsTwrStreamSample(item) {
   const tagId = Number(item?.tag_id);
   const anchorId = Number(item?.anchor_id);
@@ -8654,38 +8701,72 @@ function ingestDsTwrStreamSample(item) {
   }
 
   const sequenceModulus = 65536;
-  const frameStartSequence =
+  const roundIndex = Number(item?.round_index);
+  const slotIndex = Number(item?.slot_index);
+  const firstAnchorId = Number(item?.first_anchor_id);
+  const hasRoundContext =
+    Number.isInteger(roundIndex) && roundIndex >= 0 &&
+    Number.isInteger(slotIndex) && slotIndex >= 0 &&
+    slotIndex < settings.anchorIds.length;
+  const fallbackFrameStartSequence =
     (sequence - anchorIndex + sequenceModulus) % sequenceModulus;
-  const frameKey = `${tagId}:${frameStartSequence}`;
+  const frameKey = hasRoundContext
+    ? `${tagId}:round:${roundIndex}`
+    : `${tagId}:seq:${fallbackFrameStartSequence}`;
   let frame = state.dsPositionFrameBuckets.get(frameKey);
   if (!frame) {
     frame = {
       anchorIds: [...settings.anchorIds],
       items: {},
+      slots: {},
+      roundIndex: hasRoundContext ? roundIndex : null,
+      firstAnchorId: Number.isInteger(firstAnchorId) ? firstAnchorId : null,
+      frameStartSequence: hasRoundContext
+        ? null
+        : fallbackFrameStartSequence,
       createdAtMs: nowMs,
       updatedAtMs: nowMs,
     };
     state.dsPositionFrameBuckets.set(frameKey, frame);
   }
   frame.items[String(anchorId)] = {...item};
+  if (hasRoundContext) {
+    frame.slots[String(slotIndex)] = {...item};
+    if (slotIndex === 0) frame.frameStartSequence = sequence;
+  }
   frame.updatedAtMs = nowMs;
 
   for (const [key, candidate] of state.dsPositionFrameBuckets) {
     if (nowMs - candidate.updatedAtMs > 500) {
       state.dsPositionFrameBuckets.delete(key);
       state.nativeDsFrameDiagnostics.expiredCount++;
+      state.nativeDsFrameDiagnostics.expiredTimes.push(nowMs);
+      state.nativeDsFrameDiagnostics.expiredTimes =
+        state.nativeDsFrameDiagnostics.expiredTimes.filter(
+          value => nowMs - Number(value) <= 60000);
     }
   }
-  const coherent = settings.anchorIds.every((id, index) => {
-    const sample = frame.items[String(id)];
-    return sample &&
-      Number(sample.seq) ===
-        (frameStartSequence + index) % sequenceModulus;
-  });
+  const coherent = hasRoundContext
+    ? settings.anchorIds.every(id => frame.items[String(id)]) &&
+      settings.anchorIds.every((_, index) => {
+        const sample = frame.slots[String(index)];
+        return sample &&
+          Number(sample.round_index) === roundIndex &&
+          Number(sample.slot_index) === index;
+      })
+    : settings.anchorIds.every((id, index) => {
+        const sample = frame.items[String(id)];
+        return sample &&
+          Number(sample.seq) ===
+            (fallbackFrameStartSequence + index) % sequenceModulus;
+      });
   if (!coherent) return;
 
   state.dsPositionFrameBuckets.delete(frameKey);
   state.nativeDsFrameDiagnostics.completedCount++;
+  const frameStartSequence = Number.isInteger(Number(frame.frameStartSequence))
+    ? Number(frame.frameStartSequence)
+    : sequence;
   const receivedTimes = settings.anchorIds
     .map(id => Number(frame.items[String(id)]?.received_at))
     .filter(Number.isFinite);
@@ -8695,9 +8776,9 @@ function ingestDsTwrStreamSample(item) {
   const spanMs = receivedTimes.length > 1
     ? Math.max(0, (Math.max(...receivedTimes) - Math.min(...receivedTimes)) * 1000)
     : 0;
-  const latestValuesWouldMix = settings.anchorIds.some((id, index) =>
+  const latestValuesWouldMix = settings.anchorIds.some(id =>
     Number(state.ranging.distances[`${tagId}:${id}`]?.seq) !==
-      (frameStartSequence + index) % sequenceModulus
+      Number(frame.items[String(id)]?.seq)
   );
   if (latestValuesWouldMix) {
     state.nativeDsFrameDiagnostics.mixedLatestAvoided++;
@@ -8707,15 +8788,27 @@ function ingestDsTwrStreamSample(item) {
   const previousIsStale =
     previousFrame &&
     nowMs - Number(previousFrame.completedAtMs || 0) > 2000;
+  const frameIsNewer = previousFrame && hasRoundContext &&
+      Number.isInteger(Number(previousFrame.roundIndex))
+    ? sequence32IsNewer(roundIndex, previousFrame.roundIndex)
+    : previousFrame
+      ? sequence16IsNewer(
+          frameStartSequence, previousFrame.frameStartSequence)
+      : true;
   if (previousFrame && !previousIsStale &&
-      !sequence16IsNewer(
-        frameStartSequence, previousFrame.frameStartSequence)) {
+      !frameIsNewer) {
     state.nativeDsFrameDiagnostics.lateCompleteRejected++;
+    state.nativeDsFrameDiagnostics.lateCompleteTimes.push(nowMs);
+    state.nativeDsFrameDiagnostics.lateCompleteTimes =
+      state.nativeDsFrameDiagnostics.lateCompleteTimes.filter(
+        value => nowMs - Number(value) <= 60000);
     return;
   }
   const publishedFrame = {
     tagId,
     frameStartSequence,
+    roundIndex: hasRoundContext ? roundIndex : null,
+    firstAnchorId: hasRoundContext ? frame.firstAnchorId : null,
     anchorIds: [...settings.anchorIds],
     items: filterNativeDsCoherentItems(
       tagId, settings.anchorIds, frame.items),
@@ -8725,8 +8818,14 @@ function ingestDsTwrStreamSample(item) {
   };
   state.nativeDsCoherentFrames[tagKey] = publishedFrame;
   state.nativeDsFrameDiagnostics.publishedCount++;
+  state.nativeDsFrameDiagnostics.publishedTimes.push(nowMs);
+  state.nativeDsFrameDiagnostics.publishedTimes =
+    state.nativeDsFrameDiagnostics.publishedTimes.filter(
+      value => nowMs - Number(value) <= 60000);
   state.nativeDsFrameDiagnostics.lastSpanMs = spanMs;
-  state.nativeDsFrameDiagnostics.lastFrameKey = frameStartSequence;
+  state.nativeDsFrameDiagnostics.lastFrameKey = hasRoundContext
+    ? `round:${roundIndex}`
+    : `seq:${frameStartSequence}`;
   if (settings.nativeDsUpdateMode === "coherent") {
     state.positionStreamLatestEvent = {
       token: `ds:${frameKey}`,
@@ -11282,13 +11381,14 @@ function setRangingProfileFieldVisible(profileKey, field, visible) {
 function rangingProfileDescription(values, solver) {
   if (solver !== "ranging") return "";
   const baseFrameMs = 4 * values.slotMs + values.roundGapMs;
-  const geometryMs = values.slotMs + nativeDsGeometryCommandDelayMs;
+  const geometryMs = values.slotMs + nativeDsGeometryCommandDelayMs +
+    2 * nativeDsGeometryGuardMs;
   const averageFrameMs =
     baseFrameMs + geometryMs / nativeDsGeometryFrameInterval;
   return `${fmtFixed(values.dsPositionMaxAgeSec, 1)} s distance freshness; ` +
     `native POLL → RESP → FINAL base frame is ${fmtFixed(baseFrameMs, 0)} ms ` +
     `for four anchors; one rotating anchor-pair geometry slot adds ` +
-    `${fmtFixed(geometryMs, 0)} ms every ${nativeDsGeometryFrameInterval} frames ` +
+    `${fmtFixed(geometryMs, 0)} ms, including 5+5 ms guards, every ${nativeDsGeometryFrameInterval} frames ` +
     `(${fmtFixed(averageFrameMs, 1)} ms average).`;
 }
 
@@ -11305,7 +11405,7 @@ function updateRangingSettingsProtocol() {
       title: "DS-TWR Settings",
       label: "Native DS-TWR",
       hint: "Selected in Position Setup. The tag ranges every anchor, then periodically commands one rotating anchor-pair DS-TWR exchange so physical geometry remains live.",
-      note: "Fresh 2026-07-31 verification found 60 ms to be the fastest profile with zero raw-range anomalies in a 180 s static capture. Profiles at 59 ms and below are retained as experimental stress tests because their tight-looking position output can hide impossible raw ranges. One extra geometry slot every four frames is included in the live throughput. Applying a profile persists it and reboots the selected modules; FlexTDOA, distance-test and calibration timing remain untouched.",
+      note: "The guarded 53 ms profile completed a one-hour static validation with zero source rejects. The 60 and 64 ms profiles remain validated reserves, while 410 ms is the slow control; 33 and 13 ms are deliberately retained as experimental boundary points. One guarded geometry slot every four frames is included in the displayed throughput. Applying a profile persists it and reboots the selected modules; FlexTDOA, distance-test and calibration timing remain untouched.",
     },
     passive_ds: {
       title: "Passive DS-TWR Settings",
@@ -11335,6 +11435,7 @@ function updateRangingSettingsProtocol() {
   document.getElementById("passiveDsProfilesSection")
     ?.classList.toggle("hidden", solver !== "passive_ds");
   document.getElementById("rangingProfileNote").textContent = protocol.note;
+  renderNativeDsActiveProfile();
 
   const visibleFields = rangingProtocolProfileFields[solver];
   for (const profileKey of Object.keys(rangingProfileDefaults)) {
@@ -11816,15 +11917,28 @@ function renderNativeDsTwrTimingDiagram() {
     0, Math.min(N - 1, Number(state.dsTimingSlotIndex || 0))
   );
   state.dsTimingSlotIndex = selectedIndex;
-  selector.innerHTML = config.anchorIds.map((anchorId, index) =>
-    `<option value="${index}">frame[${index}] · T${esc(config.tagId)} ↔ A${esc(anchorId)}</option>`
+  const latest = dsTimingLatestResult(config);
+  const firstAnchorIndex = latest
+    ? config.anchorIds.indexOf(Number(latest.first_anchor_id))
+    : -1;
+  const liveFrameAnchorIds = firstAnchorIndex >= 0
+    ? [
+        ...config.anchorIds.slice(firstAnchorIndex),
+        ...config.anchorIds.slice(0, firstAnchorIndex),
+      ]
+    : [...config.anchorIds];
+  selector.innerHTML = liveFrameAnchorIds.map((anchorId, index) =>
+    `<option value="${index}">slot[${index}] · T${esc(config.tagId)} ↔ A${esc(anchorId)}</option>`
   ).join("");
   selector.value = String(selectedIndex);
 
-  const latest = dsTimingLatestResult(config);
-  const liveAnchorIndex = latest
-    ? config.anchorIds.indexOf(Number(latest.anchor_id))
-    : -1;
+  const reportedSlotIndex = Number(latest?.slot_index);
+  const liveAnchorIndex = Number.isInteger(reportedSlotIndex) &&
+      reportedSlotIndex >= 0 && reportedSlotIndex < N
+    ? reportedSlotIndex
+    : latest
+      ? liveFrameAnchorIds.indexOf(Number(latest.anchor_id))
+      : -1;
   const latestSequence = Number(latest?.seq);
   const frameStartSequence = Number.isInteger(latestSequence) &&
     liveAnchorIndex >= 0
@@ -11836,7 +11950,8 @@ function renderNativeDsTwrTimingDiagram() {
 
   const frameMs = N * config.slotMs + config.roundGapMs;
   const geometryMaintenanceMs =
-    config.slotMs + nativeDsGeometryCommandDelayMs;
+    config.slotMs + nativeDsGeometryCommandDelayMs +
+    2 * nativeDsGeometryGuardMs;
   const averageFrameMs =
     frameMs + geometryMaintenanceMs / nativeDsGeometryFrameInterval;
   const frameHz = averageFrameMs > 0 ? 1000 / averageFrameMs : NaN;
@@ -11847,7 +11962,7 @@ function renderNativeDsTwrTimingDiagram() {
   const timingOverrun = config.respDelayMs + config.finalDelayMs >
     config.slotMs;
 
-  const frameSlots = config.anchorIds.map((anchorId, index) => {
+  const frameSlots = liveFrameAnchorIds.map((anchorId, index) => {
     const classes = [
       "flex-frame-slot",
       index === selectedIndex ? "selected" : "",
@@ -11855,7 +11970,7 @@ function renderNativeDsTwrTimingDiagram() {
     ].filter(Boolean).join(" ");
     const sequence = sequenceForIndex(index);
     return `<div class="${classes}">
-      <b>frame[${index}]${sequence === null ? "" : ` · seq ${esc(sequence)}`}</b>
+      <b>slot[${index}]${sequence === null ? "" : ` · seq ${esc(sequence)}`}</b>
       <strong>T${esc(config.tagId)} ↔ A${esc(anchorId)}</strong>
       <span>POLL → RESP → FINAL</span>
     </div>`;
@@ -11883,7 +11998,7 @@ function renderNativeDsTwrTimingDiagram() {
     )
   ).join("");
 
-  const selectedAnchorId = config.anchorIds[selectedIndex];
+  const selectedAnchorId = liveFrameAnchorIds[selectedIndex];
   const segments = [
     {
       key: "POLL → RESP",
@@ -11951,7 +12066,7 @@ function renderNativeDsTwrTimingDiagram() {
       <div class="flex-timing-metric"><span>Topology</span><strong>T${esc(config.tagId)} · N=${N}</strong></div>
       <div class="flex-timing-metric"><span>Slot period</span><strong>${fmtFixed(config.slotMs, 3)} ms</strong></div>
       <div class="flex-timing-metric"><span>Base position frame</span><strong>${fmtFixed(frameMs, 3)} ms</strong></div>
-      <div class="flex-timing-metric"><span>Geometry maintenance</span><strong>+${fmtFixed(geometryMaintenanceMs, 0)} ms / ${nativeDsGeometryFrameInterval} frames</strong></div>
+      <div class="flex-timing-metric"><span>Geometry maintenance</span><strong>+${fmtFixed(geometryMaintenanceMs, 0)} ms / ${nativeDsGeometryFrameInterval} frames</strong><small>includes 5+5 ms boundary guards</small></div>
       <div class="flex-timing-metric"><span>Average position rate</span><strong>${fmtFixed(frameHz, 2)} Hz</strong></div>
       <div class="flex-timing-metric"><span>Exchanges / frame</span><strong>${N}</strong></div>
       <div class="flex-timing-metric"><span>Scheduled range rate</span><strong>${fmtFixed(exchangeHz, 1)} /s</strong></div>
@@ -11960,7 +12075,7 @@ function renderNativeDsTwrTimingDiagram() {
       <div class="flex-timing-canvas">
         <div class="flex-timing-label">
           <strong>Base frame · ${N} tag-anchor exchanges + frame gap</strong>
-          <span>${config.live && latest ? `live result seq ${esc(latest.seq)} from A${esc(latest.anchor_id)}` : "configured topology"} · rotating anchor-pair slot every ${nativeDsGeometryFrameInterval} frames</span>
+          <span>${config.live && latest ? `live round ${esc(latest.round_index ?? "-")} · seq ${esc(latest.seq)} from A${esc(latest.anchor_id)}` : "configured topology"} · rotating first anchor · guarded geometry slot every ${nativeDsGeometryFrameInterval} frames</span>
         </div>
         <div class="flex-frame-track" style="grid-template-columns:${frameColumns}">${frameSlots}${gapCell}</div>
         <div class="flex-frame-axis">${frameAxis}</div>
@@ -12512,7 +12627,8 @@ function renderPassiveDsTimingDiagram() {
 function profileSummaryText(values, solver, anchorCount = 4) {
   if (solver !== "ranging") return "";
   const dsCycleMs = anchorCount * values.slotMs + values.roundGapMs;
-  const maintenanceMs = values.slotMs + nativeDsGeometryCommandDelayMs;
+  const maintenanceMs = values.slotMs + nativeDsGeometryCommandDelayMs +
+    2 * nativeDsGeometryGuardMs;
   const averageCycleMs =
     dsCycleMs + maintenanceMs / nativeDsGeometryFrameInterval;
   const frameHz = averageCycleMs > 0 ? 1000 / averageCycleMs : NaN;
@@ -12522,7 +12638,7 @@ function profileSummaryText(values, solver, anchorCount = 4) {
     warnings.push("RESP + FINAL >= slot");
   }
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `fresh ${fmtFixed(values.dsPositionMaxAgeSec, 1)} s · POLL → RESP → FINAL · ${fmtFixed(values.slotMs, 0)} ms slot · ${fmtFixed(values.roundGapMs, 0)} ms gap · ${fmtFixed(dsCycleMs, 0)} ms base frame · ${fmtFixed(averageCycleMs, 1)} ms average with live geometry · ${fmtFixed(frameHz, 2)} Hz${warnText}`;
+  return `fresh ${fmtFixed(values.dsPositionMaxAgeSec, 1)} s · POLL → RESP → FINAL · ${fmtFixed(values.slotMs, 0)} ms slot · ${fmtFixed(values.roundGapMs, 0)} ms gap · ${fmtFixed(dsCycleMs, 0)} ms base frame · ${fmtFixed(averageCycleMs, 1)} ms guarded average · ${fmtFixed(frameHz, 2)} Hz${warnText}`;
 }
 
 function updateRangingProfileSummary(profileKey) {
