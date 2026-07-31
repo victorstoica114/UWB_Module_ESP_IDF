@@ -95,6 +95,7 @@ TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2 = 10
 TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3 = 11
 TELEMETRY_STREAM_PASSIVE_DS_POSITION_V4 = 12
 TELEMETRY_STREAM_NATIVE_DS_TAG_RANGE = 13
+TELEMETRY_STREAM_PASSIVE_DS_GEOMETRY = 14
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
 TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
@@ -103,6 +104,7 @@ TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN = 41
 TELEMETRY_PASSIVE_DS_POSITION_V2_SAMPLE_LEN = 40
 TELEMETRY_PASSIVE_DS_POSITION_V3_SAMPLE_LEN = 49
 TELEMETRY_PASSIVE_DS_POSITION_V4_SAMPLE_LEN = 63
+TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN = 24
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
 TELEMETRY_FLEX_OBSERVATION_STRUCT = struct.Struct("<IIiiiHBBBB")
 TELEMETRY_FLEX_ANCHOR_RANGE_STRUCT = struct.Struct("<IIiiHBB")
@@ -119,6 +121,7 @@ TELEMETRY_PASSIVE_DS_POSITION_V3_STRUCT = struct.Struct(
 TELEMETRY_PASSIVE_DS_POSITION_V4_STRUCT = struct.Struct(
     "<IIiiiiiiIHBBIIBHHHHHI"
 )
+TELEMETRY_PASSIVE_DS_GEOMETRY_STRUCT = struct.Struct("<IIiiiBBBB")
 ANCHOR_RANGE_HISTORY_MAX_AGE_SEC = 30.0
 TELEMETRY_STREAM_SAMPLE_SIZES = {
     TELEMETRY_STREAM_BNO085_ACCEL: TELEMETRY_ACCEL_SAMPLE_LEN,
@@ -145,6 +148,8 @@ TELEMETRY_STREAM_SAMPLE_SIZES = {
         TELEMETRY_PASSIVE_DS_POSITION_V4_SAMPLE_LEN,
     TELEMETRY_STREAM_NATIVE_DS_TAG_RANGE:
         TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN,
+    TELEMETRY_STREAM_PASSIVE_DS_GEOMETRY:
+        TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN,
 }
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
 
@@ -765,6 +770,36 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "responder_id": int(responder_id),
                 }
             )
+        elif stream_type == TELEMETRY_STREAM_PASSIVE_DS_GEOMETRY:
+            (
+                uptime_ms,
+                geometry_version,
+                x_mm,
+                y_mm,
+                fit_rms_mm,
+                anchor_id,
+                anchor_count,
+                tag_id,
+                flags,
+            ) = TELEMETRY_PASSIVE_DS_GEOMETRY_STRUCT.unpack_from(
+                frame, offset
+            )
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "topic": "uwb.passive_ds.geometry",
+                    "tdoa_protocol": "passive_ds",
+                    "geometry_version": int(geometry_version),
+                    "x_m": x_mm / 1000.0,
+                    "y_m": y_mm / 1000.0,
+                    "fit_rms_m": fit_rms_mm / 1000.0,
+                    "anchor_id": int(anchor_id),
+                    "anchor_count": int(anchor_count),
+                    "tag_id": int(tag_id),
+                    "dynamic": bool(flags & 1),
+                }
+            )
         elif stream_type in (
             TELEMETRY_STREAM_FLEX_POSITION,
             TELEMETRY_STREAM_PASSIVE_DS_POSITION,
@@ -906,7 +941,12 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "observation_count": int(observation_count),
                     "tag_id": int(tag_id),
                     "anchor_count": int(anchor_count),
-                    "position_filter": "ekf_cv",
+                    "position_filter": (
+                        "none" if solution_flags & 16 else "ekf_cv"
+                    ),
+                    "solver_location": (
+                        "esp32_tag" if solution_flags & 16 else "legacy_shared"
+                    ),
                     "solution_kind": (
                         "complete_superframe"
                         if solution_flags & 2
@@ -917,7 +957,9 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "independent_frame": bool(solution_flags & 1),
                     "complete_superframe": bool(solution_flags & 2),
                     "filter_correction": (
-                        bool(solution_flags & 4)
+                        False
+                        if solution_flags & 16
+                        else bool(solution_flags & 4)
                         if solution_flags & 8
                         else True
                     ),
@@ -966,6 +1008,7 @@ class DashboardState:
         self.tdoa_anchor_distances: dict[tuple[int, int], dict[str, Any]] = {}
         self.tdoa_anchor_history: dict[tuple[int, int], deque[dict[str, Any]]] = {}
         self.tdoa_local_positions: dict[int, dict[str, Any]] = {}
+        self.tdoa_local_geometries: dict[int, dict[str, Any]] = {}
         self.tdoa_position_events: deque[dict[str, Any]] = deque(maxlen=4096)
         self.next_position_event_id = 1
         self.next_position_stream_event_id = 1
@@ -1041,6 +1084,50 @@ class DashboardState:
                     "uwb.passive_ds.position",
                 ):
                     self.record_tdoa_position_sample_locked(sample)
+                elif topic == "uwb.passive_ds.geometry":
+                    self.record_passive_ds_geometry_sample_locked(sample)
+
+    def record_passive_ds_geometry_sample_locked(
+        self, item: dict[str, Any]
+    ) -> None:
+        try:
+            tag_id = int(item["tag_id"])
+            anchor_id = int(item["anchor_id"])
+            anchor_count = int(item["anchor_count"])
+            version = int(item["geometry_version"])
+            x_m = float(item["x_m"])
+            y_m = float(item["y_m"])
+            fit_rms_m = float(item["fit_rms_m"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if (
+            tag_id <= 0
+            or anchor_id <= 0
+            or anchor_count < 3
+            or not all(math.isfinite(value) for value in (x_m, y_m, fit_rms_m))
+        ):
+            return
+        received_at = float(item.get("received_at") or time.time())
+        geometry = self.tdoa_local_geometries.get(tag_id)
+        if geometry is None or int(geometry.get("geometry_version", -1)) != version:
+            geometry = {
+                "tag_id": tag_id,
+                "geometry_version": version,
+                "anchor_count": anchor_count,
+                "fit_rms_m": fit_rms_m,
+                "dynamic": bool(item.get("dynamic", True)),
+                "anchors": {},
+                "received_at": received_at,
+            }
+            self.tdoa_local_geometries[tag_id] = geometry
+        geometry["anchors"][str(anchor_id)] = {
+            "id": anchor_id,
+            "x": x_m,
+            "y": y_m,
+        }
+        geometry["fit_rms_m"] = fit_rms_m
+        geometry["received_at"] = received_at
+        geometry["complete"] = len(geometry["anchors"]) == anchor_count
 
     def record_tdoa_position_sample_locked(self, item: dict[str, Any]) -> None:
         try:
@@ -1844,6 +1931,13 @@ class DashboardState:
                     "age_sec": now - float(item.get("received_at") or 0.0),
                 }
                 for tag_id, item in self.tdoa_local_positions.items()
+            },
+            "local_geometries": {
+                str(tag_id): {
+                    **item,
+                    "age_sec": now - float(item.get("received_at") or 0.0),
+                }
+                for tag_id, item in self.tdoa_local_geometries.items()
             },
             "max_age_sec": max_age_sec,
         }
@@ -4634,7 +4728,7 @@ const state = {
   hydratedSettings: false,
   calibrationResult: null,
   ranging: {distances: {}, max_age_sec: 3},
-  tdoa: {observations: {}, anchor_distances: {}, local_positions: {}, max_age_sec: 3},
+  tdoa: {observations: {}, anchor_distances: {}, local_positions: {}, local_geometries: {}, max_age_sec: 3},
   positionTrail: {},
   positionRawTrail: {},
   positionTrailTokens: {},
@@ -6533,6 +6627,64 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
   }
 
   const batch = currentAnchorDistanceBatch(anchorIds, maxAge, solver);
+  if (protocol === "passive_ds") {
+    const expectedIds = anchorIds.map(Number);
+    const candidates = Object.values(state.tdoa?.local_geometries || {})
+      .filter(item => {
+        if (!item?.complete || Number(item.age_sec) > maxAge) return false;
+        const ids = Object.keys(item.anchors || {}).map(Number);
+        return ids.length === expectedIds.length &&
+          expectedIds.every(id => ids.includes(id));
+      })
+      .sort((left, right) =>
+        Number(right.geometry_version || 0) -
+        Number(left.geometry_version || 0));
+    const espGeometry = candidates[0] || null;
+    if (!espGeometry) {
+      return {
+        anchors: {},
+        distanceItems: batch.distanceItems,
+        missingPairs: batch.missingPairs,
+        residuals: {},
+        complete: false,
+        positionReady: false,
+        canFix: false,
+        status: "waiting_esp",
+        protocol,
+      };
+    }
+    const anchors = Object.fromEntries(
+      Object.entries(espGeometry.anchors || {}).map(([id, anchor]) => [
+        Number(id),
+        {x: Number(anchor.x), y: Number(anchor.y)},
+      ])
+    );
+    const fitRmsM = Number(espGeometry.fit_rms_m);
+    return {
+      anchors,
+      distanceItems: batch.distanceItems,
+      missingPairs: [],
+      residuals: {},
+      fitQuality: {
+        rmsM: fitRmsM,
+        acceptable: Number.isFinite(fitRmsM),
+      },
+      complete: true,
+      positionReady: true,
+      canFix: false,
+      status: "esp_dynamic",
+      protocol,
+      updates: Number(espGeometry.geometry_version || 0),
+      frameId: Number(espGeometry.geometry_version || 0),
+      lastUpdateAgeSec: Number(espGeometry.age_sec || 0),
+      estimateAgeSec: Number(espGeometry.age_sec || 0),
+      maxSigmaM: NaN,
+      relocationCount: 0,
+      rejectedCount: 0,
+      heldPairs: [],
+      sourceTagId: Number(espGeometry.tag_id),
+    };
+  }
   const session = state.positionGeometry;
   let geometryUpdated = false;
   if (!session.ekf && batch.coherent && batch.missingPairs.length === 0) {
@@ -7206,38 +7358,52 @@ function computePositionModel() {
       let positionAgeSec = 0;
       let positionHoldSec = 0;
       if (positionProtocolUsesTdoa(settings.solver)) {
-        coherence = coherentTdoaBatch(
-          tagId,
-          settings.anchorIds,
-          settings.maxAge,
-          settings.solver
-        );
-        observations = coherence.items
-          .filter(item => anchors[Number(item.initiator_id)] && anchors[Number(item.responder_id)]);
-        const seedKey = `${positionGeometryKey(settings.anchorIds)}:${tagId}`;
-        const fitInput = coherence.complete ? observations : [];
-        const fit = rawTdoaFit(
-          settings.anchorIds,
-          anchors,
-          fitInput,
-          state.positionSeeds[seedKey] || null
-        );
-        position = fit.position;
-        fitObservations = fit.used || [];
-        observations = fit.annotated || observations.map(item => ({...item, used_in_fit: true, reject_reason: ""}));
-        residuals = tdoaResiduals(position, anchors, observations);
-        accuracy = tdoaPositionAccuracy(
-          position,
-          anchors,
-          fitObservations.length ? fitObservations : observations,
-          tdoaResiduals(position, anchors, fitObservations.length ? fitObservations : observations)
-        );
         localPosition = state.tdoa?.local_positions?.[String(tagId)];
         const wantedProtocol = settings.solver === "passive_ds"
           ? "passive_ds"
           : "flextdoa";
         if (String(localPosition?.tdoa_protocol || "flextdoa") !== wantedProtocol) {
           localPosition = null;
+        }
+        if (settings.solver === "passive_ds") {
+          observations = freshTdoaObservations(
+            tagId, settings.anchorIds, settings.maxAge)
+            .filter(item =>
+              String(item?.tdoa_protocol || "") === "passive_ds");
+          coherence = {
+            complete: Boolean(localPosition?.independent_frame),
+            items: observations,
+            frameId: Number(localPosition?.slot_id),
+            source: "esp32_tag",
+          };
+        } else {
+          coherence = coherentTdoaBatch(
+            tagId,
+            settings.anchorIds,
+            settings.maxAge,
+            settings.solver
+          );
+          observations = coherence.items
+            .filter(item => anchors[Number(item.initiator_id)] && anchors[Number(item.responder_id)]);
+          const seedKey = `${positionGeometryKey(settings.anchorIds)}:${tagId}`;
+          const fitInput = coherence.complete ? observations : [];
+          const fit = rawTdoaFit(
+            settings.anchorIds,
+            anchors,
+            fitInput,
+            state.positionSeeds[seedKey] || null
+          );
+          position = fit.position;
+          fitObservations = fit.used || [];
+          observations = fit.annotated || observations.map(item => ({...item, used_in_fit: true, reject_reason: ""}));
+          residuals = tdoaResiduals(position, anchors, observations);
+          accuracy = tdoaPositionAccuracy(
+            position,
+            anchors,
+            fitObservations.length ? fitObservations : observations,
+            tdoaResiduals(position, anchors, fitObservations.length ? fitObservations : observations)
+          );
+          if (position) state.positionSeeds[seedKey] = {x: position.x, y: position.y};
         }
         if (localPosition && localPositionAge(localPosition, now) <= settings.maxAge &&
             Number.isFinite(Number(localPosition.x_m)) &&
@@ -7261,7 +7427,6 @@ function computePositionModel() {
             gdop: NaN,
           };
         }
-        if (position) state.positionSeeds[seedKey] = {x: position.x, y: position.y};
         metricPosition = position;
         trailPosition = position;
         trailAccuracy = accuracy;
@@ -7719,7 +7884,19 @@ function renderPositionGeometryPanel(model) {
 
   const geometry = model.geometry || {};
   if (status) {
-    if (geometry.status === "dynamic") {
+    if (geometry.status === "esp_dynamic") {
+      const fitText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
+        ? ` · fit RMS ${fmtPositionCm(geometry.fitQuality.rmsM, 1)}`
+        : "";
+      status.textContent =
+        `Live ${positionSolverLabel(model.settings.solver)} geometry · ` +
+        `ESP32 tag M${geometry.sourceTagId || "?"} · ` +
+        `generation ${geometry.updates || 0} · ` +
+        `latest ${fmtFixed(geometry.lastUpdateAgeSec, 1)} s${fitText}`;
+      status.className = geometry.fitQuality?.acceptable
+        ? "muted fresh"
+        : "muted stale";
+    } else if (geometry.status === "dynamic") {
       const fitText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
         ? ` · fit RMS ${fmtPositionCm(geometry.fitQuality.rmsM, 1)}`
         : "";
@@ -9813,7 +9990,7 @@ function renderInfo(snapshot) {
   state.statuses = snapshot.statuses || [];
   state.ranging = snapshot.ranging || {distances: {}, max_age_sec: 3};
   const previousLocalPositions = state.tdoa?.local_positions || {};
-  const nextTdoa = snapshot.tdoa || {observations: {}, anchor_distances: {}, local_positions: {}, max_age_sec: 3};
+  const nextTdoa = snapshot.tdoa || {observations: {}, anchor_distances: {}, local_positions: {}, local_geometries: {}, max_age_sec: 3};
   nextTdoa.local_positions = nextTdoa.local_positions || {};
   for (const [tagId, previous] of Object.entries(previousLocalPositions)) {
     const incoming = nextTdoa.local_positions[tagId];

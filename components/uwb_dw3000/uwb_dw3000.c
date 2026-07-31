@@ -21,6 +21,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "flextdoa_solver_service.h"
+#include "passive_ds_solver_service.h"
 #include "sdkconfig.h"
 
 #include "app_config.h"
@@ -5460,7 +5461,7 @@ static enum uwb_passive_ds_tdoa_status uwb_passive_ds_accept_piggyback(
         frame->source_id, peer_id, frame->sequence, range_slot_id,
         calibrated_distance_mm, raw_distance_mm);
     if (stored > 0) {
-        (void)flextdoa_solver_service_submit_anchor_range(
+        (void)passive_ds_solver_service_submit_anchor_range(
             frame->source_id, peer_id, range_slot_id, stored);
     }
 
@@ -7647,7 +7648,7 @@ static void uwb_passive_ds_tag_submit_double_sided(
         tag_id, initiator_id, responder_id, responder_index, sequence,
         slot_id, difference_mm, difference_mm, anchor_distance_mm, 0,
         clock_ratio_ppb, reply_delay_us, range_source, 0U);
-    (void)flextdoa_solver_service_submit_observation(
+    (void)passive_ds_solver_service_submit_observation(
         tag_id, initiator_id, responder_id, slot_id, difference_mm);
 }
 
@@ -7798,7 +7799,7 @@ static void uwb_passive_ds_tag_loop(const uint8_t *anchor_ids,
 {
     struct uwb_passive_ds_tdoa_context context;
     uwb_passive_ds_tdoa_init(&context);
-    const esp_err_t solver_err = flextdoa_solver_service_start();
+    const esp_err_t solver_err = passive_ds_solver_service_start();
     if (solver_err != ESP_OK) {
         ESP_LOGW(TAG, "PASSIVE_DS local solver unavailable: %s",
                  esp_err_to_name(solver_err));
@@ -9165,6 +9166,7 @@ static esp_err_t uwb_dw3000_reinitialize_runtime(
     }
 
     (void)flextdoa_solver_service_reset();
+    (void)passive_ds_solver_service_reset();
     s_runtime_hot_entry = true;
     s_runtime_switch_count++;
     s_last_runtime_switch_ms =

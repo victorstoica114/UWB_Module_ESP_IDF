@@ -1259,7 +1259,7 @@ static bool flex_solver_publish_prediction(
             state->last_batch_span_ms, prediction_age_ms,
             state->last_observation_mask,
             state->rejection_reason_mask_since_submit,
-            state->rejected_since_submit, state->position_rejected);
+            state->rejected_since_submit, state->position_rejected, false);
     if (submitted) {
         state->rejection_reason_mask_since_submit = 0U;
         state->rejected_since_submit = 0U;
@@ -1471,7 +1471,7 @@ static bool flex_solver_update_position(
             state->independent_frame_accepted, batch->span_ms,
             batch->max_age_ms, batch->observation_mask,
             state->rejection_reason_mask_since_submit,
-            state->rejected_since_submit, state->position_rejected);
+            state->rejected_since_submit, state->position_rejected, false);
         if (submitted) {
             state->rejection_reason_mask_since_submit = 0U;
             state->rejected_since_submit = 0U;
