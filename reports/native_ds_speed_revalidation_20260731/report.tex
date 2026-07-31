@@ -1,0 +1,570 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[a4paper,margin=20mm,headheight=15pt]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xurl}
+
+\graphicspath{{figures/}}
+\definecolor{controlblue}{HTML}{2563EB}
+\definecolor{acceptedgreen}{HTML}{16A34A}
+\definecolor{rejectedred}{HTML}{DC2626}
+\definecolor{amber}{HTML}{D97706}
+\definecolor{slate}{HTML}{334155}
+\definecolor{lightgray}{HTML}{F1F5F9}
+
+\newcommand{\dstwr}{DS-TWR}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small Native DS-TWR speed-limit revalidation}
+\rhead{\small July 31, 2026}
+\cfoot{\thepage}
+
+\hypersetup{
+  pdftitle={Native DS-TWR speed-limit revalidation},
+  pdfauthor={UWB ESP-IDF technical report},
+  pdfsubject={Fresh static precision, raw-range integrity, and speed-boundary study},
+  pdfkeywords={UWB, DS-TWR, DW3000, ESP32-S3, ranging, precision, integrity}
+}
+
+\begin{document}
+\pagenumbering{gobble}
+
+\begin{titlepage}
+  \centering
+  \vspace*{15mm}
+  {\Huge\bfseries Native \dstwr{} speed-limit revalidation\par}
+  \vspace{4mm}
+  {\Large Fresh throughput, precision, and raw-range integrity study\par}
+  \vspace{15mm}
+
+  \begin{tabular}{rl}
+    Test date: & July 31, 2026, EEST\\
+    Platform: & 5 ESP32-S3 + DW3000 modules, Raspberry Pi 5\\
+    Branch: & \texttt{experiment/passive-ds-twr-pipeline}\\
+    Dashboard source: & \texttt{8244a3432f68}\\
+    Active firmware identity: & \texttt{54a586c-dirty}\\
+    Configuration: & M1 tag; M2, M3, M4, M5 anchors\\
+    Radio: & UWB channel 5\\
+    Environment: & unchanged static indoor setup\\
+  \end{tabular}
+
+  \vfill
+  \colorbox{lightgray}{%
+    \begin{minipage}{0.88\textwidth}
+      \vspace{3mm}
+      \textbf{Key result.}
+      The \textbf{60 ms} profile is the fastest setting that completed the
+      decisive 180 s validation with \textbf{zero impossible raw ranges}.
+      It delivered \textbf{11.63 coherent independent frames/s} and
+      \textbf{61.96 rolling display updates/s}, with
+      \textbf{1.38 cm precision RMS} and \textbf{2.39 cm CEP95}.
+      Relative to the fresh 410 ms control, this is a
+      \textbf{6.75$\times$ coherent-frame speedup} for only
+      \textbf{+1.6\% RMS} and \textbf{+3.9\% CEP95}.
+      The otherwise excellent-looking 59 ms profile was rejected because it
+      produced a physically impossible $-5.301$ m raw range.
+      \vspace{3mm}
+    \end{minipage}}
+  \vfill
+  {\large Reproducible updated field report\par}
+  \vspace{5mm}
+\end{titlepage}
+
+\pagenumbering{roman}
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\section{Executive summary}
+
+This report revalidates the native three-message \dstwr{} speed limit after
+restoring the low-noise ranging behavior and capturing a new slow control on
+the same physical setup. The exchange remains strictly
+\texttt{POLL--RESP--FINAL}. No temporal filter, moving average, position
+smoothing, or additional radio message is used in the offline comparison.
+
+The study contains 17 capture blocks, 1,860.8 s of data, and 156,935 raw
+tag-to-anchor ranges. It first repeats the dashboard profiles from 410 ms down
+to 13 ms, then narrows the transition using 49, 57, 58, 59, 60, 61, and
+64 ms candidates. Decisive profiles use 180 s blocks; short 60 s screens are
+used only to reject obviously unsafe settings or select the next candidate.
+
+\begin{table}[H]
+  \centering
+  \caption{Main fresh results. Precision is measured around each unfiltered
+  coherent-position series' own mean.}
+  \small
+  \begin{tabular}{lrrrrrr}
+    \toprule
+    Profile & Coherent & Rolling & Delivery & RMS & CEP95 & Raw anomalies\\
+    \midrule
+    410 ms control & 1.72 Hz & 9.16 Hz & 94.11\% & 1.36 cm & 2.30 cm & 0\\
+    64 ms reserve & 10.92 Hz & 58.14 Hz & 94.03\% & 1.38 cm & 2.41 cm & 0\\
+    \textcolor{acceptedgreen}{\textbf{60 ms recommended}}
+      & \textbf{11.63 Hz} & \textbf{61.96 Hz} & \textbf{93.97\%}
+      & \textbf{1.38 cm} & \textbf{2.39 cm} & \textbf{0}\\
+    \textcolor{rejectedred}{59 ms rejected}
+      & 11.82 Hz & 62.78 Hz & 93.75\% & 1.31 cm & 2.20 cm & 1\\
+    \textcolor{rejectedred}{58 ms rejected}
+      & 12.00 Hz & 63.48 Hz & 93.32\% & 1.35 cm & 2.30 cm & 2\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Decision.}
+Use 60 ms as the fastest currently validated precision profile. Use 64 ms
+when an additional millisecond of reserve per anchor slot is preferred.
+Retain 410 ms only as a slow control. Treat every profile below 60 ms as an
+experimental stress test: their central position distributions can remain
+tight while rare timestamp failures generate impossible raw distances.
+
+\section{Why the recommendation changed}
+
+The July 26 report recommended 17 ms and treated 13 ms as the measured
+maximum. That report faithfully described the complete-position and timing
+statistics available in its original capture. The present result does not
+erase that historical data; it changes the operating recommendation for the
+current firmware and validation criterion.
+
+Three differences matter:
+
+\begin{enumerate}[leftmargin=8mm]
+  \item the low-noise native \dstwr{} implementation was recovered and a fresh
+  410 ms control was captured on the unchanged current setup;
+  \item the current dashboard maintains live anchor geometry and distinguishes
+  rolling estimates from strict coherent four-anchor frames;
+  \item most importantly, every raw range is now audited before solver or
+  frame-assembly rejection. Negative ranges and deviations greater than
+  10 cm from the per-anchor median are counted even when they do not visibly
+  disturb the position trail.
+\end{enumerate}
+
+The new audit found impossible raw measurements at 33, 29, 25, 21, 17, and
+13 ms. Their coherent RMS and CEP95 still look comparable to the control.
+Position precision alone is therefore insufficient to qualify the radio
+timing. The updated recommendation requires both tight central precision and
+clean raw timestamp integrity.
+
+\section{System and protocol}
+
+\subsection{Native three-frame DS-TWR}
+
+For each anchor, the tag sends \texttt{POLL}, the anchor returns
+\texttt{RESP}, and the tag sends \texttt{FINAL}. The anchor combines its
+hardware receive/transmit timestamps with the tag timestamps embedded in the
+final message and estimates propagation time as
+
+\begin{equation}
+  \widehat{T}_{\mathrm{prop}} =
+  \frac{R_aR_b-D_aD_b}{R_a+D_a+R_b+D_b},
+\end{equation}
+
+where $R_a,R_b$ are round-trip intervals and $D_a,D_b$ are reply delays.
+Antenna-delay calibration and the instantaneous carrier-integrator correction
+remain enabled. They correct physical timestamp behavior and are not temporal
+position filters.
+
+\subsection{Frame and geometry scheduler}
+
+The tag visits anchors A2, A3, A4, and A5 sequentially. The base tag-ranging
+frame is
+
+\begin{equation}
+  T_{\mathrm{base}} = 4T_{\mathrm{slot}} + T_{\mathrm{gap}}.
+\end{equation}
+
+The current implementation also inserts one rotating anchor-to-anchor
+geometry-maintenance slot every four base frames. With a 1 ms command delay,
+the average scheduler period is approximately
+
+\begin{equation}
+  T_{\mathrm{avg}} =
+  T_{\mathrm{base}} +
+  \frac{T_{\mathrm{slot}}+1\ \mathrm{ms}}{4}.
+\end{equation}
+
+This maintenance exchange keeps the displayed physical geometry live and is
+included in measured throughput. It is one reason the measured strict
+coherent-frame rate is lower than $1/T_{\mathrm{base}}$.
+
+\subsection{Coherent frames and rolling updates}
+
+A coherent independent position uses four ranges assigned to one complete
+anchor round. A rolling position is recomputed whenever a new range arrives,
+using the latest still-fresh ranges from the other anchors. Rolling updates
+provide low display latency, but adjacent estimates share measurements and
+must not be interpreted as statistically independent frames.
+
+At 60 ms, the dashboard can produce 61.96 rolling updates/s while the strict
+offline assembler identifies 11.63 complete independent frames/s. Both rates
+are reported so display responsiveness is not confused with independent
+measurement throughput.
+
+\section{Experimental method}
+
+\subsection{Geometry and unchanged setup}
+
+All captures use the same cached measured geometry:
+
+\begin{center}
+\begin{tabular}{lrr}
+  \toprule
+  Anchor & $x$ [m] & $y$ [m]\\
+  \midrule
+  A2 & 0.000 & 0.000\\
+  A3 & 0.000 & 3.067\\
+  A4 & 2.971 & $-0.071$\\
+  A5 & 3.196 & 2.974\\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+The stored tag reference is the anchor centroid,
+$(1.54175,1.49250)$ m. Because this coordinate is derived from cached
+geometry rather than an independent survey of the tag location, the report
+uses dispersion around each capture mean as its primary precision metric.
+Absolute bias fields are retained in \path{summary.json} but are not presented
+as independently verified absolute accuracy.
+
+Active antenna delays remained M1=16363, M2=16368, M3=16362, M4=16371, and
+M5=16371. No module was physically moved during the sweep. Runtime profile
+changes were applied to all five modules in parallel, followed by reboot and
+warm-up.
+
+\subsection{Fresh control and boundary search}
+
+The sequence was:
+
+\begin{enumerate}[leftmargin=8mm]
+  \item capture a new 180 s 410 ms precision control;
+  \item validate the existing 64, 33, and 29 ms profiles for 180 s and screen
+  25, 21, 17, and the true 13 ms profile for 60 s;
+  \item test intermediate 49, 57, 58, 60, and 61 ms candidates for 60 s;
+  \item perform decisive 180 s validations at 58, 59, and 60 ms.
+\end{enumerate}
+
+The short 58 ms screen was clean, but its 180 s validation produced two
+impossible ranges. Likewise, the 29 ms screen was clean and its long
+validation failed. These two cases demonstrate why short visual screening
+cannot establish reliability.
+
+\subsection{Acceptance criteria}
+
+A candidate is accepted only if:
+
+\begin{itemize}[leftmargin=7mm]
+  \item the decisive 180 s block contains no negative raw distance;
+  \item no raw distance differs by more than 10 cm from that anchor's capture
+  median;
+  \item coherent RMS and CEP95 remain within 20\% of the 410 ms control;
+  \item all five modules remain online with stable sequence delivery.
+\end{itemize}
+
+The 10 cm threshold is an integrity alarm, not the claimed localization
+accuracy. Every rejected boundary event was several metres beyond that limit.
+No range is made acceptable merely because a later solver ignores it.
+
+\subsection{Metrics}
+
+The offline reconstruction uses unweighted all-anchor linear trilateration and
+no temporal filtering. Precision RMS is
+
+\begin{equation}
+  \mathrm{RMS}_{\mathrm{precision}} =
+  \sqrt{\frac{1}{N}\sum_{i=1}^{N}
+  \left\lVert \mathbf{p}_i-\overline{\mathbf{p}}\right\rVert^2}.
+\end{equation}
+
+CEP50 and CEP95 are the corresponding 50th and 95th percentiles of radial
+deviation from the capture mean. Sequence delivery is the fraction of observed
+16-bit range sequences within the capture span. Raw integrity is calculated
+directly from every \texttt{UWB\_RANGING result} record.
+
+\section{Results}
+
+\subsection{Update rate and scheduler yield}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{01_rate_delivery.pdf}
+  \caption{Measured coherent and rolling update rates, plus the yield of each
+  stream relative to its ideal average scheduler rate. An asterisk marks a
+  profile that failed raw-integrity validation. Colors retain the metric
+  meanings shown in the legend.}
+\end{figure}
+
+The 60 ms profile yields a 6.75$\times$ coherent-frame speedup and a
+6.77$\times$ rolling-update speedup over the 410 ms control. Sequence delivery
+changes by only $-0.14$ percentage points. The lower timing profiles raise
+apparent update rate, but raw integrity fails. In the lower panel, coherent
+yield is the observed independent-frame rate divided by the ideal
+geometry-adjusted frame rate. Rolling yield uses four ideal display updates
+per complete tag-ranging frame. The difference quantifies how shared
+fresh-range updates remain responsive even when strict four-range frames are
+incomplete.
+
+\subsection{Central precision}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth]{02_central_precision.pdf}
+  \caption{Unfiltered coherent-position dispersion. The rejected profiles
+  are marked with an asterisk but still have deceptively good RMS and CEP95.
+  Colors retain the RMS/CEP95 meanings shown in the legend.}
+\end{figure}
+
+The 60 ms coherent RMS is 1.3766 cm, compared with 1.3555 cm at 410 ms:
++0.0211 cm or +1.56\%. CEP95 changes from 2.2987 to 2.3892 cm:
++0.0905 cm or +3.94\%. These are small differences relative to ordinary
+between-capture variation.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.91\textwidth]{05_precision_cdf.pdf}
+  \caption{Empirical CDF of radial coherent-position deviation from each
+  capture mean. The accepted 410, 64, and 60 ms distributions nearly overlap.}
+\end{figure}
+
+The CDF confirms that the recommended 60 ms setting preserves the complete
+shape of the static precision distribution rather than only its RMS summary.
+
+\subsection{Raw-range integrity}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\textwidth]{03_raw_anomalies.pdf}
+  \caption{Impossible measurements per 10,000 raw ranges, counted before any
+  frame or solver rejection.}
+\end{figure}
+
+The accepted 410, 64, and 60 ms captures contain no raw anomaly. Every
+existing dashboard profile below 60 ms produces at least one impossible
+measurement in its fresh capture. At 17 ms, 13 negative ranges and 15 total
+spikes appear in 11,467 observations; at 13 ms, the counts rise to 20 and 22
+in 14,303 observations.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{04_boundary_integrity.pdf}
+  \caption{All A2 raw deviations during the decisive 58, 59, and 60 ms
+  validations. The symlog axis preserves centimetre-scale noise and
+  metre-scale failures in the same figure.}
+\end{figure}
+
+The boundary result is unusually sharp. The 58 ms profile produced two
+negative A2 ranges, the 59 ms profile produced one, and the otherwise
+identical 60 ms profile produced none. All three use 14 ms anchor slots,
+8 ms RX timeout, and 2+2 ms response/final delays. Only the frame gap changes:
+2, 3, and 4 ms respectively.
+
+\subsection{Accepted per-anchor stability}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.90\textwidth]{06_anchor_stability.pdf}
+  \caption{Raw range standard deviation for the three accepted profiles.}
+\end{figure}
+
+The accepted profiles retain approximately 1--2 cm raw standard deviation per
+anchor. The 60 ms values are 1.19 cm (A2), 1.12 cm (A3), 1.23 cm (A4), and
+1.79 cm (A5). There is no broad noise inflation as the frame period falls
+from 410 to 60 ms.
+
+\section{Interpretation and recommendation}
+
+\subsection{Observed limiting mechanism}
+
+The data do not show a gradual accuracy-versus-speed tradeoff near the
+boundary. Central RMS is actually slightly lower at 59 ms than at 60 ms.
+Instead, rare metre-scale failures appear while the ordinary range population
+remains centimetre-stable.
+
+Because 58, 59, and 60 ms use the same 14 ms slot and exchange delays, while
+only the inter-frame gap changes, the evidence strongly implicates insufficient
+recovery margin between rounds. Every decisive boundary failure is emitted by
+A2, the first anchor in the configured list. This pattern is consistent with a
+round-boundary timestamp or radio-state race, but the present field data do
+not prove the exact firmware instruction or DW3000 state responsible.
+
+The correct engineering response is therefore to retain a clean timing margin,
+not to add a position filter that hides the symptom. Instrumenting the
+round transition and validating an explicit timestamp sanity check remain
+useful future firmware tasks.
+
+\subsection{Recommended profiles}
+
+\paragraph{Default: 60 ms precision-speed limit.}
+Use 14 ms slots, 4 ms frame gap, 8 ms RX timeout, 2 ms response delay, 2 ms
+final delay, 100 ms anchor RX slice, and 500 UUS auto-RX delay. This is the
+fastest profile with a clean 180 s raw audit.
+
+\paragraph{Reserve: 64 ms.}
+Use 15 ms slots and the same 4/8/2/2 ms gap/timeout/response/final values.
+It loses about 6\% coherent throughput relative to 60 ms but also passed its
+180 s capture with zero raw anomalies.
+
+\paragraph{Control: 410 ms.}
+Use 100 ms slots, 10 ms gap, 90 ms timeout, and 20+20 ms delayed
+transmissions only when reproducing the slow precision baseline. It is no
+longer justified as the normal operating profile.
+
+\paragraph{Experimental profiles below 60 ms.}
+They remain available in the dashboard for controlled investigation, but are
+now marked rejected or experimental. Their high rolling-update numbers must
+not be presented as validated reliable positioning throughput.
+
+\section{Limits of inference and next tests}
+
+This is a strict static revalidation at one favorable point, not a complete
+localization qualification. The 60 ms decision applies to the tested modules,
+firmware state, channel, anchor order, geometry, and host load. It does not yet
+establish:
+
+\begin{itemize}[leftmargin=7mm]
+  \item multi-hour probability of a rare boundary failure;
+  \item performance while the tag translates or rotates;
+  \item behavior near or outside the anchor perimeter;
+  \item NLOS, human blockage, or severe multipath performance;
+  \item sensitivity to Wi-Fi/dashboard load, temperature, or supply voltage;
+  \item behavior with a different first anchor or additional modules.
+\end{itemize}
+
+The next validation should run 60 and 64 ms for at least one hour, alternate
+their order, and repeat with A2 moved away from the first slot. A controlled
+dynamic trajectory should then compare coherent latency and precision. If
+sub-60 ms operation remains important, add per-stage round-transition
+timestamps and an explicit hardware-timestamp validity guard before changing
+the estimator or adding filters.
+
+\clearpage
+\appendix
+
+\section{Complete profile table}
+
+\begin{longtable}{rrrrrrrrr}
+  \caption{Fresh aggregate results. Durations are 180 s unless marked
+  60 s screen.}\\
+  \toprule
+  Frame & Duration & Coherent & Rolling & Delivery & RMS & CEP95 & Neg. & Spikes\\
+  \midrule
+  \endfirsthead
+  \toprule
+  Frame & Duration & Coherent & Rolling & Delivery & RMS & CEP95 & Neg. & Spikes\\
+  \midrule
+  \endhead
+  410 & 180 s & 1.72 & 9.16 & 94.11\% & 1.36 & 2.30 & 0 & 0\\
+  64 & 180 s & 10.92 & 58.14 & 94.03\% & 1.38 & 2.41 & 0 & 0\\
+  60 & 180 s & 11.63 & 61.96 & 93.97\% & 1.38 & 2.39 & 0 & 0\\
+  59 & 180 s & 11.82 & 62.78 & 93.75\% & 1.31 & 2.20 & 1 & 1\\
+  58 & 180 s & 12.00 & 63.48 & 93.32\% & 1.35 & 2.30 & 2 & 2\\
+  57 & 60 s & 12.21 & 64.37 & 93.02\% & 1.38 & 2.42 & 1 & 1\\
+  49 & 60 s & 17.61 & 74.26 & 92.46\% & 1.30 & 2.25 & 1 & 1\\
+  33 & 180 s & 20.42 & 107.21 & 90.61\% & 1.33 & 2.33 & 7 & 9\\
+  29 & 180 s & 23.37 & 119.09 & 88.92\% & 1.43 & 2.46 & 13 & 19\\
+  25 & 60 s & 27.09 & 137.28 & 89.28\% & 1.43 & 2.47 & 2 & 2\\
+  21 & 60 s & 33.34 & 157.85 & 87.90\% & 1.43 & 2.53 & 4 & 4\\
+  17 & 60 s & 39.77 & 191.04 & 87.14\% & 1.34 & 2.35 & 13 & 15\\
+  13 & 60 s & 44.99 & 238.12 & 85.30\% & 1.38 & 2.36 & 20 & 22\\
+  \bottomrule
+\end{longtable}
+
+Coherent and rolling columns are updates/s. RMS and CEP95 are centimetres.
+Spikes count all raw distances more than 10 cm from the corresponding
+per-anchor median and include the negative observations.
+
+\section{Timing profiles}
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabular}{rrrrrr}
+    \toprule
+    Frame & Slot & Gap & RX timeout & RESP delay & FINAL delay\\
+    \midrule
+    410 & 100 & 10 & 90 & 20 & 20\\
+    64 & 15 & 4 & 8 & 2 & 2\\
+    60 & 14 & 4 & 8 & 2 & 2\\
+    59 & 14 & 3 & 8 & 2 & 2\\
+    58 & 14 & 2 & 8 & 2 & 2\\
+    57 & 14 & 1 & 8 & 2 & 2\\
+    49 & 12 & 1 & 8 & 2 & 2\\
+    33 & 8 & 1 & 5 & 2 & 2\\
+    29 & 7 & 1 & 5 & 2 & 2\\
+    25 & 6 & 1 & 5 & 2 & 2\\
+    21 & 5 & 1 & 5 & 2 & 2\\
+    17 & 4 & 1 & 4 & 1 & 1\\
+    13 & 3 & 1 & 3 & 1 & 1\\
+    \bottomrule
+  \end{tabular}
+  \caption{Runtime values in milliseconds. RX slice is 100 ms and automatic
+  RX delay is 500 UUS for every row.}
+\end{table}
+
+\section{Files and reproduction}
+
+\small
+\begin{tabularx}{\textwidth}{p{62mm}Y}
+  \toprule
+  File/directory & Contents\\
+  \midrule
+  \path{README.md} & fresh 410 ms control identity and precision reference\\
+  \path{PROFILE_REVALIDATION.md} & concise findings and boundary decision\\
+  \path{profile_comparison.csv} & machine-readable aggregate table\\
+  \path{*/data/*.jsonl} & raw range/status events and timing logs\\
+  \path{*/data/*.metadata.json} & full initial/final module status and runtime
+  configuration\\
+  \path{*/positions.csv} & unfiltered coherent and rolling reconstructions\\
+  \path{*/summary.json} & complete per-capture metrics\\
+  \path{*/raw_quality.json} & per-anchor raw integrity audit\\
+  \path{figures/} & report plots in vector PDF and PNG\\
+  \bottomrule
+\end{tabularx}
+
+\paragraph{Reproduction}
+\begin{verbatim}
+cd /home/pi/Documents/UWB
+python3 tools/uwb_native_ds_speed_revalidation_report.py
+cd reports/native_ds_speed_revalidation_20260731
+latexmk -pdf -interaction=nonstopmode -halt-on-error report.tex
+\end{verbatim}
+
+\begin{thebibliography}{9}
+
+\bibitem{qorvo-api}
+Qorvo, \emph{DW3xxx Device Driver API Guide}, double-sided two-way-ranging
+examples, 2025.
+\url{https://forum.qorvo.com/uploads/short-url/xD3TlXKvkujjdUaJWXv2b4E7GQN.pdf}.
+
+\bibitem{aps013}
+Decawave, \emph{APS013: DW1000 and Two-Way Ranging}, rev. 2.3,
+Poll--Response--Final and the asymmetric DS-TWR formula.
+\url{https://forum.qorvo.com/uploads/short-url/x34DrF7EW5fQP9wY3aNESqPKz8z.pdf}.
+
+\bibitem{firmware}
+Local repository \emph{UWB Module ESP-IDF}, branch
+\texttt{experiment/passive-ds-twr-pipeline}, dashboard source
+\texttt{8244a3432f68caf23d604e475cbe718698c4ab2f}, active module firmware
+identity \texttt{54a586c-dirty}, field state from July 31, 2026.
+
+\end{thebibliography}
+
+\end{document}
