@@ -11744,6 +11744,60 @@ function dsTimingLatestResult(config) {
     })[0] || null;
 }
 
+function nativeDsStageMetric(stage) {
+  if (!stage) return "—";
+  return `${esc(stage.avg_us ?? 0)}/${esc(stage.max_us ?? 0)} µs` +
+    ` · ${esc(stage.fail ?? 0)}/${esc(stage.count ?? 0)} fail`;
+}
+
+function nativeDsPipelineDiagnosticsHtml() {
+  const rows = state.statuses
+    .filter(statusIsFresh)
+    .map(item => {
+      const stats = item.native_ds_pipeline_stats;
+      if (!stats || !stats.stages) return "";
+      const stages = stats.stages;
+      const moduleId = Number(item.module_id);
+      const role = moduleId === 1 ? "tag / initiator" : "anchor / responder";
+      return `<tr>
+        <td>M${esc(item.module_id)}</td>
+        <td>${role}</td>
+        <td>${esc(stats.initiated ?? 0)}/${esc(stats.completed ?? 0)}/${esc(stats.responded ?? 0)}</td>
+        <td>${esc(stats.response_timeouts ?? 0)}/${esc(stats.final_timeouts ?? 0)}</td>
+        <td>${esc(stats.context_mismatches ?? 0)}/${esc(stats.timestamp_rejects ?? 0)}/${esc(stats.negative_tof_rejects ?? 0)}/${esc(stats.impossible_range_rejects ?? 0)}</td>
+        <td>${esc(stats.slot_overruns ?? 0)}</td>
+        <td>${esc(stats.boundary_min_us ?? 0)}/${esc(stats.boundary_max_us ?? 0)} µs</td>
+        <td>${nativeDsStageMetric(stages.poll_tx)}</td>
+        <td>${nativeDsStageMetric(stages.response_wait)}</td>
+        <td>${nativeDsStageMetric(stages.final_tx)}</td>
+        <td>${nativeDsStageMetric(stages.response_tx)}</td>
+        <td>${nativeDsStageMetric(stages.final_wait)}</td>
+        <td>${nativeDsStageMetric(stages.formula)}</td>
+      </tr>`;
+    })
+    .filter(Boolean)
+    .join("");
+  if (!rows) {
+    return `<div class="flex-timing-note warn">Waiting for Native DS-TWR round-boundary instrumentation from the modules.</div>`;
+  }
+  return `<div class="flex-parameter-map">
+    <div class="flex-timing-label">
+      <strong>Live round-boundary diagnostics</strong>
+      <span>initiated/completed/responded and source-integrity counters; A2 can be compared directly with the other responders.</span>
+    </div>
+    <div class="table-wrap"><table class="flex-parameter-table">
+      <thead><tr>
+        <th>Module</th><th>Role</th><th>init/complete/respond</th>
+        <th>RESP/FINAL timeout</th><th>context/ts/negative/range reject</th>
+        <th>slot overrun</th><th>boundary min/max</th>
+        <th>POLL TX avg/max</th><th>RESP wait avg/max</th>
+        <th>FINAL TX avg/max</th><th>RESP TX avg/max</th>
+        <th>FINAL wait avg/max</th><th>formula avg/max</th>
+      </tr></thead><tbody>${rows}</tbody>
+    </table></div>
+  </div>`;
+}
+
 function renderNativeDsTwrTimingDiagram() {
   const root = document.getElementById("nativeDsTwrTimingDiagram");
   const selector = document.getElementById("dsTimingSlotSelect");
@@ -11950,6 +12004,7 @@ function renderNativeDsTwrTimingDiagram() {
         </div>
       </div>
     </div>
+    ${nativeDsPipelineDiagnosticsHtml()}
     <div class="flex-parameter-map">
       <div class="flex-timing-label">
         <strong>Live runtime parameter map</strong>

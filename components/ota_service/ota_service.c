@@ -92,6 +92,8 @@ typedef struct {
     char runtime_passive_ds_range_bias_json[512];
     struct uwb_passive_ds_pipeline_stats passive_ds_pipeline_stats;
     char passive_ds_pipeline_stats_json[1536];
+    struct uwb_native_ds_pipeline_stats native_ds_pipeline_stats;
+    char native_ds_pipeline_stats_json[2048];
     char response[OTA_SERVICE_STATUS_RESPONSE_SIZE];
 } ota_status_context_t;
 
@@ -734,6 +736,61 @@ static void format_passive_ds_pipeline_stats_json(
         poll, response, final_tx, final_rx, cia, rearm);
 }
 
+static void format_native_ds_pipeline_stats_json(
+    const struct uwb_native_ds_pipeline_stats *stats, char *buffer,
+    size_t buffer_size)
+{
+    if (stats == NULL || buffer == NULL || buffer_size == 0U) {
+        return;
+    }
+    char poll[192] = {0};
+    char response_wait[192] = {0};
+    char final_tx[192] = {0};
+    char response_tx[192] = {0};
+    char final_wait[192] = {0};
+    char formula[192] = {0};
+    char boundary[192] = {0};
+    format_passive_ds_stage_stats_json(&stats->poll_tx, poll, sizeof(poll));
+    format_passive_ds_stage_stats_json(
+        &stats->response_wait, response_wait, sizeof(response_wait));
+    format_passive_ds_stage_stats_json(
+        &stats->final_tx, final_tx, sizeof(final_tx));
+    format_passive_ds_stage_stats_json(
+        &stats->response_tx, response_tx, sizeof(response_tx));
+    format_passive_ds_stage_stats_json(
+        &stats->final_wait, final_wait, sizeof(final_wait));
+    format_passive_ds_stage_stats_json(
+        &stats->formula, formula, sizeof(formula));
+    format_passive_ds_stage_stats_json(
+        &stats->round_boundary, boundary, sizeof(boundary));
+    (void)snprintf(
+        buffer, buffer_size,
+        "{\"initiated\":%lu,\"completed\":%lu,\"responded\":%lu,"
+        "\"response_timeouts\":%lu,\"final_timeouts\":%lu,"
+        "\"context_mismatches\":%lu,\"timestamp_rejects\":%lu,"
+        "\"negative_tof_rejects\":%lu,\"impossible_range_rejects\":%lu,"
+        "\"slot_overruns\":%lu,\"round_boundaries\":%lu,"
+        "\"boundary_min_us\":%lu,\"boundary_max_us\":%lu,\"stages\":{"
+        "\"poll_tx\":%s,\"response_wait\":%s,\"final_tx\":%s,"
+        "\"response_tx\":%s,\"final_wait\":%s,\"formula\":%s,"
+        "\"round_boundary\":%s}}",
+        (unsigned long)stats->initiated_exchange_count,
+        (unsigned long)stats->completed_exchange_count,
+        (unsigned long)stats->responder_exchange_count,
+        (unsigned long)stats->response_timeout_count,
+        (unsigned long)stats->final_timeout_count,
+        (unsigned long)stats->context_mismatch_count,
+        (unsigned long)stats->timestamp_reject_count,
+        (unsigned long)stats->negative_tof_reject_count,
+        (unsigned long)stats->impossible_range_reject_count,
+        (unsigned long)stats->slot_overrun_count,
+        (unsigned long)stats->round_boundary_count,
+        (unsigned long)stats->round_boundary_min_us,
+        (unsigned long)stats->round_boundary_max_us,
+        poll, response_wait, final_tx, response_tx, final_wait, formula,
+        boundary);
+}
+
 static bool ota_parse_flex_geometry(
     const char *text, const app_runtime_config_t *config,
     int32_t x_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS],
@@ -1034,6 +1091,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #define passive_ds_pipeline_stats (ctx->passive_ds_pipeline_stats)
 #define passive_ds_pipeline_stats_json \
     (ctx->passive_ds_pipeline_stats_json)
+#define native_ds_pipeline_stats (ctx->native_ds_pipeline_stats)
+#define native_ds_pipeline_stats_json (ctx->native_ds_pipeline_stats_json)
 
     const esp_app_desc_t *app = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -1097,6 +1156,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     format_passive_ds_pipeline_stats_json(
         &passive_ds_pipeline_stats, passive_ds_pipeline_stats_json,
         sizeof(passive_ds_pipeline_stats_json));
+    uwb_dw3000_get_native_ds_pipeline_stats(
+        &native_ds_pipeline_stats);
+    format_native_ds_pipeline_stats_json(
+        &native_ds_pipeline_stats, native_ds_pipeline_stats_json,
+        sizeof(native_ds_pipeline_stats_json));
 
     char *response = ctx->response;
 
@@ -1176,6 +1240,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_ranging_resp_delay_ms\":%lu,"
         "\"runtime_ranging_final_delay_ms\":%lu,"
         "\"runtime_ranging_auto_rx_delay_uus\":%lu,"
+        "\"native_ds_pipeline_stats\":%s,"
         "\"runtime_passive_ds_schedule\":%u,"
         "\"runtime_passive_ds_slot_ms\":%lu,"
         "\"runtime_passive_ds_round_gap_ms\":%lu,"
@@ -1685,6 +1750,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)runtime_config->ranging_resp_delay_ms,
         (unsigned long)runtime_config->ranging_final_delay_ms,
         (unsigned long)runtime_config->ranging_auto_rx_delay_uus,
+        native_ds_pipeline_stats_json,
         (unsigned)runtime_config->passive_ds_schedule,
         (unsigned long)runtime_config->passive_ds_slot_ms,
         (unsigned long)runtime_config->passive_ds_round_gap_ms,
@@ -2167,6 +2233,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #undef runtime_passive_ds_range_bias_json
 #undef passive_ds_pipeline_stats
 #undef passive_ds_pipeline_stats_json
+#undef native_ds_pipeline_stats
+#undef native_ds_pipeline_stats_json
     return response_err;
 }
 

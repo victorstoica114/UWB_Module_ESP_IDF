@@ -25,6 +25,8 @@ RANGING_RESULT_RE = re.compile(
     r"\bUWB_RANGING result\s+tag=(?P<tag>\d+)\s+"
     r"anchor=(?P<anchor>\d+)\s+seq=(?P<seq>\d+)\s+"
     r"distance=(?P<distance>[+-]?(?:\d+(?:\.\d*)?|\.\d+))\s+m\b"
+    r".*?\btoken=0x(?P<token>[0-9a-fA-F]+)\s+"
+    r"round=(?P<round>\d+)\s+slot=(?P<slot>\d+)"
 )
 
 STATUS_KEYS = (
@@ -48,6 +50,7 @@ STATUS_KEYS = (
     "runtime_ranging_resp_delay_ms",
     "runtime_ranging_final_delay_ms",
     "runtime_ranging_auto_rx_delay_uus",
+    "native_ds_pipeline_stats",
     "runtime_flex_tdoa_guard_us",
     "runtime_flex_tdoa_request_subslot_us",
     "runtime_flex_tdoa_request_process_us",
@@ -232,6 +235,8 @@ def relevant_timing_log(item: dict[str, Any]) -> bool:
     message = str(item.get("message") or "")
     return (
         "UWB_RANGING result" in message
+        or "UWB_RANGING rejected" in message
+        or "UWB_RANGING trace_" in message
         or "UWB_RANGING initiator active" in message
         or "UWB_RANGING anchor responder active" in message
         or "UWB_RANGING native summary" in message
@@ -329,6 +334,9 @@ def capture_timing_logs(
                         "tag_id": int(match.group("tag")),
                         "anchor_id": int(match.group("anchor")),
                         "seq": int(match.group("seq")),
+                        "context_token": int(match.group("token"), 16),
+                        "round_index": int(match.group("round")),
+                        "slot_index": int(match.group("slot")),
                         "distance_m": float(match.group("distance")),
                         "log_id": item.get("id"),
                         "source_module_id": item.get("module_id"),
@@ -388,12 +396,18 @@ def main() -> int:
         time.sleep(min(0.25, warmup_deadline - time.monotonic()))
 
     last_snapshot = fetch_json(snapshot_url)
-    initial_position_events = fetch_json(
-        f"{position_events_url}?after=0&limit=1"
-    )
-    position_cursor = int(
-        initial_position_events.get("next_event_id") or 0
-    )
+    if args.protocol == "ds_twr":
+        # Native DS-TWR positions are calculated inside the dashboard and do
+        # not enter the firmware position-event stream. Avoid polling and
+        # draining unrelated FlexTDOA/passive events during long captures.
+        position_cursor = 0
+    else:
+        initial_position_events = fetch_json(
+            f"{position_events_url}?after=0&limit=1"
+        )
+        position_cursor = int(
+            initial_position_events.get("next_event_id") or 0
+        )
     log_cursor = max(
         0,
         int(last_snapshot.get("next_log_id") or 0) - 1,
@@ -406,7 +420,7 @@ def main() -> int:
     next_status = started_monotonic
     next_log_capture = started_monotonic
     next_position_capture = started_monotonic
-    seen_ds: set[tuple[int, int, int]] = set()
+    seen_ds: set[tuple[int, int, int, int, int]] = set()
     seen_tdoa: set[tuple[int, int, int, int, int]] = set()
     seen_anchor: set[tuple[int, int, int, int]] = set()
     seen_position: set[tuple[int, int]] = set()
@@ -463,6 +477,8 @@ def main() -> int:
                                 int(item["tag_id"]),
                                 int(item["anchor_id"]),
                                 int(item["seq"]),
+                                int(item.get("context_token") or 0),
+                                int(item.get("round_index") or 0),
                             )
                             if key in seen_ds:
                                 continue
@@ -489,7 +505,10 @@ def main() -> int:
                         )
                 next_log_capture += 1.0
 
-            if time.monotonic() >= next_position_capture:
+            if (
+                args.protocol != "ds_twr"
+                and time.monotonic() >= next_position_capture
+            ):
                 try:
                     while True:
                         response = fetch_json(
@@ -556,28 +575,36 @@ def main() -> int:
                         )
                 next_position_capture += 0.1
 
-            for item in snapshot.get("ranging", {}).get("distances", {}).values():
-                event_time = received_at(item, captured_at)
-                if event_time + 0.05 < started_at:
-                    continue
-                key = (
-                    int(item.get("tag_id") or 0),
-                    int(item.get("anchor_id") or 0),
-                    int(item.get("seq") or 0),
-                )
-                if key in seen_ds:
-                    continue
-                seen_ds.add(key)
-                write_event(
-                    handle,
-                    kind="ds_range",
-                    protocol=args.protocol,
-                    block=args.block,
-                    captured_at=captured_at,
-                    event_received_at=event_time,
-                    payload=clean_item(item),
-                )
-                counters["ds_range"] += 1
+            # With a timing-log capture enabled, Native DS-TWR ranges come
+            # from the lossless cursor-based log stream. Mixing in the latest
+            # snapshot would duplicate those events under a different key.
+            if args.protocol != "ds_twr" or log_path is None:
+                for item in (
+                    snapshot.get("ranging", {}).get("distances", {}).values()
+                ):
+                    event_time = received_at(item, captured_at)
+                    if event_time + 0.05 < started_at:
+                        continue
+                    key = (
+                        int(item.get("tag_id") or 0),
+                        int(item.get("anchor_id") or 0),
+                        int(item.get("seq") or 0),
+                        int(item.get("context_token") or 0),
+                        int(item.get("round_index") or 0),
+                    )
+                    if key in seen_ds:
+                        continue
+                    seen_ds.add(key)
+                    write_event(
+                        handle,
+                        kind="ds_range",
+                        protocol=args.protocol,
+                        block=args.block,
+                        captured_at=captured_at,
+                        event_received_at=event_time,
+                        payload=clean_item(item),
+                    )
+                    counters["ds_range"] += 1
 
             tdoa = snapshot.get("tdoa", {})
             for item in tdoa.get("recent_observations", []):
@@ -703,6 +730,8 @@ def main() -> int:
                             int(item["tag_id"]),
                             int(item["anchor_id"]),
                             int(item["seq"]),
+                            int(item.get("context_token") or 0),
+                            int(item.get("round_index") or 0),
                         )
                         if key in seen_ds:
                             continue

@@ -1,0 +1,377 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[a4paper,margin=20mm,headheight=15pt]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xurl}
+
+\graphicspath{{figures/}}
+\definecolor{controlblue}{HTML}{2563EB}
+\definecolor{acceptedgreen}{HTML}{16A34A}
+\definecolor{rejectedred}{HTML}{DC2626}
+\definecolor{amber}{HTML}{D97706}
+\definecolor{slate}{HTML}{334155}
+\definecolor{lightgray}{HTML}{F1F5F9}
+
+\newcommand{\dstwr}{DS-TWR}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small Native DS-TWR round-boundary investigation}
+\rhead{\small July 31, 2026}
+\cfoot{\thepage}
+
+\hypersetup{
+  pdftitle={Native DS-TWR round-boundary investigation},
+  pdfauthor={UWB ESP-IDF technical report},
+  pdfsubject={Root cause and guarded validation at the 53 ms profile},
+  pdfkeywords={UWB, DS-TWR, DW3000, ESP32-S3, round boundary, timing integrity}
+}
+
+\begin{document}
+\pagenumbering{gobble}
+
+\begin{titlepage}
+  \centering
+  \vspace*{14mm}
+  {\Huge\bfseries Native \dstwr{} round-boundary investigation\par}
+  \vspace{4mm}
+  {\Large Why shorter frames lost integrity, and why the guarded 53 ms profile works\par}
+  \vspace{14mm}
+
+  \begin{tabular}{rl}
+    Test date: & July 31, 2026, EEST\\
+    Platform: & 5 ESP32-S3 + DW3000 modules, Raspberry Pi dashboard\\
+    Branch: & \texttt{experiment/native-ds-round-boundary}\\
+    Reference: & \texttt{c727a64} before boundary instrumentation\\
+    Configuration: & M1 active tag; M2, M3, M4, M5 anchors\\
+    Geometry: & unchanged static indoor setup\\
+    Captures: & five uninterrupted one-hour blocks\\
+  \end{tabular}
+
+  \vfill
+  \colorbox{lightgray}{%
+    \begin{minipage}{0.88\textwidth}
+      \vspace{3mm}
+      \textbf{Key result.}
+      The apparent speed/precision limit was not the airtime of an ordinary
+      \texttt{POLL--RESP--FINAL} exchange. All \textbf{267} impossible ToFs
+      observed before the fix occurred at the separately inserted
+      anchor-geometry boundary; \textbf{none} occurred in an ordinary tag
+      ranging round. A 5 ms guard on each side of that periodic exchange
+      eliminated every source rejection during a new one-hour run at the
+      fastest tested \textbf{53 ms} profile. Delivered throughput changed
+      only from \textbf{67.24} to \textbf{65.35 ranges/s} ($-2.8\%$), while
+      RESP timeouts fell by \textbf{53.7\%} and FINAL timeouts by
+      \textbf{96.6\%}.
+      \vspace{3mm}
+    \end{minipage}}
+  \vfill
+  {\large Reproducible field investigation and validation report\par}
+  \vspace{5mm}
+\end{titlepage}
+
+\pagenumbering{roman}
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\section{Executive summary}
+
+The original hypothesis was that shorter Native \dstwr{} profiles reduced
+accuracy because an individual radio exchange no longer fit inside its slot.
+The instrumentation added for this study shows a more specific failure:
+ordinary tag exchanges were sound, but the periodic transition into and out
+of anchor self-localization was not isolated from adjacent radio work.
+
+Five one-hour captures were collected. Four unguarded profiles varied the
+normal frame from 59 ms down to 53 ms. The most aggressive 53 ms profile was
+then repeated after moving the normal gap directly behind the tag round and
+adding a 5 ms guard before and after the geometry exchange.
+
+\begin{table}[H]
+  \centering
+  \caption{Five-hour result summary. Rates and event counts come directly
+  from the lossless firmware log stream.}
+  \small
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Normal frame & Valid ranges & Rate & RESP timeout & FINAL timeout & Source reject\\
+    \midrule
+    59 ms & 220,710 & 61.31/s & 4,657 & 350 & 34\\
+    58 ms & 223,776 & 62.16/s & 4,972 & 376 & 35\\
+    57 ms & 226,315 & 62.86/s & 6,660 & 858 & 98\\
+    53 ms & 242,069 & 67.24/s & 8,514 & 923 & 100\\
+    \textcolor{acceptedgreen}{\textbf{53 ms guarded}}
+      & \textbf{235,249} & \textbf{65.35/s} & \textbf{3,944}
+      & \textbf{31} & \textbf{0}\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Decision.}
+The guarded 53 ms profile is a valid fast operating point for the tested
+static setup. It preserves the short ordinary frame while spending extra time
+only around the periodic geometry-maintenance operation. The validation is
+strong evidence of timing integrity, but not yet a universal RF or motion
+qualification; dynamic, NLOS, and longer-duration trials should follow.
+
+\section{Question under test}
+
+The Native \dstwr{} tag exchanges three mandatory packets with each anchor:
+\texttt{POLL}, \texttt{RESP}, and \texttt{FINAL}. With four anchors, one
+normal round contains four independent three-message exchanges. A separate
+anchor-to-anchor \dstwr{} operation is periodically inserted so the dashboard
+can reconstruct a moving physical anchor geometry.
+
+The investigation separated three possible causes:
+
+\begin{enumerate}[leftmargin=8mm]
+  \item \textbf{insufficient ordinary slot duration}: the packet exchange
+  itself overruns its allocation;
+  \item \textbf{anchor-specific behavior}: A2, its RF path, or its antenna
+  calibration is worse than the other anchors;
+  \item \textbf{round-boundary state overlap}: timestamps or radio state from
+  the tag round and the separately inserted geometry exchange touch each
+  other at the schedule boundary.
+\end{enumerate}
+
+The third hypothesis is the only one consistent with all captured evidence.
+
+\section{Instrumentation and integrity checks}
+
+The firmware was instrumented at the radio boundary rather than only in the
+dashboard solver. Every exchange carries and validates:
+
+\begin{itemize}[leftmargin=7mm]
+  \item random token, 16-bit sequence, round, slot, and first-anchor ID;
+  \item flags identifying a geometry exchange and the first following tag
+  round;
+  \item DW3000 transmit/receive timestamps for all stages;
+  \item low-32 ESP timer values for host-side scheduling correlation;
+  \item separate alternating initiator and responder exchange contexts.
+\end{itemize}
+
+Before applying the \dstwr{} equation, the code requires exact context
+equality and valid timestamp intervals. A non-finite, non-positive, negative,
+or physically impossible ToF is rejected at the source before telemetry and
+position solving. Consequently, a clean trail cannot hide an invalid raw
+measurement behind later solver rejection.
+
+The first anchor also rotates between rounds. If the failure remained tied to
+A2, that would indicate an anchor path. If it followed schedule position and
+appeared on all anchors, it would indicate a boundary problem.
+
+\section{Results before the guard}
+
+\subsection{Throughput}
+
+Shortening the frame increases delivered ranges as expected. The pre-guard
+53 ms profile reaches 67.24 valid ranges/s; the guarded validation reaches
+65.35 ranges/s. The small difference is the cost of periodic boundary
+isolation, not an increase in the ordinary tag frame.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.93\textwidth]{01_valid_throughput.pdf}
+  \caption{Delivered raw-range throughput. Blue denotes the original
+  schedule; green denotes the corrected 53 ms validation.}
+\end{figure}
+
+\subsection{Every impossible ToF is a boundary event}
+
+The decisive observation is categorical rather than statistical. Across the
+four original one-hour runs, all 267 source rejects occurred either inside
+the geometry exchange or in the first tag round immediately after it. There
+were zero source rejects in ordinary rounds.
+
+\begin{table}[H]
+  \centering
+  \caption{Location of every rejected ToF before and after the guard.}
+  \small
+  \begin{tabular}{lrrrr}
+    \toprule
+    Frame & Geometry exchange & First post-geometry round & Ordinary round & Total\\
+    \midrule
+    59 ms & 29 & 5 & 0 & 34\\
+    58 ms & 25 & 10 & 0 & 35\\
+    57 ms & 81 & 17 & 0 & 98\\
+    53 ms & 78 & 22 & 0 & 100\\
+    53 ms guarded & 0 & 0 & 0 & 0\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.93\textwidth]{02_boundary_rejects.pdf}
+  \caption{Source-rejected negative ToFs classified by scheduler location.
+  The absence of an ordinary-round segment is the key result.}
+\end{figure}
+
+\subsection{The problem is not A2}
+
+The rejected measurements appear on A2, A3, A4, and A5. Their distribution
+changes when the first-anchor order rotates. A2 has the fewest aggregated
+rejects, while A5 has the most; the fault therefore follows timing position,
+not one permanent anchor identity.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.93\textwidth]{05_anchor_distribution.pdf}
+  \caption{Rejected measurements by responding anchor. Rotation moves the
+  boundary exposure across the four modules and disproves an A2-only fault.}
+\end{figure}
+
+\section{Root cause}
+
+In the original scheduler, the configured round gap was applied after the
+optional geometry operation. It therefore did not isolate the last tag
+\texttt{FINAL} from the following \texttt{SURVEY\_CMD}. On the other side of
+the geometry slot, the next tag \texttt{POLL} relied only on the nominal slot
+duration. Occasional radio and host scheduling latency allowed the two
+initiator regimes to touch at either boundary.
+
+This explains why packet-airtime arithmetic alone was insufficient. An
+ordinary three-message exchange could fit comfortably while the separately
+inserted maintenance exchange still collided with the state transition around
+it. The resulting failure was rare, short, and often invisible after solver
+gating, but it was present in the raw timestamps.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth]{06_schedule_guard.pdf}
+  \caption{Conceptual scheduler comparison. The correction protects both
+  sides of geometry maintenance without lengthening an ordinary 53 ms tag
+  round.}
+\end{figure}
+
+\section{Correction}
+
+The corrected schedule makes five changes:
+
+\begin{enumerate}[leftmargin=8mm]
+  \item place the configured frame gap immediately after every tag round;
+  \item wait 5 ms before transmitting \texttt{SURVEY\_CMD};
+  \item wait another 5 ms after the anchor-geometry \dstwr{} slot;
+  \item mark every slot in the first following tag round as post-geometry;
+  \item retain complete diagnostic traces for every rejected exchange while
+  sampling detailed accepted traces to avoid perturbing the scheduler.
+\end{enumerate}
+
+The collector was also corrected to deduplicate by token, round, and slot
+rather than by the wrapping 16-bit sequence alone. The final one-hour run
+crossed several sequence wraps while its count remained linear.
+
+\section{Guarded 53 ms validation}
+
+The final firmware was rebuilt, uploaded simultaneously to all five modules,
+and tested for one uninterrupted hour at slot 13 ms plus gap 1 ms. It produced
+235,249 accepted ranges, no impossible ToF, no timestamp-context mismatch,
+and no ordinary-round integrity error.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.93\textwidth]{04_before_after_timeline.pdf}
+  \caption{Per-minute delivery and cumulative source rejects for the two 53
+  ms runs. The guarded capture remains at zero rejects for the full hour.}
+\end{figure}
+
+The guard reduces valid throughput by 2.8\%, from 67.24 to 65.35 ranges/s.
+That cost is smaller than the nominal added guard time would suggest because
+fewer collided exchanges are retried or lost. RESP timeouts fall from 8,514
+to 3,944 ($-53.7\%$), FINAL timeouts fall from 923 to 31 ($-96.6\%$), and
+source-rejected ToFs fall from 100 to zero.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.93\textwidth]{03_failure_rates.pdf}
+  \caption{Failure events normalized per 1,000 delivered ranges. The guarded
+  schedule improves both integrity and radio-exchange completion.}
+\end{figure}
+
+\section{How to interpret the result}
+
+\subsection{What is demonstrated}
+
+\begin{itemize}[leftmargin=7mm]
+  \item The ordinary 53 ms Native \dstwr{} frame is not the source of the
+  observed impossible ranges in this static test.
+  \item The prior apparent accuracy limit was a periodic scheduler-boundary
+  problem, not a fundamental \dstwr{} propagation or airtime limit.
+  \item The error is not specific to A2, antenna delay, or one RF path.
+  \item Source validation prevents a rare timestamp corruption from becoming
+  a plausible-looking distance or position.
+  \item The boundary guards buy clean integrity for only 2.8\% measured
+  delivered-throughput cost.
+\end{itemize}
+
+\subsection{What is not yet demonstrated}
+
+This test does not establish a universal 53 ms limit. It uses one static
+indoor geometry and one RF environment. A clean source-reject count proves
+timestamp and schedule integrity, but it is not by itself a position-accuracy
+metric. The next qualification should include moving-tag trials, controlled
+NLOS conditions, power/temperature variation, and multiple runs of at least
+one hour. Position RMSE and P95 should be compared against the same fixed
+geometric reference used for the slow control.
+
+\subsection{Recommended operating policy}
+
+Use the guarded 53 ms profile as the current fast candidate. Keep the 59 ms
+and 58 ms profiles available as diagnostic controls, but the present evidence
+does not justify slowing ordinary tag rounds merely to hide a geometry
+boundary that can be isolated directly. Preserve all source context checks
+and physically impossible-ToF rejection in production builds.
+
+\section{Reproducibility and artifacts}
+
+The complete raw captures, metadata snapshots, generated figures, and
+machine-readable report summary live under:
+
+\begin{quote}
+  \code{reports/native_ds_round_boundary_20260731/}
+\end{quote}
+
+The classification can be reproduced with:
+
+\begin{verbatim}
+tools/analyze_native_ds_round_boundary.py \
+  reports/native_ds_round_boundary_20260731/data/\
+candidate_59ms_round_boundary_3600s.logs.jsonl \
+  reports/native_ds_round_boundary_20260731/data/\
+candidate_58ms_round_boundary_3600s.logs.jsonl \
+  reports/native_ds_round_boundary_20260731/data/\
+candidate_57ms_round_boundary_3600s.logs.jsonl \
+  reports/native_ds_round_boundary_20260731/data/\
+candidate_53ms_round_boundary_3600s.logs.jsonl \
+  reports/native_ds_round_boundary_20260731/data/\
+candidate_53ms_guarded_3600s.logs.jsonl
+\end{verbatim}
+
+Figures and \code{report_summary.json} are regenerated by:
+
+\begin{verbatim}
+tools/uwb_native_ds_round_boundary_report.py
+\end{verbatim}
+
+The interrupted 130 s over-instrumented capture is retained separately and is
+not included in any result above.
+
+\end{document}

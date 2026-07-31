@@ -45,6 +45,29 @@ struct uwb_passive_ds_pipeline_stats {
     struct uwb_passive_ds_stage_stats rx_rearm;
 };
 
+struct uwb_native_ds_pipeline_stats {
+    uint32_t initiated_exchange_count;
+    uint32_t completed_exchange_count;
+    uint32_t responder_exchange_count;
+    uint32_t response_timeout_count;
+    uint32_t final_timeout_count;
+    uint32_t context_mismatch_count;
+    uint32_t timestamp_reject_count;
+    uint32_t negative_tof_reject_count;
+    uint32_t impossible_range_reject_count;
+    uint32_t slot_overrun_count;
+    uint32_t round_boundary_count;
+    uint32_t round_boundary_min_us;
+    uint32_t round_boundary_max_us;
+    struct uwb_passive_ds_stage_stats poll_tx;
+    struct uwb_passive_ds_stage_stats response_wait;
+    struct uwb_passive_ds_stage_stats final_tx;
+    struct uwb_passive_ds_stage_stats response_tx;
+    struct uwb_passive_ds_stage_stats final_wait;
+    struct uwb_passive_ds_stage_stats formula;
+    struct uwb_passive_ds_stage_stats round_boundary;
+};
+
 esp_err_t uwb_dw3000_start(void);
 esp_err_t uwb_dw3000_start_distance_test(void);
 esp_err_t uwb_dw3000_start_calibration(void);
@@ -74,6 +97,8 @@ uint32_t uwb_dw3000_get_last_rx_sequence(void);
 uint16_t uwb_dw3000_get_antenna_delay(void);
 void uwb_dw3000_get_passive_ds_pipeline_stats(
     struct uwb_passive_ds_pipeline_stats *stats);
+void uwb_dw3000_get_native_ds_pipeline_stats(
+    struct uwb_native_ds_pipeline_stats *stats);
 
 #ifdef __cplusplus
 }
