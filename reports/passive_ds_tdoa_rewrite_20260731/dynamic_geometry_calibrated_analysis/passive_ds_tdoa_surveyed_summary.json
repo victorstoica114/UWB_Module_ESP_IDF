@@ -1,0 +1,178 @@
+[
+  {
+    "capture": "reports/passive_ds_tdoa_rewrite_20260731/ds_tdoa_3ms_dynamic_geometry_calibrated_30s.jsonl",
+    "directed_paths": [
+      {
+        "count": 487,
+        "initiator_id": 2,
+        "mean_cm": -0.2848049281314169,
+        "p95_abs_cm": 7.5699999999999985,
+        "responder_id": 3,
+        "std_cm": 3.8382597320283893
+      },
+      {
+        "count": 463,
+        "initiator_id": 2,
+        "mean_cm": -0.27732181425485963,
+        "p95_abs_cm": 7.9,
+        "responder_id": 4,
+        "std_cm": 4.112517024280787
+      },
+      {
+        "count": 579,
+        "initiator_id": 2,
+        "mean_cm": -0.1618307426597582,
+        "p95_abs_cm": 7.9,
+        "responder_id": 5,
+        "std_cm": 4.13823559919159
+      },
+      {
+        "count": 549,
+        "initiator_id": 3,
+        "mean_cm": 0.33533697632058285,
+        "p95_abs_cm": 6.9600000000000035,
+        "responder_id": 2,
+        "std_cm": 3.602344751072947
+      },
+      {
+        "count": 395,
+        "initiator_id": 3,
+        "mean_cm": -1.3144303797468355,
+        "p95_abs_cm": 8.1,
+        "responder_id": 4,
+        "std_cm": 3.9859167518118364
+      },
+      {
+        "count": 377,
+        "initiator_id": 3,
+        "mean_cm": 0.15145888594164456,
+        "p95_abs_cm": 7.159999999999997,
+        "responder_id": 5,
+        "std_cm": 3.7576099018527653
+      },
+      {
+        "count": 297,
+        "initiator_id": 4,
+        "mean_cm": 0.09595959595959597,
+        "p95_abs_cm": 7.119999999999998,
+        "responder_id": 2,
+        "std_cm": 3.647831247354078
+      },
+      {
+        "count": 516,
+        "initiator_id": 4,
+        "mean_cm": 1.3275193798449612,
+        "p95_abs_cm": 9.225,
+        "responder_id": 3,
+        "std_cm": 4.229308103988009
+      },
+      {
+        "count": 311,
+        "initiator_id": 4,
+        "mean_cm": 1.057556270096463,
+        "p95_abs_cm": 7.3,
+        "responder_id": 5,
+        "std_cm": 3.9218904850418976
+      },
+      {
+        "count": 307,
+        "initiator_id": 5,
+        "mean_cm": 0.09609120521172637,
+        "p95_abs_cm": 7.369999999999998,
+        "responder_id": 2,
+        "std_cm": 3.625299315768193
+      },
+      {
+        "count": 328,
+        "initiator_id": 5,
+        "mean_cm": 0.3701219512195122,
+        "p95_abs_cm": 9.064999999999998,
+        "responder_id": 3,
+        "std_cm": 4.377921809884414
+      },
+      {
+        "count": 415,
+        "initiator_id": 5,
+        "mean_cm": -1.0212048192771084,
+        "p95_abs_cm": 8.9,
+        "responder_id": 4,
+        "std_cm": 4.427732486276133
+      }
+    ],
+    "duration_sec": 30.07982635498047,
+    "embedded_live_geometry_all": {
+      "bias_cm": 0.28754051695699795,
+      "count": 3001,
+      "max_cm": 11.166467659918244,
+      "mean_x_m": 1.5025781406197933,
+      "mean_y_m": 1.4987267577474175,
+      "p95_cm": 4.527692569068697,
+      "rate_hz": 99.76786317129485,
+      "rmse_cm": 2.5534316769575707,
+      "std_x_cm": 1.8321080081194774,
+      "std_y_cm": 1.7558074508640171
+    },
+    "embedded_live_geometry_independent": {
+      "bias_cm": 0.249846108756083,
+      "count": 663,
+      "max_cm": 7.467261881037794,
+      "mean_x_m": 1.5019336349924586,
+      "mean_y_m": 1.4984177978883861,
+      "p95_cm": 3.825567312914028,
+      "rate_hz": 22.041350643974837,
+      "rmse_cm": 2.1698086048310286,
+      "std_x_cm": 1.4804316751231617,
+      "std_y_cm": 1.568752992486001
+    },
+    "observation_count": 5024,
+    "observation_rate_hz": 167.02224077726936,
+    "reference_geometry": {
+      "anchors_m": {
+        "2": [
+          0.0,
+          0.0
+        ],
+        "3": [
+          0.0,
+          3.0
+        ],
+        "4": [
+          3.0,
+          0.0
+        ],
+        "5": [
+          3.0,
+          3.0
+        ]
+      },
+      "tag_m": [
+        1.5,
+        1.5
+      ]
+    },
+    "surveyed_geometry_disjoint_three_slot_batches": {
+      "bias_cm": 0.4259395785242932,
+      "count": 1884,
+      "max_cm": 16.585592377960882,
+      "mean_x_m": 1.5029652578572803,
+      "mean_y_m": 1.4969422723641268,
+      "p95_cm": 7.912077398505539,
+      "rate_hz": 62.633340291476,
+      "rmse_cm": 4.239341047782448,
+      "std_x_cm": 3.0189731279502507,
+      "std_y_cm": 2.9471744518598717
+    },
+    "surveyed_geometry_rolling": {
+      "bias_cm": 0.4834239443192884,
+      "count": 5023,
+      "max_cm": 9.414423357994053,
+      "mean_x_m": 1.5035140345885702,
+      "mean_y_m": 1.4966801458007235,
+      "p95_cm": 2.837166482716281,
+      "rate_hz": 166.98899590450316,
+      "rmse_cm": 1.643664624061522,
+      "std_x_cm": 1.1439059110003793,
+      "std_y_cm": 1.076989033322633
+    }
+  }
+]

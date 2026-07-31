@@ -23,9 +23,12 @@ PROTOCOL_MODES = {
 
 RANGING_RESULT_RE = re.compile(
     r"\bUWB_RANGING result\s+tag=(?P<tag>\d+)\s+"
-    r"anchor=(?P<anchor>\d+)\s+seq=(?P<seq>\d+)\s+"
+    r"anchor=(?P<anchor>\d+)\s+(?:seq|frame)=(?P<seq>\d+)\s+"
     r"distance=(?P<distance>[+-]?(?:\d+(?:\.\d*)?|\.\d+))\s+m\b"
-    r".*?\btoken=0x(?P<token>[0-9a-fA-F]+)\s+"
+)
+
+RANGING_CONTEXT_RE = re.compile(
+    r"\btoken=0x(?P<token>[0-9a-fA-F]+)\s+"
     r"round=(?P<round>\d+)\s+slot=(?P<slot>\d+)"
 )
 
@@ -327,16 +330,27 @@ def capture_timing_logs(
             break
         for item in logs:
             cursor = max(cursor, int(item.get("id") or 0))
-            match = RANGING_RESULT_RE.search(str(item.get("message") or ""))
+            message = str(item.get("message") or "")
+            match = RANGING_RESULT_RE.search(message)
             if match is not None:
+                context = RANGING_CONTEXT_RE.search(message)
                 ranging_items.append(
                     {
                         "tag_id": int(match.group("tag")),
                         "anchor_id": int(match.group("anchor")),
                         "seq": int(match.group("seq")),
-                        "context_token": int(match.group("token"), 16),
-                        "round_index": int(match.group("round")),
-                        "slot_index": int(match.group("slot")),
+                        "context_token": (
+                            int(context.group("token"), 16)
+                            if context is not None else 0
+                        ),
+                        "round_index": (
+                            int(context.group("round"))
+                            if context is not None else 0
+                        ),
+                        "slot_index": (
+                            int(context.group("slot"))
+                            if context is not None else 0
+                        ),
                         "distance_m": float(match.group("distance")),
                         "log_id": item.get("id"),
                         "source_module_id": item.get("module_id"),

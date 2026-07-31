@@ -94,6 +94,7 @@ TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE = 9
 TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2 = 10
 TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3 = 11
 TELEMETRY_STREAM_PASSIVE_DS_POSITION_V4 = 12
+TELEMETRY_STREAM_NATIVE_DS_TAG_RANGE = 13
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
 TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
@@ -142,6 +143,8 @@ TELEMETRY_STREAM_SAMPLE_SIZES = {
         TELEMETRY_PASSIVE_DS_POSITION_V3_SAMPLE_LEN,
     TELEMETRY_STREAM_PASSIVE_DS_POSITION_V4:
         TELEMETRY_PASSIVE_DS_POSITION_V4_SAMPLE_LEN,
+    TELEMETRY_STREAM_NATIVE_DS_TAG_RANGE:
+        TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN,
 }
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
 
@@ -721,6 +724,7 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
             TELEMETRY_STREAM_FLEX_ANCHOR_RANGE,
             TELEMETRY_STREAM_PASSIVE_DS_ANCHOR_RANGE,
             TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE,
+            TELEMETRY_STREAM_NATIVE_DS_TAG_RANGE,
         ):
             (
                 uptime_ms,
@@ -740,6 +744,8 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                             "uwb.passive_ds.anchor_range",
                         TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE:
                             "uwb.native_ds.anchor_range",
+                        TELEMETRY_STREAM_NATIVE_DS_TAG_RANGE:
+                            "uwb.native_ds.tag_range",
                     }.get(
                         stream_type, "uwb.flex_tdoa.anchor_range"
                     ),
@@ -747,6 +753,8 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                         TELEMETRY_STREAM_PASSIVE_DS_ANCHOR_RANGE:
                             "passive_ds",
                         TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE:
+                            "native_ds",
+                        TELEMETRY_STREAM_NATIVE_DS_TAG_RANGE:
                             "native_ds",
                     }.get(stream_type, "flextdoa"),
                     "slot_id": int(slot_id),
@@ -1023,9 +1031,10 @@ class DashboardState:
                 elif topic in (
                     "uwb.flex_tdoa.anchor_range",
                     "uwb.passive_ds.anchor_range",
+                    "uwb.native_ds.anchor_range",
                 ):
                     self.record_tdoa_anchor_sample_locked(sample)
-                elif topic == "uwb.native_ds.anchor_range":
+                elif topic == "uwb.native_ds.tag_range":
                     self.record_native_ds_range_sample_locked(sample)
                 elif topic in (
                     "uwb.flex_tdoa.position",
@@ -3419,10 +3428,6 @@ tr.status-stale td { color: #4f3b1d; }
             <select id="positionSolver"><option value="flextdoa" selected>FlexTDOA</option><option value="passive_ds">Passive DS-TWR</option><option value="ranging">Native DS-TWR</option><option value="hybrid">Legacy hybrid logs</option></select>
             <label for="positionAnchors">Anchor IDs</label>
             <input id="positionAnchors" value="2,3,4,5">
-            <label class="native-ds-position-option" for="positionNativeAnchorX">Anchor X coordinates m</label>
-            <input class="native-ds-position-option" id="positionNativeAnchorX" value="0,0,2.971,3.196">
-            <label class="native-ds-position-option" for="positionNativeAnchorY">Anchor Y coordinates m</label>
-            <input class="native-ds-position-option" id="positionNativeAnchorY" value="0,3.067,-0.071,2.974">
             <label for="positionTags">Tag IDs</label>
             <input id="positionTags" value="1">
             <label for="positionMaxAgeSec">Fresh age s</label>
@@ -3443,9 +3448,9 @@ tr.status-stale td { color: #4f3b1d; }
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
             <div><b>Ranging method</b><span>FlexTDOA and Passive DS-TWR use receive-only tags. Native DS-TWR ranges each active tag to every anchor. Each protocol keeps independent timing profiles.</span></div>
-            <div class="native-ds-position-option"><b>Native calculation</b><span>The Raspberry solves one unfiltered all-anchor position only after all four raw ranges from the same frame arrive. Coordinates follow the Anchor IDs order.</span></div>
+            <div class="native-ds-position-option"><b>Native calculation</b><span>The Raspberry uses every fresh tag range for the live marker. Accuracy metrics and the trail use complete 4/4 frames.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In both passive protocols every non-anchor module only listens on UWB, so additional tags consume no radio slots.</span></div>
-            <div><b>Geometry</b><span>FlexTDOA and Passive DS-TWR may estimate live geometry. The clean Native DS-TWR baseline does not add anchor-to-anchor traffic; enter its known anchor coordinates above.</span></div>
+            <div><b>Geometry</b><span>Every live protocol reconstructs anchor geometry from native anchor-to-anchor ranges. Moving an anchor physically updates both the displayed layout and the position solver.</span></div>
             <div><b>Known reference</b><span>Use the anchor centroid while the tag is physically centered. Manual coordinates support other surveyed test points.</span></div>
           </div>
           <div class="form-actions">
@@ -4010,7 +4015,7 @@ tr.status-stale td { color: #4f3b1d; }
           <div class="flex-timing-head">
             <div>
               <h2>Passive DS-TWR Protocol Timing</h2>
-              <div class="muted">Three on-air frames per anchor pair: POLL → RESP → FINAL. Tags only receive POLL and RESP; FINAL completes anchor-to-anchor DS-TWR.</div>
+              <div class="muted">Three on-air packets per anchor-pair exchange: POLL → RESP → FINAL. Receive-only tags listen to all three packets and transmit none.</div>
             </div>
           </div>
           <div id="passiveDsTimingDiagram" class="muted">Waiting for Passive DS-TWR runtime status...</div>
@@ -4248,11 +4253,16 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p class="muted profile-note">Both variants use exactly POLL, RESP and FINAL. Fast Star keeps A1 as the position reference for three frames, then uses one rotating maintenance frame so every physical anchor pair remains observable. Robust Rotating changes the reference after every complete frame, adding maximum path diversity while tag count remains free.</p>
+          <p class="muted profile-note">Both variants use exactly POLL, RESP and FINAL. Fast Star keeps the first configured anchor as the position reference for three frames, then uses one rotating maintenance frame so every physical anchor pair remains observable. Robust Rotating changes the reference after every complete frame, adding maximum path diversity while tag count remains free.</p>
+          <div id="passiveDsActiveProfile" class="profile-validation">Waiting for live Passive DS-TWR timing...</div>
+          <div class="form-actions">
+            <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="fast">Apply Fast Star · 10 ms Maximum</button>
+            <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="robust">Apply Robust Rotating · 10 ms Maximum</button>
+          </div>
           <div class="profile-grid">
             <div class="profile-card passive-ds-profile-card" data-passive-ds-profile="fast">
               <h3>Fast Star</h3>
-              <p class="muted">A1 initiates one exchange to every other anchor. Lowest coordination overhead and fastest steady-state position frame.</p>
+              <p class="muted">The first configured anchor initiates one exchange to every other anchor for three frames; the fourth is a rotating geometry-maintenance frame.</p>
               <div class="profile-validation">implementation baseline · hardware validation pending</div>
               <div class="form-grid compact">
                 <label for="passiveDsFastSpeedPreset">Speed preset</label><select id="passiveDsFastSpeedPreset" class="passive-ds-speed-preset"><option value="safe">16 ms Safe · 62.5 Hz</option><option value="balanced">13 ms Balanced · 76.9 Hz</option><option value="maximum">10 ms Maximum · 100 Hz</option><option value="custom">Custom timing</option></select>
@@ -4270,7 +4280,7 @@ tr.status-stale td { color: #4f3b1d; }
             </div>
             <div class="profile-card passive-ds-profile-card" data-passive-ds-profile="robust">
               <h3>Robust Rotating</h3>
-              <p class="muted">The reference rotates A1 → A2 → A3 → A4 after each frame. Every position frame remains solvable, with diversified directed paths over a superframe.</p>
+              <p class="muted">The reference rotates through the configured anchor order after every frame. Every position frame remains solvable, with diversified directed paths over a superframe.</p>
               <div class="profile-validation">diversity profile · hardware validation pending</div>
               <div class="form-grid compact">
                 <label for="passiveDsRobustSpeedPreset">Speed preset</label><select id="passiveDsRobustSpeedPreset" class="passive-ds-speed-preset"><option value="safe">16 ms Safe · 62.5 Hz</option><option value="balanced">13 ms Balanced · 76.9 Hz</option><option value="maximum">10 ms Maximum · 100 Hz</option><option value="custom">Custom timing</option></select>
@@ -4685,13 +4695,29 @@ const rangingProfileFields = [
   {key: "autoRxDelayUus", suffix: "AutoRxDelayUus", label: "Auto RX delay UUS", min: 1, step: 1},
 ];
 const rangingProfileDefaults = {
+  reference100: {
+    prefix: "profileReference100",
+    label: "100 ms Slot Precision Reference",
+    description: "Validated Native DS-TWR and antenna-delay calibration reference. Each anchor has a 100 ms exchange slot; four anchors plus the 10 ms guard time produce a 410 ms complete position frame.",
+    validationClass: "good",
+    validationText: "validated calibrated reference · 2026-07-31",
+    buttonLabel: "Apply 100 ms Reference",
+    dsPositionMaxAgeSec: 0.5,
+    slotMs: 100,
+    roundGapMs: 10,
+    dsRxSliceMs: 100,
+    timeoutMs: 90,
+    respDelayMs: 20,
+    finalDelayMs: 20,
+    autoRxDelayUus: 500,
+  },
   frame64: {
     prefix: "profileFrame64",
-    label: "64 ms Stable Reference",
-    description: "Native DS-TWR reference with one millisecond of scheduling reserve per anchor over the 60 ms speed target.",
-    validationClass: "good",
-    validationText: "active clean reference",
-    buttonLabel: "Apply 64 ms Reference",
+    label: "64 ms Rejected Timing Interaction",
+    description: "Retained as a diagnostic profile. On the current clean runtime its 15 ms slots interact poorly with live geometry traffic and produced tag and anchor-range spikes.",
+    validationClass: "bad",
+    validationText: "rejected · 3 tag spikes + 10 geometry spikes / 180 s",
+    buttonLabel: "Apply 64 ms Diagnostic",
     dsPositionMaxAgeSec: 0.2,
     slotMs: 15,
     roundGapMs: 4,
@@ -4703,11 +4729,11 @@ const rangingProfileDefaults = {
   },
   frame60: {
     prefix: "profileFrame60",
-    label: "60 ms Precision-Speed Target",
-    description: "Fast Native DS-TWR target retained for direct comparison with the 64 ms stable reference.",
-    validationClass: "warn",
-    validationText: "next clean validation step",
-    buttonLabel: "Apply 60 ms Target",
+    label: "60 ms Validated Fast Profile",
+    description: "Fastest recommended Native DS-TWR profile. The current calibrated runtime preserved reference precision and produced zero tag-ranging spikes during a 180 s validation.",
+    validationClass: "good",
+    validationText: "recommended · 1.64 cm RMS · 12.21 coherent frames/s · 0 tag spikes / 180 s",
+    buttonLabel: "Apply 60 ms Fast Profile",
     dsPositionMaxAgeSec: 0.2,
     slotMs: 14,
     roundGapMs: 4,
@@ -5464,7 +5490,7 @@ function switchPositionProtocolSettings() {
   const restartGeometry =
     document.getElementById("positionRestartAnchorSelfLocalization");
   if (restartGeometry) {
-    const available = solver !== "hybrid" && solver !== "ranging";
+    const available = solver !== "hybrid";
     restartGeometry.disabled = !available;
     restartGeometry.title = available
       ? "Clear any legacy fixed geometry and restart the live anchor estimate."
@@ -5477,19 +5503,6 @@ function positionSettings() {
   const solver = normalizePositionSolver(document.getElementById("positionSolver")?.value || "flextdoa");
   const anchorIds = parseIdList(document.getElementById("positionAnchors")?.value, anchorCount);
   const tagIds = parseIdList(document.getElementById("positionTags")?.value);
-  const nativeAnchorX = parseCoordinateList(
-    document.getElementById("positionNativeAnchorX")?.value, anchorIds.length);
-  const nativeAnchorY = parseCoordinateList(
-    document.getElementById("positionNativeAnchorY")?.value, anchorIds.length);
-  const nativeAnchorCoordinates = {};
-  if (nativeAnchorX.length === anchorIds.length &&
-      nativeAnchorY.length === anchorIds.length) {
-    anchorIds.forEach((anchorId, index) => {
-      nativeAnchorCoordinates[anchorId] = {
-        x: nativeAnchorX[index], y: nativeAnchorY[index],
-      };
-    });
-  }
   const maxAge = Math.max(0.2, Number(document.getElementById("positionMaxAgeSec")?.value || 3));
   const referenceMode = String(document.getElementById("positionReferenceMode")?.value || "none");
   const referenceX = Number(document.getElementById("positionReferenceX")?.value);
@@ -5506,8 +5519,7 @@ function positionSettings() {
     referenceX,
     referenceY,
     errorWindowSec,
-    nativeAnchorCoordinates,
-    nativeDsUpdateMode: "coherent",
+    nativeDsUpdateMode: "rolling",
     nativeDsFit: "all_anchor",
   };
 }
@@ -6428,72 +6440,6 @@ function persistedModuleGeometryResult(anchorIds, persisted, protocol) {
   };
 }
 
-function nativeDsKnownGeometry(anchorIds, configuredAnchors) {
-  const anchors = {};
-  for (const anchorId of anchorIds) {
-    const point = configuredAnchors?.[anchorId];
-    if (!point || !Number.isFinite(Number(point.x)) ||
-        !Number.isFinite(Number(point.y))) {
-      return {
-        anchors: {}, distanceItems: {}, residuals: {},
-        missingPairs: selectedAnchorPairs(anchorIds), complete: false,
-        positionReady: false, canFix: false, status: "invalid-known",
-        protocol: "native_ds",
-      };
-    }
-    anchors[anchorId] = {x: Number(point.x), y: Number(point.y)};
-  }
-  if (anchorIds.length >= 3) {
-    const first = anchors[anchorIds[0]];
-    const second = anchors[anchorIds[1]];
-    const third = anchors[anchorIds[2]];
-    const doubleArea = Math.abs(
-      (second.x - first.x) * (third.y - first.y) -
-      (second.y - first.y) * (third.x - first.x));
-    if (!Number.isFinite(doubleArea) || doubleArea < 0.01) {
-      return {
-        anchors: {}, distanceItems: {}, residuals: {},
-        missingPairs: selectedAnchorPairs(anchorIds), complete: false,
-        positionReady: false, canFix: false, status: "invalid-known",
-        protocol: "native_ds",
-      };
-    }
-  }
-  const distanceItems = {};
-  const residuals = {};
-  for (const [a, b] of selectedAnchorPairs(anchorIds)) {
-    const key = anchorPairKey(a, b);
-    const distanceM = Math.hypot(
-      anchors[a].x - anchors[b].x, anchors[a].y - anchors[b].y);
-    distanceItems[key] = {
-      anchor_a_id: a,
-      anchor_b_id: b,
-      initiator_id: a,
-      responder_id: b,
-      distance_m: distanceM,
-      accepted_distance_m: distanceM,
-      age_sec: 0,
-      geometry_gate_status: "known coordinates",
-      geometry_held: true,
-      stats: {robust_sigma_m: null},
-    };
-    residuals[key] = 0;
-  }
-  return {
-    anchors,
-    distanceItems,
-    missingPairs: [],
-    residuals,
-    fitQuality: {acceptable: true, rmsM: 0},
-    complete: true,
-    positionReady: true,
-    canFix: false,
-    status: "known",
-    protocol: "native_ds",
-    sourceLabel: "Known coordinates from Position Setup",
-  };
-}
-
 function resetPaperAnchorSelfLocalization(
   anchorIds, solver, forgetStored = true
 ) {
@@ -6575,13 +6521,8 @@ function smoothPublishedAnchorCoordinates(ekf, targetAnchors, updated) {
   return ekf.publishedAnchors;
 }
 
-function paperAnchorGeometry(
-  anchorIds, maxAge, solver, nativeAnchorCoordinates = null
-) {
+function paperAnchorGeometry(anchorIds, maxAge, solver) {
   const protocol = positionGeometryProtocol(solver);
-  if (protocol === "native_ds") {
-    return nativeDsKnownGeometry(anchorIds, nativeAnchorCoordinates);
-  }
   const key = `${protocol}:${positionGeometryKey(anchorIds)}`;
   // Remove the browser-side fixed coordinates written by older dashboard
   // releases. They are intentionally not a fallback for live positioning.
@@ -6600,7 +6541,9 @@ function paperAnchorGeometry(
   }
 
   if (!session.ekf) {
-    const persisted = persistedModuleAnchorGeometry(anchorIds);
+    const persisted = protocol === "native_ds"
+      ? null
+      : persistedModuleAnchorGeometry(anchorIds);
     if (persisted) {
       return persistedModuleGeometryResult(
         anchorIds, persisted, protocol);
@@ -7220,8 +7163,7 @@ function computePositionModel() {
   });
   const active = positionRangingActive(settings);
   const geometry = paperAnchorGeometry(
-    settings.anchorIds, positionGeometryMaxAge(settings), settings.solver,
-    settings.nativeAnchorCoordinates);
+    settings.anchorIds, positionGeometryMaxAge(settings), settings.solver);
   const anchors = {...(geometry?.anchors || {})};
 
   if (!active && state.positionWasActive) {
@@ -7372,6 +7314,28 @@ function computePositionModel() {
               solvedAtMs: performance.now(),
             };
           }
+        }
+        const rollingSourceItems = {};
+        const rollingFreshAgeSec = nativeDsEffectiveFreshAgeSec(settings);
+        for (const anchorId of expectedAnchorIds) {
+          const item = state.ranging?.distances?.[`${tagId}:${anchorId}`];
+          if (!item || localPositionAge(item, now) > rollingFreshAgeSec) continue;
+          rollingSourceItems[String(anchorId)] = item;
+        }
+        const rollingSolution = solveNativeDsPosition(
+          expectedAnchorIds,
+          anchors,
+          rollingSourceItems,
+          now
+        );
+        if (rollingSolution.position) {
+          position = rollingSolution.position;
+          accuracy = rollingSolution.accuracy;
+          residuals = rollingSolution.residuals;
+          for (const key of Object.keys(distances)) delete distances[key];
+          for (const key of Object.keys(distanceItems)) delete distanceItems[key];
+          Object.assign(distances, rollingSolution.distances);
+          Object.assign(distanceItems, rollingSolution.distanceItems);
         }
         if (!position) {
           const lastSolution =
@@ -7905,7 +7869,8 @@ function renderPositionSolverStatus(model) {
       <div class="position-filter-row">
         <span class="position-pill">DS-TWR ranges</span>
         <span class="position-pill good">Raspberry solver</span>
-        <span class="position-pill good">raw coherent frames only (4/4)</span>
+        <span class="position-pill good">rolling live marker</span>
+        <span class="position-pill good">coherent metrics + trail (4/4)</span>
         <span class="position-pill good">unfiltered all-anchor fit</span>
         ${coherentPill}
         ${holdPill}
@@ -8026,19 +7991,13 @@ function renderPositionReadout(model) {
   const missingCoords = model.settings.anchorIds.filter(id => !model.anchors[id]);
   if (missingCoords.length) {
     overlay.classList.add("active");
-    const native = model.settings.solver === "ranging";
-    overlay.querySelector("h2").textContent = native
-      ? "Native anchor coordinates are invalid"
-      : "Waiting for live anchor geometry";
-    overlay.querySelector("p").textContent = native
-      ? "Enter one finite X and Y coordinate per Anchor ID. The Raspberry needs known geometry to solve the position."
-      : `Waiting for fresh ${solverName} anchor-to-anchor ranges involving: ` +
-        `${missingCoords.join(", ")}. Positioning starts automatically when ` +
-        "the dynamic geometry is complete.";
+    overlay.querySelector("h2").textContent = "Waiting for live anchor geometry";
+    overlay.querySelector("p").textContent =
+      `Waiting for fresh ${solverName} anchor-to-anchor ranges involving: ` +
+      `${missingCoords.join(", ")}. Positioning starts automatically when ` +
+      "the dynamic geometry is complete.";
     if (overlayButton) {
-      overlayButton.textContent = native
-        ? "Check Anchor Coordinates"
-        : "Waiting for Anchor Ranges";
+      overlayButton.textContent = "Waiting for Anchor Ranges";
       overlayButton.disabled = true;
       overlayButton.dataset.action = "wait";
     }
@@ -8095,9 +8054,7 @@ function renderPositionReadout(model) {
     return `<div class="position-tag-card"><b id="positionTagSummary${esc(tag.tagId)}">Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span id="positionTagMeta${esc(tag.tagId)}">${countText}${accuracyText}${referenceText}</span></div>`;
   });
   const emptyTagCard = !model.geometry?.positionReady
-    ? model.settings.solver === "ranging"
-      ? `<div class="position-tag-card"><b>waiting for known geometry</b><span>Enter valid anchor coordinates in Position Setup.</span></div>`
-      : `<div class="position-tag-card"><b>waiting for live geometry</b><span>Positioning starts automatically after fresh anchor-to-anchor ranges initialize the EKF.</span></div>`
+    ? `<div class="position-tag-card"><b>waiting for live geometry</b><span>Positioning starts automatically after fresh anchor-to-anchor ranges initialize the EKF.</span></div>`
     : `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
   readout.innerHTML = `${renderPositionSolverStatus(model)}${tagCards.join("") || emptyTagCard}`;
   const accuracyTableRows = Object.values(model.tags).map(tag => {
@@ -8511,6 +8468,13 @@ function ingestDsTwrStreamSample(item) {
       !settings.tagIds.includes(tagId)) return;
   if (!settings.anchorIds.includes(anchorId)) return;
   const nowMs = performance.now();
+  state.positionStreamLatestEvent = {
+    token: `ds:${tagId}:${anchorId}:${frameId}:${item?.received_at ?? nowMs}`,
+    arrivalMs: nowMs,
+  };
+  state.positionStreamRxTimes.push(nowMs);
+  trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
+  schedulePositionStreamRender();
 
   const frameKey = `${tagId}:frame:${frameId}`;
   let frame = state.dsPositionFrameBuckets.get(frameKey);
@@ -8590,15 +8554,8 @@ function ingestDsTwrStreamSample(item) {
   state.nativeDsFrameDiagnostics.lastSpanMs = spanMs;
   state.nativeDsFrameDiagnostics.lastFrameKey =
     `frame:${frameId}`;
-  state.positionStreamLatestEvent = {
-    token: `ds:${frameKey}`,
-    arrivalMs: nowMs,
-  };
-  state.positionStreamRxTimes.push(nowMs);
-  trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
   state.positionStreamIndependentTimes.push(nowMs);
   trimPositionRateWindow(state.positionStreamIndependentTimes, nowMs);
-  schedulePositionStreamRender();
 }
 
 function ingestPositionStreamSample(item) {
@@ -9925,6 +9882,7 @@ function renderInfo(snapshot) {
   renderFlexTdoaTimingDiagram();
   renderNativeDsTwrTimingDiagram();
   renderPassiveDsTimingDiagram();
+  renderPassiveDsActiveProfile();
   renderPassiveDsExperimentControls();
   renderPassiveDsCalibration();
   scheduleAccelRender();
@@ -11166,7 +11124,7 @@ function updateRangingSettingsProtocol() {
     passive_ds: {
       title: "Passive DS-TWR Settings",
       label: "Passive DS-TWR",
-      hint: "Selected in Position Setup. Anchors exchange native three-frame DS-TWR while every non-anchor tag only receives.",
+      hint: "Selected in Position Setup. Anchors exchange native three-packet DS-TWR while every non-anchor tag only receives.",
       note: "Fast Star uses one rotating maintenance frame in four to keep the full anchor geometry observable. Robust Rotating changes reference every frame. Their timing remains separate from native DS-TWR and FlexTDOA.",
     },
     hybrid: {
@@ -11205,6 +11163,7 @@ function updateRangingSettingsProtocol() {
   if (solver === "ranging") renderNativeDsTwrTimingDiagram();
   if (solver === "passive_ds") {
     renderPassiveDsTimingDiagram();
+    renderPassiveDsActiveProfile();
     renderPassiveDsExperimentControls();
   }
 }
@@ -11327,7 +11286,7 @@ function renderFlexTdoaTimingDiagram() {
   ));
   state.flexTimingSlotIndex = selectedIndex;
   selector.innerHTML = config.initiators.map((initiatorId, index) =>
-    `<option value="${index}">frame[${index}] · A${esc(initiatorId)}</option>`
+    `<option value="${index}">slot[${index}] · A${esc(initiatorId)}</option>`
   ).join("");
   selector.value = String(selectedIndex);
 
@@ -11361,7 +11320,7 @@ function renderFlexTdoaTimingDiagram() {
       config.live && index === liveSlotIndex ? "live" : "",
     ].filter(Boolean).join(" ");
     return `<div class="${classes}">
-      <b>slot ${esc(absoluteSlotId)} · frame[${index}]</b>
+      <b>slot[${index}] · seq ${esc(absoluteSlotId)}</b>
       <strong>A${esc(initiatorId)} initiator</strong>
       <span title="${esc(responders.map(id => `A${id}`).join(" → "))}">RESP ${esc(responders.map(id => `A${id}`).join(" → "))}</span>
     </div>`;
@@ -11385,7 +11344,7 @@ function renderFlexTdoaTimingDiagram() {
       detail: `A${anchorId} delayed TX`,
     })),
     {key: "Process RESP", short: "P_RESP", duration: responseProcessTotalUs, cls: "response-process", detail: `${K} × ${timing.responseProcessUs} us`},
-    {key: "Gap", short: "GAP", duration: timing.guardUs, cls: "guard", detail: "quiet guard before next REQ"},
+    {key: "Guard time", short: "GUARD TIME", duration: timing.guardUs, cls: "guard", detail: "quiet guard before next REQ"},
   ];
   const segmentCells = segments.map(segment => {
     return `<div class="flex-slot-segment ${segment.cls}" title="${esc(`${segment.key}: ${segment.detail}, ${segment.duration} us`)}">
@@ -11476,7 +11435,7 @@ function renderFlexTdoaTimingDiagram() {
           </div>
           <div class="flex-dimension gap" style="left:${100 * (slotUs - timing.guardUs) / slotUs}%;width:${100 * timing.guardUs / slotUs}%;top:31px">
             <div class="flex-dimension-line"></div>
-            <span class="flex-dimension-label">In-slot GAP = ${timing.guardUs} us</span>
+            <span class="flex-dimension-label">GUARD TIME = ${timing.guardUs} us</span>
           </div>
         </div>
         <div class="flex-host-window">
@@ -11532,7 +11491,7 @@ function renderFlexTdoaTimingDiagram() {
         </tbody>
       </table>
     </div>
-    <div class="flex-timing-note">The cyclic view starts at REQ. Colored widths are protocol time budgets, not packet airtime: REQ and each RESP transmit at their subslot boundary. The final ${timing.guardUs} us GAP is the configured guard interval inside every slot; pure FlexTDOA has no separate frame-level round gap. P_RESP is K × ${timing.responseProcessUs} us. Response offsets are native DW3000 delayed-TX targets relative to REQ_RX.</div>`;
+    <div class="flex-timing-note">The cyclic view starts at REQ. Colored widths are protocol time budgets, not packet airtime: REQ and each RESP transmit at their subslot boundary. The final ${timing.guardUs} us GUARD TIME is the configured quiet interval inside every slot; pure FlexTDOA has no separate frame-level round gap. P_RESP is K × ${timing.responseProcessUs} us. Response offsets are native DW3000 delayed-TX targets relative to REQ_RX.</div>`;
 }
 
 const dsTimingFallback = {
@@ -12027,6 +11986,63 @@ function profileSummaryScheduleLabel(key) {
   return key === "robust" ? "Robust Rotating" : "Fast Star";
 }
 
+function renderPassiveDsActiveProfile() {
+  const root = document.getElementById("passiveDsActiveProfile");
+  if (!root) return;
+  const freshStatuses = state.statuses.filter(statusIsFresh);
+  const statuses = freshStatuses.filter(item =>
+    item.runtime_mode_name === "uwb_passive_ds_twr"
+  );
+  if (!statuses.length) {
+    root.textContent = "Passive DS-TWR is not active on any fresh module.";
+    root.className = "profile-validation warn";
+    return;
+  }
+  const timing = item => ({
+    schedule: Number(item.runtime_passive_ds_schedule),
+    slotMs: Number(item.runtime_passive_ds_slot_ms),
+    gapMs: Number(item.runtime_passive_ds_round_gap_ms),
+    rxMs: Number(item.runtime_passive_ds_rx_slice_ms),
+    timeoutMs: Number(item.runtime_passive_ds_rx_timeout_ms),
+    respUs: Number(item.runtime_passive_ds_resp_delay_us),
+    finalUs: Number(item.runtime_passive_ds_final_delay_us),
+    autoRxUus: Number(item.runtime_passive_ds_auto_rx_delay_uus),
+    anchorCount: Math.max(3, (item.runtime_anchor_ids || []).length),
+  });
+  const live = timing(statuses[0]);
+  const fields = [
+    "schedule", "slotMs", "gapMs", "rxMs", "timeoutMs",
+    "respUs", "finalUs", "autoRxUus", "anchorCount",
+  ];
+  const consistent = statuses.every(item => {
+    const candidate = timing(item);
+    return fields.every(field => candidate[field] === live[field]);
+  });
+  if (!consistent) {
+    root.textContent =
+      `Passive DS-TWR timing differs between the ${statuses.length} active modules.`;
+    root.className = "profile-validation warn";
+    return;
+  }
+  const presetKey = matchingPassiveDsSpeedPreset(live);
+  const presetLabel = passiveDsSpeedPresets[presetKey]?.label || "Custom timing";
+  const scheduleLabel = live.schedule === 1
+    ? "Robust Rotating"
+    : "Fast Star";
+  const frameMs = (live.anchorCount - 1) * live.slotMs + live.gapMs;
+  const frameHz = frameMs > 0 ? 1000 / frameMs : 0;
+  root.textContent =
+    `Active on ${statuses.length}/${freshStatuses.length || statuses.length} modules: ` +
+    `${scheduleLabel} · ${presetLabel} · ${fmtFixed(frameMs, 0)} ms frame · ` +
+    `${fmtFixed(frameHz, 2)} Hz · RESP/FINAL ${live.respUs}+${live.finalUs} µs.`;
+  root.className = "profile-validation good";
+}
+
+async function applyPassiveDsQuickProfile(key) {
+  applyPassiveDsSpeedPreset(key, "maximum");
+  await applyPassiveDsProfile(key);
+}
+
 async function applyPassiveDsProfile(key) {
   const profile = passiveDsProfileDefaults[key];
   const values = readPassiveDsProfile(key);
@@ -12312,10 +12328,65 @@ function renderPassiveDsTimingDiagram() {
     : `A${config.anchorIds[0]} · maintenance every 4th`;
   const slotCards = config.anchorIds.slice(1).map((anchorId, index) => `
     <div class="flex-frame-slot">
-      <b>frame[${index}] · ${fmtFixed(index * config.slotMs, 0)} ms</b>
+      <b>slot[${index}] · ${fmtFixed(index * config.slotMs, 0)} ms</b>
       <strong>${robust ? "current reference" : `A${esc(config.anchorIds[0])}`} ↔ A${esc(anchorId)}</strong>
       <span>POLL → RESP → FINAL</span>
     </div>`).join("");
+  const gapCell = config.gapMs > 0
+    ? `<div class="ds-frame-gap"><b>frame gap</b><strong>${fmtFixed(config.gapMs, 0)} ms</strong><span>quiet scheduler gap</span></div>`
+    : "";
+  const frameColumns = [
+    ...Array.from({length: slots}, () =>
+      `${Math.max(0.001, config.slotMs)}fr`),
+    ...(config.gapMs > 0
+      ? [`${Math.max(0.001, config.gapMs)}fr`]
+      : []),
+  ].join(" ");
+  const frameBoundaries = [0];
+  for (let index = 1; index <= slots; index += 1) {
+    frameBoundaries.push(index * config.slotMs);
+  }
+  if (config.gapMs > 0) frameBoundaries.push(frameMs);
+  const frameAxis = frameBoundaries.map((value, index) =>
+    flexTimingAxisMark(
+      100 * value / frameMs,
+      `${fmtFixed(value, 0)} ms`,
+      index === 0 ? "edge-start" :
+        (index === frameBoundaries.length - 1 ? "edge-end" : "")
+    )
+  ).join("");
+
+  const respMs = config.respUs / 1000;
+  const finalMs = config.finalUs / 1000;
+  const guardMs = Math.max(0, config.slotMs - respMs - finalMs);
+  const timingOverrun = respMs + finalMs > config.slotMs;
+  const segments = [
+    {key: "POLL → RESP", duration: respMs, cls: "req"},
+    {key: "RESP → FINAL", duration: finalMs, cls: "response"},
+    {key: "GUARD TIME", duration: guardMs, cls: "guard"},
+  ].filter(segment => segment.duration > 0);
+  const segmentCells = segments.map(segment =>
+    `<div class="flex-slot-segment ${segment.cls}">
+      <b>${esc(segment.key)}</b><span>${fmtFixed(segment.duration, 3)} ms</span>
+    </div>`
+  ).join("");
+  const slotColumns = segments
+    .map(segment => `${Math.max(0.001, segment.duration)}fr`)
+    .join(" ");
+  let elapsedMs = 0;
+  const slotBoundaries = [0];
+  for (const segment of segments) {
+    elapsedMs += segment.duration;
+    slotBoundaries.push(elapsedMs);
+  }
+  const slotAxis = slotBoundaries.map((value, index) =>
+    flexTimingAxisMark(
+      100 * value / config.slotMs,
+      `${fmtFixed(value, 3)} ms`,
+      index === 0 ? "edge-start" :
+        (index === slotBoundaries.length - 1 ? "edge-end" : "")
+    )
+  ).join("");
   root.className = "";
   root.innerHTML = `
     <div class="flex-timing-metrics">
@@ -12327,12 +12398,39 @@ function renderPassiveDsTimingDiagram() {
       <div class="flex-timing-metric"><span>Position / EKF</span><strong>${esc(passiveDsSolveModeLabel(config.solveMode, config.rollingMaxHz))}</strong></div>
       <div class="flex-timing-metric"><span>Tag airtime</span><strong>0 packets</strong></div>
     </div>
-    <div class="flex-frame-track" style="grid-template-columns:repeat(${slots}, minmax(190px, 1fr))">${slotCards}</div>
+    <div class="flex-timing-scroll">
+      <div class="flex-timing-canvas">
+        <div class="flex-timing-label">
+          <strong>Position frame · ${slots} anchor-pair slots + frame gap</strong>
+          <span>${robust ? "reference rotates after every frame" : "three star frames + one maintenance frame"}</span>
+        </div>
+        <div class="flex-frame-track" style="grid-template-columns:${frameColumns}">${slotCards}${gapCell}</div>
+        <div class="flex-frame-axis">${frameAxis}</div>
+        <div class="flex-frame-dimensions">
+          <div class="flex-dimension" style="left:0%;width:100%;top:0">
+            <div class="flex-dimension-line"></div>
+            <span class="flex-dimension-label">Frame = ${slots} × ${fmtFixed(config.slotMs, 0)} ms + ${fmtFixed(config.gapMs, 0)} ms = ${fmtFixed(frameMs, 0)} ms</span>
+          </div>
+        </div>
+        <div class="flex-timing-label">
+          <strong>One anchor-pair exchange</strong>
+          <span>native three-packet DS-TWR</span>
+        </div>
+        <div class="flex-slot-track" style="grid-template-columns:${slotColumns}">${segmentCells}</div>
+        <div class="flex-slot-axis">${slotAxis}</div>
+        <div class="flex-dimensions">
+          <div class="flex-dimension" style="left:0%;width:100%;top:0">
+            <div class="flex-dimension-line"></div>
+            <span class="flex-dimension-label">DS-TWR slot budget = ${fmtFixed(config.slotMs, 3)} ms</span>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="flex-packet-flow" style="margin-top:12px">
       <div class="flex-packet-row"><b>POLL · reference → responder</b><code>header | slot32 | previous DS-TWR range</code></div>
       <div class="flex-packet-row"><b>RESP · responder → reference · +${esc(config.respUs)} µs</b><code>header | slot32 | exact_reply_dtu32 | previous DS-TWR range</code></div>
       <div class="flex-packet-row"><b>FINAL · reference → responder · +${esc(config.finalUs)} µs</b><code>header | poll_tx40 | resp_rx40 | final_tx40 | slot32</code></div>
-      <div class="flex-packet-row"><b>Receive-only tags</b><code>timestamp POLL_RX and RESP_RX, correct responder clock skew, emit TDOA; no absolute clock phase synchronization</code></div>
+      <div class="flex-packet-row"><b>Receive-only tags</b><code>timestamp POLL_RX, RESP_RX and FINAL_RX, then use the three-clock double-sided intervals; no CFO estimate or absolute clock synchronization</code></div>
     </div>
     <div class="flex-timing-note ${config.live ? "" : "warn"}">
       ${config.live ? "Live configuration" : "Configured fallback (Passive DS-TWR is not active)"} ·
@@ -12342,6 +12440,7 @@ function renderPassiveDsTimingDiagram() {
       ${robust
         ? `Robust Rotating spans ${fmtFixed(N * frameMs, 0)} ms before every anchor has served as reference.`
         : `Fast Star keeps its reference for three frames and rotates the fourth; a full maintenance cycle spans ${fmtFixed((N - 1) * passiveDsFastGeometryFrameInterval * frameMs, 0)} ms.`}
+      ${timingOverrun ? " Warning: RESP + FINAL exceeds the configured slot." : ""}
     </div>`;
 }
 
@@ -12409,8 +12508,7 @@ function persistedSettingIds() {
     "runtimeTargets", "runtimeMode", "runtimeTag", "runtimeAnchors", "runtimeReboot",
     "runtimeUwb", "runtimeBno085", "runtimeGps", "runtimeTelemetryPort",
     "accelTimebase", "accelSampleHz", "accelTargets",
-    "positionAnchorCount", "positionSolver", "positionAnchors",
-    "positionNativeAnchorX", "positionNativeAnchorY", "positionTags",
+    "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
     "positionReferenceMode", "positionReferenceX",
     "positionReferenceY", "positionErrorWindowSec",
     "uwbTargets", "uwbRadioChannel", "uwbFlexAnchors", "uwbFlexK",
@@ -12728,8 +12826,7 @@ function wireSettings() {
     });
   }
   [
-    "positionAnchorCount", "positionSolver", "positionAnchors",
-    "positionNativeAnchorX", "positionNativeAnchorY", "positionTags",
+    "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
     "positionMaxAgeSec", "positionReferenceMode", "positionReferenceX",
     "positionReferenceY", "positionErrorWindowSec",
   ].forEach(id => {
@@ -12738,8 +12835,7 @@ function wireSettings() {
     const update = () => {
       if (id === "positionSolver") switchPositionProtocolSettings();
       if (id === "positionMaxAgeSec") savePositionProtocolSettings();
-      if (id === "positionNativeAnchorX" ||
-          id === "positionNativeAnchorY" || id === "positionAnchors") {
+      if (id === "positionAnchors") {
         resetPositionTagTrails();
         resetNativeDsFrameAssembler();
         state.positionSeeds = {};
@@ -12872,6 +12968,11 @@ function wireSettings() {
   document.querySelectorAll(".apply-passive-ds-profile").forEach(button => {
     button.addEventListener("click", () =>
       applyPassiveDsProfile(button.dataset.passiveDsProfile)
+    );
+  });
+  document.querySelectorAll(".apply-passive-ds-quick-profile").forEach(button => {
+    button.addEventListener("click", () =>
+      applyPassiveDsQuickProfile(button.dataset.passiveDsProfile)
     );
   });
   document.querySelectorAll(".reset-passive-ds-profile").forEach(button => {

@@ -42,8 +42,9 @@ struct uwb_native_ds_radio_ops {
     void (*delay_ms)(void *context, uint32_t delay_ms);
     bool (*stop_requested)(void *context);
     void (*set_ready)(void *context);
-    void (*publish_range)(void *context, uint8_t tag_id, uint8_t anchor_id,
-                          uint16_t frame_id, double distance_m);
+    void (*publish_range)(void *context, uint8_t initiator_id,
+                          uint8_t responder_id, uint16_t frame_id,
+                          double distance_m);
 };
 
 struct uwb_native_ds_config {

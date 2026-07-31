@@ -1,0 +1,248 @@
+{
+  "bootstrap_replicates": 10000,
+  "center_method": "median per link; equal link weight",
+  "coordinate_convention": "3.000 m square; T1 static at center; full 10-link raw Native DS-TWR antenna-delay calibration capture; no corrections applied.",
+  "events_file": "reports/antenna_delay_full_graph_20260731/data/antenna_delay_full_graph_raw.jsonl",
+  "link_count": 10,
+  "links": [
+    {
+      "fit_residual_cm": 1.7916666666666752,
+      "known_m": 2.1213203435596424,
+      "mean_m": 2.2220716723549487,
+      "median_m": 2.221,
+      "module_a": 1,
+      "module_b": 2,
+      "pair": "M1-M2",
+      "raw_error_cm": 9.96796564403577,
+      "raw_error_dtu": 21.252040995712324,
+      "robust_sigma_cm": 1.4826000000000343,
+      "rounded_residual_cm": 1.9943589686676804,
+      "samples": 293,
+      "std_cm": 1.3596513164807085
+    },
+    {
+      "fit_residual_cm": 1.1749999999999867,
+      "known_m": 2.1213203435596424,
+      "mean_m": 2.208641638225256,
+      "median_m": 2.209,
+      "module_a": 1,
+      "module_b": 3,
+      "pair": "M1-M3",
+      "raw_error_cm": 8.767965644035769,
+      "raw_error_dtu": 18.693600276154474,
+      "robust_sigma_cm": 1.7791200000000014,
+      "rounded_residual_cm": 1.2633946554540376,
+      "samples": 293,
+      "std_cm": 1.607187057991007
+    },
+    {
+      "fit_residual_cm": -0.17499999999998944,
+      "known_m": 2.1213203435596424,
+      "mean_m": 2.192692832764505,
+      "median_m": 2.193,
+      "module_a": 1,
+      "module_b": 4,
+      "pair": "M1-M4",
+      "raw_error_cm": 7.1679656440357675,
+      "raw_error_dtu": 15.282345983410673,
+      "robust_sigma_cm": 1.9273799999999852,
+      "rounded_residual_cm": 0.1324303422403948,
+      "samples": 293,
+      "std_cm": 1.8529595822008151
+    },
+    {
+      "fit_residual_cm": -2.7916666666666745,
+      "known_m": 2.1213203435596424,
+      "mean_m": 2.212277397260274,
+      "median_m": 2.211,
+      "module_a": 1,
+      "module_b": 5,
+      "pair": "M1-M5",
+      "raw_error_cm": 8.967965644035747,
+      "raw_error_dtu": 19.1200070627474,
+      "robust_sigma_cm": 1.630859999999952,
+      "rounded_residual_cm": -2.7579265256232084,
+      "samples": 292,
+      "std_cm": 1.7385883387707166
+    },
+    {
+      "fit_residual_cm": -0.7536437626905108,
+      "known_m": 3.0,
+      "mean_m": 3.0737755102040816,
+      "median_m": 3.071,
+      "module_a": 2,
+      "module_b": 3,
+      "pair": "M2-M3",
+      "raw_error_cm": 7.100000000000017,
+      "raw_error_dtu": 15.137440924050642,
+      "robust_sigma_cm": 1.630860000000018,
+      "rounded_residual_cm": -0.8736066753680718,
+      "samples": 49,
+      "std_cm": 1.4457912608139214
+    },
+    {
+      "fit_residual_cm": 0.9463562373094642,
+      "known_m": 3.0,
+      "mean_m": 3.0869375,
+      "median_m": 3.0854999999999997,
+      "module_a": 2,
+      "module_b": 4,
+      "pair": "M2-M4",
+      "raw_error_cm": 8.549999999999969,
+      "raw_error_dtu": 18.228890126849606,
+      "robust_sigma_cm": 0.815429999999943,
+      "rounded_residual_cm": 1.045429011418238,
+      "samples": 48,
+      "std_cm": 0.8050378484891235
+    },
+    {
+      "fit_residual_cm": -1.984379141285649,
+      "known_m": 4.242640687119285,
+      "mean_m": 4.3453333333333335,
+      "median_m": 4.343,
+      "module_a": 2,
+      "module_b": 5,
+      "pair": "M2-M5",
+      "raw_error_cm": 10.03593128807152,
+      "raw_error_dtu": 21.396946055072355,
+      "robust_sigma_cm": 1.0378199999999516,
+      "rounded_residual_cm": -2.1589965683737935,
+      "samples": 48,
+      "std_cm": 1.2334459408052318
+    },
+    {
+      "fit_residual_cm": -2.984379141285632,
+      "known_m": 4.242640687119285,
+      "mean_m": 4.287387755102041,
+      "median_m": 4.283,
+      "module_a": 3,
+      "module_b": 4,
+      "pair": "M3-M4",
+      "raw_error_cm": 4.035931288071559,
+      "raw_error_dtu": 8.604742457283196,
+      "robust_sigma_cm": 2.372160000000002,
+      "rounded_residual_cm": -2.9996040137238134,
+      "samples": 49,
+      "std_cm": 1.6743949655397148
+    },
+    {
+      "fit_residual_cm": 2.563022903976157,
+      "known_m": 3.0,
+      "mean_m": 3.141877551020408,
+      "median_m": 3.14,
+      "module_a": 3,
+      "module_b": 5,
+      "pair": "M3-M5",
+      "raw_error_cm": 14.000000000000012,
+      "raw_error_dtu": 29.84847506150826,
+      "robust_sigma_cm": 1.186080000000001,
+      "rounded_residual_cm": 2.274107830341057,
+      "samples": 49,
+      "std_cm": 1.1596327098084265
+    },
+    {
+      "fit_residual_cm": 2.2130229039761584,
+      "known_m": 3.0,
+      "mean_m": 3.135673469387755,
+      "median_m": 3.134,
+      "module_a": 4,
+      "module_b": 5,
+      "pair": "M4-M5",
+      "raw_error_cm": 13.39999999999999,
+      "raw_error_dtu": 28.56925470172929,
+      "robust_sigma_cm": 1.630860000000018,
+      "rounded_residual_cm": 2.143143517127393,
+      "samples": 49,
+      "std_cm": 1.588271779948384
+    }
+  ],
+  "matrix_condition": 1.6329931618554525,
+  "matrix_rank": 5,
+  "metadata_file": "reports/antenna_delay_full_graph_20260731/data/antenna_delay_full_graph_raw.metadata.json",
+  "meters_per_dtu": 0.004690356867863582,
+  "module_ids": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "modules": [
+    {
+      "bootstrap_ci95_dtu": [
+        7.922944601831941,
+        8.651389528928238
+      ],
+      "correction_cm_equivalent": 3.7522854942908657,
+      "correction_dtu": 8,
+      "correction_float_dtu": 8.43818613563177,
+      "module_id": 1,
+      "old_delay": 16363,
+      "old_delay_hex": "0x3feb",
+      "proposed_delay": 16371,
+      "proposed_delay_hex": "0x3ff3"
+    },
+    {
+      "bootstrap_ci95_dtu": [
+        8.505369620547356,
+        9.518085738705716
+      ],
+      "correction_cm_equivalent": 4.221321181077223,
+      "correction_dtu": 9,
+      "correction_float_dtu": 8.993960730185137,
+      "module_id": 2,
+      "old_delay": 16368,
+      "old_delay_hex": "0x3ff0",
+      "proposed_delay": 16377,
+      "proposed_delay_hex": "0x3ff9"
+    },
+    {
+      "bootstrap_ci95_dtu": [
+        7.332750957416644,
+        8.762990387447266
+      ],
+      "correction_cm_equivalent": 3.7522854942908657,
+      "correction_dtu": 8,
+      "correction_float_dtu": 7.750274269289003,
+      "module_id": 3,
+      "old_delay": 16362,
+      "old_delay_hex": "0x3fea",
+      "proposed_delay": 16370,
+      "proposed_delay_hex": "0x3ff2"
+    },
+    {
+      "bootstrap_ci95_dtu": [
+        6.9063441708236954,
+        8.221098429485373
+      ],
+      "correction_cm_equivalent": 3.283249807504508,
+      "correction_dtu": 7,
+      "correction_float_dtu": 7.217265786047733,
+      "module_id": 4,
+      "old_delay": 16371,
+      "old_delay_hex": "0x3ff3",
+      "proposed_delay": 16378,
+      "proposed_delay_hex": "0x3ffa"
+    },
+    {
+      "bootstrap_ci95_dtu": [
+        16.162924829779502,
+        17.157873998496438
+      ],
+      "correction_cm_equivalent": 7.973606675368089,
+      "correction_dtu": 17,
+      "correction_float_dtu": 16.63374898997592,
+      "module_id": 5,
+      "old_delay": 16371,
+      "old_delay_hex": "0x3ff3",
+      "proposed_delay": 16388,
+      "proposed_delay_hex": "0x4004"
+    }
+  ],
+  "predicted_rounded_link_error_max_cm": 2.9996040137238134,
+  "predicted_rounded_link_error_rms_cm": 1.9615545286634561,
+  "raw_link_error_rms_cm": 9.613130905502532,
+  "sample_count": 1463,
+  "schema_version": 1,
+  "survey_tolerance_m": 0.002
+}

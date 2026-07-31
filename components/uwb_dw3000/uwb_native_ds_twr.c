@@ -18,7 +18,11 @@ static const char *TAG = "native_ds_twr";
 #define NATIVE_DS_FINAL_POLL_TX_OFFSET NATIVE_DS_HEADER_LEN
 #define NATIVE_DS_FINAL_RESPONSE_RX_OFFSET 15U
 #define NATIVE_DS_FINAL_FINAL_TX_OFFSET 20U
-#define NATIVE_DS_FINAL_LEN 25U
+#define NATIVE_DS_FINAL_SURVEY_PEER_OFFSET 25U
+#define NATIVE_DS_FINAL_LEN 26U
+#define NATIVE_DS_SURVEY_GUARD_MS 1U
+#define NATIVE_DS_SURVEY_INTERVAL_FRAMES 4U
+#define NATIVE_DS_SURVEY_RX_TIMEOUT_MS 4U
 #define NATIVE_DS_TIMESTAMP_MASK ((1ULL << 40U) - 1ULL)
 #define NATIVE_DS_TIME_UNIT_SECONDS 15.650040064102564e-12
 #define NATIVE_DS_SPEED_OF_LIGHT_MPS 299702547.0
@@ -132,12 +136,13 @@ static esp_err_t receive_matching(
     const struct uwb_native_ds_config *config,
     const struct uwb_native_ds_radio_ops *radio,
     enum native_ds_frame_type expected_type, uint8_t expected_source,
-    uint16_t expected_frame_id, struct native_ds_frame *frame)
+    uint16_t expected_frame_id, uint32_t timeout_ms,
+    struct native_ds_frame *frame)
 {
     const int64_t started_us = radio->now_us(radio->context);
     while (!radio->stop_requested(radio->context)) {
         const uint32_t wait_ms = remaining_ms(
-            radio, started_us, config->rx_timeout_ms);
+            radio, started_us, timeout_ms);
         if (wait_ms == 0U) {
             s_stats.rx_timeout_count++;
             return ESP_ERR_TIMEOUT;
@@ -199,17 +204,17 @@ static bool calculate_distance(
     return true;
 }
 
-static esp_err_t tag_exchange(
+static esp_err_t initiator_exchange(
     const struct uwb_native_ds_config *config,
     const struct uwb_native_ds_radio_ops *radio, uint8_t anchor_id,
-    uint16_t frame_id)
+    uint16_t frame_id, uint8_t survey_peer_id, uint32_t rx_timeout_ms)
 {
     uint8_t payload[UWB_NATIVE_DS_MAX_FRAME_LEN] = {0};
     uint64_t poll_tx = 0;
     build_frame(config, NATIVE_DS_POLL, anchor_id, frame_id, payload);
     esp_err_t err = radio->send_immediate_expect_rx(
         radio->context, payload, NATIVE_DS_POLL_LEN,
-        config->auto_rx_delay_uus, config->rx_timeout_ms, &poll_tx);
+        config->auto_rx_delay_uus, rx_timeout_ms, &poll_tx);
     if (err != ESP_OK) {
         return err;
     }
@@ -217,7 +222,7 @@ static esp_err_t tag_exchange(
 
     struct native_ds_frame response = {0};
     err = receive_matching(config, radio, NATIVE_DS_RESPONSE, anchor_id,
-                           frame_id, &response);
+                           frame_id, rx_timeout_ms, &response);
     if (err != ESP_OK) {
         return err;
     }
@@ -232,6 +237,7 @@ static esp_err_t tag_exchange(
     put_ts40(payload, NATIVE_DS_FINAL_RESPONSE_RX_OFFSET,
              response.rx_timestamp);
     put_ts40(payload, NATIVE_DS_FINAL_FINAL_TX_OFFSET, expected_final_tx);
+    payload[NATIVE_DS_FINAL_SURVEY_PEER_OFFSET] = survey_peer_id;
 
     uint64_t programmed_final_tx = 0;
     uint64_t actual_final_tx = 0;
@@ -245,6 +251,34 @@ static esp_err_t tag_exchange(
     }
     s_stats.final_tx_count++;
     return ESP_OK;
+}
+
+static bool survey_pair_for_frame(
+    const struct uwb_native_ds_config *config, uint16_t frame_id,
+    uint8_t *initiator_id, uint8_t *responder_id)
+{
+    if (config->anchor_count < 2U || initiator_id == NULL ||
+        responder_id == NULL) {
+        return false;
+    }
+    if ((frame_id % NATIVE_DS_SURVEY_INTERVAL_FRAMES) != 0U) {
+        return false;
+    }
+    const size_t pair_count =
+        ((size_t)config->anchor_count * (config->anchor_count - 1U)) / 2U;
+    size_t selected =
+        ((size_t)frame_id / NATIVE_DS_SURVEY_INTERVAL_FRAMES) % pair_count;
+    for (size_t first = 0; first < config->anchor_count; ++first) {
+        for (size_t second = first + 1U;
+             second < config->anchor_count; ++second) {
+            if (selected-- == 0U) {
+                *initiator_id = config->anchor_ids[first];
+                *responder_id = config->anchor_ids[second];
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 static void run_tag(const struct uwb_native_ds_config *config,
@@ -263,13 +297,24 @@ static void run_tag(const struct uwb_native_ds_config *config,
 
     while (!radio->stop_requested(radio->context)) {
         const uint16_t current_frame_id = frame_id++;
+        uint8_t survey_initiator_id = 0;
+        uint8_t survey_responder_id = 0;
+        (void)survey_pair_for_frame(
+            config, current_frame_id, &survey_initiator_id,
+            &survey_responder_id);
         for (size_t index = 0;
              index < config->anchor_count &&
              !radio->stop_requested(radio->context);
              ++index) {
             const int64_t slot_started_us = radio->now_us(radio->context);
-            const esp_err_t err = tag_exchange(
-                config, radio, config->anchor_ids[index], current_frame_id);
+            const uint8_t anchor_id = config->anchor_ids[index];
+            const uint8_t survey_peer_id =
+                anchor_id == survey_initiator_id
+                    ? survey_responder_id
+                    : 0U;
+            const esp_err_t err = initiator_exchange(
+                config, radio, anchor_id, current_frame_id,
+                survey_peer_id, config->rx_timeout_ms);
             if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
                 ESP_LOGW(TAG, "tag exchange anchor=%u failed: %s",
                          (unsigned)config->anchor_ids[index],
@@ -296,7 +341,7 @@ static void run_tag(const struct uwb_native_ds_config *config,
 static esp_err_t anchor_exchange(
     const struct uwb_native_ds_config *config,
     const struct uwb_native_ds_radio_ops *radio,
-    const struct native_ds_frame *poll)
+    const struct native_ds_frame *poll, uint8_t *survey_peer_id)
 {
     uint8_t payload[UWB_NATIVE_DS_MAX_FRAME_LEN] = {0};
     const uint64_t response_due = radio->add_delay_ms(
@@ -318,7 +363,8 @@ static esp_err_t anchor_exchange(
 
     struct native_ds_frame final = {0};
     err = receive_matching(config, radio, NATIVE_DS_FINAL,
-                           poll->source_id, poll->frame_id, &final);
+                           poll->source_id, poll->frame_id,
+                           config->rx_timeout_ms, &final);
     if (err != ESP_OK) {
         return err;
     }
@@ -341,9 +387,25 @@ static esp_err_t anchor_exchange(
     }
     s_stats.completed_range_count++;
     s_stats.last_distance_mm = (int32_t)(distance_m * 1000.0 + 0.5);
-    radio->publish_range(radio->context, config->tag_id, config->source_id,
+    radio->publish_range(radio->context, poll->source_id, config->source_id,
                          poll->frame_id, distance_m);
+    if (survey_peer_id != NULL) {
+        *survey_peer_id = poll->source_id == config->tag_id
+            ? final.payload[NATIVE_DS_FINAL_SURVEY_PEER_OFFSET]
+            : 0U;
+    }
     return ESP_OK;
+}
+
+static bool configured_anchor(
+    const struct uwb_native_ds_config *config, uint8_t source_id)
+{
+    for (size_t index = 0; index < config->anchor_count; ++index) {
+        if (config->anchor_ids[index] == source_id) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static void run_anchor(const struct uwb_native_ds_config *config,
@@ -374,15 +436,34 @@ static void run_anchor(const struct uwb_native_ds_config *config,
             continue;
         }
         if (poll.type != NATIVE_DS_POLL ||
-            poll.source_id != config->tag_id) {
+            (poll.source_id != config->tag_id &&
+             !configured_anchor(config, poll.source_id))) {
             s_stats.invalid_frame_count++;
             continue;
         }
         s_stats.poll_rx_count++;
-        const esp_err_t err = anchor_exchange(config, radio, &poll);
+        uint8_t survey_peer_id = 0;
+        const esp_err_t err = anchor_exchange(
+            config, radio, &poll, &survey_peer_id);
         if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
             ESP_LOGW(TAG, "anchor exchange frame=%u failed: %s",
                      (unsigned)poll.frame_id, esp_err_to_name(err));
+        }
+        if (err == ESP_OK && survey_peer_id != 0U &&
+            survey_peer_id != config->source_id &&
+            configured_anchor(config, survey_peer_id) &&
+            !radio->stop_requested(radio->context)) {
+            radio->delay_ms(radio->context, NATIVE_DS_SURVEY_GUARD_MS);
+            const esp_err_t survey_err = initiator_exchange(
+                config, radio, survey_peer_id, poll.frame_id, 0U,
+                NATIVE_DS_SURVEY_RX_TIMEOUT_MS);
+            if (survey_err != ESP_OK && survey_err != ESP_ERR_TIMEOUT) {
+                ESP_LOGW(TAG,
+                         "geometry exchange peer=%u frame=%u failed: %s",
+                         (unsigned)survey_peer_id,
+                         (unsigned)poll.frame_id,
+                         esp_err_to_name(survey_err));
+            }
         }
     }
 }
