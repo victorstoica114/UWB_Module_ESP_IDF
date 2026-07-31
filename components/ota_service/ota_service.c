@@ -743,52 +743,28 @@ static void format_native_ds_pipeline_stats_json(
     if (stats == NULL || buffer == NULL || buffer_size == 0U) {
         return;
     }
-    char poll[192] = {0};
-    char response_wait[192] = {0};
-    char final_tx[192] = {0};
-    char response_tx[192] = {0};
-    char final_wait[192] = {0};
-    char formula[192] = {0};
-    char boundary[192] = {0};
-    format_passive_ds_stage_stats_json(&stats->poll_tx, poll, sizeof(poll));
-    format_passive_ds_stage_stats_json(
-        &stats->response_wait, response_wait, sizeof(response_wait));
-    format_passive_ds_stage_stats_json(
-        &stats->final_tx, final_tx, sizeof(final_tx));
-    format_passive_ds_stage_stats_json(
-        &stats->response_tx, response_tx, sizeof(response_tx));
-    format_passive_ds_stage_stats_json(
-        &stats->final_wait, final_wait, sizeof(final_wait));
-    format_passive_ds_stage_stats_json(
-        &stats->formula, formula, sizeof(formula));
-    format_passive_ds_stage_stats_json(
-        &stats->round_boundary, boundary, sizeof(boundary));
     (void)snprintf(
         buffer, buffer_size,
-        "{\"initiated\":%lu,\"completed\":%lu,\"responded\":%lu,"
-        "\"response_timeouts\":%lu,\"final_timeouts\":%lu,"
-        "\"context_mismatches\":%lu,\"timestamp_rejects\":%lu,"
-        "\"negative_tof_rejects\":%lu,\"impossible_range_rejects\":%lu,"
-        "\"slot_overruns\":%lu,\"round_boundaries\":%lu,"
-        "\"boundary_min_us\":%lu,\"boundary_max_us\":%lu,\"stages\":{"
-        "\"poll_tx\":%s,\"response_wait\":%s,\"final_tx\":%s,"
-        "\"response_tx\":%s,\"final_wait\":%s,\"formula\":%s,"
-        "\"round_boundary\":%s}}",
-        (unsigned long)stats->initiated_exchange_count,
-        (unsigned long)stats->completed_exchange_count,
-        (unsigned long)stats->responder_exchange_count,
-        (unsigned long)stats->response_timeout_count,
-        (unsigned long)stats->final_timeout_count,
-        (unsigned long)stats->context_mismatch_count,
-        (unsigned long)stats->timestamp_reject_count,
-        (unsigned long)stats->negative_tof_reject_count,
-        (unsigned long)stats->impossible_range_reject_count,
+        "{\"poll_tx\":%lu,\"poll_rx\":%lu,"
+        "\"response_tx\":%lu,\"response_rx\":%lu,"
+        "\"final_tx\":%lu,\"final_rx\":%lu,"
+        "\"completed_ranges\":%lu,\"rx_timeouts\":%lu,"
+        "\"invalid_frames\":%lu,\"delayed_tx_errors\":%lu,"
+        "\"rejected_ranges\":%lu,\"slot_overruns\":%lu,"
+        "\"last_distance_mm\":%ld}",
+        (unsigned long)stats->poll_tx_count,
+        (unsigned long)stats->poll_rx_count,
+        (unsigned long)stats->response_tx_count,
+        (unsigned long)stats->response_rx_count,
+        (unsigned long)stats->final_tx_count,
+        (unsigned long)stats->final_rx_count,
+        (unsigned long)stats->completed_range_count,
+        (unsigned long)stats->rx_timeout_count,
+        (unsigned long)stats->invalid_frame_count,
+        (unsigned long)stats->delayed_tx_error_count,
+        (unsigned long)stats->rejected_range_count,
         (unsigned long)stats->slot_overrun_count,
-        (unsigned long)stats->round_boundary_count,
-        (unsigned long)stats->round_boundary_min_us,
-        (unsigned long)stats->round_boundary_max_us,
-        poll, response_wait, final_tx, response_tx, final_wait, formula,
-        boundary);
+        (long)stats->last_distance_mm);
 }
 
 static bool ota_parse_flex_geometry(

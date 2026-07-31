@@ -46,26 +46,19 @@ struct uwb_passive_ds_pipeline_stats {
 };
 
 struct uwb_native_ds_pipeline_stats {
-    uint32_t initiated_exchange_count;
-    uint32_t completed_exchange_count;
-    uint32_t responder_exchange_count;
-    uint32_t response_timeout_count;
-    uint32_t final_timeout_count;
-    uint32_t context_mismatch_count;
-    uint32_t timestamp_reject_count;
-    uint32_t negative_tof_reject_count;
-    uint32_t impossible_range_reject_count;
+    uint32_t poll_tx_count;
+    uint32_t poll_rx_count;
+    uint32_t response_tx_count;
+    uint32_t response_rx_count;
+    uint32_t final_tx_count;
+    uint32_t final_rx_count;
+    uint32_t completed_range_count;
+    uint32_t rx_timeout_count;
+    uint32_t invalid_frame_count;
+    uint32_t delayed_tx_error_count;
+    uint32_t rejected_range_count;
     uint32_t slot_overrun_count;
-    uint32_t round_boundary_count;
-    uint32_t round_boundary_min_us;
-    uint32_t round_boundary_max_us;
-    struct uwb_passive_ds_stage_stats poll_tx;
-    struct uwb_passive_ds_stage_stats response_wait;
-    struct uwb_passive_ds_stage_stats final_tx;
-    struct uwb_passive_ds_stage_stats response_tx;
-    struct uwb_passive_ds_stage_stats final_wait;
-    struct uwb_passive_ds_stage_stats formula;
-    struct uwb_passive_ds_stage_stats round_boundary;
+    int32_t last_distance_mm;
 };
 
 esp_err_t uwb_dw3000_start(void);

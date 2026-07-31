@@ -119,32 +119,9 @@
 #define APP_UWB_RANGING_AUTO_RX_DELAY_UUS 500
 #endif
 
-/*
- * Native DS-TWR source-integrity limits.  A valid exchange may legitimately
- * span a large indoor installation, but a negative ToF or a distance beyond
- * this bound is never forwarded to the positioning pipeline.  Diagnostics
- * are sampled in the normal hot path; setting the interval to 1 is useful for
- * a dedicated RF-quality capture, while 0 disables the additional CIA reads.
- */
+/* Native DS-TWR rejects physically impossible results before telemetry. */
 #ifndef APP_UWB_RANGING_MAX_DISTANCE_M
 #define APP_UWB_RANGING_MAX_DISTANCE_M 100.0
-#endif
-
-#ifndef APP_UWB_RANGING_DIAGNOSTICS_EVERY
-#define APP_UWB_RANGING_DIAGNOSTICS_EVERY 64
-#endif
-
-#ifndef APP_UWB_RANGING_ROTATE_ANCHOR_ORDER
-#define APP_UWB_RANGING_ROTATE_ANCHOR_ORDER 1
-#endif
-
-/*
- * Anchor self-localization changes the active initiator and therefore needs
- * an explicit radio-state boundary.  Apply this guard both before the survey
- * command and after its DS-TWR slot; it does not lengthen ordinary tag frames.
- */
-#ifndef APP_UWB_RANGING_GEOMETRY_GUARD_MS
-#define APP_UWB_RANGING_GEOMETRY_GUARD_MS 5
 #endif
 
 /*

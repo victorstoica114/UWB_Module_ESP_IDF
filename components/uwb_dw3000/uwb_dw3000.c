@@ -27,6 +27,7 @@
 #include "app_identity.h"
 #include "app_runtime_config.h"
 #include "uwb_config.h"
+#include "uwb_native_ds_twr.h"
 #include "wireless_log_service.h"
 #include "wireless_telemetry_service.h"
 
@@ -287,58 +288,9 @@ enum {
 #define UWB_DISTANCE_FRAME_FINAL_RX_TS_OFFSET 35U
 #define UWB_DISTANCE_FRAME_DISTANCE_MM_OFFSET 40U
 #define UWB_DISTANCE_FRAME_RAW_DISTANCE_MM_OFFSET 44U
-#define UWB_DISTANCE_FRAME_NATIVE_POLL_LEN UWB_DISTANCE_FRAME_HEADER_LEN
-#define UWB_DISTANCE_FRAME_NATIVE_RESP_LEN UWB_DISTANCE_FRAME_HEADER_LEN
-#define UWB_DISTANCE_FRAME_NATIVE_FINAL_LEN \
+#define UWB_DISTANCE_FRAME_FINAL_TIMESTAMPS_LEN \
     (UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET + 5U)
 #define UWB_DISTANCE_FRAME_BROADCAST_ID 255U
-
-/*
- * Native ranging keeps the same three on-air frames, but binds all six DW3000
- * timestamps to an explicit exchange context.  POLL and RESP carry the same
- * context key.  FINAL repeats the key next to the initiator timestamps and
- * includes low-32 ESP timer snapshots for offline stage correlation.
- */
-#define UWB_RANGING_CONTEXT_SEQUENCE_OFFSET UWB_DISTANCE_FRAME_HEADER_LEN
-#define UWB_RANGING_CONTEXT_TOKEN_OFFSET \
-    (UWB_RANGING_CONTEXT_SEQUENCE_OFFSET + 2U)
-#define UWB_RANGING_CONTEXT_ROUND_OFFSET \
-    (UWB_RANGING_CONTEXT_TOKEN_OFFSET + 4U)
-#define UWB_RANGING_CONTEXT_SLOT_FLAGS_OFFSET \
-    (UWB_RANGING_CONTEXT_ROUND_OFFSET + 4U)
-#define UWB_RANGING_CONTEXT_FIRST_ANCHOR_OFFSET \
-    (UWB_RANGING_CONTEXT_SLOT_FLAGS_OFFSET + 1U)
-#define UWB_RANGING_CONTEXT_LEN \
-    (UWB_RANGING_CONTEXT_FIRST_ANCHOR_OFFSET + 1U)
-
-#define UWB_RANGING_FINAL_CONTEXT_SEQUENCE_OFFSET \
-    UWB_DISTANCE_FRAME_NATIVE_FINAL_LEN
-#define UWB_RANGING_FINAL_CONTEXT_TOKEN_OFFSET \
-    (UWB_RANGING_FINAL_CONTEXT_SEQUENCE_OFFSET + 2U)
-#define UWB_RANGING_FINAL_CONTEXT_ROUND_OFFSET \
-    (UWB_RANGING_FINAL_CONTEXT_TOKEN_OFFSET + 4U)
-#define UWB_RANGING_FINAL_CONTEXT_SLOT_FLAGS_OFFSET \
-    (UWB_RANGING_FINAL_CONTEXT_ROUND_OFFSET + 4U)
-#define UWB_RANGING_FINAL_CONTEXT_FIRST_ANCHOR_OFFSET \
-    (UWB_RANGING_FINAL_CONTEXT_SLOT_FLAGS_OFFSET + 1U)
-#define UWB_RANGING_FINAL_POLL_START_HOST32_OFFSET \
-    (UWB_RANGING_FINAL_CONTEXT_FIRST_ANCHOR_OFFSET + 1U)
-#define UWB_RANGING_FINAL_POLL_DONE_HOST32_OFFSET \
-    (UWB_RANGING_FINAL_POLL_START_HOST32_OFFSET + 4U)
-#define UWB_RANGING_FINAL_RESP_RX_HOST32_OFFSET \
-    (UWB_RANGING_FINAL_POLL_DONE_HOST32_OFFSET + 4U)
-#define UWB_RANGING_FINAL_ARM_HOST32_OFFSET \
-    (UWB_RANGING_FINAL_RESP_RX_HOST32_OFFSET + 4U)
-#define UWB_RANGING_NATIVE_FINAL_LEN \
-    (UWB_RANGING_FINAL_ARM_HOST32_OFFSET + 4U)
-#define UWB_RANGING_CONTEXT_FLAG_AFTER_GEOMETRY 0x01U
-#define UWB_RANGING_CONTEXT_FLAG_GEOMETRY_EXCHANGE 0x02U
-#define UWB_RANGING_CONTEXT_SLOT_MASK 0x0FU
-#define UWB_RANGING_CONTEXT_FLAGS_SHIFT 4U
-
-/* SPI_DMA_DISABLED accepts at most 64 bytes including the register header. */
-_Static_assert(UWB_RANGING_NATIVE_FINAL_LEN <= 63U,
-               "Native DS-TWR FINAL exceeds the non-DMA SPI transaction");
 
 /*
  * Passive DS-TWR keeps the native three-message exchange, but makes the
@@ -365,7 +317,7 @@ _Static_assert(UWB_RANGING_NATIVE_FINAL_LEN <= 63U,
     (UWB_PASSIVE_DS_RESP_PIGGYBACK_OFFSET + \
      UWB_PASSIVE_DS_PIGGYBACK_LEN)
 #define UWB_PASSIVE_DS_FINAL_SLOT_ID_OFFSET \
-    UWB_DISTANCE_FRAME_NATIVE_FINAL_LEN
+    UWB_DISTANCE_FRAME_FINAL_TIMESTAMPS_LEN
 #define UWB_PASSIVE_DS_FINAL_LEN \
     (UWB_PASSIVE_DS_FINAL_SLOT_ID_OFFSET + 4U)
 #define UWB_PASSIVE_DS_BOOTSTRAP_LISTEN_US 2000000LL
@@ -385,9 +337,6 @@ _Static_assert(UWB_RANGING_NATIVE_FINAL_LEN <= 63U,
 #define UWB_ANCHOR_SURVEY_CMD_SLOT_OFFSET 12U
 #define UWB_ANCHOR_SURVEY_CMD_LEN \
     (UWB_ANCHOR_SURVEY_CMD_SLOT_OFFSET + 1U)
-#define UWB_RANGING_GEOMETRY_FRAME_INTERVAL 4U
-#define UWB_RANGING_GEOMETRY_COMMAND_DELAY_MS 1U
-
 // Figure 3 common payload. The transport header already carries message type,
 // source ID and sequence, so the application payload starts with Slot ID.
 #define UWB_FLEX_TDOA_SLOT_ID_OFFSET 10U
@@ -550,59 +499,9 @@ struct uwb_distance_measurement {
     uint64_t resp_rx_ts;
     uint64_t final_tx_ts;
     uint64_t final_rx_ts;
-    uint32_t context_token;
-    uint32_t round_index;
-    uint8_t slot_index;
-    uint8_t first_anchor_id;
-    uint8_t context_flags;
-    int64_t initiator_poll_start_host_us;
-    int64_t initiator_poll_done_host_us;
-    int64_t initiator_resp_rx_host_us;
-    int64_t initiator_final_arm_host_us;
-    int64_t responder_poll_rx_host_us;
-    int64_t responder_resp_arm_host_us;
-    int64_t responder_resp_done_host_us;
-    int64_t responder_final_rx_host_us;
-    int64_t responder_formula_done_host_us;
     struct uwb_rx_diagnostics poll_rx_diagnostics;
     struct uwb_rx_diagnostics final_rx_diagnostics;
     struct uwb_rx_diagnostics report_rx_diagnostics;
-};
-
-struct uwb_ranging_context_key {
-    uint16_t sequence;
-    uint32_t token;
-    uint32_t round_index;
-    uint8_t slot_index;
-    uint8_t first_anchor_id;
-    uint8_t flags;
-};
-
-struct uwb_ranging_initiator_context {
-    bool in_use;
-    uint8_t peer_id;
-    struct uwb_ranging_context_key key;
-    int64_t poll_start_host_us;
-    int64_t poll_done_host_us;
-    int64_t response_rx_host_us;
-    int64_t final_arm_host_us;
-    int64_t final_done_host_us;
-    uint64_t poll_tx_ts;
-    uint64_t response_rx_ts;
-    uint64_t final_programmed_tx_ts;
-    uint64_t final_actual_tx_ts;
-};
-
-struct uwb_ranging_responder_context {
-    bool in_use;
-    uint8_t peer_id;
-    struct uwb_ranging_context_key key;
-    struct uwb_distance_frame poll;
-    int64_t response_arm_host_us;
-    int64_t response_done_host_us;
-    int64_t final_rx_host_us;
-    uint64_t response_programmed_tx_ts;
-    uint64_t response_actual_tx_ts;
 };
 
 struct uwb_anchor_survey_pair {
@@ -1177,14 +1076,6 @@ static volatile bool s_flex_tdoa_schedule_alarm_fired;
 static esp_timer_handle_t s_passive_ds_schedule_timer;
 static volatile bool s_passive_ds_schedule_alarm_fired;
 static struct uwb_passive_ds_pipeline_stats s_passive_ds_pipeline_stats;
-static struct uwb_native_ds_pipeline_stats s_native_ds_pipeline_stats;
-static struct uwb_ranging_initiator_context
-    s_native_ds_initiator_contexts[2];
-static struct uwb_ranging_responder_context
-    s_native_ds_responder_contexts[2];
-static uint8_t s_native_ds_initiator_context_cursor;
-static uint8_t s_native_ds_responder_context_cursor;
-static esp_timer_handle_t s_ranging_slot_timer;
 static uint32_t s_flex_tdoa_observations_since_summary;
 static uint32_t s_flex_tdoa_observation_drops_since_summary;
 static uint32_t s_flex_tdoa_observation_invalid_since_summary;
@@ -1310,14 +1201,6 @@ static void uwb_passive_ds_record_stage(
     stage->last_event_host_us = end_host_us;
 }
 
-static void uwb_ranging_slot_alarm_callback(void *arg)
-{
-    (void)arg;
-    if (s_task_handle != NULL) {
-        xTaskNotifyGive(s_task_handle);
-    }
-}
-
 static bool IRAM_ATTR uwb_calibration_timer_alarm_callback(
     gptimer_handle_t timer, const gptimer_alarm_event_data_t *edata,
     void *user_ctx)
@@ -1402,62 +1285,6 @@ static void uwb_dw3000_delay_ms(uint32_t delay_ms)
         ticks = 1;
     }
     vTaskDelay(ticks);
-}
-
-static esp_err_t uwb_ranging_slot_timer_init(void)
-{
-    if (s_ranging_slot_timer != NULL) {
-        return ESP_OK;
-    }
-
-    const esp_timer_create_args_t args = {
-        .callback = uwb_ranging_slot_alarm_callback,
-        .arg = NULL,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "ranging_slot",
-        .skip_unhandled_events = true,
-    };
-    return esp_timer_create(&args, &s_ranging_slot_timer);
-}
-
-static void uwb_ranging_wait_until_host_us(int64_t target_us)
-{
-    int64_t remaining_us = target_us - esp_timer_get_time();
-    if (remaining_us <= 0) {
-        return;
-    }
-
-    if (uwb_ranging_slot_timer_init() != ESP_OK) {
-        while (!uwb_dw3000_runtime_switch_pending() &&
-               (remaining_us = target_us - esp_timer_get_time()) > 0) {
-            uwb_dw3000_delay_ms(
-                (uint32_t)((remaining_us + 999LL) / 1000LL));
-        }
-        return;
-    }
-
-    (void)esp_timer_stop(s_ranging_slot_timer);
-    if (esp_timer_start_once(s_ranging_slot_timer, (uint64_t)remaining_us) !=
-        ESP_OK) {
-        while (!uwb_dw3000_runtime_switch_pending() &&
-               (remaining_us = target_us - esp_timer_get_time()) > 0) {
-            uwb_dw3000_delay_ms(
-                (uint32_t)((remaining_us + 999LL) / 1000LL));
-        }
-        return;
-    }
-
-    while (!uwb_dw3000_runtime_switch_pending() &&
-           (remaining_us = target_us - esp_timer_get_time()) > 0) {
-        const uint32_t remaining_ms =
-            (uint32_t)((remaining_us + 999LL) / 1000LL);
-        TickType_t wait_ticks = pdMS_TO_TICKS(remaining_ms) + 1U;
-        if (wait_ticks == 0) {
-            wait_ticks = 1;
-        }
-        (void)ulTaskNotifyTake(pdTRUE, wait_ticks);
-    }
-    (void)esp_timer_stop(s_ranging_slot_timer);
 }
 
 static esp_err_t uwb_calibration_timer_init(void)
@@ -2440,14 +2267,7 @@ static bool uwb_dw3000_should_capture_rx_diagnostics(const uint8_t *payload,
     const app_runtime_config_t *config = app_runtime_config_get();
     if (config != NULL &&
         config->runtime_mode == APP_RUNTIME_MODE_UWB_RANGING) {
-        if (!uwb_dw3000_payload_is_distance_frame(payload, payload_len) ||
-            APP_UWB_RANGING_DIAGNOSTICS_EVERY == 0U) {
-            return false;
-        }
-        const uint16_t sequence =
-            (uint16_t)(((uint16_t)payload[8]) |
-                       ((uint16_t)payload[9] << 8));
-        return (sequence % APP_UWB_RANGING_DIAGNOSTICS_EVERY) == 0U;
+        return false;
     }
 
     if (!uwb_dw3000_payload_is_distance_frame(payload, payload_len) ||
@@ -4248,123 +4068,6 @@ static uint64_t uwb_distance_get_ts40(const uint8_t *payload, size_t offset)
     return timestamp & UWB_DW3000_TIMESTAMP_MASK;
 }
 
-static void uwb_ranging_put_context(
-    uint8_t *payload, size_t offset,
-    const struct uwb_ranging_context_key *key)
-{
-    if (payload == NULL || key == NULL) {
-        return;
-    }
-    uwb_distance_put_u16(payload, offset, key->sequence);
-    uwb_distance_put_u32(payload, offset + 2U, key->token);
-    uwb_distance_put_u32(payload, offset + 6U, key->round_index);
-    payload[offset + 10U] =
-        (uint8_t)((key->slot_index & UWB_RANGING_CONTEXT_SLOT_MASK) |
-                  ((key->flags & UWB_RANGING_CONTEXT_SLOT_MASK)
-                   << UWB_RANGING_CONTEXT_FLAGS_SHIFT));
-    payload[offset + 11U] = key->first_anchor_id;
-}
-
-static bool uwb_ranging_get_context(
-    const struct uwb_distance_frame *frame, size_t offset,
-    struct uwb_ranging_context_key *key)
-{
-    if (frame == NULL || key == NULL ||
-        frame->payload_len < offset + 12U) {
-        return false;
-    }
-    key->sequence = uwb_distance_get_u16(frame->payload, offset);
-    key->token = uwb_distance_get_u32(frame->payload, offset + 2U);
-    key->round_index = uwb_distance_get_u32(frame->payload, offset + 6U);
-    key->slot_index =
-        frame->payload[offset + 10U] & UWB_RANGING_CONTEXT_SLOT_MASK;
-    key->flags =
-        (frame->payload[offset + 10U] >>
-         UWB_RANGING_CONTEXT_FLAGS_SHIFT) & UWB_RANGING_CONTEXT_SLOT_MASK;
-    key->first_anchor_id = frame->payload[offset + 11U];
-    return true;
-}
-
-static bool uwb_ranging_context_equal(
-    const struct uwb_ranging_context_key *a,
-    const struct uwb_ranging_context_key *b)
-{
-    return a != NULL && b != NULL && a->sequence == b->sequence &&
-           a->token == b->token && a->round_index == b->round_index &&
-           a->slot_index == b->slot_index &&
-           a->first_anchor_id == b->first_anchor_id &&
-           a->flags == b->flags;
-}
-
-static uint32_t uwb_ranging_host_time32(int64_t host_time_us)
-{
-    return (uint32_t)((uint64_t)host_time_us & UINT32_MAX);
-}
-
-static struct uwb_ranging_initiator_context *
-uwb_ranging_begin_initiator_context(uint8_t peer_id, uint16_t sequence,
-                                    uint32_t round_index,
-                                    uint8_t slot_index,
-                                    uint8_t first_anchor_id,
-                                    uint8_t flags)
-{
-    struct uwb_ranging_initiator_context *context =
-        &s_native_ds_initiator_contexts[
-            s_native_ds_initiator_context_cursor++ & 1U];
-    if (context->in_use) {
-        s_native_ds_pipeline_stats.context_mismatch_count++;
-        ESP_LOGE(TAG,
-                 "Native DS-TWR initiator context collision old_seq=%u "
-                 "new_seq=%u old_peer=%u new_peer=%u",
-                 (unsigned)context->key.sequence, (unsigned)sequence,
-                 (unsigned)context->peer_id, (unsigned)peer_id);
-    }
-    memset(context, 0, sizeof(*context));
-    context->in_use = true;
-    context->peer_id = peer_id;
-    context->key.sequence = sequence;
-    context->key.token =
-        esp_random() ^ ((uint32_t)sequence << 16U) ^ (uint32_t)peer_id;
-    if (context->key.token == 0U) {
-        context->key.token = 1U;
-    }
-    context->key.round_index = round_index;
-    context->key.slot_index = slot_index;
-    context->key.first_anchor_id = first_anchor_id;
-    context->key.flags = flags;
-    return context;
-}
-
-static struct uwb_ranging_responder_context *
-uwb_ranging_begin_responder_context(
-    const struct uwb_distance_frame *poll,
-    const struct uwb_ranging_context_key *key)
-{
-    struct uwb_ranging_responder_context *context =
-        &s_native_ds_responder_contexts[
-            s_native_ds_responder_context_cursor++ & 1U];
-    if (context->in_use) {
-        s_native_ds_pipeline_stats.context_mismatch_count++;
-        ESP_LOGE(TAG,
-                 "Native DS-TWR responder context collision old_seq=%u "
-                 "new_seq=%u old_peer=%u new_peer=%u",
-                 (unsigned)context->key.sequence,
-                 poll != NULL ? (unsigned)poll->sequence : 0U,
-                 (unsigned)context->peer_id,
-                 poll != NULL ? (unsigned)poll->source_id : 0U);
-    }
-    memset(context, 0, sizeof(*context));
-    context->in_use = true;
-    if (poll != NULL) {
-        context->peer_id = poll->source_id;
-        context->poll = *poll;
-    }
-    if (key != NULL) {
-        context->key = *key;
-    }
-    return context;
-}
-
 static void uwb_distance_build_frame(enum uwb_distance_frame_type type,
                                      uint8_t destination_id,
                                      uint16_t sequence,
@@ -4802,171 +4505,6 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
     return ESP_OK;
 }
 
-/*
- * Native three-frame DS-TWR initiator used by positioning:
- *
- *   POLL -> RESP -> FINAL
- *
- * FINAL carries the three initiator timestamps. The responder already owns
- * the complementary RX/TX timestamps, so it can calculate the range without
- * REPORT or REPORT2.
- */
-static esp_err_t uwb_ranging_native_initiate_once(
-    uint8_t peer_id, uint16_t sequence, uint32_t round_index,
-    uint8_t slot_index, uint8_t first_anchor_id, uint8_t flags)
-{
-    const app_runtime_config_t *config = app_runtime_config_get();
-    const uint32_t rx_timeout_ms = config->ranging_rx_timeout_ms;
-    const uint32_t final_delay_ms = config->ranging_final_delay_ms;
-    const uint32_t auto_rx_delay_uus =
-        config->ranging_auto_rx_delay_uus;
-    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
-    struct uwb_ranging_initiator_context *context =
-        uwb_ranging_begin_initiator_context(
-            peer_id, sequence, round_index, slot_index, first_anchor_id,
-            flags);
-    esp_err_t result = ESP_FAIL;
-    s_native_ds_pipeline_stats.initiated_exchange_count++;
-
-    uwb_distance_build_frame(UWB_DISTANCE_FRAME_POLL, peer_id, sequence,
-                             payload);
-    uwb_ranging_put_context(payload, UWB_RANGING_CONTEXT_SEQUENCE_OFFSET,
-                            &context->key);
-    context->poll_start_host_us = esp_timer_get_time();
-    esp_err_t err = uwb_dw3000_send_payload_expect_rx(
-        payload, UWB_RANGING_CONTEXT_LEN, auto_rx_delay_uus,
-        rx_timeout_ms, &context->poll_tx_ts);
-    context->poll_done_host_us = esp_timer_get_time();
-    uwb_passive_ds_record_stage(
-        &s_native_ds_pipeline_stats.poll_tx,
-        context->poll_start_host_us, err == ESP_OK);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG,
-                 "Native DS-TWR POLL TX failed seq=%u anchor=%u: %s",
-                 (unsigned)sequence, (unsigned)peer_id,
-                 esp_err_to_name(err));
-        result = err;
-        goto done;
-    }
-
-    struct uwb_distance_frame response = {0};
-    const int64_t response_wait_started_us = esp_timer_get_time();
-    err = uwb_distance_receive_matching(UWB_DISTANCE_FRAME_RESP, peer_id, true,
-                                        sequence, &response, rx_timeout_ms);
-    uwb_passive_ds_record_stage(
-        &s_native_ds_pipeline_stats.response_wait,
-        response_wait_started_us, err == ESP_OK);
-    if (err != ESP_OK) {
-        if (err == ESP_ERR_TIMEOUT) {
-            s_native_ds_pipeline_stats.response_timeout_count++;
-        }
-        ESP_LOGW(TAG,
-                 "Native DS-TWR RESP wait failed seq=%u anchor=%u: %s",
-                 (unsigned)sequence, (unsigned)peer_id,
-                 esp_err_to_name(err));
-        result = err;
-        goto done;
-    }
-    context->response_rx_host_us = response.rx_host_time_us;
-    context->response_rx_ts = response.rx_timestamp;
-
-    struct uwb_ranging_context_key response_key = {0};
-    if (!uwb_ranging_get_context(
-            &response, UWB_RANGING_CONTEXT_SEQUENCE_OFFSET,
-            &response_key) ||
-        response.sequence != response_key.sequence ||
-        !uwb_ranging_context_equal(&context->key, &response_key)) {
-        s_native_ds_pipeline_stats.context_mismatch_count++;
-        ESP_LOGE(TAG,
-                 "Native DS-TWR RESP context mismatch seq=%u anchor=%u "
-                 "token=0x%08lx got_seq=%u got_token=0x%08lx",
-                 (unsigned)sequence, (unsigned)peer_id,
-                 (unsigned long)context->key.token,
-                 (unsigned)response_key.sequence,
-                 (unsigned long)response_key.token);
-        result = ESP_ERR_INVALID_RESPONSE;
-        goto done;
-    }
-
-    const uint64_t final_tx_due = uwb_dw3000_add_timestamp_delta(
-        response.rx_timestamp, uwb_dw3000_ms_to_dtu(final_delay_ms));
-    const uint32_t final_delay_word =
-        uwb_dw3000_delayed_time_word(final_tx_due);
-    const uint64_t expected_final_tx_ts =
-        uwb_dw3000_programmed_tx_timestamp(final_delay_word);
-
-    uwb_distance_build_frame(UWB_DISTANCE_FRAME_FINAL, peer_id, sequence,
-                             payload);
-    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_POLL_TX_TS_OFFSET,
-                          context->poll_tx_ts);
-    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_RESP_RX_TS_OFFSET,
-                          response.rx_timestamp);
-    uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET,
-                          expected_final_tx_ts);
-    uwb_ranging_put_context(
-        payload, UWB_RANGING_FINAL_CONTEXT_SEQUENCE_OFFSET,
-        &context->key);
-    uwb_distance_put_u32(
-        payload, UWB_RANGING_FINAL_POLL_START_HOST32_OFFSET,
-        uwb_ranging_host_time32(context->poll_start_host_us));
-    uwb_distance_put_u32(
-        payload, UWB_RANGING_FINAL_POLL_DONE_HOST32_OFFSET,
-        uwb_ranging_host_time32(context->poll_done_host_us));
-    uwb_distance_put_u32(
-        payload, UWB_RANGING_FINAL_RESP_RX_HOST32_OFFSET,
-        uwb_ranging_host_time32(context->response_rx_host_us));
-    context->final_arm_host_us = esp_timer_get_time();
-    uwb_distance_put_u32(
-        payload, UWB_RANGING_FINAL_ARM_HOST32_OFFSET,
-        uwb_ranging_host_time32(context->final_arm_host_us));
-
-    err = uwb_dw3000_send_payload_delayed(
-        payload, UWB_RANGING_NATIVE_FINAL_LEN, final_tx_due,
-        &context->final_programmed_tx_ts,
-        &context->final_actual_tx_ts);
-    context->final_done_host_us = esp_timer_get_time();
-    uwb_passive_ds_record_stage(
-        &s_native_ds_pipeline_stats.final_tx,
-        context->final_arm_host_us, err == ESP_OK);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG,
-                 "Native DS-TWR FINAL TX failed seq=%u anchor=%u: %s",
-                 (unsigned)sequence, (unsigned)peer_id,
-                 esp_err_to_name(err));
-        result = err;
-        goto done;
-    }
-    if (context->final_programmed_tx_ts != expected_final_tx_ts) {
-        s_native_ds_pipeline_stats.timestamp_reject_count++;
-        ESP_LOGW(TAG,
-                 "Native DS-TWR FINAL timestamp mismatch seq=%u "
-                 "expected=0x%010llx programmed=0x%010llx",
-                 (unsigned)sequence,
-                 (unsigned long long)expected_final_tx_ts,
-                 (unsigned long long)context->final_programmed_tx_ts);
-        result = ESP_ERR_INVALID_STATE;
-        goto done;
-    }
-
-    ESP_LOGD(TAG,
-             "Native DS-TWR complete seq=%u token=0x%08lx round=%lu "
-             "slot=%u anchor=%u poll=0x%010llx resp=0x%010llx "
-             "final=0x%010llx actual=0x%010llx",
-             (unsigned)sequence, (unsigned long)context->key.token,
-             (unsigned long)context->key.round_index,
-             (unsigned)context->key.slot_index, (unsigned)peer_id,
-             (unsigned long long)context->poll_tx_ts,
-             (unsigned long long)context->response_rx_ts,
-             (unsigned long long)context->final_programmed_tx_ts,
-             (unsigned long long)context->final_actual_tx_ts);
-    s_native_ds_pipeline_stats.completed_exchange_count++;
-    result = ESP_OK;
-
-done:
-    context->in_use = false;
-    return result;
-}
-
 static void uwb_distance_fill_measurement_from_timestamps(
     uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
     uint64_t poll_tx_ts, uint64_t poll_rx_ts, uint64_t resp_tx_ts,
@@ -5031,331 +4569,6 @@ static void uwb_distance_fill_measurement(
     measurement->poll_rx_diagnostics = poll->diagnostics;
     measurement->final_rx_diagnostics = final->diagnostics;
     measurement->report_rx_diagnostics = report->diagnostics;
-}
-
-enum uwb_native_ds_reject_reason {
-    UWB_NATIVE_DS_REJECT_NONE = 0,
-    UWB_NATIVE_DS_REJECT_TIMESTAMP,
-    UWB_NATIVE_DS_REJECT_NEGATIVE_TOF,
-    UWB_NATIVE_DS_REJECT_IMPOSSIBLE_RANGE,
-};
-
-static const char *uwb_native_ds_reject_reason_name(
-    enum uwb_native_ds_reject_reason reason)
-{
-    switch (reason) {
-    case UWB_NATIVE_DS_REJECT_TIMESTAMP:
-        return "timestamp_interval";
-    case UWB_NATIVE_DS_REJECT_NEGATIVE_TOF:
-        return "negative_tof";
-    case UWB_NATIVE_DS_REJECT_IMPOSSIBLE_RANGE:
-        return "impossible_range";
-    default:
-        return "none";
-    }
-}
-
-static void uwb_ranging_log_measurement_trace(
-    const struct uwb_distance_measurement *measurement, const char *state)
-{
-    if (measurement == NULL) {
-        return;
-    }
-    ESP_LOGI(
-        TAG,
-        "UWB_RANGING trace_dw state=%s tag=%u anchor=%u seq=%u "
-        "token=%08lx round=%lu slot=%u first=%u flags=%02x "
-        "ts=%010llx/%010llx/%010llx/%010llx/%010llx/%010llx",
-        state != NULL ? state : "unknown",
-        (unsigned)measurement->initiator_id,
-        (unsigned)measurement->responder_id,
-        (unsigned)measurement->sequence,
-        (unsigned long)measurement->context_token,
-        (unsigned long)measurement->round_index,
-        (unsigned)measurement->slot_index,
-        (unsigned)measurement->first_anchor_id,
-        (unsigned)measurement->context_flags,
-        (unsigned long long)measurement->poll_tx_ts,
-        (unsigned long long)measurement->poll_rx_ts,
-        (unsigned long long)measurement->resp_tx_ts,
-        (unsigned long long)measurement->resp_rx_ts,
-        (unsigned long long)measurement->final_tx_ts,
-        (unsigned long long)measurement->final_rx_ts);
-    ESP_LOGI(
-        TAG,
-        "UWB_RANGING trace_host state=%s tag=%u anchor=%u seq=%u "
-        "i32=%08lx/%08lx/%08lx/%08lx r32=%08lx/%08lx/%08lx/%08lx/%08lx",
-        state != NULL ? state : "unknown",
-        (unsigned)measurement->initiator_id,
-        (unsigned)measurement->responder_id,
-        (unsigned)measurement->sequence,
-        (unsigned long)(uint32_t)measurement->initiator_poll_start_host_us,
-        (unsigned long)(uint32_t)measurement->initiator_poll_done_host_us,
-        (unsigned long)(uint32_t)measurement->initiator_resp_rx_host_us,
-        (unsigned long)(uint32_t)measurement->initiator_final_arm_host_us,
-        (unsigned long)(uint32_t)measurement->responder_poll_rx_host_us,
-        (unsigned long)(uint32_t)measurement->responder_resp_arm_host_us,
-        (unsigned long)(uint32_t)measurement->responder_resp_done_host_us,
-        (unsigned long)(uint32_t)measurement->responder_final_rx_host_us,
-        (unsigned long)(uint32_t)measurement->responder_formula_done_host_us);
-    if (measurement->poll_rx_diagnostics.valid ||
-        measurement->final_rx_diagnostics.valid) {
-        ESP_LOGI(
-            TAG,
-            "UWB_RANGING trace_cia state=%s tag=%u anchor=%u seq=%u "
-            "poll=%u/%u/%lu/%lu/%u final=%u/%u/%lu/%lu/%u",
-            state != NULL ? state : "unknown",
-            (unsigned)measurement->initiator_id,
-            (unsigned)measurement->responder_id,
-            (unsigned)measurement->sequence,
-            measurement->poll_rx_diagnostics.valid ? 1U : 0U,
-            (unsigned)measurement->poll_rx_diagnostics.ipatov_fp_index,
-            (unsigned long)measurement->poll_rx_diagnostics.ipatov_peak_amp,
-            (unsigned long)measurement->poll_rx_diagnostics.ipatov_power,
-            (unsigned)measurement->poll_rx_diagnostics.ipatov_accum_count,
-            measurement->final_rx_diagnostics.valid ? 1U : 0U,
-            (unsigned)measurement->final_rx_diagnostics.ipatov_fp_index,
-            (unsigned long)measurement->final_rx_diagnostics.ipatov_peak_amp,
-            (unsigned long)measurement->final_rx_diagnostics.ipatov_power,
-            (unsigned)measurement->final_rx_diagnostics.ipatov_accum_count);
-    }
-}
-
-static enum uwb_native_ds_reject_reason
-uwb_ranging_native_validate_measurement(
-    const struct uwb_distance_measurement *measurement,
-    const app_runtime_config_t *config)
-{
-    if (measurement == NULL || config == NULL) {
-        return UWB_NATIVE_DS_REJECT_TIMESTAMP;
-    }
-
-    const uint64_t maximum_interval_dtu = uwb_dw3000_ms_to_dtu(
-        config->ranging_rx_timeout_ms + config->ranging_resp_delay_ms +
-        config->ranging_final_delay_ms + 4U);
-    const uint64_t round_a = uwb_distance_delta_ts(
-        measurement->resp_rx_ts, measurement->poll_tx_ts);
-    const uint64_t round_b = uwb_distance_delta_ts(
-        measurement->final_rx_ts, measurement->resp_tx_ts);
-    const uint64_t reply_a = uwb_distance_delta_ts(
-        measurement->final_tx_ts, measurement->resp_rx_ts);
-    const uint64_t reply_b = uwb_distance_delta_ts(
-        measurement->resp_tx_ts, measurement->poll_rx_ts);
-    if (round_a == 0U || round_b == 0U || reply_a == 0U || reply_b == 0U ||
-        round_a > maximum_interval_dtu || round_b > maximum_interval_dtu ||
-        reply_a > maximum_interval_dtu || reply_b > maximum_interval_dtu) {
-        return UWB_NATIVE_DS_REJECT_TIMESTAMP;
-    }
-
-    if (!isfinite(measurement->raw_tof_dtu) ||
-        !isfinite(measurement->tof_dtu) ||
-        measurement->raw_tof_dtu <= 0.0 || measurement->tof_dtu <= 0.0 ||
-        measurement->raw_distance_m <= 0.0 || measurement->distance_m <= 0.0) {
-        return UWB_NATIVE_DS_REJECT_NEGATIVE_TOF;
-    }
-    if (!isfinite(measurement->raw_distance_m) ||
-        !isfinite(measurement->distance_m) ||
-        measurement->raw_distance_m > APP_UWB_RANGING_MAX_DISTANCE_M ||
-        measurement->distance_m > APP_UWB_RANGING_MAX_DISTANCE_M) {
-        return UWB_NATIVE_DS_REJECT_IMPOSSIBLE_RANGE;
-    }
-    return UWB_NATIVE_DS_REJECT_NONE;
-}
-
-static void uwb_ranging_log_rejected_measurement(
-    const struct uwb_distance_measurement *measurement,
-    enum uwb_native_ds_reject_reason reason)
-{
-    if (measurement == NULL) {
-        return;
-    }
-    ESP_LOGE(
-        TAG,
-        "UWB_RANGING rejected reason=%s tag=%u anchor=%u seq=%u "
-        "token=0x%08lx round=%lu slot=%u first=%u flags=0x%02x "
-        "tof=%.2f raw_tof=%.2f distance=%.3f raw=%.3f",
-        uwb_native_ds_reject_reason_name(reason),
-        (unsigned)measurement->initiator_id,
-        (unsigned)measurement->responder_id,
-        (unsigned)measurement->sequence,
-        (unsigned long)measurement->context_token,
-        (unsigned long)measurement->round_index,
-        (unsigned)measurement->slot_index,
-        (unsigned)measurement->first_anchor_id,
-        (unsigned)measurement->context_flags,
-        measurement->tof_dtu, measurement->raw_tof_dtu,
-        measurement->distance_m, measurement->raw_distance_m);
-    uwb_ranging_log_measurement_trace(measurement, "rejected");
-}
-
-static esp_err_t uwb_ranging_native_respond_to_poll(
-    const struct uwb_distance_frame *poll,
-    struct uwb_distance_measurement *measurement)
-{
-    if (poll == NULL || measurement == NULL ||
-        poll->type != UWB_DISTANCE_FRAME_POLL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    struct uwb_ranging_context_key poll_key = {0};
-    if (!uwb_ranging_get_context(
-            poll, UWB_RANGING_CONTEXT_SEQUENCE_OFFSET, &poll_key) ||
-        poll_key.sequence != poll->sequence) {
-        s_native_ds_pipeline_stats.context_mismatch_count++;
-        ESP_LOGE(TAG,
-                 "Native DS-TWR POLL context mismatch header_seq=%u "
-                 "context_seq=%u source=%u len=%u",
-                 (unsigned)poll->sequence, (unsigned)poll_key.sequence,
-                 (unsigned)poll->source_id, (unsigned)poll->payload_len);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-
-    struct uwb_ranging_responder_context *context =
-        uwb_ranging_begin_responder_context(poll, &poll_key);
-    const app_runtime_config_t *config = app_runtime_config_get();
-    const uint32_t rx_timeout_ms = config->ranging_rx_timeout_ms;
-    const uint32_t resp_delay_ms = config->ranging_resp_delay_ms;
-    const uint32_t auto_rx_delay_uus =
-        config->ranging_auto_rx_delay_uus;
-    const uint8_t peer_id = poll->source_id;
-    const uint16_t sequence = poll->sequence;
-    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
-    esp_err_t result = ESP_FAIL;
-    s_native_ds_pipeline_stats.responder_exchange_count++;
-
-    uwb_distance_build_frame(UWB_DISTANCE_FRAME_RESP, peer_id, sequence,
-                             payload);
-    uwb_ranging_put_context(payload, UWB_RANGING_CONTEXT_SEQUENCE_OFFSET,
-                            &context->key);
-    const uint64_t resp_tx_due = uwb_dw3000_add_timestamp_delta(
-        poll->rx_timestamp, uwb_dw3000_ms_to_dtu(resp_delay_ms));
-    context->response_arm_host_us = esp_timer_get_time();
-    esp_err_t err = uwb_dw3000_send_payload_delayed_expect_rx(
-        payload, UWB_RANGING_CONTEXT_LEN, resp_tx_due,
-        auto_rx_delay_uus, rx_timeout_ms,
-        &context->response_programmed_tx_ts,
-        &context->response_actual_tx_ts);
-    context->response_done_host_us = esp_timer_get_time();
-    uwb_passive_ds_record_stage(
-        &s_native_ds_pipeline_stats.response_tx,
-        context->response_arm_host_us, err == ESP_OK);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG,
-                 "Native DS-TWR RESP TX failed seq=%u tag=%u: %s",
-                 (unsigned)sequence, (unsigned)peer_id,
-                 esp_err_to_name(err));
-        result = err;
-        goto done;
-    }
-
-    struct uwb_distance_frame final = {0};
-    const int64_t final_wait_started_us = esp_timer_get_time();
-    err = uwb_distance_receive_matching(UWB_DISTANCE_FRAME_FINAL, peer_id, true,
-                                        sequence, &final, rx_timeout_ms);
-    uwb_passive_ds_record_stage(
-        &s_native_ds_pipeline_stats.final_wait,
-        final_wait_started_us, err == ESP_OK);
-    if (err != ESP_OK) {
-        if (err == ESP_ERR_TIMEOUT) {
-            s_native_ds_pipeline_stats.final_timeout_count++;
-        }
-        ESP_LOGW(TAG,
-                 "Native DS-TWR FINAL wait failed seq=%u tag=%u: %s",
-                 (unsigned)sequence, (unsigned)peer_id,
-                 esp_err_to_name(err));
-        result = err;
-        goto done;
-    }
-    context->final_rx_host_us = final.rx_host_time_us;
-    if (final.payload_len < UWB_RANGING_NATIVE_FINAL_LEN) {
-        ESP_LOGW(TAG,
-                 "Native DS-TWR FINAL payload too short seq=%u tag=%u len=%u",
-                 (unsigned)sequence, (unsigned)peer_id,
-                 (unsigned)final.payload_len);
-        result = ESP_ERR_INVALID_SIZE;
-        goto done;
-    }
-
-    struct uwb_ranging_context_key final_key = {0};
-    if (!uwb_ranging_get_context(
-            &final, UWB_RANGING_FINAL_CONTEXT_SEQUENCE_OFFSET,
-            &final_key) ||
-        final.sequence != final_key.sequence ||
-        !uwb_ranging_context_equal(&context->key, &final_key)) {
-        s_native_ds_pipeline_stats.context_mismatch_count++;
-        ESP_LOGE(TAG,
-                 "Native DS-TWR FINAL context mismatch seq=%u tag=%u "
-                 "token=0x%08lx got_seq=%u got_token=0x%08lx",
-                 (unsigned)sequence, (unsigned)peer_id,
-                 (unsigned long)context->key.token,
-                 (unsigned)final_key.sequence,
-                 (unsigned long)final_key.token);
-        result = ESP_ERR_INVALID_RESPONSE;
-        goto done;
-    }
-
-    const int64_t formula_started_us = esp_timer_get_time();
-    const uint64_t poll_tx_ts = uwb_distance_get_ts40(
-        final.payload, UWB_DISTANCE_FRAME_POLL_TX_TS_OFFSET);
-    const uint64_t resp_rx_ts = uwb_distance_get_ts40(
-        final.payload, UWB_DISTANCE_FRAME_RESP_RX_TS_OFFSET);
-    const uint64_t final_tx_ts = uwb_distance_get_ts40(
-        final.payload, UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET);
-    uwb_distance_fill_measurement_from_timestamps(
-        peer_id, s_source_id, sequence, poll_tx_ts, poll->rx_timestamp,
-        context->response_programmed_tx_ts, resp_rx_ts, final_tx_ts,
-        final.rx_timestamp,
-        final.clock_offset_valid, final.clock_offset_raw, measurement);
-    measurement->context_token = context->key.token;
-    measurement->round_index = context->key.round_index;
-    measurement->slot_index = context->key.slot_index;
-    measurement->first_anchor_id = context->key.first_anchor_id;
-    measurement->context_flags = context->key.flags;
-    measurement->initiator_poll_start_host_us = (int64_t)uwb_distance_get_u32(
-        final.payload, UWB_RANGING_FINAL_POLL_START_HOST32_OFFSET);
-    measurement->initiator_poll_done_host_us = (int64_t)uwb_distance_get_u32(
-        final.payload, UWB_RANGING_FINAL_POLL_DONE_HOST32_OFFSET);
-    measurement->initiator_resp_rx_host_us = (int64_t)uwb_distance_get_u32(
-        final.payload, UWB_RANGING_FINAL_RESP_RX_HOST32_OFFSET);
-    measurement->initiator_final_arm_host_us = (int64_t)uwb_distance_get_u32(
-        final.payload, UWB_RANGING_FINAL_ARM_HOST32_OFFSET);
-    measurement->responder_poll_rx_host_us = poll->rx_host_time_us;
-    measurement->responder_resp_arm_host_us = context->response_arm_host_us;
-    measurement->responder_resp_done_host_us = context->response_done_host_us;
-    measurement->responder_final_rx_host_us = final.rx_host_time_us;
-    measurement->responder_formula_done_host_us = esp_timer_get_time();
-    measurement->poll_rx_diagnostics = poll->diagnostics;
-    measurement->final_rx_diagnostics = final.diagnostics;
-    const enum uwb_native_ds_reject_reason reject_reason =
-        uwb_ranging_native_validate_measurement(measurement, config);
-    const bool measurement_valid = reject_reason == UWB_NATIVE_DS_REJECT_NONE;
-    uwb_passive_ds_record_stage(
-        &s_native_ds_pipeline_stats.formula,
-        formula_started_us, measurement_valid);
-    if (!measurement_valid) {
-        if (reject_reason == UWB_NATIVE_DS_REJECT_TIMESTAMP) {
-            s_native_ds_pipeline_stats.timestamp_reject_count++;
-        } else if (reject_reason == UWB_NATIVE_DS_REJECT_NEGATIVE_TOF) {
-            s_native_ds_pipeline_stats.negative_tof_reject_count++;
-        } else if (reject_reason == UWB_NATIVE_DS_REJECT_IMPOSSIBLE_RANGE) {
-            s_native_ds_pipeline_stats.impossible_range_reject_count++;
-        }
-        uwb_ranging_log_rejected_measurement(measurement, reject_reason);
-        result = ESP_ERR_INVALID_RESPONSE;
-        goto done;
-    }
-
-    ESP_LOGD(TAG,
-             "Native DS-TWR responder complete seq=%u tag=%u "
-             "resp_programmed=0x%010llx resp_actual=0x%010llx",
-             (unsigned)sequence, (unsigned)peer_id,
-             (unsigned long long)context->response_programmed_tx_ts,
-             (unsigned long long)context->response_actual_tx_ts);
-    result = ESP_OK;
-
-done:
-    context->in_use = false;
-    return result;
 }
 
 static void uwb_distance_build_report2(
@@ -9238,422 +8451,175 @@ static void uwb_dw3000_anchor_survey_loop(void)
     uwb_anchor_survey_anchor_loop(coordinator_id, anchor_ids, anchor_count);
 }
 
-static void
-uwb_ranging_log_result(const struct uwb_distance_measurement *measurement)
+static esp_err_t native_ds_send_immediate_expect_rx(
+    void *context, const uint8_t *payload, size_t payload_len,
+    uint32_t rx_after_tx_delay_uus, uint32_t rx_timeout_ms,
+    uint64_t *tx_timestamp)
 {
-    if (measurement == NULL) {
-        return;
-    }
-
-    const uint8_t tag_id = app_runtime_config_get()->tag_id;
-    ESP_LOGI(TAG,
-             "UWB_RANGING result tag=%u anchor=%u seq=%u distance=%.3f m "
-             "%.1f cm raw=%.3f m clk_valid=%u token=0x%08lx round=%lu "
-             "slot=%u first=%u flags=0x%02x",
-             (unsigned)tag_id,
-             (unsigned)measurement->responder_id,
-             (unsigned)measurement->sequence, measurement->distance_m,
-             measurement->distance_m * 100.0, measurement->raw_distance_m,
-             measurement->clock_offset_valid ? 1U : 0U,
-             (unsigned long)measurement->context_token,
-             (unsigned long)measurement->round_index,
-             (unsigned)measurement->slot_index,
-             (unsigned)measurement->first_anchor_id,
-             (unsigned)measurement->context_flags);
-
-    /* Keep the complete post-geometry round classified in every result, but
-     * sample the expensive DW/host trace only on its first slot.  Rejected
-     * measurements always emit a trace from the validation path. */
-    bool trace =
-        (measurement->context_flags &
-         UWB_RANGING_CONTEXT_FLAG_AFTER_GEOMETRY) != 0U &&
-        measurement->slot_index == 0U;
-#if APP_UWB_RANGING_DIAGNOSTICS_EVERY > 0
-    trace = trace ||
-            (measurement->sequence % APP_UWB_RANGING_DIAGNOSTICS_EVERY) == 0U;
-#endif
-    if (trace) {
-        uwb_ranging_log_measurement_trace(measurement, "accepted");
-    }
+    (void)context;
+    return uwb_dw3000_send_payload_expect_rx(
+        payload, payload_len, rx_after_tx_delay_uus, rx_timeout_ms,
+        tx_timestamp);
 }
 
-static void uwb_ranging_log_anchor_geometry(
-    const struct uwb_distance_measurement *measurement)
+static esp_err_t native_ds_send_delayed(
+    void *context, const uint8_t *payload, size_t payload_len,
+    uint64_t due_timestamp, uint64_t *programmed_tx_timestamp,
+    uint64_t *actual_tx_timestamp)
 {
-    if (measurement == NULL) {
-        return;
-    }
-    ESP_LOGI(TAG,
-             "UWB_RANGING geometry pair=%u-%u seq=%u distance=%.3f m "
-             "%.1f cm raw=%.3f m",
-             (unsigned)measurement->initiator_id,
-             (unsigned)measurement->responder_id,
-             (unsigned)measurement->sequence, measurement->distance_m,
-             measurement->distance_m * 100.0,
-             measurement->raw_distance_m);
+    (void)context;
+    return uwb_dw3000_send_payload_delayed(
+        payload, payload_len, due_timestamp, programmed_tx_timestamp,
+        actual_tx_timestamp);
 }
 
-static void uwb_ranging_handle_geometry_command(
-    const struct uwb_distance_frame *frame, uint8_t tag_id,
-    const uint8_t *anchor_ids, size_t anchor_count)
+static esp_err_t native_ds_send_delayed_expect_rx(
+    void *context, const uint8_t *payload, size_t payload_len,
+    uint64_t due_timestamp, uint32_t rx_after_tx_delay_uus,
+    uint32_t rx_timeout_ms, uint64_t *programmed_tx_timestamp,
+    uint64_t *actual_tx_timestamp)
 {
-    if (frame == NULL || frame->type != UWB_DISTANCE_FRAME_SURVEY_CMD ||
-        frame->source_id != tag_id ||
-        !uwb_distance_destination_matches(frame->destination_id)) {
-        return;
-    }
+    (void)context;
+    return uwb_dw3000_send_payload_delayed_expect_rx(
+        payload, payload_len, due_timestamp, rx_after_tx_delay_uus,
+        rx_timeout_ms, programmed_tx_timestamp, actual_tx_timestamp);
+}
 
-    struct uwb_anchor_survey_pair pair = {0};
-    uint8_t pair_index = 0;
-    if (!uwb_anchor_survey_parse_command(frame, &pair, &pair_index) ||
-        pair.initiator_id != s_source_id ||
-        !uwb_anchor_survey_id_in_set(
-            anchor_ids, anchor_count, pair.responder_id)) {
-        return;
+static esp_err_t native_ds_receive(
+    void *context, struct uwb_native_ds_rx_frame *frame,
+    uint32_t timeout_ms)
+{
+    (void)context;
+    if (frame == NULL) {
+        return ESP_ERR_INVALID_ARG;
     }
-
-    uwb_dw3000_delay_ms(UWB_RANGING_GEOMETRY_COMMAND_DELAY_MS);
-    const esp_err_t err = uwb_ranging_native_initiate_once(
-        pair.responder_id, frame->sequence, UINT32_MAX, pair_index,
-        pair.initiator_id, UWB_RANGING_CONTEXT_FLAG_GEOMETRY_EXCHANGE);
+    struct uwb_dw3000_rx_frame radio_frame = {0};
+    const esp_err_t err = uwb_dw3000_receive_frame(
+        &radio_frame, timeout_ms);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG,
-                 "UWB_RANGING geometry initiate pair=%u-%u index=%u "
-                 "seq=%u failed: %s",
-                 (unsigned)pair.initiator_id,
-                 (unsigned)pair.responder_id, (unsigned)pair_index,
-                 (unsigned)frame->sequence, esp_err_to_name(err));
+        return err;
     }
+    if (radio_frame.payload_len > sizeof(frame->payload)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    memset(frame, 0, sizeof(*frame));
+    frame->payload_len = radio_frame.payload_len;
+    frame->rx_timestamp = radio_frame.rx_timestamp;
+    memcpy(frame->payload, radio_frame.payload, radio_frame.payload_len);
+    return ESP_OK;
 }
 
-static void uwb_ranging_tag_loop(const uint8_t *anchor_ids, size_t anchor_count)
+static uint64_t native_ds_add_delay_ms(
+    void *context, uint64_t timestamp, uint32_t delay_ms)
 {
-    const app_runtime_config_t *config = app_runtime_config_get();
-    struct uwb_anchor_survey_pair
-        geometry_pairs[UWB_ANCHOR_SURVEY_MAX_PAIRS] = {0};
-    const size_t geometry_pair_count = uwb_anchor_survey_build_pairs(
-        anchor_ids, anchor_count, geometry_pairs);
-    size_t geometry_pair_index = 0;
-    uint16_t sequence = (uint16_t)(esp_random() & 0xFFFFU);
-    uint32_t round = 0;
-    uint32_t successful_exchanges = 0;
-    uint32_t failed_exchanges = 0;
-    uint32_t successful_geometry_commands = 0;
-    uint32_t failed_geometry_commands = 0;
-    uint32_t slot_overruns = 0;
-    uint32_t exchange_max_us = 0;
-    int64_t summary_started_us = esp_timer_get_time();
-    int64_t previous_round_final_done_us = 0;
-    bool previous_round_had_geometry = false;
-
-    s_status = UWB_DW3000_STATUS_READY;
-    ESP_LOGI(TAG,
-             "UWB_RANGING native tag initiator active: source_id=%u "
-             "anchors=[%u,%u,%u,%u] slot=%u ms frame=%lu ms "
-             "timeout=%u ms resp=%u ms final=%u ms",
-             (unsigned)s_source_id, (unsigned)anchor_ids[0],
-             (unsigned)anchor_ids[1], (unsigned)anchor_ids[2],
-             (unsigned)anchor_ids[3], (unsigned)config->ranging_slot_ms,
-             (unsigned long)(anchor_count * config->ranging_slot_ms +
-                             config->ranging_round_gap_ms),
-             (unsigned)config->ranging_rx_timeout_ms,
-             (unsigned)config->ranging_resp_delay_ms,
-             (unsigned)config->ranging_final_delay_ms);
-
-    while (!uwb_dw3000_runtime_switch_pending()) {
-        const size_t order_offset =
-            APP_UWB_RANGING_ROTATE_ANCHOR_ORDER
-                ? (size_t)((round +
-                            round / UWB_RANGING_GEOMETRY_FRAME_INTERVAL) %
-                           anchor_count)
-                : 0U;
-        const uint8_t first_anchor_id = anchor_ids[order_offset];
-        for (size_t i = 0;
-             i < anchor_count && !uwb_dw3000_runtime_switch_pending(); ++i) {
-            config = app_runtime_config_get();
-            const uint8_t anchor_id =
-                anchor_ids[(order_offset + i) % anchor_count];
-            const int64_t exchange_started_us = esp_timer_get_time();
-            if (i == 0U && previous_round_final_done_us > 0) {
-                const int64_t boundary_elapsed_us =
-                    exchange_started_us - previous_round_final_done_us;
-                const uint32_t boundary_us =
-                    boundary_elapsed_us <= 0
-                        ? 0U
-                        : boundary_elapsed_us > (int64_t)UINT32_MAX
-                              ? UINT32_MAX
-                              : (uint32_t)boundary_elapsed_us;
-                uwb_passive_ds_record_stage(
-                    &s_native_ds_pipeline_stats.round_boundary,
-                    previous_round_final_done_us, true);
-                s_native_ds_pipeline_stats.round_boundary_count++;
-                if (s_native_ds_pipeline_stats.round_boundary_min_us == 0U ||
-                    boundary_us <
-                        s_native_ds_pipeline_stats.round_boundary_min_us) {
-                    s_native_ds_pipeline_stats.round_boundary_min_us =
-                        boundary_us;
-                }
-                if (boundary_us >
-                    s_native_ds_pipeline_stats.round_boundary_max_us) {
-                    s_native_ds_pipeline_stats.round_boundary_max_us =
-                        boundary_us;
-                }
-            }
-            const int64_t slot_end_us =
-                exchange_started_us +
-                (int64_t)config->ranging_slot_ms * 1000LL;
-            /* Mark the complete first round after a geometry exchange.  A
-             * stale radio state can survive beyond slot zero, so every slot
-             * in this round belongs to the same boundary experiment. */
-            const uint8_t context_flags =
-                previous_round_had_geometry
-                    ? UWB_RANGING_CONTEXT_FLAG_AFTER_GEOMETRY
-                    : 0U;
-            const esp_err_t err =
-                uwb_ranging_native_initiate_once(
-                    anchor_id, sequence, round, (uint8_t)i,
-                    first_anchor_id, context_flags);
-            if (err == ESP_OK) {
-                successful_exchanges++;
-            } else {
-                failed_exchanges++;
-            }
-            sequence++;
-
-            const int64_t exchange_done_us = esp_timer_get_time();
-            const uint32_t exchange_us =
-                (uint32_t)(exchange_done_us - exchange_started_us);
-            if (exchange_us > exchange_max_us) {
-                exchange_max_us = exchange_us;
-            }
-            if (i + 1U == anchor_count) {
-                previous_round_final_done_us = exchange_done_us;
-            }
-            if (esp_timer_get_time() < slot_end_us) {
-                uwb_ranging_wait_until_host_us(slot_end_us);
-            } else {
-                slot_overruns++;
-                s_native_ds_pipeline_stats.slot_overrun_count++;
-            }
-        }
-
-        if (uwb_dw3000_runtime_switch_pending()) {
-            break;
-        }
-        round++;
-        config = app_runtime_config_get();
-        /* The configured frame gap belongs directly after the tag round.
-         * Previously it was applied after the optional geometry exchange,
-         * leaving FINAL -> SURVEY_CMD without the advertised separation. */
-        uwb_ranging_wait_until_host_us(
-            esp_timer_get_time() +
-            (int64_t)config->ranging_round_gap_ms * 1000LL);
-        bool geometry_after_round = false;
-        if (geometry_pair_count > 0U &&
-            round % UWB_RANGING_GEOMETRY_FRAME_INTERVAL == 0U) {
-            geometry_after_round = true;
-            config = app_runtime_config_get();
-            uwb_ranging_wait_until_host_us(
-                esp_timer_get_time() +
-                (int64_t)APP_UWB_RANGING_GEOMETRY_GUARD_MS * 1000LL);
-            const struct uwb_anchor_survey_pair *pair =
-                &geometry_pairs[geometry_pair_index];
-            const esp_err_t geometry_err = uwb_anchor_survey_send_command(
-                pair, (uint8_t)geometry_pair_index, sequence);
-            if (geometry_err == ESP_OK) {
-                successful_geometry_commands++;
-            } else {
-                failed_geometry_commands++;
-            }
-            sequence++;
-            geometry_pair_index =
-                (geometry_pair_index + 1U) % geometry_pair_count;
-            uwb_ranging_wait_until_host_us(
-                esp_timer_get_time() +
-                (int64_t)(config->ranging_slot_ms +
-                          UWB_RANGING_GEOMETRY_COMMAND_DELAY_MS +
-                          APP_UWB_RANGING_GEOMETRY_GUARD_MS) *
-                    1000LL);
-        }
-        previous_round_had_geometry = geometry_after_round;
-
-        const int64_t now_us = esp_timer_get_time();
-        if (now_us - summary_started_us >= 1000000LL) {
-            const double elapsed_s =
-                (double)(now_us - summary_started_us) / 1000000.0;
-            const uint32_t attempts =
-                successful_exchanges + failed_exchanges;
-            ESP_LOGI(TAG,
-                     "UWB_RANGING native summary round=%lu frame=%lu ms "
-                     "ok=%lu fail=%lu rate=%.2f/s overrun=%lu max=%lu us "
-                     "geometry_cmd_ok=%lu geometry_cmd_fail=%lu pair=%u/%u "
-                     "order=%s first=%u geometry_guard=%u+%u ms "
-                     "boundary_min=%lu us "
-                     "boundary_max=%lu us context_reject=%lu ts_reject=%lu",
-                     (unsigned long)round,
-                     (unsigned long)(anchor_count * config->ranging_slot_ms +
-                                     config->ranging_round_gap_ms),
-                     (unsigned long)successful_exchanges,
-                     (unsigned long)failed_exchanges,
-                     elapsed_s > 0.0 ? (double)attempts / elapsed_s : 0.0,
-                     (unsigned long)slot_overruns,
-                     (unsigned long)exchange_max_us,
-                     (unsigned long)successful_geometry_commands,
-                     (unsigned long)failed_geometry_commands,
-                     (unsigned)geometry_pair_index,
-                     (unsigned)geometry_pair_count,
-                     APP_UWB_RANGING_ROTATE_ANCHOR_ORDER ? "rotating"
-                                                        : "configured",
-                     (unsigned)first_anchor_id,
-                     (unsigned)APP_UWB_RANGING_GEOMETRY_GUARD_MS,
-                     (unsigned)APP_UWB_RANGING_GEOMETRY_GUARD_MS,
-                     (unsigned long)
-                         s_native_ds_pipeline_stats.round_boundary_min_us,
-                     (unsigned long)
-                         s_native_ds_pipeline_stats.round_boundary_max_us,
-                     (unsigned long)
-                         s_native_ds_pipeline_stats.context_mismatch_count,
-                     (unsigned long)
-                         s_native_ds_pipeline_stats.timestamp_reject_count);
-            successful_exchanges = 0;
-            failed_exchanges = 0;
-            slot_overruns = 0;
-            exchange_max_us = 0;
-            successful_geometry_commands = 0;
-            failed_geometry_commands = 0;
-            summary_started_us = now_us;
-        }
-    }
+    (void)context;
+    return uwb_dw3000_add_timestamp_delta(
+        timestamp, uwb_dw3000_ms_to_dtu(delay_ms));
 }
 
-static void uwb_ranging_anchor_loop(
-    uint8_t tag_id, const uint8_t *anchor_ids, size_t anchor_count)
+static uint64_t native_ds_programmed_tx_timestamp(
+    void *context, uint64_t due_timestamp)
 {
-    const app_runtime_config_t *config = app_runtime_config_get();
+    (void)context;
+    return uwb_dw3000_programmed_tx_timestamp(
+        uwb_dw3000_delayed_time_word(due_timestamp));
+}
+
+static int64_t native_ds_now_us(void *context)
+{
+    (void)context;
+    return esp_timer_get_time();
+}
+
+static void native_ds_delay_ms(void *context, uint32_t delay_ms)
+{
+    (void)context;
+    uwb_dw3000_delay_ms(delay_ms);
+}
+
+static bool native_ds_stop_requested(void *context)
+{
+    (void)context;
+    return uwb_dw3000_runtime_switch_pending();
+}
+
+static void native_ds_set_ready(void *context)
+{
+    (void)context;
     s_status = UWB_DW3000_STATUS_READY;
+}
+
+static void native_ds_publish_range(
+    void *context, uint8_t tag_id, uint8_t anchor_id, uint16_t frame_id,
+    double distance_m)
+{
+    (void)context;
+    const int32_t distance_mm = uwb_distance_meters_to_mm(distance_m);
     ESP_LOGI(TAG,
-             "UWB_RANGING native anchor responder active: source_id=%u "
-             "tag_id=%u rx_slice=%u ms timeout=%u ms resp=%u ms",
-             (unsigned)s_source_id, (unsigned)tag_id,
-             (unsigned)config->ranging_rx_slice_ms,
-             (unsigned)config->ranging_rx_timeout_ms,
-             (unsigned)config->ranging_resp_delay_ms);
-
-    while (!uwb_dw3000_runtime_switch_pending()) {
-        config = app_runtime_config_get();
-        struct uwb_distance_frame frame = {0};
-        const esp_err_t rx_err =
-            uwb_distance_receive_next(&frame, config->ranging_rx_slice_ms);
-        if (rx_err == ESP_ERR_TIMEOUT) {
-            continue;
-        }
-        if (rx_err != ESP_OK) {
-            if (uwb_dw3000_runtime_switch_pending()) {
-                break;
-            }
-            ESP_LOGW(TAG, "UWB_RANGING native anchor RX failed: %s",
-                     esp_err_to_name(rx_err));
-            uwb_dw3000_delay_ms(5);
-            continue;
-        }
-        if (frame.type == UWB_DISTANCE_FRAME_SURVEY_CMD) {
-            uwb_ranging_handle_geometry_command(
-                &frame, tag_id, anchor_ids, anchor_count);
-            continue;
-        }
-        const bool from_tag = frame.source_id == tag_id;
-        const bool from_anchor = uwb_anchor_survey_id_in_set(
-            anchor_ids, anchor_count, frame.source_id);
-        if (frame.type != UWB_DISTANCE_FRAME_POLL ||
-            (!from_tag && !from_anchor) ||
-            !uwb_distance_destination_matches(frame.destination_id)) {
-            continue;
-        }
-
-        struct uwb_distance_measurement measurement = {0};
-        const esp_err_t err =
-            uwb_ranging_native_respond_to_poll(&frame, &measurement);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG,
-                     "UWB_RANGING native anchor respond failed tag=%u "
-                     "seq=%u: %s",
-                     (unsigned)tag_id, (unsigned)frame.sequence,
-                     esp_err_to_name(err));
-            continue;
-        }
-
-        /*
-         * Keep the high-rate positioning path to one compact result record.
-         * uwb_distance_log_measurement() emits a second verbose record plus
-         * periodic diagnostics/event-counter SPI reads; those facilities are
-         * intended for the dedicated diagnostic modes.
-         */
-        if (from_tag) {
-            uwb_ranging_log_result(&measurement);
-        } else {
-            uwb_ranging_log_anchor_geometry(&measurement);
-            (void)wireless_telemetry_service_submit_native_ds_anchor_range(
-                measurement.initiator_id, measurement.responder_id,
-                measurement.sequence, (uint32_t)measurement.sequence,
-                uwb_distance_meters_to_mm(measurement.distance_m),
-                uwb_distance_meters_to_mm(measurement.raw_distance_m));
-        }
-    }
+             "UWB_RANGING result tag=%u anchor=%u frame=%u "
+             "distance=%.3f m %.1f cm",
+             (unsigned)tag_id, (unsigned)anchor_id, (unsigned)frame_id,
+             distance_m, distance_m * 100.0);
+    (void)wireless_telemetry_service_submit_native_ds_anchor_range(
+        tag_id, anchor_id, frame_id, (uint32_t)frame_id,
+        distance_mm, distance_mm);
 }
 
 static void uwb_dw3000_ranging_loop(void)
 {
-    memset(&s_native_ds_pipeline_stats, 0,
-           sizeof(s_native_ds_pipeline_stats));
-    memset(s_native_ds_initiator_contexts, 0,
-           sizeof(s_native_ds_initiator_contexts));
-    memset(s_native_ds_responder_contexts, 0,
-           sizeof(s_native_ds_responder_contexts));
-    s_native_ds_initiator_context_cursor = 0U;
-    s_native_ds_responder_context_cursor = 0U;
-    uint8_t anchor_ids[UWB_ANCHOR_SURVEY_MAX_ANCHORS] = {0};
+    uint8_t anchor_ids[UWB_NATIVE_DS_MAX_ANCHORS] = {0};
     const size_t anchor_count = uwb_anchor_survey_anchor_ids(anchor_ids);
-    const app_runtime_config_t *config = app_runtime_config_get();
-    const uint8_t tag_id = config->tag_id;
+    const app_runtime_config_t *runtime = app_runtime_config_get();
+    if (anchor_count == 0U || anchor_count > UWB_NATIVE_DS_MAX_ANCHORS) {
+        s_status = UWB_DW3000_STATUS_FAILED;
+        ESP_LOGE(TAG, "Native DS-TWR invalid anchor configuration");
+        return;
+    }
+
+    struct uwb_native_ds_config config = {
+        .source_id = s_source_id,
+        .tag_id = runtime->tag_id,
+        .anchor_count = (uint8_t)anchor_count,
+        .slot_ms = runtime->ranging_slot_ms,
+        .round_gap_ms = runtime->ranging_round_gap_ms,
+        .rx_slice_ms = runtime->ranging_rx_slice_ms,
+        .rx_timeout_ms = runtime->ranging_rx_timeout_ms,
+        .response_delay_ms = runtime->ranging_resp_delay_ms,
+        .final_delay_ms = runtime->ranging_final_delay_ms,
+        .auto_rx_delay_uus = runtime->ranging_auto_rx_delay_uus,
+        .maximum_distance_m = APP_UWB_RANGING_MAX_DISTANCE_M,
+    };
+    memcpy(config.anchor_ids, anchor_ids, anchor_count);
+
+    const struct uwb_native_ds_radio_ops radio = {
+        .send_immediate_expect_rx = native_ds_send_immediate_expect_rx,
+        .send_delayed = native_ds_send_delayed,
+        .send_delayed_expect_rx = native_ds_send_delayed_expect_rx,
+        .receive = native_ds_receive,
+        .add_delay_ms = native_ds_add_delay_ms,
+        .programmed_tx_timestamp = native_ds_programmed_tx_timestamp,
+        .now_us = native_ds_now_us,
+        .delay_ms = native_ds_delay_ms,
+        .stop_requested = native_ds_stop_requested,
+        .set_ready = native_ds_set_ready,
+        .publish_range = native_ds_publish_range,
+    };
 
     ESP_LOGI(TAG,
-             "UWB_RANGING native three-frame runtime start: "
-             "source_id=%u tag_id=%u anchors=[%u,%u,%u,%u]",
-             (unsigned)s_source_id, (unsigned)tag_id,
-             (unsigned)anchor_ids[0], (unsigned)anchor_ids[1],
-             (unsigned)anchor_ids[2], (unsigned)anchor_ids[3]);
-
-    if (anchor_count == 0 || anchor_count > UWB_ANCHOR_SURVEY_MAX_ANCHORS) {
+             "Native DS-TWR clean runtime: source=%u tag=%u anchors=%u "
+             "slot=%lu ms gap=%lu ms timeout=%lu ms resp=%lu ms "
+             "final=%lu ms; no clock correction",
+             (unsigned)config.source_id, (unsigned)config.tag_id,
+             (unsigned)config.anchor_count, (unsigned long)config.slot_ms,
+             (unsigned long)config.round_gap_ms,
+             (unsigned long)config.rx_timeout_ms,
+             (unsigned long)config.response_delay_ms,
+             (unsigned long)config.final_delay_ms);
+    const esp_err_t err = uwb_native_ds_twr_run(&config, &radio);
+    if (err != ESP_OK && !uwb_dw3000_runtime_switch_pending()) {
         s_status = UWB_DW3000_STATUS_FAILED;
-        ESP_LOGE(TAG, "UWB_RANGING invalid anchor configuration");
-        vTaskDelete(NULL);
-        return;
-    }
-    if (uwb_anchor_survey_id_in_set(anchor_ids, anchor_count, tag_id)) {
-        s_status = UWB_DW3000_STATUS_FAILED;
-        ESP_LOGE(TAG,
-                 "UWB_RANGING invalid role configuration: tag_id=%u is also in anchor list",
-                 (unsigned)tag_id);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    if (s_source_id == tag_id) {
-        uwb_ranging_tag_loop(anchor_ids, anchor_count);
-        return;
-    }
-
-    if (uwb_anchor_survey_id_in_set(anchor_ids, anchor_count, s_source_id)) {
-        uwb_ranging_anchor_loop(tag_id, anchor_ids, anchor_count);
-        return;
-    }
-
-    s_status = UWB_DW3000_STATUS_READY;
-    ESP_LOGW(TAG,
-             "UWB_RANGING idle: source_id=%u is neither tag nor configured anchor",
-             (unsigned)s_source_id);
-    while (!uwb_dw3000_runtime_switch_pending()) {
-        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+        ESP_LOGE(TAG, "Native DS-TWR runtime failed: %s",
+                 esp_err_to_name(err));
     }
 }
 
@@ -10108,9 +9074,6 @@ static esp_err_t uwb_dw3000_reinitialize_runtime(
     if (s_passive_ds_schedule_timer != NULL) {
         (void)esp_timer_stop(s_passive_ds_schedule_timer);
     }
-    if (s_ranging_slot_timer != NULL) {
-        (void)esp_timer_stop(s_ranging_slot_timer);
-    }
     s_flex_tdoa_schedule_alarm_fired = false;
     s_passive_ds_schedule_alarm_fired = false;
     s_flex_tdoa_local_request.active = false;
@@ -10520,8 +9483,5 @@ void uwb_dw3000_get_passive_ds_pipeline_stats(
 void uwb_dw3000_get_native_ds_pipeline_stats(
     struct uwb_native_ds_pipeline_stats *stats)
 {
-    if (stats == NULL) {
-        return;
-    }
-    memcpy(stats, &s_native_ds_pipeline_stats, sizeof(*stats));
+    uwb_native_ds_twr_get_stats(stats);
 }

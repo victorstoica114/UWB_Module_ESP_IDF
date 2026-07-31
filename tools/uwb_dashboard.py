@@ -51,12 +51,8 @@ CAL_SAMPLE_RE = re.compile(
 )
 RANGING_RE = re.compile(
     r"\bUWB_RANGING result\s+tag=(?P<tag>\d+)\s+anchor=(?P<anchor>\d+)\s+"
-    r"seq=(?P<seq>\d+)\s+distance=(?P<distance>[-+]?\d+(?:\.\d+)?)\s+m"
-)
-RANGING_CONTEXT_RE = re.compile(
-    r"\btoken=0x(?P<token>[0-9a-fA-F]+)\s+"
-    r"round=(?P<round>\d+)\s+slot=(?P<slot>\d+)\s+"
-    r"first=(?P<first>\d+)\s+flags=0x(?P<flags>[0-9a-fA-F]+)"
+    r"(?:frame|seq)=(?P<frame_id>\d+)\s+"
+    r"distance=(?P<distance>[-+]?\d+(?:\.\d+)?)\s+m"
 )
 FLOAT_TEXT_RE = r"[-+]?(?:\d+(?:\.\d+)?|nan|inf)"
 FLEX_TDOA_RE = re.compile(
@@ -1027,9 +1023,10 @@ class DashboardState:
                 elif topic in (
                     "uwb.flex_tdoa.anchor_range",
                     "uwb.passive_ds.anchor_range",
-                    "uwb.native_ds.anchor_range",
                 ):
                     self.record_tdoa_anchor_sample_locked(sample)
+                elif topic == "uwb.native_ds.anchor_range":
+                    self.record_native_ds_range_sample_locked(sample)
                 elif topic in (
                     "uwb.flex_tdoa.position",
                     "uwb.passive_ds.position",
@@ -1211,33 +1208,80 @@ class DashboardState:
             tag_id = int(match.group("tag"))
             anchor_id = int(match.group("anchor"))
             distance_m = float(match.group("distance"))
-            seq = int(match.group("seq"))
+            frame_id = int(match.group("frame_id"))
         except ValueError:
             return
 
+        self.store_native_ds_range_locked(
+            tag_id=tag_id,
+            anchor_id=anchor_id,
+            frame_id=frame_id,
+            distance_m=distance_m,
+            item=item,
+            raw_message=raw_message,
+        )
+
+    def record_native_ds_range_sample_locked(
+        self, item: dict[str, Any]
+    ) -> None:
+        try:
+            tag_id = int(item["initiator_id"])
+            anchor_id = int(item["responder_id"])
+            frame_id = int(item["seq"])
+            distance_m = float(item["distance_m"])
+        except (KeyError, TypeError, ValueError):
+            return
+        self.store_native_ds_range_locked(
+            tag_id=tag_id,
+            anchor_id=anchor_id,
+            frame_id=frame_id,
+            distance_m=distance_m,
+            item=item,
+            raw_message="binary native DS-TWR telemetry",
+        )
+
+    def store_native_ds_range_locked(
+        self,
+        *,
+        tag_id: int,
+        anchor_id: int,
+        frame_id: int,
+        distance_m: float,
+        item: dict[str, Any],
+        raw_message: str,
+    ) -> None:
+        if (
+            tag_id <= 0
+            or anchor_id <= 0
+            or tag_id == anchor_id
+            or not math.isfinite(distance_m)
+            or distance_m <= 0
+        ):
+            return
         now = float(item.get("received_at") or time.time())
         key = (tag_id, anchor_id)
+        previous = self.ranging_distances.get(key)
+        duplicate = (
+            previous is not None
+            and int(previous.get("frame_id", -1)) == frame_id
+            and abs(float(previous.get("distance_m", math.inf)) - distance_m)
+            < 0.0005
+            and now - float(previous.get("received_at") or 0.0) < 1.0
+        )
+        if duplicate:
+            return
         sample = {
             "tag_id": tag_id,
             "anchor_id": anchor_id,
             "distance_m": distance_m,
-            "seq": seq,
+            "frame_id": frame_id,
+            "seq": frame_id,
             "received_at": now,
             "log_id": item.get("id"),
             "source_module_id": item.get("module_id"),
-            "raw": item.get("raw") or item.get("message") or "",
+            "raw": raw_message,
+            "tdoa_protocol": "native_ds",
         }
-        context_match = RANGING_CONTEXT_RE.search(raw_message)
-        if context_match is not None:
-            sample.update(
-                {
-                    "context_token": int(context_match.group("token"), 16),
-                    "round_index": int(context_match.group("round")),
-                    "slot_index": int(context_match.group("slot")),
-                    "first_anchor_id": int(context_match.group("first")),
-                    "boundary_flags": int(context_match.group("flags"), 16),
-                }
-            )
         self.ranging_distances[key] = sample
         self.ranging_history.setdefault(
             key, deque(maxlen=self.max_ranging_samples)
@@ -1574,6 +1618,7 @@ class DashboardState:
                 "tag_id": tag_id,
                 "anchor_id": anchor_id,
                 "distance_m": float(item["distance_m"]),
+                "frame_id": int(item["frame_id"]),
                 "seq": int(item["seq"]),
                 "age_sec": now - float(item["received_at"]),
                 "log_id": item.get("log_id"),
@@ -1582,11 +1627,6 @@ class DashboardState:
                 "tdoa_protocol": str(
                     item.get("tdoa_protocol") or "flextdoa"
                 ),
-                "context_token": item.get("context_token"),
-                "round_index": item.get("round_index"),
-                "slot_index": item.get("slot_index"),
-                "first_anchor_id": item.get("first_anchor_id"),
-                "boundary_flags": item.get("boundary_flags"),
                 "stats": {
                     "samples": len(values),
                     "mean_m": mean_m,
@@ -1608,10 +1648,8 @@ class DashboardState:
         anchor_distances: dict[str, Any] = {}
         recent_observations: list[dict[str, Any]] = []
         recent_anchor_ranges: list[dict[str, Any]] = []
-        # Native DS-TWR emits one anchor-geometry pair every four position
-        # frames. A full six-pair sweep can take more than ten seconds with
-        # the compatibility profile, so retain enough history for a newly
-        # opened browser to assemble a complete live geometry.
+        # Retain enough anchor-range history for the receive-only protocols to
+        # reconstruct their live geometry after a browser reconnect.
         max_age_sec = ANCHOR_RANGE_HISTORY_MAX_AGE_SEC
         for (tag_id, initiator_id, responder_id), item in sorted(
             self.tdoa_observations.items()
@@ -3379,19 +3417,12 @@ tr.status-stale td { color: #4f3b1d; }
             <select id="positionAnchorCount"><option value="4">4 anchors</option><option value="3">3 anchors</option></select>
             <label for="positionSolver">Ranging method</label>
             <select id="positionSolver"><option value="flextdoa" selected>FlexTDOA</option><option value="passive_ds">Passive DS-TWR</option><option value="ranging">Native DS-TWR</option><option value="hybrid">Legacy hybrid logs</option></select>
-            <label class="native-ds-position-option" for="positionNativeDsUpdateMode">Calculation method</label>
-            <select class="native-ds-position-option" id="positionNativeDsUpdateMode">
-              <option value="hybrid" selected>Rolling display + coherent metrics</option>
-              <option value="coherent">Coherent frames only (4/4)</option>
-              <option value="rolling">Rolling latest ranges</option>
-            </select>
-            <label class="native-ds-position-option" for="positionNativeDsFit">Fit method</label>
-            <select class="native-ds-position-option" id="positionNativeDsFit">
-              <option value="all_anchor" selected>All-anchor fit</option>
-              <option value="robust_3of4">Robust 3-of-4 fit</option>
-            </select>
             <label for="positionAnchors">Anchor IDs</label>
             <input id="positionAnchors" value="2,3,4,5">
+            <label class="native-ds-position-option" for="positionNativeAnchorX">Anchor X coordinates m</label>
+            <input class="native-ds-position-option" id="positionNativeAnchorX" value="0,0,2.971,3.196">
+            <label class="native-ds-position-option" for="positionNativeAnchorY">Anchor Y coordinates m</label>
+            <input class="native-ds-position-option" id="positionNativeAnchorY" value="0,3.067,-0.071,2.974">
             <label for="positionTags">Tag IDs</label>
             <input id="positionTags" value="1">
             <label for="positionMaxAgeSec">Fresh age s</label>
@@ -3412,20 +3443,19 @@ tr.status-stale td { color: #4f3b1d; }
           <div class="param-legend">
             <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
             <div><b>Ranging method</b><span>FlexTDOA and Passive DS-TWR use receive-only tags. Native DS-TWR ranges each active tag to every anchor. Each protocol keeps independent timing profiles.</span></div>
-            <div class="native-ds-position-option"><b>Calculation method</b><span>Hybrid uses every new range for the low-latency live marker, while the trail and accuracy metrics use coherent 4/4 frames. The other options expose either source directly.</span></div>
-            <div class="native-ds-position-option"><b>Fit method</b><span>All-anchor preserves every accepted range. Robust 3-of-4 may reject one inconsistent anchor measurement.</span></div>
+            <div class="native-ds-position-option"><b>Native calculation</b><span>The Raspberry solves one unfiltered all-anchor position only after all four raw ranges from the same frame arrive. Coordinates follow the Anchor IDs order.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In both passive protocols every non-anchor module only listens on UWB, so additional tags consume no radio slots.</span></div>
-            <div><b>Geometry</b><span>Anchor-to-anchor DS-TWR continuously updates the paper-style EKF. Physical anchor movement changes the displayed geometry and every live position solver automatically; no fixed layout is required.</span></div>
+            <div><b>Geometry</b><span>FlexTDOA and Passive DS-TWR may estimate live geometry. The clean Native DS-TWR baseline does not add anchor-to-anchor traffic; enter its known anchor coordinates above.</span></div>
             <div><b>Known reference</b><span>Use the anchor centroid while the tag is physically centered. Manual coordinates support other surveyed test points.</span></div>
           </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
-            <button id="positionRestartAnchorSelfLocalization">Reset Live Geometry Estimate</button>
+            <button class="dynamic-geometry-option" id="positionRestartAnchorSelfLocalization">Reset Live Geometry Estimate</button>
             <button class="primary" id="positionEnableRangingSide">Enable Position Runtime</button>
           </div>
           <div id="positionToast" class="toast"></div>
           <div class="section" style="margin-top:12px;">
-            <h2>Live Anchor Geometry</h2>
+            <h2>Anchor Geometry</h2>
             <div id="positionGeometryStatus" class="muted" style="margin-bottom:8px;">Waiting for live anchor ranges.</div>
             <table>
               <thead><tr><th>Pair</th><th>raw / stable</th><th>robust σ</th><th>age</th><th>fit</th></tr></thead>
@@ -4604,11 +4634,6 @@ const state = {
   positionWasActive: false,
   positionGeometry: {key: "", ekf: null},
   positionSeeds: {},
-  nativeRangeDiagnostics: {
-    rejectedCount: 0,
-    lastRejected: null,
-    tokens: {},
-  },
   positionStream: null,
   positionStreamConnected: false,
   positionStreamRenderPending: false,
@@ -4622,14 +4647,13 @@ const state = {
   positionStreamLastRenderedEventToken: "",
   dsPositionFrameBuckets: new Map(),
   nativeDsCoherentFrames: {},
-  nativeDsRangeFilters: {},
+  nativeDsLastSolutions: {},
   nativeDsFrameDiagnostics: {
     completedCount: 0,
     publishedCount: 0,
     publishedTimes: [],
     expiredCount: 0,
     expiredTimes: [],
-    mixedLatestAvoided: 0,
     lateCompleteRejected: 0,
     lateCompleteTimes: [],
     lastSpanMs: NaN,
@@ -4661,61 +4685,13 @@ const rangingProfileFields = [
   {key: "autoRxDelayUus", suffix: "AutoRxDelayUus", label: "Auto RX delay UUS", min: 1, step: 1},
 ];
 const rangingProfileDefaults = {
-  frame53: {
-    prefix: "profileFrame53",
-    label: "53 ms Guarded Fast Profile",
-    description: "Fastest profile validated with explicit 5 ms isolation on both sides of the periodic anchor-geometry exchange.",
-    validationClass: "good",
-    validationText: "recommended · 0 source rejects / 1 h · 65.35 valid ranges/s",
-    buttonLabel: "Apply 53 ms Guarded",
-    dsPositionMaxAgeSec: 0.2,
-    slotMs: 13,
-    roundGapMs: 1,
-    dsRxSliceMs: 100,
-    timeoutMs: 8,
-    respDelayMs: 2,
-    finalDelayMs: 2,
-    autoRxDelayUus: 500,
-  },
-  legacyPrecision: {
-    prefix: "profileLegacyPrecision",
-    label: "410 ms Legacy Precision Reference",
-    description: "Fresh slow baseline captured on the unchanged 2026-07-31 geometry with the strict three-frame Native DS-TWR exchange.",
-    validationClass: "good",
-    validationText: "validated 180 s · 0 raw anomalies · coherent RMS 1.36 cm · 1.72 frames/s",
-    buttonLabel: "Apply Legacy Precision",
-    dsPositionMaxAgeSec: 0.5,
-    slotMs: 100,
-    roundGapMs: 10,
-    dsRxSliceMs: 100,
-    timeoutMs: 90,
-    respDelayMs: 20,
-    finalDelayMs: 20,
-    autoRxDelayUus: 500,
-  },
-  frame60: {
-    prefix: "profileFrame60",
-    label: "60 ms Validated Precision Profile",
-    description: "Conservative high-speed reference retained from the precision study, with four 14 ms slots and a 4 ms frame gap.",
-    validationClass: "good",
-    validationText: "validated 180 s · 0 raw anomalies · RMS 1.38 cm · 11.63 coherent frames/s",
-    buttonLabel: "Apply 60 ms Validated",
-    dsPositionMaxAgeSec: 0.2,
-    slotMs: 14,
-    roundGapMs: 4,
-    dsRxSliceMs: 100,
-    timeoutMs: 8,
-    respDelayMs: 2,
-    finalDelayMs: 2,
-    autoRxDelayUus: 500,
-  },
   frame64: {
     prefix: "profileFrame64",
-    label: "64 ms Validated Reserve",
-    description: "Validated alternative with one extra millisecond per anchor slot. Use it when additional scheduling reserve is preferred over the 60 ms limit.",
+    label: "64 ms Stable Reference",
+    description: "Native DS-TWR reference with one millisecond of scheduling reserve per anchor over the 60 ms speed target.",
     validationClass: "good",
-    validationText: "validated 180 s · 0 raw anomalies · coherent RMS 1.38 cm · 10.92 frames/s",
-    buttonLabel: "Apply 64 ms Reserve",
+    validationText: "active clean reference",
+    buttonLabel: "Apply 64 ms Reference",
     dsPositionMaxAgeSec: 0.2,
     slotMs: 15,
     roundGapMs: 4,
@@ -4725,36 +4701,20 @@ const rangingProfileDefaults = {
     finalDelayMs: 2,
     autoRxDelayUus: 500,
   },
-  frame33: {
-    prefix: "profileFrame33",
-    label: "33 ms Experimental Candidate",
-    description: "Intermediate limit-search profile retained for controlled experiments. It has not yet received a full guarded one-hour qualification.",
+  frame60: {
+    prefix: "profileFrame60",
+    label: "60 ms Precision-Speed Target",
+    description: "Fast Native DS-TWR target retained for direct comparison with the 64 ms stable reference.",
     validationClass: "warn",
-    validationText: "experimental · boundary guard active · long validation pending",
-    buttonLabel: "Apply 33 ms Experimental",
-    dsPositionMaxAgeSec: 0.1,
-    slotMs: 8,
-    roundGapMs: 1,
+    validationText: "next clean validation step",
+    buttonLabel: "Apply 60 ms Target",
+    dsPositionMaxAgeSec: 0.2,
+    slotMs: 14,
+    roundGapMs: 4,
     dsRxSliceMs: 100,
-    timeoutMs: 5,
+    timeoutMs: 8,
     respDelayMs: 2,
     finalDelayMs: 2,
-    autoRxDelayUus: 500,
-  },
-  frame13: {
-    prefix: "profileFrame13",
-    label: "13 ms Extreme Stress Test",
-    description: "Minimum three-millisecond slot retained only for boundary and failure-path experiments; it is not a precision profile.",
-    validationClass: "warn",
-    validationText: "stress only · boundary guard active · not qualified",
-    buttonLabel: "Apply 13 ms Stress Test",
-    dsPositionMaxAgeSec: 0.1,
-    slotMs: 3,
-    roundGapMs: 1,
-    dsRxSliceMs: 100,
-    timeoutMs: 3,
-    respDelayMs: 1,
-    finalDelayMs: 1,
     autoRxDelayUus: 500,
   },
 };
@@ -4909,12 +4869,9 @@ const rangingProtocolProfileFields = {
   ]),
   hybrid: new Set(),
 };
-const rangingProfileDefaultsVersion = "2026-07-31-native-ds-round-boundary-v6";
+const rangingProfileDefaultsVersion = "2026-07-31-native-ds-clean-v2";
 const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
 const passiveDsProfileDefaultsVersion = "2026-07-27-passive-ds-speed-sweep-v5";
-const nativeDsGeometryFrameInterval = 4;
-const nativeDsGeometryCommandDelayMs = 1;
-const nativeDsGeometryGuardMs = 5;
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -5403,6 +5360,14 @@ function parseIdList(text, expected = null) {
   return expected ? unique.slice(0, expected) : unique;
 }
 
+function parseCoordinateList(text, expected) {
+  const values = String(text || "")
+    .split(/[,;\s]+/)
+    .map(value => Number(value.trim()))
+    .filter(Number.isFinite);
+  return values.length === expected ? values : [];
+}
+
 function normalizePositionSolver(value) {
   if (value === "hybrid") return "hybrid";
   if (value === "passive_ds" || value === "passive_ds_twr") return "passive_ds";
@@ -5425,38 +5390,7 @@ const positionAnchorRangeHistoryMaxAgeSec = 30;
 function positionGeometryMaxAge(settings) {
   // Geometry is refreshed on a slower cadence than tag observations.
   const minimumAgeSec = Math.max(3, Number(settings.maxAge) || 0);
-  if (normalizePositionSolver(settings.solver) !== "ranging") {
-    return minimumAgeSec;
-  }
-
-  // Native DS-TWR emits one geometry pair every four complete tag frames.
-  // Include the extra geometry slot, then leave enough margin for scheduling
-  // jitter, a lost exchange, and the HTTP/telemetry delivery path.
-  const ids = (settings.anchorIds || [])
-    .map(Number)
-    .filter(id => Number.isInteger(id) && id > 0);
-  const anchorCount = Math.max(3, Math.min(4,
-    ids.length || Number(settings.anchorCount) || 4));
-  const statuses = ids.map(statusForModule).filter(Boolean);
-  const slotMs = Math.max(1, ...statuses.map(
-    item => Number(item.runtime_ranging_slot_ms) || 0));
-  const roundGapMs = Math.max(0, ...statuses.map(
-    item => Number(item.runtime_ranging_round_gap_ms) || 0));
-  const effectiveSlotMs = slotMs > 1 ? slotMs : 100;
-  const effectiveGapMs = roundGapMs > 0 ? roundGapMs : 10;
-  const pairCount = anchorCount * (anchorCount - 1) / 2;
-  const framesPerPair = 4;
-  const geometryBoundaryMs = nativeDsGeometryCommandDelayMs +
-    2 * nativeDsGeometryGuardMs;
-  const frameMs = anchorCount * effectiveSlotMs + effectiveGapMs;
-  const sweepMs =
-    pairCount * framesPerPair * frameMs +
-    pairCount * (effectiveSlotMs + geometryBoundaryMs);
-  const sweepWithMarginSec = sweepMs / 1000 * 1.35 + 1;
-  return Math.min(
-    positionAnchorRangeHistoryMaxAgeSec,
-    Math.max(minimumAgeSec, sweepWithMarginSec)
-  );
+  return minimumAgeSec;
 }
 
 function positionGeometryProtocol(solver) {
@@ -5470,28 +5404,6 @@ function positionSolverLabel(solver) {
   if (solver === "passive_ds") return "Passive DS-TWR";
   if (solver === "flextdoa") return "FlexTDOA";
   return "Native DS-TWR";
-}
-
-function normalizeNativeDsUpdateMode(value) {
-  if (value === "coherent" || value === "rolling") return value;
-  return "hybrid";
-}
-
-function normalizeNativeDsFit(value) {
-  return value === "robust_3of4" ? value : "all_anchor";
-}
-
-function nativeDsUpdateModeLabel(mode) {
-  const normalized = normalizeNativeDsUpdateMode(mode);
-  if (normalized === "coherent") return "coherent frames only (4/4)";
-  if (normalized === "rolling") return "rolling latest ranges";
-  return "rolling display + coherent metrics";
-}
-
-function nativeDsFitLabel(fit) {
-  return normalizeNativeDsFit(fit) === "robust_3of4"
-    ? "robust 3-of-4 fit"
-    : "all-anchor fit";
 }
 
 const positionProtocolDefaults = {
@@ -5545,10 +5457,14 @@ function switchPositionProtocolSettings() {
   document.querySelectorAll(".native-ds-position-option").forEach(element => {
     element.classList.toggle("hidden", solver !== "ranging");
   });
+  document.querySelectorAll(".dynamic-geometry-option").forEach(element => {
+    element.classList.toggle(
+      "hidden", solver === "ranging" || solver === "hybrid");
+  });
   const restartGeometry =
     document.getElementById("positionRestartAnchorSelfLocalization");
   if (restartGeometry) {
-    const available = solver !== "hybrid";
+    const available = solver !== "hybrid" && solver !== "ranging";
     restartGeometry.disabled = !available;
     restartGeometry.title = available
       ? "Clear any legacy fixed geometry and restart the live anchor estimate."
@@ -5561,16 +5477,25 @@ function positionSettings() {
   const solver = normalizePositionSolver(document.getElementById("positionSolver")?.value || "flextdoa");
   const anchorIds = parseIdList(document.getElementById("positionAnchors")?.value, anchorCount);
   const tagIds = parseIdList(document.getElementById("positionTags")?.value);
+  const nativeAnchorX = parseCoordinateList(
+    document.getElementById("positionNativeAnchorX")?.value, anchorIds.length);
+  const nativeAnchorY = parseCoordinateList(
+    document.getElementById("positionNativeAnchorY")?.value, anchorIds.length);
+  const nativeAnchorCoordinates = {};
+  if (nativeAnchorX.length === anchorIds.length &&
+      nativeAnchorY.length === anchorIds.length) {
+    anchorIds.forEach((anchorId, index) => {
+      nativeAnchorCoordinates[anchorId] = {
+        x: nativeAnchorX[index], y: nativeAnchorY[index],
+      };
+    });
+  }
   const maxAge = Math.max(0.2, Number(document.getElementById("positionMaxAgeSec")?.value || 3));
   const referenceMode = String(document.getElementById("positionReferenceMode")?.value || "none");
   const referenceX = Number(document.getElementById("positionReferenceX")?.value);
   const referenceY = Number(document.getElementById("positionReferenceY")?.value);
   const errorWindowSec = Math.max(
     1, Math.min(120, Number(document.getElementById("positionErrorWindowSec")?.value || 30)));
-  const nativeDsUpdateMode = normalizeNativeDsUpdateMode(
-    document.getElementById("positionNativeDsUpdateMode")?.value);
-  const nativeDsFit = normalizeNativeDsFit(
-    document.getElementById("positionNativeDsFit")?.value);
   return {
     anchorCount,
     solver,
@@ -5581,8 +5506,9 @@ function positionSettings() {
     referenceX,
     referenceY,
     errorWindowSec,
-    nativeDsUpdateMode,
-    nativeDsFit,
+    nativeAnchorCoordinates,
+    nativeDsUpdateMode: "coherent",
+    nativeDsFit: "all_anchor",
   };
 }
 
@@ -6395,60 +6321,6 @@ function cloneAnchorCoordinates(anchors) {
   ]));
 }
 
-/*
- * Firmware 04a2183 predates the live anchor-to-anchor geometry telemetry used
- * by the current dashboard.  Keep the last geometry captured from the modules
- * immediately before that regression-test firmware was installed.  This
- * fallback is deliberately gated to the exact old firmware and UWB_RANGING
- * runtime; current firmware geometry always wins and no other setup silently
- * inherits these coordinates.
- */
-const legacyNativeDsGeometryCache = Object.freeze({
-  firmwareVersion: "04a2183",
-  generation: 72,
-  capturedAt: "2026-07-31",
-  anchorIds: Object.freeze([2, 3, 4, 5]),
-  xMm: Object.freeze([0, 0, 2971, 3196]),
-  yMm: Object.freeze([0, 3067, -71, 2974]),
-});
-
-function legacyNativeDsAnchorGeometry(anchorIds) {
-  const selectedIds = anchorIds
-    .map(Number)
-    .filter(id => Number.isInteger(id) && id > 0);
-  const cachedIds = legacyNativeDsGeometryCache.anchorIds;
-  if (selectedIds.length !== cachedIds.length ||
-      selectedIds.some(id => !cachedIds.includes(id))) return null;
-
-  const onlineStatuses = (state.statuses || []).filter(moduleHttpOnline);
-  if (!onlineStatuses.length ||
-      !onlineStatuses.every(status =>
-        String(status.version || "").startsWith(
-          legacyNativeDsGeometryCache.firmwareVersion) &&
-        String(status.runtime_mode_name || "").toLowerCase() ===
-          "uwb_ranging")) return null;
-
-  const anchors = {};
-  for (const anchorId of selectedIds) {
-    const index = cachedIds.indexOf(anchorId);
-    anchors[anchorId] = {
-      x: legacyNativeDsGeometryCache.xMm[index] / 1000,
-      y: legacyNativeDsGeometryCache.yMm[index] / 1000,
-    };
-  }
-  return {
-    anchors,
-    generation: legacyNativeDsGeometryCache.generation,
-    sourceModuleId: null,
-    ageSec: 0,
-    sourceKind: "legacy-dashboard-cache",
-    sourceLabel:
-      `Cached pre-downgrade geometry · generation ` +
-      `${legacyNativeDsGeometryCache.generation} · ` +
-      `${legacyNativeDsGeometryCache.firmwareVersion} compatibility`,
-  };
-}
-
 function persistedModuleAnchorGeometry(anchorIds) {
   const selectedIds = anchorIds
     .map(Number)
@@ -6503,15 +6375,13 @@ function persistedModuleAnchorGeometry(anchorIds) {
     left.ageSec - right.ageSec ||
     Number(left.sourceModuleId || 9999) -
       Number(right.sourceModuleId || 9999));
-  return candidates[0] || legacyNativeDsAnchorGeometry(selectedIds);
+  return candidates[0] || null;
 }
 
 function persistedModuleGeometryResult(anchorIds, persisted, protocol) {
   const distanceItems = {};
   const residuals = {};
-  const geometryGateStatus = persisted.sourceKind === "legacy-dashboard-cache"
-    ? "cached before firmware downgrade"
-    : "persisted in modules";
+  const geometryGateStatus = "persisted in modules";
   for (const [a, b] of selectedAnchorPairs(anchorIds)) {
     const key = anchorPairKey(a, b);
     const distanceM = Math.hypot(
@@ -6555,6 +6425,72 @@ function persistedModuleGeometryResult(anchorIds, persisted, protocol) {
     candidatePairs: [],
     heldPairs: selectedAnchorPairs(anchorIds).map(
       ([a, b]) => anchorPairKey(a, b)),
+  };
+}
+
+function nativeDsKnownGeometry(anchorIds, configuredAnchors) {
+  const anchors = {};
+  for (const anchorId of anchorIds) {
+    const point = configuredAnchors?.[anchorId];
+    if (!point || !Number.isFinite(Number(point.x)) ||
+        !Number.isFinite(Number(point.y))) {
+      return {
+        anchors: {}, distanceItems: {}, residuals: {},
+        missingPairs: selectedAnchorPairs(anchorIds), complete: false,
+        positionReady: false, canFix: false, status: "invalid-known",
+        protocol: "native_ds",
+      };
+    }
+    anchors[anchorId] = {x: Number(point.x), y: Number(point.y)};
+  }
+  if (anchorIds.length >= 3) {
+    const first = anchors[anchorIds[0]];
+    const second = anchors[anchorIds[1]];
+    const third = anchors[anchorIds[2]];
+    const doubleArea = Math.abs(
+      (second.x - first.x) * (third.y - first.y) -
+      (second.y - first.y) * (third.x - first.x));
+    if (!Number.isFinite(doubleArea) || doubleArea < 0.01) {
+      return {
+        anchors: {}, distanceItems: {}, residuals: {},
+        missingPairs: selectedAnchorPairs(anchorIds), complete: false,
+        positionReady: false, canFix: false, status: "invalid-known",
+        protocol: "native_ds",
+      };
+    }
+  }
+  const distanceItems = {};
+  const residuals = {};
+  for (const [a, b] of selectedAnchorPairs(anchorIds)) {
+    const key = anchorPairKey(a, b);
+    const distanceM = Math.hypot(
+      anchors[a].x - anchors[b].x, anchors[a].y - anchors[b].y);
+    distanceItems[key] = {
+      anchor_a_id: a,
+      anchor_b_id: b,
+      initiator_id: a,
+      responder_id: b,
+      distance_m: distanceM,
+      accepted_distance_m: distanceM,
+      age_sec: 0,
+      geometry_gate_status: "known coordinates",
+      geometry_held: true,
+      stats: {robust_sigma_m: null},
+    };
+    residuals[key] = 0;
+  }
+  return {
+    anchors,
+    distanceItems,
+    missingPairs: [],
+    residuals,
+    fitQuality: {acceptable: true, rmsM: 0},
+    complete: true,
+    positionReady: true,
+    canFix: false,
+    status: "known",
+    protocol: "native_ds",
+    sourceLabel: "Known coordinates from Position Setup",
   };
 }
 
@@ -6639,8 +6575,13 @@ function smoothPublishedAnchorCoordinates(ekf, targetAnchors, updated) {
   return ekf.publishedAnchors;
 }
 
-function paperAnchorGeometry(anchorIds, maxAge, solver) {
+function paperAnchorGeometry(
+  anchorIds, maxAge, solver, nativeAnchorCoordinates = null
+) {
   const protocol = positionGeometryProtocol(solver);
+  if (protocol === "native_ds") {
+    return nativeDsKnownGeometry(anchorIds, nativeAnchorCoordinates);
+  }
   const key = `${protocol}:${positionGeometryKey(anchorIds)}`;
   // Remove the browser-side fixed coordinates written by older dashboard
   // releases. They are intentionally not a fallback for live positioning.
@@ -7126,6 +7067,7 @@ function resetPositionTagTrails() {
   state.positionTrail = {};
   state.positionRawTrail = {};
   state.positionTrailTokens = {};
+  state.nativeDsLastSolutions = {};
   state.positionStreamRenderLatencies = [];
   state.positionStreamLatestEvent = null;
   state.positionStreamLastRenderedEventToken = "";
@@ -7134,116 +7076,70 @@ function resetPositionTagTrails() {
 function resetNativeDsFrameAssembler() {
   state.dsPositionFrameBuckets.clear();
   state.nativeDsCoherentFrames = {};
-  state.nativeDsRangeFilters = {};
+  state.nativeDsLastSolutions = {};
   state.nativeDsFrameDiagnostics = {
     completedCount: 0,
     publishedCount: 0,
     publishedTimes: [],
     expiredCount: 0,
     expiredTimes: [],
-    mixedLatestAvoided: 0,
     lateCompleteRejected: 0,
     lateCompleteTimes: [],
     lastSpanMs: NaN,
     lastFrameKey: null,
   };
-  state.nativeRangeDiagnostics = {
-    rejectedCount: 0,
-    lastRejected: null,
-    tokens: {},
-  };
 }
 
-function filterNativeDsCoherentItems(tagId, anchorIds, items) {
-  const filteredItems = {};
-  for (const anchorId of anchorIds) {
-    const source = items?.[String(anchorId)] || {};
-    const item = {...source};
-    const distanceM = Number(item.distance_m);
-    const filterKey = `${tagId}:${anchorId}`;
-    const filter = state.nativeDsRangeFilters[filterKey] || {
-      acceptedDistances: [],
-      acceptedDeltas: [],
-    };
-    const history = filter.acceptedDistances
-      .map(Number)
-      .filter(Number.isFinite);
-    const deltaHistory = (filter.acceptedDeltas || [])
-      .map(Number)
-      .filter(Number.isFinite);
-    let accepted = Number.isFinite(distanceM) &&
-      distanceM >= 0.05 && distanceM <= 100;
-    let rejectReason = accepted ? "" : "invalid range";
-    const medianM = history.length
-      ? percentile(history, 0.5)
-      : NaN;
-    let predictedM = Number(filter.lastAcceptedM);
-    let robustSigmaM = NaN;
-    let thresholdM = NaN;
-
-    if (accepted && Number.isFinite(predictedM)) {
-      const medianDeltaM = deltaHistory.length >= 3
-        ? percentile(deltaHistory, 0.5)
-        : 0;
-      predictedM += medianDeltaM;
-      const deviations = deltaHistory.map(
-        value => Math.abs(value - medianDeltaM));
-      const madM = percentile(deviations, 0.5);
-      robustSigmaM = Number.isFinite(madM)
-        ? Math.max(0.005, 1.4826 * madM)
-        : 0.005;
-      thresholdM = Math.max(0.15, 6 * robustSigmaM);
-      if (Math.abs(distanceM - predictedM) > thresholdM) {
-        accepted = false;
-        rejectReason = "temporal spike";
-      }
-    }
-
-    if (accepted) {
-      const previousAcceptedM = Number(filter.lastAcceptedM);
-      if (Number.isFinite(previousAcceptedM)) {
-        deltaHistory.push(distanceM - previousAcceptedM);
-        if (deltaHistory.length > 31) {
-          deltaHistory.splice(0, deltaHistory.length - 31);
-        }
-      }
-      history.push(distanceM);
-      if (history.length > 31) {
-        history.splice(0, history.length - 31);
-      }
-      filter.acceptedDistances = history;
-      filter.acceptedDeltas = deltaHistory;
-      filter.lastAcceptedM = distanceM;
-      filter.lastAcceptedAt = Number(item.received_at);
-    } else {
-      filter.rejectedCount = Number(filter.rejectedCount || 0) + 1;
-    }
-    state.nativeDsRangeFilters[filterKey] = filter;
-    filteredItems[String(anchorId)] = {
-      ...item,
-      temporal_accepted: accepted,
-      temporal_reject_reason: rejectReason,
-      temporal_median_m: medianM,
-      temporal_predicted_m: predictedM,
-      temporal_robust_sigma_m: robustSigmaM,
-      temporal_threshold_m: thresholdM,
-    };
+function nativeDsFrameAgeSec(frame, nowEpochSec = Date.now() / 1000) {
+  const completedAtMs = Number(frame?.completedAtMs);
+  if (Number.isFinite(completedAtMs)) {
+    return Math.max(0, (performance.now() - completedAtMs) / 1000);
   }
-  return filteredItems;
+  const receivedAt = Number(frame?.receivedAt);
+  return Number.isFinite(receivedAt)
+    ? Math.max(0, nowEpochSec - receivedAt)
+    : Infinity;
+}
+
+function nativeDsExpectedFrameSec(settings) {
+  const status = state.statuses.find(item =>
+    statusIsFresh(item) &&
+    item.runtime_mode_name === "uwb_ranging" &&
+    Number(item.module_id) === Number(settings.tagIds?.[0]));
+  const slotMs = Number(status?.runtime_ranging_slot_ms);
+  const gapMs = Number(status?.runtime_ranging_round_gap_ms);
+  if (!Number.isFinite(slotMs) || slotMs <= 0 ||
+      !Number.isFinite(gapMs) || gapMs < 0) return NaN;
+  return (settings.anchorIds.length * slotMs + gapMs) / 1000;
+}
+
+function nativeDsEffectiveFreshAgeSec(settings) {
+  const configuredSec = Number(settings.maxAge) || 0;
+  const frameSec = nativeDsExpectedFrameSec(settings);
+  return Number.isFinite(frameSec)
+    ? Math.max(configuredSec, frameSec + 0.1)
+    : configuredSec;
+}
+
+function nativeDsDisplayHoldSec(settings) {
+  const frameSec = nativeDsExpectedFrameSec(settings);
+  const frameAwareHold = Number.isFinite(frameSec)
+    ? frameSec * 4 + 0.25
+    : 1.5;
+  return Math.max(
+    Number(settings.maxAge) || 0,
+    Math.min(3, Math.max(1.5, frameAwareHold))
+  );
 }
 
 function solveNativeDsPosition(
-  tagId,
   anchorIds,
   solveAnchors,
   sourceItems,
-  fitMethod,
-  seed,
   now
 ) {
   const distanceItems = {};
-  const acceptedDistances = {};
-  const allRawDistances = {};
+  const distances = {};
   for (const anchorId of anchorIds) {
     const source = sourceItems?.[String(anchorId)] || null;
     const measured = Number(source?.distance_m);
@@ -7254,64 +7150,24 @@ function solveNativeDsPosition(
       age_sec: localPositionAge(source, now),
     };
     distanceItems[anchorId] = item;
-    allRawDistances[anchorId] = measured;
-    if (item.temporal_accepted !== false) {
-      acceptedDistances[anchorId] = measured;
-    }
+    distances[anchorId] = measured;
   }
-
-  let position = null;
-  let distances = {};
-  let residuals = {};
-  let rejectedIds = [];
-  if (normalizeNativeDsFit(fitMethod) === "robust_3of4") {
-    const fit = robustTrilaterate(
-      solveAnchors, acceptedDistances, seed);
-    if (fit) {
-      position = fit.position;
-      distances = fit.usedDistances || {};
-      residuals = fit.residuals || {};
-      rejectedIds = Object.keys(distanceItems)
-        .map(Number)
-        .filter(anchorId => !fit.usedIds.includes(anchorId));
-    }
-  } else {
-    position = trilaterate(solveAnchors, acceptedDistances);
-    if (position) {
-      distances = {...acceptedDistances};
-      residuals = positionResiduals(
-        position, solveAnchors, allRawDistances);
-      const usedIds = new Set(Object.keys(distances).map(Number));
-      rejectedIds = Object.keys(distanceItems)
-        .map(Number)
-        .filter(anchorId => !usedIds.has(anchorId));
-    }
-  }
-
-  const usedIds = new Set(Object.keys(distances).map(Number));
+  const position = Object.keys(distances).length === anchorIds.length
+    ? trilaterate(solveAnchors, distances)
+    : null;
+  const residuals = positionResiduals(position, solveAnchors, distances);
   for (const [anchorId, item] of Object.entries(distanceItems)) {
-    const used = usedIds.has(Number(anchorId));
     distanceItems[anchorId] = {
       ...item,
-      used_in_fit: used,
-      reject_reason: used
-        ? ""
-        : String(
-          item.temporal_reject_reason ||
-          (normalizeNativeDsFit(fitMethod) === "robust_3of4"
-            ? "robust outlier"
-            : "unusable range")),
+      used_in_fit: Boolean(position),
+      reject_reason: position ? "" : "incomplete coherent frame",
     };
   }
-  recordNativeRangeRejections(
-    tagId, distanceItems, rejectedIds, now);
   return {
     position,
     distances,
     distanceItems,
-    residuals: position
-      ? residuals
-      : positionResiduals(position, solveAnchors, allRawDistances),
+    residuals,
     accuracy: rangingPositionAccuracy(
       position, solveAnchors, distances, residuals),
   };
@@ -7331,27 +7187,6 @@ function positionTrailDrawSamples(trail) {
     samples.push(trail[trail.length - 1]);
   }
   return samples;
-}
-
-function recordNativeRangeRejections(
-  tagId, distanceItems, rejectedIds, now
-) {
-  const diagnostics = state.nativeRangeDiagnostics;
-  for (const anchorId of rejectedIds || []) {
-    const item = distanceItems?.[anchorId];
-    if (!item) continue;
-    const key = `${tagId}:${anchorId}`;
-    const token = `${item.seq ?? "-"}:${item.received_at ?? "-"}`;
-    if (diagnostics.tokens[key] === token) continue;
-    diagnostics.tokens[key] = token;
-    diagnostics.rejectedCount++;
-    diagnostics.lastRejected = {
-      tagId: Number(tagId),
-      anchorId: Number(anchorId),
-      distanceM: Number(item.distance_m),
-      at: now,
-    };
-  }
 }
 
 function localPositionAge(item, now = Date.now() / 1000) {
@@ -7385,7 +7220,8 @@ function computePositionModel() {
   });
   const active = positionRangingActive(settings);
   const geometry = paperAnchorGeometry(
-    settings.anchorIds, positionGeometryMaxAge(settings), settings.solver);
+    settings.anchorIds, positionGeometryMaxAge(settings), settings.solver,
+    settings.nativeAnchorCoordinates);
   const anchors = {...(geometry?.anchors || {})};
 
   if (!active && state.positionWasActive) {
@@ -7424,6 +7260,9 @@ function computePositionModel() {
       let trailAccuracy = null;
       let positionEventTime = now;
       let positionEventToken = `pc:${now}`;
+      let heldPosition = false;
+      let positionAgeSec = 0;
+      let positionHoldSec = 0;
       if (positionProtocolUsesTdoa(settings.solver)) {
         coherence = coherentTdoaBatch(
           tagId,
@@ -7493,106 +7332,73 @@ function computePositionModel() {
           frameAnchorIds.length === expectedAnchorIds.length &&
           expectedAnchorIds.every(id => frameAnchorIds.includes(id));
         const frameReceivedAt = Number(candidateFrame?.receivedAt);
-        let coherentSolution = null;
+        const frameAgeSec = nativeDsFrameAgeSec(candidateFrame, now);
+        const freshAgeSec = nativeDsEffectiveFreshAgeSec(settings);
         if (candidateFrame && frameAnchorSetMatches &&
             Number.isFinite(frameReceivedAt) &&
-            now - frameReceivedAt <= settings.maxAge) {
-          if (!candidateFrame.geometryAnchors) {
-            candidateFrame.geometryAnchors =
-              cloneAnchorCoordinates(anchors);
-            candidateFrame.geometryFrameId =
-              Number(geometry?.frameId);
-          }
+            frameAgeSec <= freshAgeSec) {
           nativeFrame = candidateFrame;
-          const coherentAnchors =
-            cloneAnchorCoordinates(candidateFrame.geometryAnchors);
-          const coherentSeedKey =
-            `native-coherent:${positionGeometryKey(settings.anchorIds)}:${tagId}`;
-          coherentSolution = solveNativeDsPosition(
-            tagId,
+          const coherentSolution = solveNativeDsPosition(
             expectedAnchorIds,
-            coherentAnchors,
+            anchors,
             candidateFrame.items,
-            settings.nativeDsFit,
-            state.positionSeeds[coherentSeedKey] || null,
             now
           );
-          if (coherentSolution.position) {
-            state.positionSeeds[coherentSeedKey] = {
-              ...coherentSolution.position,
-              t: now,
+          position = coherentSolution.position;
+          metricPosition = position;
+          accuracy = coherentSolution.accuracy;
+          Object.assign(distances, coherentSolution.distances);
+          Object.assign(distanceItems, coherentSolution.distanceItems);
+          residuals = coherentSolution.residuals;
+          trailPosition = position;
+          trailAccuracy = accuracy;
+          positionEventTime = frameReceivedAt;
+          positionEventToken =
+            `native:${tagId}:frame:${candidateFrame.frameId}`;
+          if (position) {
+            state.nativeDsLastSolutions[String(tagId)] = {
+              position: {x: position.x, y: position.y},
+              accuracy,
+              residuals: {...residuals},
+              distances: {...distances},
+              distanceItems: Object.fromEntries(
+                Object.entries(distanceItems).map(
+                  ([anchorId, item]) => [anchorId, {...item}]
+                )
+              ),
+              nativeFrame,
+              positionEventTime,
+              positionEventToken,
+              solvedAtMs: performance.now(),
             };
           }
-          positionEventTime = frameReceivedAt;
-          positionEventToken = Number.isInteger(Number(candidateFrame.roundIndex))
-            ? `native:${tagId}:round:${candidateFrame.roundIndex}`
-            : `native:${tagId}:seq:${candidateFrame.frameStartSequence}`;
         }
-
-        const rollingItems = {};
-        let rollingReceivedAt = -Infinity;
-        for (const anchorId of expectedAnchorIds) {
-          const item = freshDistanceFor(
-            tagId, anchorId, settings.maxAge);
-          if (!item || localPositionAge(item, now) > settings.maxAge) continue;
-          rollingItems[String(anchorId)] = item;
-          const receivedAt = Number(item.received_at);
-          if (Number.isFinite(receivedAt)) {
-            rollingReceivedAt = Math.max(rollingReceivedAt, receivedAt);
+        if (!position) {
+          const lastSolution =
+            state.nativeDsLastSolutions?.[String(tagId)] || null;
+          const solvedAtMs = Number(lastSolution?.solvedAtMs);
+          const heldAgeSec = Number.isFinite(solvedAtMs)
+            ? Math.max(0, (performance.now() - solvedAtMs) / 1000)
+            : Infinity;
+          const holdSec = nativeDsDisplayHoldSec(settings);
+          if (lastSolution?.position && heldAgeSec <= holdSec) {
+            position = {
+              x: Number(lastSolution.position.x),
+              y: Number(lastSolution.position.y),
+            };
+            metricPosition = position;
+            accuracy = lastSolution.accuracy;
+            residuals = {...(lastSolution.residuals || {})};
+            Object.assign(distances, lastSolution.distances || {});
+            Object.assign(distanceItems, lastSolution.distanceItems || {});
+            nativeFrame = lastSolution.nativeFrame || candidateFrame;
+            positionEventTime = Number(lastSolution.positionEventTime) || now;
+            positionEventToken = String(
+              lastSolution.positionEventToken || `native-held:${tagId}`);
+            heldPosition = true;
+            positionAgeSec = heldAgeSec;
+            positionHoldSec = holdSec;
           }
-        }
-        const rollingSeedKey =
-          `native-rolling:${positionGeometryKey(settings.anchorIds)}:${tagId}`;
-        const rollingSolution = solveNativeDsPosition(
-          tagId,
-          expectedAnchorIds,
-          anchors,
-          rollingItems,
-          settings.nativeDsFit,
-          state.positionSeeds[rollingSeedKey] || null,
-          now
-        );
-        if (rollingSolution.position) {
-          state.positionSeeds[rollingSeedKey] = {
-            ...rollingSolution.position,
-            t: now,
-          };
-        }
-
-        const displaySolution = settings.nativeDsUpdateMode === "coherent"
-          ? coherentSolution
-          : (rollingSolution.position ? rollingSolution : coherentSolution);
-        const metricSolution = settings.nativeDsUpdateMode === "hybrid"
-          ? coherentSolution
-          : displaySolution;
-        const trailSolution = settings.nativeDsUpdateMode === "rolling"
-          ? rollingSolution
-          : coherentSolution;
-
-        position = displaySolution?.position || null;
-        metricPosition = metricSolution?.position || null;
-        accuracy = metricSolution?.accuracy || displaySolution?.accuracy || null;
-        Object.assign(
-          distances,
-          metricSolution?.distances || displaySolution?.distances || {}
-        );
-        Object.assign(
-          distanceItems,
-          metricSolution?.distanceItems ||
-            displaySolution?.distanceItems || {}
-        );
-        residuals =
-          metricSolution?.residuals || displaySolution?.residuals || {};
-        trailPosition = trailSolution?.position || null;
-        trailAccuracy = trailSolution?.accuracy || null;
-        if (settings.nativeDsUpdateMode === "rolling") {
-          positionEventTime = Number.isFinite(rollingReceivedAt)
-            ? rollingReceivedAt
-            : now;
-          positionEventToken =
-            `native-rolling:${tagId}:` +
-            expectedAnchorIds.map(
-              id => rollingItems[String(id)]?.seq ?? "-").join(",");
         }
       }
       tags[tagId] = {
@@ -7608,12 +7414,15 @@ function computePositionModel() {
         coherence,
         rawPosition,
         nativeFrame,
+        heldPosition,
+        positionAgeSec,
+        positionHoldSec,
         solverSource: localPosition &&
           localPositionAge(localPosition, now) <= settings.maxAge
             ? "ESP32 AlgMin"
             : positionProtocolUsesTdoa(settings.solver)
               ? "PC AlgMin"
-              : `PC ${nativeDsFitLabel(settings.nativeDsFit)}`,
+              : "Raspberry all-anchor",
       };
       const streamedPositionIsLive = Boolean(
         localPosition &&
@@ -7914,6 +7723,16 @@ function drawPosition(model) {
     }
     const x = tx.x(tag.position.x);
     const y = tx.y(tag.position.y);
+    if (tag.heldPosition) {
+      ctx.save();
+      ctx.strokeStyle = "#b46a00";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.arc(x, y, 11, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
     ctx.fillStyle = "#d7352a";
     ctx.beginPath();
     ctx.arc(x, y, 7, 0, Math.PI * 2);
@@ -7923,7 +7742,9 @@ function drawPosition(model) {
     ctx.stroke();
     ctx.fillStyle = "#17202a";
     ctx.font = "700 12px Inter, sans-serif";
-    ctx.fillText(`Tag ${tag.tagId}`, x + 11, y - 12);
+    ctx.fillText(
+      `Tag ${tag.tagId}${tag.heldPosition ? " · held" : ""}`,
+      x + 11, y - 12);
   }
 }
 
@@ -7963,6 +7784,11 @@ function renderPositionGeometryPanel(model) {
       status.className = geometry.fitQuality?.acceptable
         ? "muted fresh"
         : "muted stale";
+    } else if (geometry.status === "known") {
+      status.textContent =
+        "Known Native DS-TWR geometry · position solved on Raspberry · " +
+        "no anchor-to-anchor traffic";
+      status.className = "muted fresh";
     } else if (geometry.status === "persisted") {
       status.textContent =
         geometry.sourceLabel
@@ -8041,22 +7867,15 @@ function passiveDsRejectionReasonText(mask) {
 function renderPositionSolverStatus(model) {
   const settings = model.settings || {};
   if (!positionProtocolUsesTdoa(settings.solver)) {
-    const diagnostics = state.nativeRangeDiagnostics;
     const frameDiagnostics = state.nativeDsFrameDiagnostics;
     const firstTag = Object.values(model.tags || {})[0];
     const frame = firstTag?.nativeFrame;
-    const rejectPill = diagnostics.rejectedCount > 0
-      ? `<span class="position-pill warn">${diagnostics.rejectedCount} tag range(s) rejected</span>`
-      : `<span class="position-pill good">range gate clean</span>`;
     const coherentPill = frame
-      ? `<span class="position-pill good">coherent 4/4 · ${Number.isInteger(Number(frame.roundIndex)) ? `round ${esc(frame.roundIndex)}` : `seq ${esc(frame.frameStartSequence)}`} · span ${fmtFixed(frame.spanMs, 1)} ms</span>`
+      ? `<span class="position-pill good">coherent 4/4 · frame ${esc(frame.frameId)} · span ${fmtFixed(frame.spanMs, 1)} ms</span>`
       : `<span class="position-pill warn">waiting for coherent 4/4 frame</span>`;
-    const rollingMode = settings.nativeDsUpdateMode === "rolling";
-    const avoidedPill = rollingMode
-      ? `<span class="position-pill warn">mixed-latest ranges intentionally enabled</span>`
-      : frameDiagnostics.mixedLatestAvoided > 0
-        ? `<span class="position-pill good">${frameDiagnostics.mixedLatestAvoided} mixed-latest metric solve(s) prevented</span>`
-        : `<span class="position-pill good">coherent metric source</span>`;
+    const holdPill = firstTag?.heldPosition
+      ? `<span class="position-pill warn">holding last-good position · ${fmtFixed(firstTag.positionAgeSec, 2)} / ${fmtFixed(firstTag.positionHoldSec, 2)} s</span>`
+      : `<span class="position-pill good">live marker</span>`;
     const diagnosticsNowMs = performance.now();
     const recentPublishedTimes = (frameDiagnostics.publishedTimes || []).filter(
       value => diagnosticsNowMs - Number(value) <= 60000);
@@ -8085,13 +7904,12 @@ function renderPositionSolverStatus(model) {
       <b>Position Calculation</b>
       <div class="position-filter-row">
         <span class="position-pill">DS-TWR ranges</span>
-        <span class="position-pill good">${esc(nativeDsUpdateModeLabel(settings.nativeDsUpdateMode))}</span>
-        <span class="position-pill good">${esc(nativeDsFitLabel(settings.nativeDsFit))}</span>
-        <span class="position-pill good">${rollingMode ? "raw rolling ranges" : "motion-aware coherent gate"}</span>
+        <span class="position-pill good">Raspberry solver</span>
+        <span class="position-pill good">raw coherent frames only (4/4)</span>
+        <span class="position-pill good">unfiltered all-anchor fit</span>
         ${coherentPill}
-        ${avoidedPill}
+        ${holdPill}
         ${assemblyPill}
-        ${rejectPill}
         <span class="position-pill" id="positionStreamMetrics">position stream connecting</span>
         <span class="position-pill" id="positionTrailMetrics">trail waiting</span>
       </div>
@@ -8208,13 +8026,19 @@ function renderPositionReadout(model) {
   const missingCoords = model.settings.anchorIds.filter(id => !model.anchors[id]);
   if (missingCoords.length) {
     overlay.classList.add("active");
-    overlay.querySelector("h2").textContent = "Waiting for live anchor geometry";
-    overlay.querySelector("p").textContent =
-      `Waiting for fresh ${solverName} anchor-to-anchor ranges involving: ` +
-      `${missingCoords.join(", ")}. Positioning starts automatically when ` +
-      "the dynamic geometry is complete.";
+    const native = model.settings.solver === "ranging";
+    overlay.querySelector("h2").textContent = native
+      ? "Native anchor coordinates are invalid"
+      : "Waiting for live anchor geometry";
+    overlay.querySelector("p").textContent = native
+      ? "Enter one finite X and Y coordinate per Anchor ID. The Raspberry needs known geometry to solve the position."
+      : `Waiting for fresh ${solverName} anchor-to-anchor ranges involving: ` +
+        `${missingCoords.join(", ")}. Positioning starts automatically when ` +
+        "the dynamic geometry is complete.";
     if (overlayButton) {
-      overlayButton.textContent = "Waiting for Anchor Ranges";
+      overlayButton.textContent = native
+        ? "Check Anchor Coordinates"
+        : "Waiting for Anchor Ranges";
       overlayButton.disabled = true;
       overlayButton.dataset.action = "wait";
     }
@@ -8265,11 +8089,15 @@ function renderPositionReadout(model) {
       ? `${tag.accuracy.count} raw obs`
       : usesTdoa
       ? `${fitCount}/${total} fit · ${freshCount} fresh`
-      : `${fitCount}/${total} fresh distances`;
+      : tag.heldPosition
+        ? `holding last-good · age ${fmtFixed(tag.positionAgeSec, 2)} s`
+        : `${fitCount}/${total} fresh distances`;
     return `<div class="position-tag-card"><b id="positionTagSummary${esc(tag.tagId)}">Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span id="positionTagMeta${esc(tag.tagId)}">${countText}${accuracyText}${referenceText}</span></div>`;
   });
   const emptyTagCard = !model.geometry?.positionReady
-    ? `<div class="position-tag-card"><b>waiting for live geometry</b><span>Positioning starts automatically after fresh anchor-to-anchor ranges initialize the EKF.</span></div>`
+    ? model.settings.solver === "ranging"
+      ? `<div class="position-tag-card"><b>waiting for known geometry</b><span>Enter valid anchor coordinates in Position Setup.</span></div>`
+      : `<div class="position-tag-card"><b>waiting for live geometry</b><span>Positioning starts automatically after fresh anchor-to-anchor ranges initialize the EKF.</span></div>`
     : `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
   readout.innerHTML = `${renderPositionSolverStatus(model)}${tagCards.join("") || emptyTagCard}`;
   const accuracyTableRows = Object.values(model.tags).map(tag => {
@@ -8655,24 +8483,18 @@ function schedulePositionStreamRender() {
   requestAnimationFrame(renderPositionStreamFrame);
 }
 
-function sequence16IsNewer(candidate, reference) {
+function frame16IsNewer(candidate, reference) {
   const delta = (Number(candidate) - Number(reference) + 65536) % 65536;
   return delta > 0 && delta < 32768;
-}
-
-function sequence32IsNewer(candidate, reference) {
-  const modulus = 4294967296;
-  const delta = (Number(candidate) - Number(reference) + modulus) % modulus;
-  return delta > 0 && delta < modulus / 2;
 }
 
 function ingestDsTwrStreamSample(item) {
   const tagId = Number(item?.tag_id);
   const anchorId = Number(item?.anchor_id);
-  const sequence = Number(item?.seq);
+  const frameId = Number(item?.frame_id ?? item?.seq);
   if (!Number.isInteger(tagId) || tagId <= 0 ||
       !Number.isInteger(anchorId) || anchorId <= 0 ||
-      !Number.isInteger(sequence)) return;
+      !Number.isInteger(frameId)) return;
 
   if (!state.ranging) state.ranging = {distances: {}, max_age_sec: 3};
   if (!state.ranging.distances) state.ranging.distances = {};
@@ -8687,57 +8509,26 @@ function ingestDsTwrStreamSample(item) {
   const settings = positionSettings();
   if (settings.solver !== "ranging" ||
       !settings.tagIds.includes(tagId)) return;
-  const anchorIndex = settings.anchorIds.indexOf(anchorId);
-  if (anchorIndex < 0) return;
+  if (!settings.anchorIds.includes(anchorId)) return;
   const nowMs = performance.now();
-  if (settings.nativeDsUpdateMode !== "coherent") {
-    state.positionStreamLatestEvent = {
-      token: `ds-rolling:${tagId}:${anchorId}:${sequence}`,
-      arrivalMs: nowMs,
-    };
-    state.positionStreamRxTimes.push(nowMs);
-    trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
-    schedulePositionStreamRender();
-  }
 
-  const sequenceModulus = 65536;
-  const roundIndex = Number(item?.round_index);
-  const slotIndex = Number(item?.slot_index);
-  const firstAnchorId = Number(item?.first_anchor_id);
-  const hasRoundContext =
-    Number.isInteger(roundIndex) && roundIndex >= 0 &&
-    Number.isInteger(slotIndex) && slotIndex >= 0 &&
-    slotIndex < settings.anchorIds.length;
-  const fallbackFrameStartSequence =
-    (sequence - anchorIndex + sequenceModulus) % sequenceModulus;
-  const frameKey = hasRoundContext
-    ? `${tagId}:round:${roundIndex}`
-    : `${tagId}:seq:${fallbackFrameStartSequence}`;
+  const frameKey = `${tagId}:frame:${frameId}`;
   let frame = state.dsPositionFrameBuckets.get(frameKey);
   if (!frame) {
     frame = {
       anchorIds: [...settings.anchorIds],
       items: {},
-      slots: {},
-      roundIndex: hasRoundContext ? roundIndex : null,
-      firstAnchorId: Number.isInteger(firstAnchorId) ? firstAnchorId : null,
-      frameStartSequence: hasRoundContext
-        ? null
-        : fallbackFrameStartSequence,
+      frameId,
       createdAtMs: nowMs,
       updatedAtMs: nowMs,
     };
     state.dsPositionFrameBuckets.set(frameKey, frame);
   }
   frame.items[String(anchorId)] = {...item};
-  if (hasRoundContext) {
-    frame.slots[String(slotIndex)] = {...item};
-    if (slotIndex === 0) frame.frameStartSequence = sequence;
-  }
   frame.updatedAtMs = nowMs;
 
   for (const [key, candidate] of state.dsPositionFrameBuckets) {
-    if (nowMs - candidate.updatedAtMs > 500) {
+    if (nowMs - candidate.updatedAtMs > 1500) {
       state.dsPositionFrameBuckets.delete(key);
       state.nativeDsFrameDiagnostics.expiredCount++;
       state.nativeDsFrameDiagnostics.expiredTimes.push(nowMs);
@@ -8746,27 +8537,14 @@ function ingestDsTwrStreamSample(item) {
           value => nowMs - Number(value) <= 60000);
     }
   }
-  const coherent = hasRoundContext
-    ? settings.anchorIds.every(id => frame.items[String(id)]) &&
-      settings.anchorIds.every((_, index) => {
-        const sample = frame.slots[String(index)];
-        return sample &&
-          Number(sample.round_index) === roundIndex &&
-          Number(sample.slot_index) === index;
-      })
-    : settings.anchorIds.every((id, index) => {
-        const sample = frame.items[String(id)];
-        return sample &&
-          Number(sample.seq) ===
-            (fallbackFrameStartSequence + index) % sequenceModulus;
-      });
+  const coherent = settings.anchorIds.every(id => {
+    const sample = frame.items[String(id)];
+    return sample && Number(sample.frame_id ?? sample.seq) === frameId;
+  });
   if (!coherent) return;
 
   state.dsPositionFrameBuckets.delete(frameKey);
   state.nativeDsFrameDiagnostics.completedCount++;
-  const frameStartSequence = Number.isInteger(Number(frame.frameStartSequence))
-    ? Number(frame.frameStartSequence)
-    : sequence;
   const receivedTimes = settings.anchorIds
     .map(id => Number(frame.items[String(id)]?.received_at))
     .filter(Number.isFinite);
@@ -8776,25 +8554,14 @@ function ingestDsTwrStreamSample(item) {
   const spanMs = receivedTimes.length > 1
     ? Math.max(0, (Math.max(...receivedTimes) - Math.min(...receivedTimes)) * 1000)
     : 0;
-  const latestValuesWouldMix = settings.anchorIds.some(id =>
-    Number(state.ranging.distances[`${tagId}:${id}`]?.seq) !==
-      Number(frame.items[String(id)]?.seq)
-  );
-  if (latestValuesWouldMix) {
-    state.nativeDsFrameDiagnostics.mixedLatestAvoided++;
-  }
   const tagKey = String(tagId);
   const previousFrame = state.nativeDsCoherentFrames[tagKey] || null;
   const previousIsStale =
     previousFrame &&
     nowMs - Number(previousFrame.completedAtMs || 0) > 2000;
-  const frameIsNewer = previousFrame && hasRoundContext &&
-      Number.isInteger(Number(previousFrame.roundIndex))
-    ? sequence32IsNewer(roundIndex, previousFrame.roundIndex)
-    : previousFrame
-      ? sequence16IsNewer(
-          frameStartSequence, previousFrame.frameStartSequence)
-      : true;
+  const frameIsNewer = previousFrame
+    ? frame16IsNewer(frameId, previousFrame.frameId)
+    : true;
   if (previousFrame && !previousIsStale &&
       !frameIsNewer) {
     state.nativeDsFrameDiagnostics.lateCompleteRejected++;
@@ -8806,12 +8573,10 @@ function ingestDsTwrStreamSample(item) {
   }
   const publishedFrame = {
     tagId,
-    frameStartSequence,
-    roundIndex: hasRoundContext ? roundIndex : null,
-    firstAnchorId: hasRoundContext ? frame.firstAnchorId : null,
+    frameId,
     anchorIds: [...settings.anchorIds],
-    items: filterNativeDsCoherentItems(
-      tagId, settings.anchorIds, frame.items),
+    items: Object.fromEntries(settings.anchorIds.map(
+      id => [String(id), {...frame.items[String(id)]}])),
     receivedAt,
     completedAtMs: nowMs,
     spanMs,
@@ -8823,17 +8588,14 @@ function ingestDsTwrStreamSample(item) {
     state.nativeDsFrameDiagnostics.publishedTimes.filter(
       value => nowMs - Number(value) <= 60000);
   state.nativeDsFrameDiagnostics.lastSpanMs = spanMs;
-  state.nativeDsFrameDiagnostics.lastFrameKey = hasRoundContext
-    ? `round:${roundIndex}`
-    : `seq:${frameStartSequence}`;
-  if (settings.nativeDsUpdateMode === "coherent") {
-    state.positionStreamLatestEvent = {
-      token: `ds:${frameKey}`,
-      arrivalMs: nowMs,
-    };
-    state.positionStreamRxTimes.push(nowMs);
-    trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
-  }
+  state.nativeDsFrameDiagnostics.lastFrameKey =
+    `frame:${frameId}`;
+  state.positionStreamLatestEvent = {
+    token: `ds:${frameKey}`,
+    arrivalMs: nowMs,
+  };
+  state.positionStreamRxTimes.push(nowMs);
+  trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
   state.positionStreamIndependentTimes.push(nowMs);
   trimPositionRateWindow(state.positionStreamIndependentTimes, nowMs);
   schedulePositionStreamRender();
@@ -11381,15 +11143,9 @@ function setRangingProfileFieldVisible(profileKey, field, visible) {
 function rangingProfileDescription(values, solver) {
   if (solver !== "ranging") return "";
   const baseFrameMs = 4 * values.slotMs + values.roundGapMs;
-  const geometryMs = values.slotMs + nativeDsGeometryCommandDelayMs +
-    2 * nativeDsGeometryGuardMs;
-  const averageFrameMs =
-    baseFrameMs + geometryMs / nativeDsGeometryFrameInterval;
   return `${fmtFixed(values.dsPositionMaxAgeSec, 1)} s distance freshness; ` +
     `native POLL → RESP → FINAL base frame is ${fmtFixed(baseFrameMs, 0)} ms ` +
-    `for four anchors; one rotating anchor-pair geometry slot adds ` +
-    `${fmtFixed(geometryMs, 0)} ms, including 5+5 ms guards, every ${nativeDsGeometryFrameInterval} frames ` +
-    `(${fmtFixed(averageFrameMs, 1)} ms average).`;
+    "for four anchors. No geometry-maintenance packets are inserted.";
 }
 
 function updateRangingSettingsProtocol() {
@@ -11404,8 +11160,8 @@ function updateRangingSettingsProtocol() {
     ranging: {
       title: "DS-TWR Settings",
       label: "Native DS-TWR",
-      hint: "Selected in Position Setup. The tag ranges every anchor, then periodically commands one rotating anchor-pair DS-TWR exchange so physical geometry remains live.",
-      note: "The guarded 53 ms profile completed a one-hour static validation with zero source rejects. The 60 and 64 ms profiles remain validated reserves, while 410 ms is the slow control; 33 and 13 ms are deliberately retained as experimental boundary points. One guarded geometry slot every four frames is included in the displayed throughput. Applying a profile persists it and reboots the selected modules; FlexTDOA, distance-test and calibration timing remain untouched.",
+      hint: "Selected in Position Setup. The clean baseline uses exactly POLL, delayed RESP and delayed FINAL for each tag-anchor range.",
+      note: "Use the 64 ms stable reference first, then compare the 60 ms precision-speed target. Applying a profile persists it and reboots the selected modules; FlexTDOA, Passive DS-TWR, distance-test and calibration timing remain untouched.",
     },
     passive_ds: {
       title: "Passive DS-TWR Settings",
@@ -11834,7 +11590,7 @@ function dsTimingLatestResult(config) {
     .filter(item =>
       Number(item.tag_id) === config.tagId &&
       config.anchorIds.includes(Number(item.anchor_id)) &&
-      Number.isFinite(Number(item.seq)))
+      Number.isFinite(Number(item.frame_id ?? item.seq)))
     .sort((left, right) => {
       const leftTime = Number(left.received_at);
       const rightTime = Number(right.received_at);
@@ -11845,55 +11601,44 @@ function dsTimingLatestResult(config) {
     })[0] || null;
 }
 
-function nativeDsStageMetric(stage) {
-  if (!stage) return "—";
-  return `${esc(stage.avg_us ?? 0)}/${esc(stage.max_us ?? 0)} µs` +
-    ` · ${esc(stage.fail ?? 0)}/${esc(stage.count ?? 0)} fail`;
-}
-
 function nativeDsPipelineDiagnosticsHtml() {
   const rows = state.statuses
     .filter(statusIsFresh)
     .map(item => {
       const stats = item.native_ds_pipeline_stats;
-      if (!stats || !stats.stages) return "";
-      const stages = stats.stages;
+      if (!stats || stats.poll_tx === undefined) return "";
       const moduleId = Number(item.module_id);
-      const role = moduleId === 1 ? "tag / initiator" : "anchor / responder";
+      const tagId = Number(item.runtime_tag_id || 1);
+      const role = moduleId === tagId ? "tag" : "anchor";
       return `<tr>
         <td>M${esc(item.module_id)}</td>
         <td>${role}</td>
-        <td>${esc(stats.initiated ?? 0)}/${esc(stats.completed ?? 0)}/${esc(stats.responded ?? 0)}</td>
-        <td>${esc(stats.response_timeouts ?? 0)}/${esc(stats.final_timeouts ?? 0)}</td>
-        <td>${esc(stats.context_mismatches ?? 0)}/${esc(stats.timestamp_rejects ?? 0)}/${esc(stats.negative_tof_rejects ?? 0)}/${esc(stats.impossible_range_rejects ?? 0)}</td>
+        <td>${esc(stats.poll_tx ?? 0)}/${esc(stats.poll_rx ?? 0)}</td>
+        <td>${esc(stats.response_tx ?? 0)}/${esc(stats.response_rx ?? 0)}</td>
+        <td>${esc(stats.final_tx ?? 0)}/${esc(stats.final_rx ?? 0)}</td>
+        <td>${esc(stats.completed_ranges ?? 0)}</td>
+        <td>${esc(stats.rx_timeouts ?? 0)}</td>
+        <td>${esc(stats.invalid_frames ?? 0)}/${esc(stats.delayed_tx_errors ?? 0)}/${esc(stats.rejected_ranges ?? 0)}</td>
         <td>${esc(stats.slot_overruns ?? 0)}</td>
-        <td>${esc(stats.boundary_min_us ?? 0)}/${esc(stats.boundary_max_us ?? 0)} µs</td>
-        <td>${nativeDsStageMetric(stages.poll_tx)}</td>
-        <td>${nativeDsStageMetric(stages.response_wait)}</td>
-        <td>${nativeDsStageMetric(stages.final_tx)}</td>
-        <td>${nativeDsStageMetric(stages.response_tx)}</td>
-        <td>${nativeDsStageMetric(stages.final_wait)}</td>
-        <td>${nativeDsStageMetric(stages.formula)}</td>
+        <td>${Number.isFinite(Number(stats.last_distance_mm)) ? fmtFixed(Number(stats.last_distance_mm) / 1000, 3) : "-"}</td>
       </tr>`;
     })
     .filter(Boolean)
     .join("");
   if (!rows) {
-    return `<div class="flex-timing-note warn">Waiting for Native DS-TWR round-boundary instrumentation from the modules.</div>`;
+    return `<div class="flex-timing-note warn">Waiting for clean Native DS-TWR counters from the modules.</div>`;
   }
   return `<div class="flex-parameter-map">
     <div class="flex-timing-label">
-      <strong>Live round-boundary diagnostics</strong>
-      <span>initiated/completed/responded and source-integrity counters; A2 can be compared directly with the other responders.</span>
+      <strong>Live protocol counters</strong>
+      <span>Direct counters from the clean POLL → RESP → FINAL implementation.</span>
     </div>
     <div class="table-wrap"><table class="flex-parameter-table">
       <thead><tr>
-        <th>Module</th><th>Role</th><th>init/complete/respond</th>
-        <th>RESP/FINAL timeout</th><th>context/ts/negative/range reject</th>
-        <th>slot overrun</th><th>boundary min/max</th>
-        <th>POLL TX avg/max</th><th>RESP wait avg/max</th>
-        <th>FINAL TX avg/max</th><th>RESP TX avg/max</th>
-        <th>FINAL wait avg/max</th><th>formula avg/max</th>
+        <th>Module</th><th>Role</th><th>POLL TX/RX</th>
+        <th>RESP TX/RX</th><th>FINAL TX/RX</th><th>Ranges</th>
+        <th>RX timeout</th><th>invalid/delayed/rejected</th>
+        <th>slot overrun</th><th>last m</th>
       </tr></thead><tbody>${rows}</tbody>
     </table></div>
   </div>`;
@@ -11918,43 +11663,20 @@ function renderNativeDsTwrTimingDiagram() {
   );
   state.dsTimingSlotIndex = selectedIndex;
   const latest = dsTimingLatestResult(config);
-  const firstAnchorIndex = latest
-    ? config.anchorIds.indexOf(Number(latest.first_anchor_id))
-    : -1;
-  const liveFrameAnchorIds = firstAnchorIndex >= 0
-    ? [
-        ...config.anchorIds.slice(firstAnchorIndex),
-        ...config.anchorIds.slice(0, firstAnchorIndex),
-      ]
-    : [...config.anchorIds];
+  const liveFrameAnchorIds = [...config.anchorIds];
   selector.innerHTML = liveFrameAnchorIds.map((anchorId, index) =>
     `<option value="${index}">slot[${index}] · T${esc(config.tagId)} ↔ A${esc(anchorId)}</option>`
   ).join("");
   selector.value = String(selectedIndex);
 
-  const reportedSlotIndex = Number(latest?.slot_index);
-  const liveAnchorIndex = Number.isInteger(reportedSlotIndex) &&
-      reportedSlotIndex >= 0 && reportedSlotIndex < N
-    ? reportedSlotIndex
-    : latest
-      ? liveFrameAnchorIds.indexOf(Number(latest.anchor_id))
-      : -1;
-  const latestSequence = Number(latest?.seq);
-  const frameStartSequence = Number.isInteger(latestSequence) &&
-    liveAnchorIndex >= 0
-    ? (latestSequence - liveAnchorIndex + 65536) % 65536
-    : null;
-  const sequenceForIndex = index => frameStartSequence === null
-    ? null
-    : (frameStartSequence + index) % 65536;
+  const liveAnchorIndex = latest
+    ? liveFrameAnchorIds.indexOf(Number(latest.anchor_id))
+    : -1;
+  const latestFrameId = Number(latest?.frame_id ?? latest?.seq);
+  const frameId = Number.isInteger(latestFrameId) ? latestFrameId : null;
 
   const frameMs = N * config.slotMs + config.roundGapMs;
-  const geometryMaintenanceMs =
-    config.slotMs + nativeDsGeometryCommandDelayMs +
-    2 * nativeDsGeometryGuardMs;
-  const averageFrameMs =
-    frameMs + geometryMaintenanceMs / nativeDsGeometryFrameInterval;
-  const frameHz = averageFrameMs > 0 ? 1000 / averageFrameMs : NaN;
+  const frameHz = frameMs > 0 ? 1000 / frameMs : NaN;
   const exchangeHz = N * frameHz;
   const slotRemainderMs = Math.max(
     0, config.slotMs - config.respDelayMs - config.finalDelayMs
@@ -11968,9 +11690,9 @@ function renderNativeDsTwrTimingDiagram() {
       index === selectedIndex ? "selected" : "",
       config.live && index === liveAnchorIndex ? "live" : "",
     ].filter(Boolean).join(" ");
-    const sequence = sequenceForIndex(index);
+    const slotFrameId = frameId;
     return `<div class="${classes}">
-      <b>slot[${index}]${sequence === null ? "" : ` · seq ${esc(sequence)}`}</b>
+      <b>slot[${index}]${slotFrameId === null ? "" : ` · frame ${esc(slotFrameId)}`}</b>
       <strong>T${esc(config.tagId)} ↔ A${esc(anchorId)}</strong>
       <span>POLL → RESP → FINAL</span>
     </div>`;
@@ -12015,11 +11737,11 @@ function renderNativeDsTwrTimingDiagram() {
       detail: `T${config.tagId} schedules FINAL at RESP_RX + ${fmtFixed(config.finalDelayMs, 0)} ms`,
     },
     {
-      key: "Slot remainder",
-      short: "REMAINDER",
+      key: "Guard time",
+      short: "GUARD TIME",
       duration: slotRemainderMs,
       cls: "guard",
-      detail: "responder computes the range; scheduler waits to the slot boundary",
+      detail: "responder computes the range; scheduler then waits to the next slot boundary",
     },
   ];
   const visibleSegments = segments.filter(segment => segment.duration > 0);
@@ -12065,9 +11787,8 @@ function renderNativeDsTwrTimingDiagram() {
     <div class="flex-timing-metrics">
       <div class="flex-timing-metric"><span>Topology</span><strong>T${esc(config.tagId)} · N=${N}</strong></div>
       <div class="flex-timing-metric"><span>Slot period</span><strong>${fmtFixed(config.slotMs, 3)} ms</strong></div>
-      <div class="flex-timing-metric"><span>Base position frame</span><strong>${fmtFixed(frameMs, 3)} ms</strong></div>
-      <div class="flex-timing-metric"><span>Geometry maintenance</span><strong>+${fmtFixed(geometryMaintenanceMs, 0)} ms / ${nativeDsGeometryFrameInterval} frames</strong><small>includes 5+5 ms boundary guards</small></div>
-      <div class="flex-timing-metric"><span>Average position rate</span><strong>${fmtFixed(frameHz, 2)} Hz</strong></div>
+      <div class="flex-timing-metric"><span>Position frame</span><strong>${fmtFixed(frameMs, 3)} ms</strong></div>
+      <div class="flex-timing-metric"><span>Nominal position rate</span><strong>${fmtFixed(frameHz, 2)} Hz</strong></div>
       <div class="flex-timing-metric"><span>Exchanges / frame</span><strong>${N}</strong></div>
       <div class="flex-timing-metric"><span>Scheduled range rate</span><strong>${fmtFixed(exchangeHz, 1)} /s</strong></div>
     </div>
@@ -12075,7 +11796,7 @@ function renderNativeDsTwrTimingDiagram() {
       <div class="flex-timing-canvas">
         <div class="flex-timing-label">
           <strong>Base frame · ${N} tag-anchor exchanges + frame gap</strong>
-          <span>${config.live && latest ? `live round ${esc(latest.round_index ?? "-")} · seq ${esc(latest.seq)} from A${esc(latest.anchor_id)}` : "configured topology"} · rotating first anchor · guarded geometry slot every ${nativeDsGeometryFrameInterval} frames</span>
+          <span>${config.live && latest ? `latest frame ${esc(latest.frame_id ?? latest.seq)} from A${esc(latest.anchor_id)}` : "configured topology"} · fixed anchor order · no maintenance packets</span>
         </div>
         <div class="flex-frame-track" style="grid-template-columns:${frameColumns}">${frameSlots}${gapCell}</div>
         <div class="flex-frame-axis">${frameAxis}</div>
@@ -12086,7 +11807,7 @@ function renderNativeDsTwrTimingDiagram() {
           </div>
         </div>
         <div class="flex-timing-label">
-          <strong>Selected exchange · T${esc(config.tagId)} ↔ A${esc(selectedAnchorId)}${sequenceForIndex(selectedIndex) === null ? "" : ` · seq ${esc(sequenceForIndex(selectedIndex))}`}</strong>
+          <strong>Selected exchange · T${esc(config.tagId)} ↔ A${esc(selectedAnchorId)}${frameId === null ? "" : ` · frame ${esc(frameId)}`}</strong>
           <span>native three-packet DS-TWR</span>
         </div>
         <div class="flex-slot-track" style="grid-template-columns:${slotColumns}">${segmentCells}</div>
@@ -12627,18 +12348,14 @@ function renderPassiveDsTimingDiagram() {
 function profileSummaryText(values, solver, anchorCount = 4) {
   if (solver !== "ranging") return "";
   const dsCycleMs = anchorCount * values.slotMs + values.roundGapMs;
-  const maintenanceMs = values.slotMs + nativeDsGeometryCommandDelayMs +
-    2 * nativeDsGeometryGuardMs;
-  const averageCycleMs =
-    dsCycleMs + maintenanceMs / nativeDsGeometryFrameInterval;
-  const frameHz = averageCycleMs > 0 ? 1000 / averageCycleMs : NaN;
+  const frameHz = dsCycleMs > 0 ? 1000 / dsCycleMs : NaN;
   const warnings = [];
   if (values.timeoutMs > values.slotMs) warnings.push("timeout > slot");
   if (values.respDelayMs + values.finalDelayMs >= values.slotMs) {
     warnings.push("RESP + FINAL >= slot");
   }
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `fresh ${fmtFixed(values.dsPositionMaxAgeSec, 1)} s · POLL → RESP → FINAL · ${fmtFixed(values.slotMs, 0)} ms slot · ${fmtFixed(values.roundGapMs, 0)} ms gap · ${fmtFixed(dsCycleMs, 0)} ms base frame · ${fmtFixed(averageCycleMs, 1)} ms guarded average · ${fmtFixed(frameHz, 2)} Hz${warnText}`;
+  return `fresh ${fmtFixed(values.dsPositionMaxAgeSec, 1)} s · POLL → delayed RESP → delayed FINAL · ${fmtFixed(values.slotMs, 0)} ms slot · ${fmtFixed(values.roundGapMs, 0)} ms gap · ${fmtFixed(dsCycleMs, 0)} ms frame · ${fmtFixed(frameHz, 2)} Hz${warnText}`;
 }
 
 function updateRangingProfileSummary(profileKey) {
@@ -12692,8 +12409,8 @@ function persistedSettingIds() {
     "runtimeTargets", "runtimeMode", "runtimeTag", "runtimeAnchors", "runtimeReboot",
     "runtimeUwb", "runtimeBno085", "runtimeGps", "runtimeTelemetryPort",
     "accelTimebase", "accelSampleHz", "accelTargets",
-    "positionAnchorCount", "positionSolver", "positionNativeDsUpdateMode",
-    "positionNativeDsFit", "positionAnchors", "positionTags",
+    "positionAnchorCount", "positionSolver", "positionAnchors",
+    "positionNativeAnchorX", "positionNativeAnchorY", "positionTags",
     "positionReferenceMode", "positionReferenceX",
     "positionReferenceY", "positionErrorWindowSec",
     "uwbTargets", "uwbRadioChannel", "uwbFlexAnchors", "uwbFlexK",
@@ -13011,8 +12728,8 @@ function wireSettings() {
     });
   }
   [
-    "positionAnchorCount", "positionSolver", "positionNativeDsUpdateMode",
-    "positionNativeDsFit", "positionAnchors", "positionTags",
+    "positionAnchorCount", "positionSolver", "positionAnchors",
+    "positionNativeAnchorX", "positionNativeAnchorY", "positionTags",
     "positionMaxAgeSec", "positionReferenceMode", "positionReferenceX",
     "positionReferenceY", "positionErrorWindowSec",
   ].forEach(id => {
@@ -13021,8 +12738,8 @@ function wireSettings() {
     const update = () => {
       if (id === "positionSolver") switchPositionProtocolSettings();
       if (id === "positionMaxAgeSec") savePositionProtocolSettings();
-      if (id === "positionNativeDsUpdateMode" ||
-          id === "positionNativeDsFit") {
+      if (id === "positionNativeAnchorX" ||
+          id === "positionNativeAnchorY" || id === "positionAnchors") {
         resetPositionTagTrails();
         resetNativeDsFrameAssembler();
         state.positionSeeds = {};
