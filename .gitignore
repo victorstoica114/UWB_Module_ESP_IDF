@@ -1,5 +1,6 @@
 build/
 build-*/
+firmware_images/
 managed_components/
 sdkconfig
 sdkconfig.old
