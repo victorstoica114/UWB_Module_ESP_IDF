@@ -198,13 +198,43 @@ def parse_args() -> argparse.Namespace:
             "captured concurrently from the dashboard log API."
         ),
     )
+    parser.add_argument(
+        "--anchor",
+        action="append",
+        default=[],
+        metavar="ID:X_M:Y_M",
+        help=(
+            "Reference anchor coordinate. Repeat for every anchor. When "
+            "omitted, the original surveyed 3 m square is recorded."
+        ),
+    )
+    parser.add_argument(
+        "--tag-reference",
+        default="1.5:1.5",
+        metavar="X_M:Y_M",
+        help="Static tag reference coordinate stored in capture metadata.",
+    )
+    parser.add_argument(
+        "--reference-note",
+        default="surveyed 3 m square",
+        help="Human-readable provenance/limitations of the reference geometry.",
+    )
+    parser.add_argument(
+        "--survey-tolerance-m",
+        type=float,
+        default=0.002,
+        help="Reference-coordinate tolerance stored in capture metadata.",
+    )
     return parser.parse_args()
 
 
 def relevant_timing_log(item: dict[str, Any]) -> bool:
     message = str(item.get("message") or "")
     return (
-        "UWB_RANGING native summary" in message
+        "UWB_RANGING result" in message
+        or "UWB_RANGING initiator active" in message
+        or "UWB_RANGING anchor responder active" in message
+        or "UWB_RANGING native summary" in message
         or "UWB_RANGING native tag initiator active" in message
         or "UWB_RANGING native anchor responder active" in message
         or (
@@ -226,6 +256,53 @@ def relevant_timing_log(item: dict[str, Any]) -> bool:
             )
         )
     )
+
+
+def parse_reference_point(value: str, *, with_id: bool) -> tuple[Any, ...]:
+    parts = value.replace(",", ":").split(":")
+    expected = 3 if with_id else 2
+    if len(parts) != expected:
+        label = "ID:X_M:Y_M" if with_id else "X_M:Y_M"
+        raise ValueError(f"expected {label}, got {value!r}")
+    try:
+        values = tuple(float(part.strip()) for part in parts)
+    except ValueError as exc:
+        raise ValueError(f"invalid reference coordinate {value!r}") from exc
+    if not all(math.isfinite(item) for item in values):
+        raise ValueError(f"non-finite reference coordinate {value!r}")
+    if with_id:
+        anchor_id = int(values[0])
+        if values[0] != anchor_id or anchor_id <= 0:
+            raise ValueError(f"invalid anchor ID in {value!r}")
+        return anchor_id, values[1], values[2]
+    return values
+
+
+def reference_geometry(args: argparse.Namespace) -> dict[str, Any]:
+    anchors: dict[str, list[float]] = {}
+    entries = args.anchor or (
+        "2:0:0",
+        "3:0:3",
+        "4:3:0",
+        "5:3:3",
+    )
+    for entry in entries:
+        anchor_id, x_m, y_m = parse_reference_point(entry, with_id=True)
+        key = str(anchor_id)
+        if key in anchors:
+            raise ValueError(f"duplicate anchor reference A{anchor_id}")
+        anchors[key] = [x_m, y_m]
+    if len(anchors) < 3:
+        raise ValueError("at least three anchor references are required")
+    tag_x, tag_y = parse_reference_point(
+        args.tag_reference, with_id=False
+    )
+    return {
+        "coordinate_convention": args.reference_note,
+        "anchors_m": anchors,
+        "tag_m": [tag_x, tag_y],
+        "survey_tolerance_m": max(0.0, args.survey_tolerance_m),
+    }
 
 
 def capture_timing_logs(
@@ -275,6 +352,11 @@ def capture_timing_logs(
 
 def main() -> int:
     args = parse_args()
+    try:
+        ground_truth = reference_geometry(args)
+    except ValueError as exc:
+        print(f"invalid reference geometry: {exc}", file=sys.stderr)
+        return 2
     output_dir = pathlib.Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     events_path = output_dir / f"{args.block}.jsonl"
@@ -661,17 +743,7 @@ def main() -> int:
         "events_file": events_path.name,
         "timing_log_file": log_path.name if log_path is not None else None,
         "event_counts": counters,
-        "ground_truth": {
-            "coordinate_convention": "A2=(0,0), A3=(0,3), A4=(3,0), A5=(3,3)",
-            "anchors_m": {
-                "2": [0.0, 0.0],
-                "3": [0.0, 3.0],
-                "4": [3.0, 0.0],
-                "5": [3.0, 3.0],
-            },
-            "tag_m": [1.5, 1.5],
-            "survey_tolerance_m": 0.002,
-        },
+        "ground_truth": ground_truth,
         "initial_status": status_summary(initial),
         "final_status": status_summary(last_snapshot),
     }
