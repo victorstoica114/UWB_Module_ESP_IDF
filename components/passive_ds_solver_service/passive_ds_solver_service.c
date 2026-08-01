@@ -15,15 +15,25 @@
 static const char *TAG = "passive_ds_solver";
 
 enum {
-    PASSIVE_DS_SOLVER_QUEUE_LEN = 256,
+    /* Absorb short Wi-Fi/telemetry bursts without dropping radio events. */
+    PASSIVE_DS_SOLVER_QUEUE_LEN = 512,
     PASSIVE_DS_SOLVER_TASK_STACK_BYTES = 32768,
-    PASSIVE_DS_SOLVER_TASK_PRIORITY = 3,
+    /* Wi-Fi stays above us (6); log/telemetry delivery stays below us (4). */
+    PASSIVE_DS_SOLVER_TASK_PRIORITY = 5,
     PASSIVE_DS_SOLVER_FRAME_BUCKETS = 32,
     PASSIVE_DS_SOLVER_RANGE_MAX_AGE_MS = 2000,
     PASSIVE_DS_SOLVER_FRAME_MAX_AGE_MS = 250,
     PASSIVE_DS_SOLVER_IDLE_WINDOW_MS = 500,
     PASSIVE_DS_SOLVER_GEOMETRY_SAMPLES_PER_PAIR = 8,
     PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION = 2,
+    /*
+     * Preserve the non-overlapping two-star precision stream, then publish
+     * one additional raw two-star window at each eight-star boundary.  The
+     * supplemental result reuses two radio stars and is therefore marked as
+     * non-independent; it is neither averaged nor temporally filtered.
+     */
+    PASSIVE_DS_SOLVER_SUPPLEMENTAL_PERIOD_STARS = 8,
+    PASSIVE_DS_SOLVER_SUPPLEMENTAL_FIRST_PHASE = 3,
     PASSIVE_DS_SOLVER_MAX_OBSERVATIONS =
         PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION *
         (APP_RUNTIME_CONFIG_MAX_ANCHORS - 1),
@@ -39,6 +49,10 @@ enum {
  * weighting only; it does not average or filter positions over time.
  */
 static const double PASSIVE_DS_SOLVER_TIMING_COMMON_CORRELATION = 0.25;
+
+/* Keep supplemental frame keys disjoint from the baseline frame counter. */
+static const uint32_t PASSIVE_DS_SOLVER_SUPPLEMENTAL_FRAME_NAMESPACE =
+    UINT32_C(0x80000000);
 
 enum passive_ds_solver_item_type {
     PASSIVE_DS_SOLVER_ITEM_RANGE,
@@ -809,6 +823,31 @@ static void handle_observation(
         (void)stage_observation(
             state, item, now, radio_frame_id / 2U,
             radio_frame_id % 2U, radio_slot_index, true);
+
+        /*
+         * A sparse overlapping window lifts the displayed raw update rate
+         * above FlexTDOA's measured ~85 Hz without changing the validated
+         * 6 ms radio exchange or contaminating the independent trail.  One
+         * window is formed from phases 3 and 4 of every eight radio stars.
+         * Both stars are complete native measurements; the only reuse is
+         * across adjacent solver windows.
+         */
+        const uint32_t supplemental_phase =
+            radio_frame_id % PASSIVE_DS_SOLVER_SUPPLEMENTAL_PERIOD_STARS;
+        if (supplemental_phase ==
+                PASSIVE_DS_SOLVER_SUPPLEMENTAL_FIRST_PHASE ||
+            supplemental_phase ==
+                PASSIVE_DS_SOLVER_SUPPLEMENTAL_FIRST_PHASE + 1U) {
+            const uint32_t supplemental_frame_id =
+                PASSIVE_DS_SOLVER_SUPPLEMENTAL_FRAME_NAMESPACE |
+                (radio_frame_id /
+                 PASSIVE_DS_SOLVER_SUPPLEMENTAL_PERIOD_STARS);
+            (void)stage_observation(
+                state, item, now, supplemental_frame_id,
+                supplemental_phase -
+                    PASSIVE_DS_SOLVER_SUPPLEMENTAL_FIRST_PHASE,
+                radio_slot_index, false);
+        }
     } else {
         /* Legacy schedules still form one non-overlapping complete frame. */
         (void)stage_observation(

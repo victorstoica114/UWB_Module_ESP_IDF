@@ -952,6 +952,8 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                         if solution_flags & 2
                         else "independent_frame"
                         if solution_flags & 1
+                        else "overlapping_raw_window"
+                        if solution_flags & 16
                         else "rolling"
                     ),
                     "independent_frame": bool(solution_flags & 1),
@@ -8438,7 +8440,17 @@ function updatePositionStreamMetrics() {
   }
   const updatesPerRender = renderRate > 0 ? rxRate / renderRate : 0;
   const passiveDs = positionSettings().solver === "passive_ds";
-  element.textContent = passiveDs
+  const passivePosition = Object.values(
+    state.tdoa?.local_positions || {}
+  ).find(item => item?.tdoa_protocol === "passive_ds");
+  const passiveUnfiltered = passiveDs &&
+    passivePosition?.position_filter === "none";
+  const overlappingRate = Math.max(0, rxRate - independentRate);
+  element.textContent = passiveUnfiltered
+    ? `${rxRate} raw solves/s · ${independentRate} independent/s · ` +
+      `${overlappingRate} overlapping/s · ${renderRate} fps · ` +
+      `${fmtFixed(updatesPerRender, 1)} updates/render`
+    : passiveDs
     ? `${rxRate} solver/s · ${independentRate} frames/s · ` +
       `${superframeRate} superframes/s · ${correctionRate} EKF corrections/s · ` +
       `${renderRate} fps · ${fmtFixed(updatesPerRender, 1)} updates/render`
@@ -8459,7 +8471,10 @@ function updatePositionStreamMetrics() {
       : "";
     const usesTdoa = positionProtocolUsesTdoa(positionSettings().solver);
     const nativeMode = positionSettings().nativeDsUpdateMode;
-    trailElement.textContent = usesTdoa
+    trailElement.textContent = passiveUnfiltered
+      ? `independent raw trail: ${trail.rawCount || trail.ekfCount} points · ` +
+        `${fmtFixed(trail.spanSec, 1)} s${latencyText}`
+      : usesTdoa
       ? `independent trail: EKF ${trail.ekfCount} · raw ${trail.rawCount} · ` +
         `${fmtFixed(trail.spanSec, 1)} s${latencyText}`
       : `${nativeMode === "rolling" ? "rolling" : "coherent"} trail: ` +
@@ -8522,13 +8537,17 @@ function updatePositionLiveMetrics(model) {
             tag.rawPosition.y - tag.position.y
           )
         : NaN;
-      summary.textContent =
-        `Tag ${tag.tagId}: EKF x=${fmtFixed(tag.position.x, 3)} m, ` +
-        `y=${fmtFixed(tag.position.y, 3)} m` +
-        (tag.rawPosition
-          ? ` · raw x=${fmtFixed(tag.rawPosition.x, 3)}, ` +
-            `y=${fmtFixed(tag.rawPosition.y, 3)} · Δ ${fmtPositionCm(rawDelta, 1)}`
-          : "");
+      const unfilteredEsp = item.position_filter === "none" &&
+        item.solver_location === "esp32_tag";
+      summary.textContent = unfilteredEsp
+        ? `Tag ${tag.tagId}: x=${fmtFixed(tag.position.x, 3)} m, ` +
+          `y=${fmtFixed(tag.position.y, 3)} m`
+        : `Tag ${tag.tagId}: EKF x=${fmtFixed(tag.position.x, 3)} m, ` +
+          `y=${fmtFixed(tag.position.y, 3)} m` +
+          (tag.rawPosition
+            ? ` · raw x=${fmtFixed(tag.rawPosition.x, 3)}, ` +
+              `y=${fmtFixed(tag.rawPosition.y, 3)} · Δ ${fmtPositionCm(rawDelta, 1)}`
+            : "");
     }
     if (meta) {
       const sigmaText = Number.isFinite(sigma)
@@ -8538,12 +8557,17 @@ function updatePositionLiveMetrics(model) {
         ? ` · actual ${fmtPositionCm(referenceStats.currentErrorM, 1)}`
         : "";
       const filterText = item.tdoa_protocol === "passive_ds"
-        ? ` · ${item.filter_correction ? "EKF correction" : "EKF predict-only"}` +
-          (item.complete_superframe
-            ? " · complete superframe"
-            : item.independent_frame
-            ? " · independent frame"
-            : " · rolling")
+        ? item.position_filter === "none"
+          ? " · raw ESP32 solve" +
+            (item.independent_frame
+              ? " · independent two-star window"
+              : " · overlapping two-star window")
+          : ` · ${item.filter_correction ? "EKF correction" : "EKF predict-only"}` +
+            (item.complete_superframe
+              ? " · complete superframe"
+              : item.independent_frame
+              ? " · independent frame"
+              : " · rolling")
         : "";
       const rejectionText = passiveDsRejectionReasonText(
         item.rejection_reason_mask
@@ -12254,10 +12278,15 @@ function renderPassiveDsActiveProfile() {
     ? live.slotMs + live.gapMs
     : (live.anchorCount - 1) * live.slotMs + live.gapMs;
   const frameHz = frameMs > 0 ? 1000 / frameMs : 0;
+  const activeTimingText = live.schedule === 2
+    ? `${fmtFixed(frameMs, 0)} ms radio star · ` +
+      `${fmtFixed(frameMs * 2, 0)} ms independent raw position · ` +
+      `${fmtFixed(frameHz / 2, 2)} independent Hz`
+    : `${fmtFixed(frameMs, 0)} ms frame · ${fmtFixed(frameHz, 2)} Hz`;
   root.textContent =
     `Active on ${statuses.length}/${freshStatuses.length || statuses.length} modules: ` +
-    `${scheduleLabel} · ${presetLabel} · ${fmtFixed(frameMs, 0)} ms frame · ` +
-    `${fmtFixed(frameHz, 2)} Hz · RESP/FINAL ${live.respUs}+${live.finalUs} µs.`;
+    `${scheduleLabel} · ${presetLabel} · ${activeTimingText} · ` +
+    `RESP/FINAL ${live.respUs}+${live.finalUs} µs.`;
   root.className = "profile-validation good";
 }
 
@@ -12556,8 +12585,12 @@ function renderPassiveDsMultipointTiming(root, config) {
   const radioMs = firstResponseDelayMs +
     Math.max(0, responderCount - 1) * responseSpacingMs + finalGuardMs;
   const guardMs = Math.max(0, config.slotMs - radioMs);
-  const frameMs = config.slotMs + config.gapMs;
-  const frameHz = frameMs > 0 ? 1000 / frameMs : NaN;
+  const radioStarMs = config.slotMs + config.gapMs;
+  const radioStarHz = radioStarMs > 0 ? 1000 / radioStarMs : NaN;
+  const independentWindowMs = radioStarMs * 2;
+  const independentHz = radioStarHz / 2;
+  const supplementalHz = radioStarHz / 8;
+  const nominalRawSolveHz = independentHz + supplementalHz;
   const segments = [
     ...Array.from({length: responderCount}, (_, index) => ({
       key: index === 0 ? "POLL → RESP[0]" : `RESP[${index - 1}] → RESP[${index}]`,
@@ -12592,17 +12625,18 @@ function renderPassiveDsMultipointTiming(root, config) {
   root.innerHTML = `
     <div class="flex-timing-metrics">
       <div class="flex-timing-metric"><span>Protocol</span><strong>Multipoint Full-DS · N+2</strong></div>
-      <div class="flex-timing-metric"><span>Reference</span><strong>rotates every frame</strong></div>
-      <div class="flex-timing-metric"><span>Position frame</span><strong>${fmtFixed(frameMs, 0)} ms</strong></div>
-      <div class="flex-timing-metric"><span>Nominal FPS</span><strong>${fmtFixed(frameHz, 2)}</strong></div>
-      <div class="flex-timing-metric"><span>UWB packets</span><strong>${N + 1} per frame</strong></div>
-      <div class="flex-timing-metric"><span>Tag solver</span><strong>raw AlgMin on ESP32</strong></div>
+      <div class="flex-timing-metric"><span>Reference</span><strong>rotates every radio star</strong></div>
+      <div class="flex-timing-metric"><span>Radio star</span><strong>${fmtFixed(radioStarMs, 0)} ms · ${fmtFixed(radioStarHz, 2)} Hz</strong></div>
+      <div class="flex-timing-metric"><span>Independent position</span><strong>${fmtFixed(independentWindowMs, 0)} ms · ${fmtFixed(independentHz, 2)} Hz</strong></div>
+      <div class="flex-timing-metric"><span>Raw solver output</span><strong>up to ${fmtFixed(nominalRawSolveHz, 2)} /s*</strong></div>
+      <div class="flex-timing-metric"><span>UWB packets</span><strong>${N + 1} per radio star</strong></div>
+      <div class="flex-timing-metric"><span>Tag solver</span><strong>raw GLS/AlgMin on ESP32</strong></div>
       <div class="flex-timing-metric"><span>Tag airtime</span><strong>0 packets</strong></div>
     </div>
     <div class="flex-timing-scroll">
       <div class="flex-timing-canvas">
         <div class="flex-timing-label">
-          <strong>One coherent multipoint position frame</strong>
+          <strong>One coherent multipoint radio star</strong>
           <span>1 broadcast POLL + ${responderCount} staggered RESP + 1 aggregate broadcast FINAL</span>
         </div>
         <div class="flex-slot-track" style="grid-template-columns:${columns}">${cells}</div>
@@ -12625,6 +12659,9 @@ function renderPassiveDsMultipointTiming(root, config) {
       ${config.live ? "Live configuration" : "Configured fallback"} ·
       first RESP ${fmtFixed(firstResponseDelayMs, 3)} ms · response spacing ${fmtFixed(responseSpacingMs, 3)} ms ·
       FINAL guard ${fmtFixed(finalGuardMs, 3)} ms · guard time ${fmtFixed(guardMs, 3)} ms.
+      * Independent results use non-overlapping pairs of stars. One extra raw
+      overlapping pair per eight stars raises display rate without adding
+      radio traffic; overlapping results reuse measurements and are reported separately.
       ${overrun ? " Warning: response train and FINAL guard exceed the exchange budget." : ""}
     </div>`;
 }

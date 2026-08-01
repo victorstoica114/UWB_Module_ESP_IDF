@@ -22,6 +22,29 @@ The `nplus2_dual_star_stable_stackfix_45s` capture is the stable checkpoint:
 - solver queue drops: 0
 - nominal measurement window: 12 ms
 
+## High-rate display checkpoint
+
+The `nplus2_sparse_overlap_queue512_prio5_60s` capture preserves the first
+configuration that exceeds 85 raw position results/s without changing the
+five-packet radio exchange or adding a temporal filter. Independent two-star
+windows remain non-overlapping; one additional overlapping two-star window is
+solved every eight radio stars to reduce display latency. The dashboard marks
+the two sources separately, because an overlapping result reuses one radio
+star and is not a new statistically independent frame.
+
+- 5,548 raw positions in 60 s (92.47 results/s)
+- 4,440 independent positions (74.00 independent frames/s)
+- 1,108 overlapping positions (18.47 results/s)
+- X/Y standard deviation, all results: 1.38/1.41 cm
+- X/Y standard deviation, independent results: 1.38/1.41 cm
+- P95 error from the surveyed centre, independent results: 4.70 cm
+- input queue drops after the queue/priority correction: 0
+- radio star: 6 ms; independent position window: 12 ms
+
+This is a low-latency raw measurement mode, not interpolation or filtering.
+The next experiment increases each solve to three radio stars to target the
+precision of Native DS-TWR while retaining a high-rate overlapping stream.
+
 The reference geometry is a surveyed 3 m square with the receive-only tag at
 its centre (1.5 m, 1.5 m). The firmware reports `position_filter=none` and
 `solver_location=esp32_tag` for every captured position.
