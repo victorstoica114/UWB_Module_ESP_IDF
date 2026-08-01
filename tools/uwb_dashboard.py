@@ -4116,8 +4116,8 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div id="passiveDsTimingDiagram" class="muted">Waiting for Passive DS-TWR runtime status...</div>
           <div class="profile-card" style="margin-top:12px">
-            <h3>Experimental pipeline and EKF policy</h3>
-            <p class="muted">The validated Robust Rotating 1.0/1.0 ms radio timing remains untouched. Coherent modes solve only the three observations from one native frame; rolling publishes low-latency EKF prediction without reusing stale measurements.</p>
+            <h3>Experimental pipeline and position-window policy</h3>
+            <p class="muted">For Multipoint Full-DS, Single coherent star produces one independent position from each radio exchange. Three-star precision preserves the validated static reference. Neither option applies a temporal position filter.</p>
             <div class="form-grid">
               <label for="passiveDsExperimentTargets">Targets</label>
               <select id="passiveDsExperimentTargets">
@@ -4133,11 +4133,11 @@ tr.status-stale td { color: #4f3b1d; }
                 <option value="0">Legacy control</option>
                 <option value="1">DW3000 deadline state machine</option>
               </select>
-              <label for="passiveDsSolveMode">Solve / EKF policy</label>
+              <label for="passiveDsSolveMode">Position-window policy</label>
               <select id="passiveDsSolveMode">
-                <option value="0">Coherent frame only</option>
+                <option value="0">Single coherent star (dynamic)</option>
                 <option value="1">Legacy mixed rolling (A/B control)</option>
-                <option value="2">Coherent frame + rolling prediction</option>
+                <option value="2">Three-star precision window</option>
                 <option value="3">Coherent superframe correction + prediction</option>
                 <option value="4">Motion-compensated rolling (experimental)</option>
               </select>
@@ -4145,7 +4145,7 @@ tr.status-stale td { color: #4f3b1d; }
               <input id="passiveDsRollingMaxHz" value="100" type="number" min="1" max="500" step="1">
             </div>
             <div class="form-actions">
-              <button id="applyPassiveDsExperimentMode" class="primary">Apply without timing changes</button>
+              <button id="applyPassiveDsExperimentMode" class="primary">Apply position-window policy</button>
             </div>
             <div id="passiveDsExperimentToast" class="toast"></div>
           </div>
@@ -4354,7 +4354,8 @@ tr.status-stale td { color: #4f3b1d; }
           <div class="form-actions">
             <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="fast">Apply Fast Star · 10 ms Maximum</button>
             <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="robust">Apply Robust Rotating · 10 ms Maximum</button>
-            <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="multi">Apply Multipoint Full-DS · 6 ms Compact</button>
+            <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="multi_precision">Apply Multipoint · Static Precision</button>
+            <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="multi_dynamic">Apply Multipoint · Single-Star Dynamic</button>
           </div>
           <div class="profile-grid">
             <div class="profile-card passive-ds-profile-card" data-passive-ds-profile="fast">
@@ -4398,6 +4399,7 @@ tr.status-stale td { color: #4f3b1d; }
               <p class="muted">One rotating reference broadcasts POLL, all three other anchors answer in native delayed-TX slots, then the reference broadcasts one aggregate FINAL. Three coherent full-DS passive observations from only five packets.</p>
               <div class="profile-validation">experimental N+2 protocol · isolated hardware validation</div>
               <div class="form-grid compact">
+                <label for="passiveDsMultiSolveMode">Position window</label><select id="passiveDsMultiSolveMode"><option value="2">Three-star precision (validated static reference)</option><option value="0">Single coherent star (dynamic, no overlap)</option></select>
                 <label for="passiveDsMultiSlotMs">Exchange budget ms</label><input id="passiveDsMultiSlotMs" value="8" type="number" min="5" max="60000" step="1">
                 <label for="passiveDsMultiGapMs">Frame gap ms</label><input id="passiveDsMultiGapMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsMultiRxMs">Anchor RX slice ms</label><input id="passiveDsMultiRxMs" value="100" type="number" min="1" max="60000" step="1">
@@ -5011,7 +5013,7 @@ const rangingProtocolProfileFields = {
 };
 const rangingProfileDefaultsVersion = "2026-07-31-native-ds-clean-v2";
 const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
-const passiveDsProfileDefaultsVersion = "2026-08-01-passive-ds-multipoint-v1";
+const passiveDsProfileDefaultsVersion = "2026-08-01-passive-ds-single-star-v2";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -12082,10 +12084,20 @@ const passiveDsProfileDefaults = {
     finalUs: 1500,
     autoRxUus: 500,
     freshSec: 0.2,
+    solveMode: 2,
   },
 };
 const passiveDsFastGeometryFrameInterval = 4;
 const passiveDsMultipointResponseSpacingUs = 750;
+const passiveDsDynamicGuardUs = 250;
+const passiveDsMultipointDynamicDefaults = {
+  ...passiveDsProfileDefaults.multi,
+  slotMs: 10,
+  timeoutMs: 5,
+  respUs: 4500,
+  finalUs: 2500,
+  solveMode: 0,
+};
 const passiveDsSpeedPresets = {
   safe: {
     label: "16 ms Safe",
@@ -12124,6 +12136,12 @@ function readPassiveDsProfile(key) {
   for (const [field, suffix] of Object.entries(passiveDsProfileFieldSuffixes)) {
     values[field] = Number(document.getElementById(`${profile.prefix}${suffix}`)?.value);
   }
+  if (key === "multi") {
+    values.solveMode = Number(
+      document.getElementById("passiveDsMultiSolveMode")?.value ??
+      profile.solveMode
+    );
+  }
   return values;
 }
 
@@ -12141,6 +12159,10 @@ function writePassiveDsProfile(key, values = passiveDsProfileDefaults[key]) {
   for (const [field, suffix] of Object.entries(passiveDsProfileFieldSuffixes)) {
     const el = document.getElementById(`${profile.prefix}${suffix}`);
     if (el) el.value = String(values[field]);
+  }
+  if (key === "multi") {
+    const solveMode = document.getElementById("passiveDsMultiSolveMode");
+    if (solveMode) solveMode.value = String(values.solveMode ?? 2);
   }
   updatePassiveDsProfileSummary(key);
 }
@@ -12192,8 +12214,10 @@ function updatePassiveDsProfileSummary(key) {
     3, Number(document.getElementById("positionAnchorCount")?.value || 4)
   );
   const multipoint = key === "multi";
+  const singleStar = multipoint && values.solveMode === 0;
+  const guardMs = singleStar ? passiveDsDynamicGuardUs / 1000 : values.gapMs;
   const frameMs = multipoint
-    ? values.slotMs + values.gapMs
+    ? values.slotMs + guardMs
     : (anchorCount - 1) * values.slotMs + values.gapMs;
   const frameHz = frameMs > 0 ? 1000 / frameMs : NaN;
   const superframeMs = key === "robust" || multipoint
@@ -12201,6 +12225,11 @@ function updatePassiveDsProfileSummary(key) {
     : (anchorCount - 1) * passiveDsFastGeometryFrameInterval * frameMs;
   const speedPresetKey = matchingPassiveDsSpeedPreset(values);
   const speedPreset = passiveDsSpeedPresets[speedPresetKey];
+  const profileVariant = multipoint
+    ? (singleStar
+        ? `Single-Star Dynamic · ${passiveDsDynamicGuardUs} µs guard`
+        : "Static Precision · three stars")
+    : (speedPreset?.label || "Custom timing");
   const selector = passiveDsSpeedPresetElement(key);
   if (selector && selector.value !== speedPresetKey) {
     selector.value = speedPresetKey;
@@ -12219,9 +12248,11 @@ function updatePassiveDsProfileSummary(key) {
   if (values.timeoutMs > values.slotMs) warnings.push("timeout > slot");
   summary.textContent =
     `${profileSummaryScheduleLabel(key)} · ` +
-    `${speedPreset?.label || "Custom timing"} · POLL → RESP → FINAL · ` +
-    `${fmtFixed(frameMs, 0)} ms position frame · ${fmtFixed(frameHz, 2)} Hz · ` +
-    `${fmtFixed(superframeMs, 0)} ms ${key === "fast" ? "full geometry maintenance cycle" : "rotating superframe"}` +
+    `${profileVariant} · POLL → RESP → FINAL · ` +
+    `${fmtFixed(frameMs, multipoint ? 2 : 0)} ms radio star · ` +
+    `${singleStar ? "one independent position/star" : "three-star precision windows"} · ` +
+    `${fmtFixed(frameHz, 2)} radio stars/s · ` +
+    `${fmtFixed(superframeMs, multipoint ? 2 : 0)} ms ${key === "fast" ? "full geometry maintenance cycle" : "rotating superframe"}` +
     (warnings.length ? ` · ${warnings.join(", ")}` : "");
   summary.className = `profile-summary ${warnings.length ? "warn" : ""}`.trim();
 }
@@ -12252,12 +12283,13 @@ function renderPassiveDsActiveProfile() {
     respUs: Number(item.runtime_passive_ds_resp_delay_us),
     finalUs: Number(item.runtime_passive_ds_final_delay_us),
     autoRxUus: Number(item.runtime_passive_ds_auto_rx_delay_uus),
+    solveMode: Number(item.runtime_passive_ds_solve_mode),
     anchorCount: Math.max(3, (item.runtime_anchor_ids || []).length),
   });
   const live = timing(statuses[0]);
   const fields = [
     "schedule", "slotMs", "gapMs", "rxMs", "timeoutMs",
-    "respUs", "finalUs", "autoRxUus", "anchorCount",
+    "respUs", "finalUs", "autoRxUus", "solveMode", "anchorCount",
   ];
   const consistent = statuses.every(item => {
     const candidate = timing(item);
@@ -12270,18 +12302,28 @@ function renderPassiveDsActiveProfile() {
     return;
   }
   const presetKey = matchingPassiveDsSpeedPreset(live);
-  const presetLabel = passiveDsSpeedPresets[presetKey]?.label || "Custom timing";
   const scheduleLabel = live.schedule === 2
     ? "Multipoint Full-DS · N+2"
     : (live.schedule === 1 ? "Robust Rotating" : "Fast Star");
+  const singleStar = live.schedule === 2 && live.solveMode === 0;
+  const presetLabel = live.schedule === 2
+    ? (singleStar
+        ? `Single-Star Dynamic · ${passiveDsDynamicGuardUs} µs guard`
+        : "Static Precision · three stars")
+    : (passiveDsSpeedPresets[presetKey]?.label || "Custom timing");
+  const liveGuardMs = singleStar
+    ? passiveDsDynamicGuardUs / 1000
+    : live.gapMs;
   const frameMs = live.schedule === 2
-    ? live.slotMs + live.gapMs
+    ? live.slotMs + liveGuardMs
     : (live.anchorCount - 1) * live.slotMs + live.gapMs;
   const frameHz = frameMs > 0 ? 1000 / frameMs : 0;
   const activeTimingText = live.schedule === 2
-    ? `${fmtFixed(frameMs, 0)} ms radio star · ` +
-      `${fmtFixed(frameMs * 2, 0)} ms independent raw position · ` +
-      `${fmtFixed(frameHz / 2, 2)} independent Hz`
+    ? `${fmtFixed(frameMs, 2)} ms radio star · ` +
+      (singleStar
+        ? `one independent position/star · ${fmtFixed(frameHz, 2)} Hz`
+        : `${fmtFixed(frameMs * 3, 2)} ms precision window · ` +
+          `${fmtFixed(frameHz / 3, 2)} independent Hz`)
     : `${fmtFixed(frameMs, 0)} ms frame · ${fmtFixed(frameHz, 2)} Hz`;
   root.textContent =
     `Active on ${statuses.length}/${freshStatuses.length || statuses.length} modules: ` +
@@ -12291,8 +12333,14 @@ function renderPassiveDsActiveProfile() {
 }
 
 async function applyPassiveDsQuickProfile(key) {
-  if (key === "multi") {
-    writePassiveDsProfile(key, passiveDsProfileDefaults.multi);
+  if (key === "multi_precision" || key === "multi_dynamic") {
+    writePassiveDsProfile("multi", {
+      ...(key === "multi_dynamic"
+        ? passiveDsMultipointDynamicDefaults
+        : passiveDsProfileDefaults.multi),
+    });
+    await applyPassiveDsProfile("multi");
+    return;
   } else {
     applyPassiveDsSpeedPreset(key, "maximum");
   }
@@ -12345,6 +12393,9 @@ async function applyPassiveDsProfile(key) {
       passive_ds_resp_delay_us: String(values.respUs),
       passive_ds_final_delay_us: String(values.finalUs),
       passive_ds_auto_rx_delay_uus: String(values.autoRxUus),
+      passive_ds_solve_mode: String(
+        key === "multi" ? values.solveMode : 0
+      ),
       hot_switch: "1",
     },
   }, "passiveDsProfileToast");
@@ -12455,7 +12506,7 @@ function passiveDsSolveModeLabel(mode, rollingMaxHz = 100) {
     return `legacy mixed rolling ≤ ${rollingMaxHz} Hz`;
   }
   if (mode === 2) {
-    return `coherent frames · prediction ≤ ${rollingMaxHz} Hz`;
+    return "three-star precision window · no temporal filter";
   }
   if (mode === 3) {
     return `coherent superframes · prediction ≤ ${rollingMaxHz} Hz`;
@@ -12463,7 +12514,7 @@ function passiveDsSolveModeLabel(mode, rollingMaxHz = 100) {
   if (mode === 4) {
     return `motion-compensated rolling ≤ ${rollingMaxHz} Hz`;
   }
-  return "coherent frame only";
+  return "single coherent star · no overlap/filter";
 }
 
 async function applyPassiveDsExperimentMode() {
@@ -12581,24 +12632,31 @@ function renderPassiveDsMultipointTiming(root, config) {
   const responderCount = N - 1;
   const firstResponseDelayMs = config.respUs / 1000;
   const responseSpacingMs = passiveDsMultipointResponseSpacingUs / 1000;
-  const finalGuardMs = config.finalUs / 1000;
+  const finalDelayMs = config.finalUs / 1000;
   const radioMs = firstResponseDelayMs +
-    Math.max(0, responderCount - 1) * responseSpacingMs + finalGuardMs;
-  const guardMs = Math.max(0, config.slotMs - radioMs);
-  const radioStarMs = config.slotMs + config.gapMs;
+    Math.max(0, responderCount - 1) * responseSpacingMs + finalDelayMs;
+  const schedulerSlackMs = Math.max(0, config.slotMs - radioMs);
+  const singleStar = config.solveMode === 0;
+  const frameGuardMs = singleStar
+    ? passiveDsDynamicGuardUs / 1000
+    : config.gapMs;
+  const radioStarMs = config.slotMs + frameGuardMs;
   const radioStarHz = radioStarMs > 0 ? 1000 / radioStarMs : NaN;
-  const independentWindowMs = radioStarMs * 3;
-  const independentHz = radioStarHz / 3;
-  const supplementalHz = 2 * radioStarHz / 6;
-  const nominalRawSolveHz = independentHz + supplementalHz;
+  const starsPerPosition = singleStar ? 1 : 3;
+  const independentWindowMs = radioStarMs * starsPerPosition;
+  const independentHz = radioStarHz / starsPerPosition;
+  const nominalRawSolveHz = singleStar
+    ? radioStarHz
+    : independentHz + 2 * radioStarHz / 6;
   const segments = [
     ...Array.from({length: responderCount}, (_, index) => ({
       key: index === 0 ? "POLL → RESP[0]" : `RESP[${index - 1}] → RESP[${index}]`,
       duration: index === 0 ? firstResponseDelayMs : responseSpacingMs,
       cls: index % 2 ? "response" : "req",
     })),
-    {key: `RESP[${responderCount - 1}] → FINAL`, duration: finalGuardMs, cls: "response"},
-    {key: "GUARD TIME", duration: guardMs, cls: "guard"},
+    {key: `RESP[${responderCount - 1}] → FINAL`, duration: finalDelayMs, cls: "response"},
+    {key: "SCHEDULER SLACK", duration: schedulerSlackMs, cls: "guard"},
+    {key: "GUARD TIME", duration: frameGuardMs, cls: "guard"},
   ].filter(segment => segment.duration > 0);
   const columns = segments.map(segment =>
     `${Math.max(0.001, segment.duration)}fr`).join(" ");
@@ -12614,7 +12672,7 @@ function renderPassiveDsMultipointTiming(root, config) {
   }
   const axis = boundaries.map((value, index) =>
     flexTimingAxisMark(
-      100 * value / config.slotMs,
+      100 * value / radioStarMs,
       `${fmtFixed(value, 3)} ms`,
       index === 0 ? "edge-start" :
         (index === boundaries.length - 1 ? "edge-end" : "")
@@ -12626,8 +12684,9 @@ function renderPassiveDsMultipointTiming(root, config) {
     <div class="flex-timing-metrics">
       <div class="flex-timing-metric"><span>Protocol</span><strong>Multipoint Full-DS · N+2</strong></div>
       <div class="flex-timing-metric"><span>Reference</span><strong>rotates every radio star</strong></div>
-      <div class="flex-timing-metric"><span>Radio star</span><strong>${fmtFixed(radioStarMs, 0)} ms · ${fmtFixed(radioStarHz, 2)} Hz</strong></div>
-      <div class="flex-timing-metric"><span>Independent position</span><strong>${fmtFixed(independentWindowMs, 0)} ms · ${fmtFixed(independentHz, 2)} Hz</strong></div>
+      <div class="flex-timing-metric"><span>Position policy</span><strong>${singleStar ? "single coherent star" : "three-star precision"}</strong></div>
+      <div class="flex-timing-metric"><span>Radio star</span><strong>${fmtFixed(radioStarMs, 2)} ms · ${fmtFixed(radioStarHz, 2)} Hz</strong></div>
+      <div class="flex-timing-metric"><span>Independent position</span><strong>${fmtFixed(independentWindowMs, 2)} ms · ${fmtFixed(independentHz, 2)} Hz</strong></div>
       <div class="flex-timing-metric"><span>Raw solver output</span><strong>up to ${fmtFixed(nominalRawSolveHz, 2)} /s*</strong></div>
       <div class="flex-timing-metric"><span>UWB packets</span><strong>${N + 1} per radio star</strong></div>
       <div class="flex-timing-metric"><span>Tag solver</span><strong>raw GLS/AlgMin on ESP32</strong></div>
@@ -12644,7 +12703,7 @@ function renderPassiveDsMultipointTiming(root, config) {
         <div class="flex-dimensions">
           <div class="flex-dimension" style="left:0%;width:100%;top:0">
             <div class="flex-dimension-line"></div>
-            <span class="flex-dimension-label">Exchange budget = ${fmtFixed(config.slotMs, 3)} ms; frame gap = ${fmtFixed(config.gapMs, 3)} ms</span>
+            <span class="flex-dimension-label">Exchange budget ${fmtFixed(config.slotMs, 3)} ms + guard time ${fmtFixed(frameGuardMs, 3)} ms = ${fmtFixed(radioStarMs, 3)} ms</span>
           </div>
         </div>
       </div>
@@ -12658,11 +12717,12 @@ function renderPassiveDsMultipointTiming(root, config) {
     <div class="flex-timing-note ${overrun ? "warn" : ""}">
       ${config.live ? "Live configuration" : "Configured fallback"} ·
       first RESP ${fmtFixed(firstResponseDelayMs, 3)} ms · response spacing ${fmtFixed(responseSpacingMs, 3)} ms ·
-      FINAL guard ${fmtFixed(finalGuardMs, 3)} ms · guard time ${fmtFixed(guardMs, 3)} ms.
-      * Independent results use non-overlapping groups of three stars. Two raw
-      overlapping three-star windows per six-star cycle raise the update rate
-      without adding radio traffic; reused measurements are reported separately.
-      ${overrun ? " Warning: response train and FINAL guard exceed the exchange budget." : ""}
+      FINAL delay ${fmtFixed(finalDelayMs, 3)} ms · scheduler slack ${fmtFixed(schedulerSlackMs, 3)} ms ·
+      guard time ${fmtFixed(frameGuardMs, 3)} ms.
+      ${singleStar
+        ? "Every star is solved exactly once and reported as an independent position; there are no overlapping windows and no temporal filter."
+        : "Independent results use non-overlapping groups of three stars. Two overlapping three-star windows per six-star cycle are explicitly marked non-independent; no temporal filter is used."}
+      ${overrun ? " Warning: response train and FINAL delay exceed the exchange budget." : ""}
     </div>`;
 }
 
@@ -13316,6 +13376,9 @@ function wireSettings() {
     el.addEventListener("input", update);
     el.addEventListener("change", update);
   });
+  document.getElementById("passiveDsMultiSolveMode")?.addEventListener(
+    "change", () => updatePassiveDsProfileSummary("multi")
+  );
   document.querySelectorAll(".passive-ds-speed-preset").forEach(el => {
     el.addEventListener("change", () => {
       const profile = el.closest(".passive-ds-profile-card")

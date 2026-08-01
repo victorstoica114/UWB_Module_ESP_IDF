@@ -161,6 +161,14 @@
 #define APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US 750
 #endif
 
+/*
+ * Validated FlexTDOA guard reused as a value, not as shared runtime state.
+ * The dynamic multipoint profile places this guard after its exchange budget.
+ */
+#ifndef APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US
+#define APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US 250
+#endif
+
 #ifndef APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS
 #define APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS 500
 #endif

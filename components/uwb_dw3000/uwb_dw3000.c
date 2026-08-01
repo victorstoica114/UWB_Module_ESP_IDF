@@ -345,6 +345,7 @@ enum {
 #define UWB_PASSIVE_DS_POLL_TX_LEAD_US 750LL
 #define UWB_PASSIVE_DS_MULTI_POLL_TX_LEAD_US 2000LL
 #define UWB_PASSIVE_DS_POLL_LATE_US 250LL
+#define UWB_PASSIVE_DS_MULTI_RESPONSE_COLLECTION_SLACK_US 500LL
 #define UWB_PASSIVE_DS_MULTI_RECOVERY_FRAMES 8LL
 #define UWB_PASSIVE_DS_MULTI_RECOVERY_MIN_US 50000LL
 #define UWB_ANCHOR_SURVEY_MAX_ANCHORS APP_RUNTIME_CONFIG_MAX_ANCHORS
@@ -3878,8 +3879,6 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                 uwb_dw3000_payload_is_distance_frame(
                     frame->payload, frame->payload_len) &&
                 (frame->payload[5] ==
-                     UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_POLL ||
-                 frame->payload[5] ==
                      UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_RESP ||
                  frame->payload[5] ==
                      UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_FINAL);
@@ -8706,8 +8705,11 @@ static void uwb_passive_ds_multi_schedule_from_poll(
     const uint32_t next_frame_id = frame_id + 1U;
     struct uwb_passive_ds_multi_plan next = {0};
     const uint32_t period_us =
-        (config->passive_ds_slot_ms + config->passive_ds_round_gap_ms) *
-        1000U;
+        config->passive_ds_slot_ms * 1000U +
+        (config->passive_ds_solve_mode ==
+                 APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR
+             ? APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US
+             : config->passive_ds_round_gap_ms * 1000U);
     schedule->last_poll_host_us = poll_host_us;
     schedule->synced =
         uwb_passive_ds_multi_build_plan(
@@ -8797,12 +8799,29 @@ static esp_err_t uwb_passive_ds_multi_initiate_frame(
         config->passive_ds_final_delay_us / 2U > 500U
             ? config->passive_ds_final_delay_us / 2U
             : 500U;
-    const int64_t collect_deadline_us =
-        poll_host_us + (int64_t)final_from_poll_us -
-        (int64_t)final_program_guard_us;
+    const bool single_star_dynamic =
+        config->passive_ds_solve_mode ==
+        APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR;
+    const uint32_t last_response_from_poll_us =
+        uwb_passive_ds_multi_response_delay_us(
+            config->passive_ds_resp_delay_us,
+            (uint8_t)(plan.responder_count - 1U));
+    const int64_t collect_deadline_us = single_star_dynamic
+        ? poll_host_us + (int64_t)last_response_from_poll_us +
+              UWB_PASSIVE_DS_MULTI_RESPONSE_COLLECTION_SLACK_US
+        : poll_host_us + (int64_t)final_from_poll_us -
+              (int64_t)final_program_guard_us;
     uint64_t response_rx[UWB_PASSIVE_DS_MULTI_MAX_RESPONDERS] = {0};
     bool received[UWB_PASSIVE_DS_MULTI_MAX_RESPONDERS] = {false};
     uint8_t response_count = 0U;
+
+    /* A millisecond receive timeout can cross FINAL's delayed-TX deadline
+     * when one response is absent.  The existing ESP timer wakes the same
+     * radio task at a microsecond deadline; it neither creates another task
+     * nor changes any UWB timestamp used by DS-TWR. */
+    if (single_star_dynamic) {
+        uwb_passive_ds_arm_schedule_alarm(collect_deadline_us, 0);
+    }
 
     while (response_count < plan.responder_count &&
            esp_timer_get_time() < collect_deadline_us) {
@@ -8845,6 +8864,10 @@ static esp_err_t uwb_passive_ds_multi_initiate_frame(
         received[response_index] = true;
         response_rx[response_index] = response.rx_timestamp;
         response_count++;
+    }
+    if (single_star_dynamic) {
+        (void)esp_timer_stop(s_passive_ds_schedule_timer);
+        s_passive_ds_schedule_alarm_fired = false;
     }
 
     struct uwb_passive_ds_multi_final final = {
@@ -9035,9 +9058,11 @@ static void uwb_passive_ds_anchor_loop_multipoint(
         const app_runtime_config_t *config = app_runtime_config_get();
         const int64_t now_us = esp_timer_get_time();
         const int64_t frame_period_us =
-            (int64_t)(config->passive_ds_slot_ms +
-                      config->passive_ds_round_gap_ms) *
-            1000LL;
+            (int64_t)config->passive_ds_slot_ms * 1000LL +
+            (config->passive_ds_solve_mode ==
+                     APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR
+                 ? APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US
+                 : (int64_t)config->passive_ds_round_gap_ms * 1000LL);
         const int64_t recovery_listen_us =
             frame_period_us * UWB_PASSIVE_DS_MULTI_RECOVERY_FRAMES >
                     UWB_PASSIVE_DS_MULTI_RECOVERY_MIN_US
@@ -9107,9 +9132,34 @@ static void uwb_passive_ds_anchor_loop_multipoint(
             armed_alarm_due_host_us = 0;
         }
 
+        /* Do not let the blocking RX slice cross the point where this
+         * anchor must arm the next delayed POLL.  The ESP timer alarm is a
+         * useful wake hint, but it cannot interrupt an SPI-backed receive
+         * already in progress.  Keeping the receive slice inside the radio
+         * deadline preserves the DW3000 delayed-TX lead time without adding
+         * another task or a host-clock synchronization layer. */
+        uint32_t poll_rx_slice_ms = config->passive_ds_rx_slice_ms;
+        if (schedule.synced) {
+            const int64_t arm_due_us =
+                schedule.next_poll_host_us -
+                UWB_PASSIVE_DS_MULTI_POLL_TX_LEAD_US;
+            const int64_t until_arm_us = arm_due_us - esp_timer_get_time();
+            if (until_arm_us <= 0) {
+                continue;
+            }
+            uint32_t deadline_slice_ms =
+                (uint32_t)(until_arm_us / 1000LL);
+            if (deadline_slice_ms == 0U) {
+                deadline_slice_ms = 1U;
+            }
+            if (poll_rx_slice_ms > deadline_slice_ms) {
+                poll_rx_slice_ms = deadline_slice_ms;
+            }
+        }
+
         struct uwb_distance_frame poll = {0};
         const esp_err_t rx_err = uwb_distance_receive_next(
-            &poll, config->passive_ds_rx_slice_ms);
+            &poll, poll_rx_slice_ms);
         if (s_passive_ds_schedule_alarm_fired) {
             s_passive_ds_schedule_alarm_fired = false;
             armed_alarm_due_host_us = 0;
@@ -9157,13 +9207,18 @@ static void uwb_passive_ds_anchor_loop_multipoint(
         if (summary_now_us - summary_started_us >= 1000000LL) {
             ESP_LOGI(TAG,
                      "PASSIVE_DS multipoint N+2 full=%lu partial=%lu "
-                     "fail=%lu late_recover=%lu frame_ms=%lu packets=5",
+                     "fail=%lu late_recover=%lu period_us=%lld "
+                     "guard_us=%lu packets=5",
                      (unsigned long)good_frames,
                      (unsigned long)partial_frames,
                      (unsigned long)failed_frames,
                      (unsigned long)schedule.late_count,
-                     (unsigned long)(config->passive_ds_slot_ms +
-                                     config->passive_ds_round_gap_ms));
+                     (long long)frame_period_us,
+                     (unsigned long)(
+                         config->passive_ds_solve_mode ==
+                                 APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR
+                             ? APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US
+                             : config->passive_ds_round_gap_ms * 1000U));
             good_frames = 0U;
             partial_frames = 0U;
             failed_frames = 0U;
@@ -9217,10 +9272,14 @@ static void uwb_dw3000_passive_ds_twr_loop(void)
         config->passive_ds_schedule ==
         APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS;
     const uint32_t slots_per_frame = (uint32_t)anchor_count - 1U;
-    const uint32_t frame_ms = multipoint
-        ? config->passive_ds_slot_ms + config->passive_ds_round_gap_ms
-        : slots_per_frame * config->passive_ds_slot_ms +
-              config->passive_ds_round_gap_ms;
+    const uint32_t frame_period_us = multipoint
+        ? config->passive_ds_slot_ms * 1000U +
+              (config->passive_ds_solve_mode ==
+                       APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR
+                   ? APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US
+                   : config->passive_ds_round_gap_ms * 1000U)
+        : (slots_per_frame * config->passive_ds_slot_ms +
+           config->passive_ds_round_gap_ms) * 1000U;
     const char *schedule_name = multipoint
         ? "multipoint_full_ds_n_plus_2"
         : (config->passive_ds_schedule ==
@@ -9229,11 +9288,11 @@ static void uwb_dw3000_passive_ds_twr_loop(void)
                : "fast_star");
     ESP_LOGI(TAG,
              "PASSIVE_DS runtime source=%u schedule=%s anchors=%u "
-             "frame=%lu ms slot=%lu ms pipeline=%s solve=%s; "
+             "period=%lu us slot=%lu ms pipeline=%s solve=%s; "
              "non-anchors are receive-only tags",
              (unsigned)s_source_id,
              schedule_name,
-             (unsigned)anchor_count, (unsigned long)frame_ms,
+             (unsigned)anchor_count, (unsigned long)frame_period_us,
              (unsigned long)config->passive_ds_slot_ms,
              config->passive_ds_pipeline_mode ==
                      APP_RUNTIME_PASSIVE_DS_PIPELINE_DEADLINE

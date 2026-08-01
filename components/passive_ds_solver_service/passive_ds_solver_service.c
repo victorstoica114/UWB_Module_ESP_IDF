@@ -9,6 +9,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "passive_ds_position_solver.h"
+#include "uwb_config.h"
 #include "wireless_log_service.h"
 #include "wireless_telemetry_service.h"
 
@@ -57,6 +58,29 @@ static const uint32_t PASSIVE_DS_SOLVER_SUPPLEMENTAL_A_FRAME_NAMESPACE =
     UINT32_C(0x80000000);
 static const uint32_t PASSIVE_DS_SOLVER_SUPPLEMENTAL_B_FRAME_NAMESPACE =
     UINT32_C(0xc0000000);
+
+static size_t multipoint_stars_per_position(
+    const app_runtime_config_t *config)
+{
+    return config != NULL &&
+                   config->passive_ds_solve_mode ==
+                       APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR
+        ? 1U
+        : PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION;
+}
+
+static uint32_t multipoint_period_us(
+    const app_runtime_config_t *config)
+{
+    if (config == NULL) {
+        return 0U;
+    }
+    return config->passive_ds_slot_ms * 1000U +
+           (config->passive_ds_solve_mode ==
+                    APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR
+                ? APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US
+                : config->passive_ds_round_gap_ms * 1000U);
+}
 
 enum passive_ds_solver_item_type {
     PASSIVE_DS_SOLVER_ITEM_RANGE,
@@ -610,7 +634,7 @@ static void solve_complete_frame(
     const bool multipoint = config->passive_ds_schedule ==
         APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS;
     const size_t stars_per_position = multipoint
-        ? PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION
+        ? multipoint_stars_per_position(config)
         : 1U;
     const size_t observations_per_star = state->anchor_count - 1U;
     const size_t expected_count = observations_per_star * stars_per_position;
@@ -675,9 +699,10 @@ static void solve_complete_frame(
     const uint32_t nominal_span_ms =
         config->passive_ds_schedule ==
                 APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS
-            ? PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION *
-                  (config->passive_ds_slot_ms +
-                   config->passive_ds_round_gap_ms)
+            ? (uint32_t)((stars_per_position *
+                              multipoint_period_us(config) +
+                          999U) /
+                         1000U)
             : ((uint32_t)state->anchor_count - 1U) *
                       config->passive_ds_slot_ms +
                   config->passive_ds_round_gap_ms;
@@ -722,7 +747,7 @@ static bool stage_observation(
     const bool multipoint = config->passive_ds_schedule ==
         APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS;
     const uint32_t expected_count = slots_per_star *
-        (multipoint ? PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION : 1U);
+        (multipoint ? (uint32_t)multipoint_stars_per_position(config) : 1U);
     const uint32_t slot_index = star_index * slots_per_star + radio_slot_index;
     struct passive_ds_solver_frame *frame = acquire_frame(
         state, frame_id, item->tag_id, now);
@@ -817,6 +842,21 @@ static void handle_observation(
     const uint32_t radio_frame_id = item->slot_id / slots_per_star;
     const uint32_t radio_slot_index = item->slot_id % slots_per_star;
     if (multipoint) {
+        if (config->passive_ds_solve_mode ==
+            APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR) {
+            /*
+             * Dynamic profile: all three observations originate in one
+             * broadcast DS-TWR star.  Solve it once, mark it independent,
+             * and never reuse it in an overlapping window.  The previous
+             * position is only the nonlinear solver's initial guess; no
+             * position averaging or temporal filter is applied.
+             */
+            (void)stage_observation(
+                state, item, now, radio_frame_id, 0U,
+                radio_slot_index, true);
+            return;
+        }
+
         /*
          * Keep the precision baseline deliberately simple: three consecutive
          * radio stars form one position window and every star is consumed

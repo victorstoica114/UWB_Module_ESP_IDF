@@ -28,6 +28,17 @@ extern "C" {
 #define APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_SUPERFRAME 3U
 #define APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_MOTION 4U
 
+/*
+ * Multipoint Full-DS window policies.  These aliases deliberately reuse the
+ * persisted solve-mode values so existing NVS images remain compatible.
+ * A single-star result contains one coherent POLL/RESP/FINAL exchange only;
+ * the precision policy keeps the validated three-star estimator.
+ */
+#define APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR \
+    APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME
+#define APP_RUNTIME_PASSIVE_DS_SOLVE_PRECISION_THREE_STAR \
+    APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_INDEPENDENT
+
 typedef struct {
     uint8_t runtime_mode;
     uint8_t tag_id;
