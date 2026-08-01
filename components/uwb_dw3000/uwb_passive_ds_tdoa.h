@@ -33,6 +33,7 @@ struct uwb_passive_ds_tdoa_result {
     double difference_m;
     double listener_to_initiator_clock_ratio;
     double listener_to_responder_clock_ratio;
+    double responder_delay_ratio;
     uint32_t responder_reply_dtu;
 };
 
@@ -58,6 +59,11 @@ struct uwb_passive_ds_tdoa_pending {
 
 struct uwb_passive_ds_tdoa_context {
     uint32_t generation;
+    uint32_t ready_count;
+    uint32_t calculation_rejected_count;
+    uint32_t missing_final_context_count;
+    uint32_t missing_exchange_context_count;
+    uint32_t pending_replacement_count;
     struct uwb_passive_ds_tdoa_pending
         pending[UWB_PASSIVE_DS_TDOA_MAX_PENDING];
 };

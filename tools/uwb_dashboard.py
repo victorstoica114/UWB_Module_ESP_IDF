@@ -4347,11 +4347,12 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p class="muted profile-note">Both variants use exactly POLL, RESP and FINAL. Fast Star keeps the first configured anchor as the position reference for three frames, then uses one rotating maintenance frame so every physical anchor pair remains observable. Robust Rotating changes the reference after every complete frame, adding maximum path diversity while tag count remains free.</p>
+          <p class="muted profile-note">Fast Star and Robust Rotating use one native three-packet exchange per anchor pair. Multipoint Full-DS combines the same full double-sided equations into one broadcast POLL, three staggered RESP frames and one broadcast FINAL, while every tag remains receive-only.</p>
           <div id="passiveDsActiveProfile" class="profile-validation">Waiting for live Passive DS-TWR timing...</div>
           <div class="form-actions">
             <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="fast">Apply Fast Star · 10 ms Maximum</button>
             <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="robust">Apply Robust Rotating · 10 ms Maximum</button>
+            <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="multi">Apply Multipoint Full-DS · 6 ms Compact</button>
           </div>
           <div class="profile-grid">
             <div class="profile-card passive-ds-profile-card" data-passive-ds-profile="fast">
@@ -4389,6 +4390,23 @@ tr.status-stale td { color: #4f3b1d; }
               </div>
               <div class="profile-summary" id="passiveDsRobustSummary"></div>
               <div class="form-actions"><button class="primary apply-passive-ds-profile" data-passive-ds-profile="robust">Apply Robust Rotating</button><button class="reset-passive-ds-profile" data-passive-ds-profile="robust">Reset Defaults</button></div>
+            </div>
+            <div class="profile-card passive-ds-profile-card" data-passive-ds-profile="multi">
+              <h3>Multipoint Full-DS · N+2</h3>
+              <p class="muted">One rotating reference broadcasts POLL, all three other anchors answer in native delayed-TX slots, then the reference broadcasts one aggregate FINAL. Three coherent full-DS passive observations from only five packets.</p>
+              <div class="profile-validation">experimental N+2 protocol · isolated hardware validation</div>
+              <div class="form-grid compact">
+                <label for="passiveDsMultiSlotMs">Exchange budget ms</label><input id="passiveDsMultiSlotMs" value="8" type="number" min="5" max="60000" step="1">
+                <label for="passiveDsMultiGapMs">Frame gap ms</label><input id="passiveDsMultiGapMs" value="1" type="number" min="1" max="60000" step="1">
+                <label for="passiveDsMultiRxMs">Anchor RX slice ms</label><input id="passiveDsMultiRxMs" value="100" type="number" min="1" max="60000" step="1">
+                <label for="passiveDsMultiTimeoutMs">RX timeout ms</label><input id="passiveDsMultiTimeoutMs" value="5" type="number" min="1" max="60000" step="1">
+                <label for="passiveDsMultiRespUs">First RESP delay µs</label><input id="passiveDsMultiRespUs" value="1500" type="number" min="100" max="1000000" step="50">
+                <label for="passiveDsMultiFinalUs">Last RESP → FINAL µs</label><input id="passiveDsMultiFinalUs" value="1500" type="number" min="100" max="1000000" step="50">
+                <label for="passiveDsMultiAutoRxUus">Auto RX delay UUS</label><input id="passiveDsMultiAutoRxUus" value="500" type="number" min="0" max="65535" step="10">
+                <label for="passiveDsMultiFreshSec">Observation freshness s</label><input id="passiveDsMultiFreshSec" value="0.2" type="number" min="0.05" step="0.05">
+              </div>
+              <div class="profile-summary" id="passiveDsMultiSummary"></div>
+              <div class="form-actions"><button class="primary apply-passive-ds-profile" data-passive-ds-profile="multi">Apply Multipoint Full-DS</button><button class="reset-passive-ds-profile" data-passive-ds-profile="multi">Reset Defaults</button></div>
             </div>
           </div>
           <div class="profile-card" style="margin-top:12px">
@@ -4991,7 +5009,7 @@ const rangingProtocolProfileFields = {
 };
 const rangingProfileDefaultsVersion = "2026-07-31-native-ds-clean-v2";
 const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
-const passiveDsProfileDefaultsVersion = "2026-07-27-passive-ds-speed-sweep-v5";
+const passiveDsProfileDefaultsVersion = "2026-08-01-passive-ds-multipoint-v1";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -12028,8 +12046,22 @@ const passiveDsProfileDefaults = {
     autoRxUus: 500,
     freshSec: 0.2,
   },
+  multi: {
+    prefix: "passiveDsMulti",
+    label: "Multipoint Full-DS",
+    schedule: 2,
+    slotMs: 5,
+    gapMs: 1,
+    rxMs: 100,
+    timeoutMs: 4,
+    respUs: 1500,
+    finalUs: 1500,
+    autoRxUus: 500,
+    freshSec: 0.2,
+  },
 };
 const passiveDsFastGeometryFrameInterval = 4;
+const passiveDsMultipointResponseSpacingUs = 750;
 const passiveDsSpeedPresets = {
   safe: {
     label: "16 ms Safe",
@@ -12120,9 +12152,10 @@ function applyPassiveDsSpeedPreset(key, presetKey) {
 
 function updatePassiveDsProfileSummary(key) {
   const values = readPassiveDsProfile(key);
-  const summary = document.getElementById(
-    key === "robust" ? "passiveDsRobustSummary" : "passiveDsFastSummary"
-  );
+  const profile = passiveDsProfileDefaults[key];
+  const summary = profile
+    ? document.getElementById(`${profile.prefix}Summary`)
+    : null;
   if (!values || !summary) return;
   const numeric = Object.keys(passiveDsProfileFieldSuffixes)
     .every(field => Number.isFinite(values[field]));
@@ -12134,9 +12167,12 @@ function updatePassiveDsProfileSummary(key) {
   const anchorCount = Math.max(
     3, Number(document.getElementById("positionAnchorCount")?.value || 4)
   );
-  const frameMs = (anchorCount - 1) * values.slotMs + values.gapMs;
+  const multipoint = key === "multi";
+  const frameMs = multipoint
+    ? values.slotMs + values.gapMs
+    : (anchorCount - 1) * values.slotMs + values.gapMs;
   const frameHz = frameMs > 0 ? 1000 / frameMs : NaN;
-  const superframeMs = key === "robust"
+  const superframeMs = key === "robust" || multipoint
     ? anchorCount * frameMs
     : (anchorCount - 1) * passiveDsFastGeometryFrameInterval * frameMs;
   const speedPresetKey = matchingPassiveDsSpeedPreset(values);
@@ -12146,20 +12182,28 @@ function updatePassiveDsProfileSummary(key) {
     selector.value = speedPresetKey;
   }
   const warnings = [];
-  if (values.respUs + values.finalUs >= values.slotMs * 1000) {
-    warnings.push("RESP + FINAL >= slot");
+  const exchangeUs = multipoint
+    ? values.respUs +
+      passiveDsMultipointResponseSpacingUs * (anchorCount - 2) +
+      values.finalUs
+    : values.respUs + values.finalUs;
+  if (exchangeUs >= values.slotMs * 1000) {
+    warnings.push(multipoint
+      ? "response train + FINAL >= exchange budget"
+      : "RESP + FINAL >= slot");
   }
   if (values.timeoutMs > values.slotMs) warnings.push("timeout > slot");
   summary.textContent =
     `${profileSummaryScheduleLabel(key)} · ` +
     `${speedPreset?.label || "Custom timing"} · POLL → RESP → FINAL · ` +
     `${fmtFixed(frameMs, 0)} ms position frame · ${fmtFixed(frameHz, 2)} Hz · ` +
-    `${fmtFixed(superframeMs, 0)} ms ${key === "robust" ? "rotating superframe" : "full geometry maintenance cycle"}` +
+    `${fmtFixed(superframeMs, 0)} ms ${key === "fast" ? "full geometry maintenance cycle" : "rotating superframe"}` +
     (warnings.length ? ` · ${warnings.join(", ")}` : "");
   summary.className = `profile-summary ${warnings.length ? "warn" : ""}`.trim();
 }
 
 function profileSummaryScheduleLabel(key) {
+  if (key === "multi") return "Multipoint Full-DS · N+2";
   return key === "robust" ? "Robust Rotating" : "Fast Star";
 }
 
@@ -12203,10 +12247,12 @@ function renderPassiveDsActiveProfile() {
   }
   const presetKey = matchingPassiveDsSpeedPreset(live);
   const presetLabel = passiveDsSpeedPresets[presetKey]?.label || "Custom timing";
-  const scheduleLabel = live.schedule === 1
-    ? "Robust Rotating"
-    : "Fast Star";
-  const frameMs = (live.anchorCount - 1) * live.slotMs + live.gapMs;
+  const scheduleLabel = live.schedule === 2
+    ? "Multipoint Full-DS · N+2"
+    : (live.schedule === 1 ? "Robust Rotating" : "Fast Star");
+  const frameMs = live.schedule === 2
+    ? live.slotMs + live.gapMs
+    : (live.anchorCount - 1) * live.slotMs + live.gapMs;
   const frameHz = frameMs > 0 ? 1000 / frameMs : 0;
   root.textContent =
     `Active on ${statuses.length}/${freshStatuses.length || statuses.length} modules: ` +
@@ -12216,7 +12262,11 @@ function renderPassiveDsActiveProfile() {
 }
 
 async function applyPassiveDsQuickProfile(key) {
-  applyPassiveDsSpeedPreset(key, "maximum");
+  if (key === "multi") {
+    writePassiveDsProfile(key, passiveDsProfileDefaults.multi);
+  } else {
+    applyPassiveDsSpeedPreset(key, "maximum");
+  }
   await applyPassiveDsProfile(key);
 }
 
@@ -12226,14 +12276,24 @@ async function applyPassiveDsProfile(key) {
   if (!profile || !values) return;
   const valid = Object.keys(passiveDsProfileFieldSuffixes)
     .every(field => Number.isFinite(values[field]) && values[field] >= 0);
+  const anchorCount = Math.max(
+    3, Number(document.getElementById("positionAnchorCount")?.value || 4)
+  );
+  const exchangeUs = key === "multi"
+    ? values.respUs +
+      passiveDsMultipointResponseSpacingUs * (anchorCount - 2) +
+      values.finalUs
+    : values.respUs + values.finalUs;
   if (!valid || values.slotMs < 1 || values.gapMs < 1 ||
       values.timeoutMs < 1 ||
       values.respUs < 100 || values.finalUs < 100 ||
       values.freshSec < 0.2 ||
-      values.respUs + values.finalUs >= values.slotMs * 1000) {
+      exchangeUs >= values.slotMs * 1000) {
     setToast(
       "passiveDsProfileToast",
-      "Invalid timing: RESP + FINAL must fit strictly inside the slot.",
+      key === "multi"
+        ? "Invalid timing: all RESP slots and FINAL guard must fit inside the exchange budget."
+        : "Invalid timing: RESP + FINAL must fit strictly inside the slot.",
       "bad"
     );
     return;
@@ -12487,6 +12547,88 @@ function renderPassiveDsExperimentControls() {
   </table>`;
 }
 
+function renderPassiveDsMultipointTiming(root, config) {
+  const N = config.anchorIds.length;
+  const responderCount = N - 1;
+  const firstResponseDelayMs = config.respUs / 1000;
+  const responseSpacingMs = passiveDsMultipointResponseSpacingUs / 1000;
+  const finalGuardMs = config.finalUs / 1000;
+  const radioMs = firstResponseDelayMs +
+    Math.max(0, responderCount - 1) * responseSpacingMs + finalGuardMs;
+  const guardMs = Math.max(0, config.slotMs - radioMs);
+  const frameMs = config.slotMs + config.gapMs;
+  const frameHz = frameMs > 0 ? 1000 / frameMs : NaN;
+  const segments = [
+    ...Array.from({length: responderCount}, (_, index) => ({
+      key: index === 0 ? "POLL → RESP[0]" : `RESP[${index - 1}] → RESP[${index}]`,
+      duration: index === 0 ? firstResponseDelayMs : responseSpacingMs,
+      cls: index % 2 ? "response" : "req",
+    })),
+    {key: `RESP[${responderCount - 1}] → FINAL`, duration: finalGuardMs, cls: "response"},
+    {key: "GUARD TIME", duration: guardMs, cls: "guard"},
+  ].filter(segment => segment.duration > 0);
+  const columns = segments.map(segment =>
+    `${Math.max(0.001, segment.duration)}fr`).join(" ");
+  const cells = segments.map(segment => `
+    <div class="flex-slot-segment ${segment.cls}">
+      <b>${esc(segment.key)}</b><span>${fmtFixed(segment.duration, 3)} ms</span>
+    </div>`).join("");
+  let elapsedMs = 0;
+  const boundaries = [0];
+  for (const segment of segments) {
+    elapsedMs += segment.duration;
+    boundaries.push(elapsedMs);
+  }
+  const axis = boundaries.map((value, index) =>
+    flexTimingAxisMark(
+      100 * value / config.slotMs,
+      `${fmtFixed(value, 3)} ms`,
+      index === 0 ? "edge-start" :
+        (index === boundaries.length - 1 ? "edge-end" : "")
+    )
+  ).join("");
+  const overrun = radioMs >= config.slotMs;
+  root.className = "";
+  root.innerHTML = `
+    <div class="flex-timing-metrics">
+      <div class="flex-timing-metric"><span>Protocol</span><strong>Multipoint Full-DS · N+2</strong></div>
+      <div class="flex-timing-metric"><span>Reference</span><strong>rotates every frame</strong></div>
+      <div class="flex-timing-metric"><span>Position frame</span><strong>${fmtFixed(frameMs, 0)} ms</strong></div>
+      <div class="flex-timing-metric"><span>Nominal FPS</span><strong>${fmtFixed(frameHz, 2)}</strong></div>
+      <div class="flex-timing-metric"><span>UWB packets</span><strong>${N + 1} per frame</strong></div>
+      <div class="flex-timing-metric"><span>Tag solver</span><strong>raw AlgMin on ESP32</strong></div>
+      <div class="flex-timing-metric"><span>Tag airtime</span><strong>0 packets</strong></div>
+    </div>
+    <div class="flex-timing-scroll">
+      <div class="flex-timing-canvas">
+        <div class="flex-timing-label">
+          <strong>One coherent multipoint position frame</strong>
+          <span>1 broadcast POLL + ${responderCount} staggered RESP + 1 aggregate broadcast FINAL</span>
+        </div>
+        <div class="flex-slot-track" style="grid-template-columns:${columns}">${cells}</div>
+        <div class="flex-slot-axis">${axis}</div>
+        <div class="flex-dimensions">
+          <div class="flex-dimension" style="left:0%;width:100%;top:0">
+            <div class="flex-dimension-line"></div>
+            <span class="flex-dimension-label">Exchange budget = ${fmtFixed(config.slotMs, 3)} ms; frame gap = ${fmtFixed(config.gapMs, 3)} ms</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="flex-packet-flow" style="margin-top:12px">
+      <div class="flex-packet-row"><b>POLL · rotating reference → broadcast</b><code>frame32 | previous full-DS range</code></div>
+      <div class="flex-packet-row"><b>RESP[0..${responderCount - 1}] · delayed native TX</b><code>frame32 | responder index | exact reply_dtu32 | previous full-DS range</code></div>
+      <div class="flex-packet-row"><b>FINAL · reference → broadcast</b><code>poll_tx40 | final_tx40 | responder ID + resp_rx40 for each response</code></div>
+      <div class="flex-packet-row"><b>Receive-only tags</b><code>${responderCount} full three-clock double-sided observations; no CFO, no absolute clock synchronization, no filter</code></div>
+    </div>
+    <div class="flex-timing-note ${overrun ? "warn" : ""}">
+      ${config.live ? "Live configuration" : "Configured fallback"} ·
+      first RESP ${fmtFixed(firstResponseDelayMs, 3)} ms · response spacing ${fmtFixed(responseSpacingMs, 3)} ms ·
+      FINAL guard ${fmtFixed(finalGuardMs, 3)} ms · guard time ${fmtFixed(guardMs, 3)} ms.
+      ${overrun ? " Warning: response train and FINAL guard exceed the exchange budget." : ""}
+    </div>`;
+}
+
 function renderPassiveDsTimingDiagram() {
   const root = document.getElementById("passiveDsTimingDiagram");
   if (!root || rangingSettingsSolver() !== "passive_ds") return;
@@ -12494,6 +12636,10 @@ function renderPassiveDsTimingDiagram() {
   const N = config.anchorIds.length;
   if (N < 3) {
     root.textContent = "Passive DS-TWR topology is unavailable.";
+    return;
+  }
+  if (config.schedule === 2) {
+    renderPassiveDsMultipointTiming(root, config);
     return;
   }
   const slots = N - 1;

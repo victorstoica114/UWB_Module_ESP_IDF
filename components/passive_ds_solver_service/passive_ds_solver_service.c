@@ -16,14 +16,29 @@ static const char *TAG = "passive_ds_solver";
 
 enum {
     PASSIVE_DS_SOLVER_QUEUE_LEN = 256,
-    PASSIVE_DS_SOLVER_TASK_STACK_BYTES = 10240,
+    PASSIVE_DS_SOLVER_TASK_STACK_BYTES = 32768,
     PASSIVE_DS_SOLVER_TASK_PRIORITY = 3,
-    PASSIVE_DS_SOLVER_FRAME_BUCKETS = 8,
+    PASSIVE_DS_SOLVER_FRAME_BUCKETS = 32,
     PASSIVE_DS_SOLVER_RANGE_MAX_AGE_MS = 2000,
     PASSIVE_DS_SOLVER_FRAME_MAX_AGE_MS = 250,
+    PASSIVE_DS_SOLVER_IDLE_WINDOW_MS = 500,
+    PASSIVE_DS_SOLVER_GEOMETRY_SAMPLES_PER_PAIR = 8,
+    PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION = 2,
+    PASSIVE_DS_SOLVER_MAX_OBSERVATIONS =
+        PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION *
+        (APP_RUNTIME_CONFIG_MAX_ANCHORS - 1),
     PASSIVE_DS_SOLVER_MAX_VARIABLES =
         2 * APP_RUNTIME_CONFIG_MAX_ANCHORS - 3,
 };
+
+/*
+ * The exact listener-timestamp covariance for the current 1.5/0.75/1.5 ms
+ * star has normalized off-diagonal terms close to 0.25.  This compact GLS
+ * form preserves the physically justified same-star correlation without
+ * repeatedly inverting matrices on the receive-only tag.  It is spatial
+ * weighting only; it does not average or filter positions over time.
+ */
+static const double PASSIVE_DS_SOLVER_TIMING_COMMON_CORRELATION = 0.25;
 
 enum passive_ds_solver_item_type {
     PASSIVE_DS_SOLVER_ITEM_RANGE,
@@ -38,6 +53,7 @@ struct passive_ds_solver_item {
     uint8_t second_id;
     uint32_t slot_id;
     int32_t value_mm;
+    uint16_t delay_ratio_q15;
 };
 
 struct passive_ds_solver_range {
@@ -52,21 +68,22 @@ struct passive_ds_solver_frame_item {
     uint8_t initiator_id;
     uint8_t responder_id;
     double difference_m;
+    double delay_ratio;
     uint32_t slot_id;
     TickType_t updated_tick;
 };
 
 struct passive_ds_solver_frame {
     bool pending;
+    bool independent_frame;
     uint8_t tag_id;
     uint8_t observation_count;
-    uint8_t initiator_id;
+    uint8_t initiator_ids[PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION];
     uint16_t observation_mask;
     uint32_t frame_id;
     uint32_t last_slot_id;
     TickType_t updated_tick;
-    struct passive_ds_solver_frame_item
-        items[APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U];
+    struct passive_ds_solver_frame_item items[PASSIVE_DS_SOLVER_MAX_OBSERVATIONS];
 };
 
 struct passive_ds_solver_state {
@@ -75,11 +92,18 @@ struct passive_ds_solver_state {
     struct passive_ds_solver_range
         ranges[APP_RUNTIME_CONFIG_MAX_ANCHORS]
               [APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    double range_batch_sum_m[APP_RUNTIME_CONFIG_MAX_ANCHORS]
+                            [APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    uint8_t range_batch_count[APP_RUNTIME_CONFIG_MAX_ANCHORS]
+                             [APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    uint32_t range_batch_slot_id[APP_RUNTIME_CONFIG_MAX_ANCHORS]
+                                [APP_RUNTIME_CONFIG_MAX_ANCHORS];
     struct passive_ds_position_anchor
         anchors[APP_RUNTIME_CONFIG_MAX_ANCHORS];
     struct passive_ds_solver_frame
         frames[PASSIVE_DS_SOLVER_FRAME_BUCKETS];
     uint32_t range_update_mask;
+    TickType_t range_batch_started_tick;
     uint32_t geometry_version;
     double geometry_fit_rms_m;
     bool geometry_ready;
@@ -87,6 +111,7 @@ struct passive_ds_solver_state {
     double previous_x_m;
     double previous_y_m;
     uint32_t position_accepted;
+    uint32_t position_independent_accepted;
     uint32_t position_rejected;
     uint32_t frame_rejected;
     uint32_t geometry_accepted;
@@ -96,7 +121,14 @@ struct passive_ds_solver_state {
     uint32_t previous_frame_rejected;
     uint32_t previous_geometry_accepted;
     uint32_t previous_geometry_rejected;
+    uint32_t observation_count[APP_RUNTIME_CONFIG_MAX_ANCHORS]
+                              [APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    double observation_mean_m[APP_RUNTIME_CONFIG_MAX_ANCHORS]
+                             [APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    double observation_m2_m2[APP_RUNTIME_CONFIG_MAX_ANCHORS]
+                            [APP_RUNTIME_CONFIG_MAX_ANCHORS];
     TickType_t summary_tick;
+    TickType_t observation_summary_tick;
 };
 
 static QueueHandle_t s_queue;
@@ -407,6 +439,69 @@ static void try_update_geometry(
     publish_geometry(state);
 }
 
+static void reset_range_batch(struct passive_ds_solver_state *state)
+{
+    memset(state->range_batch_sum_m, 0,
+           sizeof(state->range_batch_sum_m));
+    memset(state->range_batch_count, 0,
+           sizeof(state->range_batch_count));
+    memset(state->range_batch_slot_id, 0,
+           sizeof(state->range_batch_slot_id));
+    state->range_update_mask = 0U;
+    state->range_batch_started_tick = 0U;
+}
+
+static void stage_coherent_range(
+    struct passive_ds_solver_state *state, size_t first, size_t second,
+    double value_m, uint32_t slot_id, TickType_t now)
+{
+    const TickType_t max_batch_age =
+        pdMS_TO_TICKS(PASSIVE_DS_SOLVER_FRAME_MAX_AGE_MS);
+    if (state->range_batch_started_tick == 0U ||
+        now - state->range_batch_started_tick > max_batch_age) {
+        reset_range_batch(state);
+        state->range_batch_started_tick = now;
+    }
+
+    uint8_t *count = &state->range_batch_count[first][second];
+    if (*count < PASSIVE_DS_SOLVER_GEOMETRY_SAMPLES_PER_PAIR) {
+        state->range_batch_sum_m[first][second] += value_m;
+        state->range_batch_slot_id[first][second] = slot_id;
+        (*count)++;
+    }
+    if (*count == PASSIVE_DS_SOLVER_GEOMETRY_SAMPLES_PER_PAIR) {
+        const size_t index = pair_index(first, second, state->anchor_count);
+        if (index < 32U) {
+            state->range_update_mask |= (uint32_t)(1UL << index);
+        }
+    }
+
+    const uint32_t expected_mask = expected_pair_mask(state->anchor_count);
+    if ((state->range_update_mask & expected_mask) != expected_mask) {
+        return;
+    }
+    for (size_t a = 0U; a < state->anchor_count; ++a) {
+        for (size_t b = a + 1U; b < state->anchor_count; ++b) {
+            const uint8_t pair_count = state->range_batch_count[a][b];
+            if (pair_count != PASSIVE_DS_SOLVER_GEOMETRY_SAMPLES_PER_PAIR) {
+                reset_range_batch(state);
+                return;
+            }
+            const struct passive_ds_solver_range range = {
+                .valid = true,
+                .value_m = state->range_batch_sum_m[a][b] /
+                           (double)pair_count,
+                .slot_id = state->range_batch_slot_id[a][b],
+                .updated_tick = now,
+            };
+            state->ranges[a][b] = range;
+            state->ranges[b][a] = range;
+        }
+    }
+    try_update_geometry(state, now);
+    reset_range_batch(state);
+}
+
 static void reset_frame(struct passive_ds_solver_frame *frame)
 {
     memset(frame, 0, sizeof(*frame));
@@ -461,7 +556,10 @@ static struct passive_ds_solver_frame *acquire_frame(
     available->pending = true;
     available->frame_id = frame_id;
     available->tag_id = tag_id;
-    available->initiator_id = UINT8_MAX;
+    for (size_t index = 0U;
+         index < PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION; ++index) {
+        available->initiator_ids[index] = UINT8_MAX;
+    }
     available->updated_tick = now;
     return available;
 }
@@ -490,15 +588,24 @@ static void solve_complete_frame(
         reset_frame(frame);
         return;
     }
-    const size_t expected_count = state->anchor_count - 1U;
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const bool multipoint = config->passive_ds_schedule ==
+        APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS;
+    const size_t stars_per_position = multipoint
+        ? PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION
+        : 1U;
+    const size_t observations_per_star = state->anchor_count - 1U;
+    const size_t expected_count = observations_per_star * stars_per_position;
     struct passive_ds_position_observation
-        observations[APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U];
+        observations[PASSIVE_DS_SOLVER_MAX_OBSERVATIONS];
     TickType_t oldest_tick = now;
     TickType_t newest_tick = 0U;
     for (size_t index = 0U; index < expected_count; ++index) {
         const struct passive_ds_solver_frame_item *item =
             &frame->items[index];
-        if (!item->valid || item->initiator_id != frame->initiator_id) {
+        const size_t star_index = index / observations_per_star;
+        if (!item->valid || star_index >= stars_per_position ||
+            item->initiator_id != frame->initiator_ids[star_index]) {
             state->frame_rejected++;
             reset_frame(frame);
             return;
@@ -507,6 +614,7 @@ static void solve_complete_frame(
             .initiator_id = item->initiator_id,
             .responder_id = item->responder_id,
             .difference_m = item->difference_m,
+            .delay_ratio = item->delay_ratio,
         };
         if (item->updated_tick < oldest_tick) {
             oldest_tick = item->updated_tick;
@@ -517,11 +625,18 @@ static void solve_complete_frame(
     }
 
     struct passive_ds_position_result result = {0};
-    const bool solved = passive_ds_position_solve(
-        state->anchors, state->anchor_count,
-        observations, expected_count,
-        state->previous_position_valid,
-        state->previous_x_m, state->previous_y_m, &result);
+    const bool solved = multipoint
+        ? passive_ds_position_solve_correlated(
+              state->anchors, state->anchor_count,
+              observations, expected_count,
+              PASSIVE_DS_SOLVER_TIMING_COMMON_CORRELATION,
+              state->previous_position_valid,
+              state->previous_x_m, state->previous_y_m, &result)
+        : passive_ds_position_solve(
+              state->anchors, state->anchor_count,
+              observations, expected_count,
+              state->previous_position_valid,
+              state->previous_x_m, state->previous_y_m, &result);
     if (!solved) {
         state->position_rejected++;
         reset_frame(frame);
@@ -532,15 +647,22 @@ static void solve_complete_frame(
     state->previous_x_m = result.x_m;
     state->previous_y_m = result.y_m;
     state->position_accepted++;
+    if (frame->independent_frame) {
+        state->position_independent_accepted++;
+    }
     const uint32_t measured_span_ms =
         (uint32_t)((newest_tick - oldest_tick) * portTICK_PERIOD_MS);
     const uint32_t measured_age_ms =
         (uint32_t)((now - oldest_tick) * portTICK_PERIOD_MS);
-    const app_runtime_config_t *config = app_runtime_config_get();
     const uint32_t nominal_span_ms =
-        ((uint32_t)state->anchor_count - 1U) *
-            config->passive_ds_slot_ms +
-        config->passive_ds_round_gap_ms;
+        config->passive_ds_schedule ==
+                APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS
+            ? PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION *
+                  (config->passive_ds_slot_ms +
+                   config->passive_ds_round_gap_ms)
+            : ((uint32_t)state->anchor_count - 1U) *
+                      config->passive_ds_slot_ms +
+                  config->passive_ds_round_gap_ms;
     const uint16_t span_ms = (uint16_t)fmin(
         UINT16_MAX,
         (double)fmax(measured_span_ms, nominal_span_ms));
@@ -550,6 +672,7 @@ static void solve_complete_frame(
     const uint8_t tag_id = frame->tag_id;
     const uint32_t slot_id = frame->last_slot_id;
     const uint16_t mask = frame->observation_mask;
+    const bool independent_frame = frame->independent_frame;
     reset_frame(frame);
 
     (void)wireless_telemetry_service_submit_passive_ds_position(
@@ -561,10 +684,73 @@ static void solve_complete_frame(
         (int32_t)lround(result.sigma_m * 1000.0),
         (int32_t)lround(result.rms_m * 1000.0),
         result.observation_count, state->anchor_count,
-        state->geometry_version, true, false, false,
-        state->position_accepted, state->position_accepted,
+        state->geometry_version, independent_frame, false, false,
+        state->position_accepted, state->position_independent_accepted,
         span_ms, age_ms, mask, 0U, 0U,
         state->position_rejected, true);
+}
+
+static bool stage_observation(
+    struct passive_ds_solver_state *state,
+    const struct passive_ds_solver_item *item,
+    TickType_t now,
+    uint32_t frame_id,
+    uint32_t star_index,
+    uint32_t radio_slot_index,
+    bool independent_frame)
+{
+    const uint32_t slots_per_star = (uint32_t)state->anchor_count - 1U;
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const bool multipoint = config->passive_ds_schedule ==
+        APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS;
+    const uint32_t expected_count = slots_per_star *
+        (multipoint ? PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION : 1U);
+    const uint32_t slot_index = star_index * slots_per_star + radio_slot_index;
+    struct passive_ds_solver_frame *frame = acquire_frame(
+        state, frame_id, item->tag_id, now);
+    if (frame == NULL || slot_index >= expected_count ||
+        star_index >= PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION) {
+        state->frame_rejected++;
+        return false;
+    }
+    frame->independent_frame = independent_frame;
+    if (frame->initiator_ids[star_index] == UINT8_MAX) {
+        frame->initiator_ids[star_index] = item->first_id;
+    } else if (frame->initiator_ids[star_index] != item->first_id) {
+        state->frame_rejected++;
+        reset_frame(frame);
+        return false;
+    }
+    const size_t star_begin = (size_t)star_index * slots_per_star;
+    const size_t star_end = star_begin + slots_per_star;
+    for (size_t index = star_begin; index < star_end; ++index) {
+        if (index != slot_index && frame->items[index].valid &&
+            frame->items[index].responder_id == item->second_id) {
+            state->frame_rejected++;
+            reset_frame(frame);
+            return false;
+        }
+    }
+    if (!frame->items[slot_index].valid) {
+        frame->observation_count++;
+    }
+    frame->items[slot_index] = (struct passive_ds_solver_frame_item){
+        .valid = true,
+        .initiator_id = item->first_id,
+        .responder_id = item->second_id,
+        .difference_m = item->value_mm / 1000.0,
+        .delay_ratio = (double)item->delay_ratio_q15 / 32768.0,
+        .slot_id = item->slot_id,
+        .updated_tick = now,
+    };
+    frame->observation_mask |= observation_mask_bit(
+        state, item->first_id, item->second_id);
+    frame->last_slot_id = item->slot_id;
+    frame->updated_tick = now;
+    if (frame->observation_count == expected_count) {
+        solve_complete_frame(state, frame, now);
+    }
+    return true;
 }
 
 static void handle_observation(
@@ -588,47 +774,45 @@ static void handle_observation(
         return;
     }
 
-    const uint32_t slots_per_frame = (uint32_t)state->anchor_count - 1U;
-    const uint32_t frame_id = item->slot_id / slots_per_frame;
-    const uint32_t slot_index = item->slot_id % slots_per_frame;
-    struct passive_ds_solver_frame *frame = acquire_frame(
-        state, frame_id, item->tag_id, now);
-    if (frame == NULL || slot_index >= slots_per_frame) {
-        state->frame_rejected++;
-        return;
-    }
-    if (frame->initiator_id == UINT8_MAX) {
-        frame->initiator_id = item->first_id;
-    } else if (frame->initiator_id != item->first_id) {
-        state->frame_rejected++;
-        reset_frame(frame);
-        return;
-    }
-    for (size_t index = 0U; index < slots_per_frame; ++index) {
-        if (index != slot_index && frame->items[index].valid &&
-            frame->items[index].responder_id == item->second_id) {
-            state->frame_rejected++;
-            reset_frame(frame);
-            return;
-        }
-    }
-    if (!frame->items[slot_index].valid) {
-        frame->observation_count++;
-    }
-    frame->items[slot_index] = (struct passive_ds_solver_frame_item){
-        .valid = true,
-        .initiator_id = item->first_id,
-        .responder_id = item->second_id,
-        .difference_m = difference_m,
-        .slot_id = item->slot_id,
-        .updated_tick = now,
-    };
-    frame->observation_mask |= observation_mask_bit(
-        state, item->first_id, item->second_id);
-    frame->last_slot_id = item->slot_id;
-    frame->updated_tick = now;
-    if (frame->observation_count == slots_per_frame) {
-        solve_complete_frame(state, frame, now);
+    /*
+     * Diagnostic only: Welford statistics for each directed radio path.
+     * The estimator still consumes the original, unfiltered observation.
+     * Pooling the per-path variances later lets us compare the three N+2
+     * response positions without mixing their different physical means.
+     */
+    uint32_t *observation_count =
+        &state->observation_count[initiator][responder];
+    double *observation_mean_m =
+        &state->observation_mean_m[initiator][responder];
+    double *observation_m2_m2 =
+        &state->observation_m2_m2[initiator][responder];
+    (*observation_count)++;
+    const double mean_delta = difference_m - *observation_mean_m;
+    *observation_mean_m += mean_delta / (double)*observation_count;
+    *observation_m2_m2 +=
+        mean_delta * (difference_m - *observation_mean_m);
+
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const bool multipoint = config->passive_ds_schedule ==
+        APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS;
+    const uint32_t slots_per_star = (uint32_t)state->anchor_count - 1U;
+    const uint32_t radio_frame_id = item->slot_id / slots_per_star;
+    const uint32_t radio_slot_index = item->slot_id % slots_per_star;
+    if (multipoint) {
+        /*
+         * Keep the precision baseline deliberately simple: two consecutive
+         * radio stars form one position window and every star is consumed
+         * exactly once.  At the validated 6 ms radio cadence this yields an
+         * 83.3 Hz raw, unfiltered position stream without duplicate solver
+         * work or host-side frame synchronization.
+         */
+        (void)stage_observation(
+            state, item, now, radio_frame_id / 2U,
+            radio_frame_id % 2U, radio_slot_index, true);
+    } else {
+        /* Legacy schedules still form one non-overlapping complete frame. */
+        (void)stage_observation(
+            state, item, now, radio_frame_id, 0U, radio_slot_index, true);
     }
 }
 
@@ -677,6 +861,56 @@ static void submit_summary(struct passive_ds_solver_state *state)
     state->previous_geometry_accepted = state->geometry_accepted;
     state->previous_geometry_rejected = state->geometry_rejected;
     state->summary_tick = now;
+
+    const app_runtime_config_t *config = app_runtime_config_get();
+    if (config->passive_ds_schedule !=
+            APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS ||
+        (state->observation_summary_tick != 0U &&
+         now - state->observation_summary_tick < pdMS_TO_TICKS(10000))) {
+        return;
+    }
+    double pooled_m2[APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U] = {0};
+    uint32_t pooled_dof[APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U] = {0};
+    for (size_t initiator = 0U; initiator < state->anchor_count;
+         ++initiator) {
+        for (size_t responder = 0U; responder < state->anchor_count;
+             ++responder) {
+            if (initiator == responder) {
+                continue;
+            }
+            const uint32_t count =
+                state->observation_count[initiator][responder];
+            const size_t timing_index =
+                (responder + state->anchor_count - initiator - 1U) %
+                state->anchor_count;
+            if (count > 1U && timing_index < state->anchor_count - 1U) {
+                pooled_m2[timing_index] +=
+                    state->observation_m2_m2[initiator][responder];
+                pooled_dof[timing_index] += count - 1U;
+            }
+        }
+    }
+    if (state->anchor_count == 4U) {
+        const double sigma0_mm = pooled_dof[0] > 0U
+            ? 1000.0 * sqrt(pooled_m2[0] / pooled_dof[0])
+            : 0.0;
+        const double sigma1_mm = pooled_dof[1] > 0U
+            ? 1000.0 * sqrt(pooled_m2[1] / pooled_dof[1])
+            : 0.0;
+        const double sigma2_mm = pooled_dof[2] > 0U
+            ? 1000.0 * sqrt(pooled_m2[2] / pooled_dof[2])
+            : 0.0;
+        (void)wireless_log_service_submit(
+            'I', TAG,
+            "raw N+2 within-path sigma timing[0/1/2]=%ld/%ld/%ldmm "
+            "dof=%lu/%lu/%lu (diagnostic only)",
+            (long)lround(sigma0_mm), (long)lround(sigma1_mm),
+            (long)lround(sigma2_mm),
+            (unsigned long)pooled_dof[0],
+            (unsigned long)pooled_dof[1],
+            (unsigned long)pooled_dof[2]);
+    }
+    state->observation_summary_tick = now;
 }
 
 static void passive_ds_solver_task(void *arg)
@@ -684,6 +918,7 @@ static void passive_ds_solver_task(void *arg)
     (void)arg;
     static struct passive_ds_solver_state state;
     apply_runtime_config(&state);
+    TickType_t last_idle_window_tick = xTaskGetTickCount();
     ESP_LOGI(TAG, "isolated raw tag solver active anchors=%u core=%d",
              (unsigned)state.anchor_count, xPortGetCoreID());
     while (true) {
@@ -707,6 +942,15 @@ static void passive_ds_solver_task(void *arg)
             item.value_mm > 0) {
             const size_t a = (size_t)(first < second ? first : second);
             const size_t b = (size_t)(first < second ? second : first);
+            const app_runtime_config_t *config = app_runtime_config_get();
+            if (config->passive_ds_schedule ==
+                APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS) {
+                stage_coherent_range(
+                    &state, a, b, item.value_mm / 1000.0,
+                    item.slot_id, now);
+                submit_summary(&state);
+                continue;
+            }
             const struct passive_ds_solver_range range = {
                 .valid = true,
                 .value_m = item.value_mm / 1000.0,
@@ -724,6 +968,18 @@ static void passive_ds_solver_task(void *arg)
             handle_observation(&state, &item, now);
         }
         submit_summary(&state);
+
+        /*
+         * At high passive-DS rates this queue intentionally remains busy.
+         * Give the CPU0 idle task one scheduler tick often enough to feed the
+         * task watchdog; queued observations are retained and processed after
+         * the window, so this is neither result decimation nor filtering.
+         */
+        if (now - last_idle_window_tick >=
+            pdMS_TO_TICKS(PASSIVE_DS_SOLVER_IDLE_WINDOW_MS)) {
+            vTaskDelay(1);
+            last_idle_window_tick = xTaskGetTickCount();
+        }
     }
 }
 
@@ -785,7 +1041,7 @@ bool passive_ds_solver_service_submit_anchor_range(
 
 bool passive_ds_solver_service_submit_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
-    uint32_t slot_id, int32_t difference_mm)
+    uint32_t slot_id, int32_t difference_mm, uint16_t delay_ratio_q15)
 {
     const struct passive_ds_solver_item item = {
         .type = PASSIVE_DS_SOLVER_ITEM_OBSERVATION,
@@ -794,6 +1050,7 @@ bool passive_ds_solver_service_submit_observation(
         .second_id = responder_id,
         .slot_id = slot_id,
         .value_mm = difference_mm,
+        .delay_ratio_q15 = delay_ratio_q15,
     };
     return submit_item(&item);
 }

@@ -28,6 +28,7 @@ static void solve_known_point(double expected_x_m, double expected_y_m)
             .difference_m =
                 distance_to(&anchors[index + 1U], expected_x_m, expected_y_m) -
                 distance_to(&anchors[0], expected_x_m, expected_y_m),
+            .delay_ratio = (double)(index + 1U) / 4.0,
         };
     }
 
@@ -38,6 +39,22 @@ static void solve_known_point(double expected_x_m, double expected_y_m)
     assert(fabs(result.y_m - expected_y_m) < 1e-5);
     assert(result.rms_m < 1e-6);
     assert(result.observation_count == 3U);
+
+    result = (struct passive_ds_position_result){0};
+    assert(passive_ds_position_solve_correlated(
+        anchors, 4U, observations, 3U, 0.5,
+        false, 0.0, 0.0, &result));
+    assert(fabs(result.x_m - expected_x_m) < 1e-5);
+    assert(fabs(result.y_m - expected_y_m) < 1e-5);
+    assert(result.rms_m < 1e-6);
+
+    result = (struct passive_ds_position_result){0};
+    assert(passive_ds_position_solve_timing_covariance(
+        anchors, 4U, observations, 3U,
+        false, 0.0, 0.0, &result));
+    assert(fabs(result.x_m - expected_x_m) < 1e-5);
+    assert(fabs(result.y_m - expected_y_m) < 1e-5);
+    assert(result.rms_m < 1e-6);
 }
 
 int main(void)

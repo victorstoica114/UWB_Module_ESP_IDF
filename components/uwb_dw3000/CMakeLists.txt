@@ -1,4 +1,5 @@
 idf_component_register(SRCS "uwb_dw3000.c" "uwb_native_ds_twr.c"
+                            "uwb_passive_ds_multi.c"
                             "uwb_passive_ds_tdoa.c"
                        INCLUDE_DIRS "include"
                        PRIV_INCLUDE_DIRS "${PROJECT_DIR}"

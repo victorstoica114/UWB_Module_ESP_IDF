@@ -83,6 +83,8 @@ bool uwb_passive_ds_tdoa_calculate(
     result->difference_m = difference_m;
     result->listener_to_initiator_clock_ratio = listener_to_initiator;
     result->listener_to_responder_clock_ratio = listener_to_responder;
+    result->responder_delay_ratio =
+        responder_reply / responder_exchange;
     result->responder_reply_dtu = input->responder_reply_dtu;
     return true;
 }
@@ -117,16 +119,23 @@ static struct uwb_passive_ds_tdoa_pending *find_pending(
             return item;
         }
         if (!item->in_use) {
-            replacement = item;
-            break;
+            if (replacement == NULL || replacement->in_use) {
+                replacement = item;
+            }
+            continue;
         }
         if (replacement == NULL ||
-            item->generation < replacement->generation) {
+            (replacement->in_use &&
+             item->generation < replacement->generation)) {
             replacement = item;
         }
     }
     if (!create || replacement == NULL) {
         return NULL;
+    }
+
+    if (replacement->in_use) {
+        context->pending_replacement_count++;
     }
 
     memset(replacement, 0, sizeof(*replacement));
@@ -140,6 +149,7 @@ static struct uwb_passive_ds_tdoa_pending *find_pending(
 }
 
 static enum uwb_passive_ds_tdoa_status try_complete(
+    struct uwb_passive_ds_tdoa_context *context,
     struct uwb_passive_ds_tdoa_pending *pending,
     struct uwb_passive_ds_tdoa_result *result)
 {
@@ -151,6 +161,13 @@ static enum uwb_passive_ds_tdoa_status try_complete(
     const bool valid =
         uwb_passive_ds_tdoa_calculate(&pending->input, result);
     memset(pending, 0, sizeof(*pending));
+    if (context != NULL) {
+        if (valid) {
+            context->ready_count++;
+        } else {
+            context->calculation_rejected_count++;
+        }
+    }
     return valid ? UWB_PASSIVE_DS_TDOA_READY
                  : UWB_PASSIVE_DS_TDOA_REJECTED;
 }
@@ -168,7 +185,7 @@ enum uwb_passive_ds_tdoa_status uwb_passive_ds_tdoa_record_poll(
     }
     pending->input.listener_poll_rx = listener_poll_rx;
     pending->have_poll = true;
-    return try_complete(pending, result);
+    return try_complete(context, pending, result);
 }
 
 enum uwb_passive_ds_tdoa_status uwb_passive_ds_tdoa_record_response(
@@ -185,7 +202,7 @@ enum uwb_passive_ds_tdoa_status uwb_passive_ds_tdoa_record_response(
     pending->input.listener_response_rx = listener_response_rx;
     pending->input.responder_reply_dtu = responder_reply_dtu;
     pending->have_response = true;
-    return try_complete(pending, result);
+    return try_complete(context, pending, result);
 }
 
 enum uwb_passive_ds_tdoa_status uwb_passive_ds_tdoa_record_final(
@@ -198,6 +215,9 @@ enum uwb_passive_ds_tdoa_status uwb_passive_ds_tdoa_record_final(
     struct uwb_passive_ds_tdoa_pending *pending = find_pending(
         context, initiator_id, responder_id, sequence, slot_id, false);
     if (pending == NULL || result == NULL) {
+        if (context != NULL) {
+            context->missing_final_context_count++;
+        }
         return UWB_PASSIVE_DS_TDOA_REJECTED;
     }
     pending->input.listener_final_rx = listener_final_rx;
@@ -205,7 +225,7 @@ enum uwb_passive_ds_tdoa_status uwb_passive_ds_tdoa_record_final(
     pending->input.initiator_response_rx = initiator_response_rx;
     pending->input.initiator_final_tx = initiator_final_tx;
     pending->have_final = true;
-    return try_complete(pending, result);
+    return try_complete(context, pending, result);
 }
 
 enum uwb_passive_ds_tdoa_status
@@ -218,9 +238,12 @@ uwb_passive_ds_tdoa_record_responder_exchange(
     struct uwb_passive_ds_tdoa_pending *pending = find_pending(
         context, initiator_id, responder_id, sequence, slot_id, false);
     if (pending == NULL || result == NULL || responder_exchange_dtu == 0U) {
+        if (context != NULL && responder_exchange_dtu != 0U) {
+            context->missing_exchange_context_count++;
+        }
         return UWB_PASSIVE_DS_TDOA_REJECTED;
     }
     pending->input.responder_exchange_dtu = responder_exchange_dtu;
     pending->have_responder_exchange = true;
-    return try_complete(pending, result);
+    return try_complete(context, pending, result);
 }

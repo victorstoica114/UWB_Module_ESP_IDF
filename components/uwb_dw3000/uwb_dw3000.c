@@ -30,13 +30,17 @@
 #include "uwb_config.h"
 #include "uwb_native_ds_twr.h"
 #include "uwb_passive_ds_tdoa.h"
+#include "uwb_passive_ds_multi.h"
 #include "wireless_log_service.h"
 #include "wireless_telemetry_service.h"
 
 static const char *TAG = "uwb_dw3000";
 
 enum {
-    UWB_DW3000_TASK_STACK_WORDS = 8192,
+    /* ESP-IDF expresses the task stack depth in bytes. The multipoint
+     * receive-only path keeps several complete radio frames on this task's
+     * stack, so the historical 8 KiB allocation is not sufficient. */
+    UWB_DW3000_TASK_STACK_BYTES = 32768,
     // FlexTDOA delayed-TX deadlines are sub-millisecond. Keep this below the
     // ESP-IDF timer/Wi-Fi critical tasks, but above ordinary TCP/application
     // work; the task sleeps on the DW3000 interrupt between radio events.
@@ -324,10 +328,25 @@ enum {
     UWB_DISTANCE_FRAME_FINAL_TIMESTAMPS_LEN
 #define UWB_PASSIVE_DS_FINAL_LEN \
     (UWB_PASSIVE_DS_FINAL_SLOT_ID_OFFSET + 4U)
+#define UWB_PASSIVE_DS_MULTI_APPLICATION_OFFSET \
+    UWB_DISTANCE_FRAME_HEADER_LEN
+#define UWB_PASSIVE_DS_MULTI_POLL_PIGGYBACK_OFFSET \
+    (UWB_PASSIVE_DS_MULTI_APPLICATION_OFFSET + 4U)
+#define UWB_PASSIVE_DS_MULTI_RESP_PIGGYBACK_OFFSET \
+    (UWB_PASSIVE_DS_MULTI_APPLICATION_OFFSET + 9U)
+#define UWB_PASSIVE_DS_MULTI_POLL_LEN \
+    (UWB_PASSIVE_DS_MULTI_POLL_PIGGYBACK_OFFSET + \
+     UWB_PASSIVE_DS_PIGGYBACK_LEN)
+#define UWB_PASSIVE_DS_MULTI_RESP_LEN \
+    (UWB_PASSIVE_DS_MULTI_RESP_PIGGYBACK_OFFSET + \
+     UWB_PASSIVE_DS_PIGGYBACK_LEN)
 #define UWB_PASSIVE_DS_BOOTSTRAP_LISTEN_US 2000000LL
 #define UWB_PASSIVE_DS_FAST_GEOMETRY_FRAME_INTERVAL 4U
 #define UWB_PASSIVE_DS_POLL_TX_LEAD_US 750LL
+#define UWB_PASSIVE_DS_MULTI_POLL_TX_LEAD_US 2000LL
 #define UWB_PASSIVE_DS_POLL_LATE_US 250LL
+#define UWB_PASSIVE_DS_MULTI_RECOVERY_FRAMES 8LL
+#define UWB_PASSIVE_DS_MULTI_RECOVERY_MIN_US 50000LL
 #define UWB_ANCHOR_SURVEY_MAX_ANCHORS APP_RUNTIME_CONFIG_MAX_ANCHORS
 #define UWB_ANCHOR_SURVEY_MAX_PAIRS \
     ((UWB_ANCHOR_SURVEY_MAX_ANCHORS * (UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U)) / 2U)
@@ -409,6 +428,9 @@ enum uwb_distance_frame_type {
     UWB_DISTANCE_FRAME_PASSIVE_DS_POLL = 15,
     UWB_DISTANCE_FRAME_PASSIVE_DS_RESP = 16,
     UWB_DISTANCE_FRAME_PASSIVE_DS_FINAL = 17,
+    UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_POLL = 18,
+    UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_RESP = 19,
+    UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_FINAL = 20,
 };
 
 enum uwb_dw3000_runtime_mode {
@@ -593,6 +615,44 @@ struct uwb_passive_ds_schedule {
     uint32_t bootstrap_count;
     uint32_t late_count;
 };
+
+struct uwb_passive_ds_multi_schedule {
+    bool synced;
+    uint32_t next_frame_id;
+    uint64_t next_poll_radio_ts;
+    int64_t next_poll_host_us;
+    int64_t last_poll_host_us;
+    uint32_t bootstrap_count;
+    uint32_t late_count;
+};
+
+struct uwb_passive_ds_multi_tag_stats {
+    uint32_t poll_rx;
+    uint32_t response_rx[UWB_PASSIVE_DS_MULTI_MAX_RESPONDERS];
+    uint32_t final_rx;
+    uint32_t final_entries;
+    uint32_t ready[UWB_PASSIVE_DS_MULTI_MAX_ANCHORS];
+    uint32_t rejected[UWB_PASSIVE_DS_MULTI_MAX_ANCHORS];
+    uint32_t piggyback_lag[8];
+    uint32_t previous_ready_count;
+    uint32_t previous_calculation_rejected_count;
+    uint32_t previous_missing_final_context_count;
+    uint32_t previous_missing_exchange_context_count;
+    uint32_t previous_pending_replacement_count;
+    int64_t summary_started_us;
+};
+
+static void uwb_passive_ds_multi_tag_record_piggyback_lag(
+    struct uwb_passive_ds_multi_tag_stats *stats,
+    uint32_t current_frame_id, uint8_t piggyback_initiator_id,
+    uint32_t piggyback_frame_id)
+{
+    if (stats == NULL || piggyback_initiator_id == 0U) {
+        return;
+    }
+    const uint32_t lag = current_frame_id - piggyback_frame_id;
+    stats->piggyback_lag[lag < 7U ? lag : 7U]++;
+}
 
 enum uwb_passive_ds_exchange_state {
     UWB_PASSIVE_DS_EXCHANGE_IDLE = 0,
@@ -1145,6 +1205,26 @@ static bool uwb_flex_tdoa_local_is_anchor(void)
         }
     }
     return false;
+}
+
+static bool uwb_passive_ds_multi_local_is_receive_only_tag(void)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    return s_runtime_mode == UWB_DW3000_RUNTIME_PASSIVE_DS_TWR &&
+           config != NULL &&
+           config->passive_ds_schedule ==
+               APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS &&
+           !uwb_flex_tdoa_local_is_anchor();
+}
+
+static bool uwb_dw3000_runtime_uses_high_rate_rx_buffer(
+    enum uwb_dw3000_runtime_mode runtime_mode)
+{
+    if (runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
+        return true;
+    }
+    return runtime_mode == UWB_DW3000_RUNTIME_PASSIVE_DS_TWR &&
+           uwb_passive_ds_multi_local_is_receive_only_tag();
 }
 
 static void uwb_flex_tdoa_schedule_alarm_callback(void *arg)
@@ -2268,7 +2348,10 @@ static bool uwb_dw3000_should_capture_rx_diagnostics(const uint8_t *payload,
 
     const uint8_t frame_type = payload[5];
     if (frame_type == UWB_DISTANCE_FRAME_FLEX_TDOA_REQ ||
-        frame_type == UWB_DISTANCE_FRAME_FLEX_TDOA_RESP) {
+        frame_type == UWB_DISTANCE_FRAME_FLEX_TDOA_RESP ||
+        frame_type == UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_POLL ||
+        frame_type == UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_RESP ||
+        frame_type == UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_FINAL) {
         return false;
     }
 
@@ -2357,7 +2440,7 @@ static esp_err_t uwb_dw3000_release_pending_flex_request(void)
     return err;
 }
 
-static esp_err_t uwb_dw3000_configure_flex_rx_double_buffer(void)
+static esp_err_t uwb_dw3000_configure_high_rate_rx_double_buffer(void)
 {
     ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_TXRXOFF), TAG,
                         "stop RX before double-buffer setup failed");
@@ -2421,7 +2504,8 @@ static esp_err_t uwb_dw3000_configure_flex_rx_double_buffer(void)
     s_rx_double_buffer_release_max_us = 0;
     s_rx_double_buffer_enabled = true;
     ESP_LOGI(TAG,
-             "DW3000 FlexTDOA RX double buffer enabled with manual early re-arm");
+             "DW3000 high-rate RX double buffer enabled with manual early re-arm mode=%u",
+             (unsigned)s_runtime_mode);
     return ESP_OK;
 }
 
@@ -3752,8 +3836,7 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             frame->rx_buffer_index = s_rx_double_buffer_index;
             frame->rx_buffer_status = rdb_status;
             bool spi_bus_acquired = false;
-            if (s_rx_double_buffer_enabled &&
-                s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
+            if (s_rx_double_buffer_enabled) {
                 const esp_err_t acquire_err =
                     spi_device_acquire_bus(s_spi, portMAX_DELAY);
                 if (acquire_err != ESP_OK) {
@@ -3770,12 +3853,10 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             // RX_FINFO, RX_TIME and the payload are valid as soon as the
             // double buffer reports a good frame. FlexTDOA requests do not
             // need CIA diagnostics, so they can be dispatched immediately.
-            const bool flex_buffered_fast_path =
-                s_rx_double_buffer_enabled &&
-                s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA;
+            const bool buffered_fast_path = s_rx_double_buffer_enabled;
             esp_err_t read_err = ESP_OK;
             esp_err_t ts_err = ESP_OK;
-            if (flex_buffered_fast_path) {
+            if (buffered_fast_path) {
                 read_err = uwb_dw3000_read_flex_buffered_frame(frame);
                 ts_err = read_err;
             } else {
@@ -3791,6 +3872,17 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                                                      frame->payload_len) &&
                 (frame->payload[5] == UWB_DISTANCE_FRAME_FLEX_TDOA_REQ ||
                  frame->payload[5] == UWB_DISTANCE_FRAME_FLEX_TDOA_RESP);
+            const bool passive_multi_fast_rearm =
+                !s_rx_double_buffer_enabled && read_err == ESP_OK &&
+                s_runtime_mode == UWB_DW3000_RUNTIME_PASSIVE_DS_TWR &&
+                uwb_dw3000_payload_is_distance_frame(
+                    frame->payload, frame->payload_len) &&
+                (frame->payload[5] ==
+                     UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_POLL ||
+                 frame->payload[5] ==
+                     UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_RESP ||
+                 frame->payload[5] ==
+                     UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_FINAL);
             const bool passive_ds_frame =
                 read_err == ESP_OK &&
                 s_runtime_mode == UWB_DW3000_RUNTIME_PASSIVE_DS_TWR &&
@@ -3805,7 +3897,8 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             const int64_t passive_ds_cia_started_us =
                 passive_ds_frame ? esp_timer_get_time() : 0;
             esp_err_t clock_err = ESP_OK;
-            if (!flex_buffered_fast_path && read_err == ESP_OK &&
+            if (!buffered_fast_path && !passive_multi_fast_rearm &&
+                read_err == ESP_OK &&
                 uwb_dw3000_payload_is_distance_frame(frame->payload,
                                                      frame->payload_len) &&
                     frame->payload[5] != UWB_DISTANCE_FRAME_FLEX_TDOA_REQ) {
@@ -3840,12 +3933,13 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                     passive_ds_cia_started_us, clock_err == ESP_OK);
             }
             const bool flex_anchor_request =
-                flex_buffered_fast_path && read_err == ESP_OK &&
+                buffered_fast_path && read_err == ESP_OK &&
+                s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA &&
                 uwb_flex_tdoa_local_is_anchor() &&
                 uwb_dw3000_payload_is_distance_frame(frame->payload,
                                                      frame->payload_len) &&
                 frame->payload[5] == UWB_DISTANCE_FRAME_FLEX_TDOA_REQ;
-            if (flex_buffered_fast_path && !flex_anchor_request) {
+            if (buffered_fast_path && !flex_anchor_request) {
                 // Tags and anchors consuming RESP frames must keep listening
                 // while the occupied buffer is copied and released. An anchor
                 // receiving REQ remains idle because it will transmit next.
@@ -3926,7 +4020,7 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             // Keep the radio listening while the ESP32 parses and processes a
             // FlexTDOA frame. A responder cancels this RX state immediately
             // before programming its own delayed transmission.
-            if (flex_fast_rearm) {
+            if (flex_fast_rearm || passive_multi_fast_rearm) {
                 const esp_err_t rearm_err = uwb_dw3000_arm_rx();
                 if (rearm_err != ESP_OK) {
                     s_rx_error_count++;
@@ -3972,8 +4066,7 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
         }
 
         if (uwb_dw3000_remaining_ms(start, timeout_ms) == 0) {
-            if (s_rx_double_buffer_enabled &&
-                s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
+            if (s_rx_double_buffer_enabled) {
                 // A passive tag has no TX path that would recover a silently
                 // idle receiver. In a healthy FlexTDOA frame a 5 ms receive
                 // interval cannot expire without traffic, so use that event
@@ -4144,6 +4237,12 @@ static const char *uwb_distance_type_name(uint8_t type)
         return "PASSIVE_DS_RESP";
     case UWB_DISTANCE_FRAME_PASSIVE_DS_FINAL:
         return "PASSIVE_DS_FINAL";
+    case UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_POLL:
+        return "PASSIVE_DS_MULTI_POLL";
+    case UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_RESP:
+        return "PASSIVE_DS_MULTI_RESP";
+    case UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_FINAL:
+        return "PASSIVE_DS_MULTI_FINAL";
     default:
         return "UNKNOWN";
     }
@@ -7621,12 +7720,30 @@ static void uwb_passive_ds_tag_submit_double_sided(
     uint8_t expected_initiator = 0U;
     uint8_t expected_responder = 0U;
     uint8_t responder_index = 0U;
-    if (!uwb_passive_ds_slot_pair(
-            slot_id, anchor_ids, anchor_count,
-            config->passive_ds_schedule, &expected_initiator,
-            &expected_responder, &responder_index) ||
-        expected_initiator != initiator_id ||
-        expected_responder != responder_id) {
+    uint32_t solver_slot_id = slot_id;
+    if (config->passive_ds_schedule ==
+        APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS) {
+        struct uwb_passive_ds_multi_plan plan = {0};
+        if (!uwb_passive_ds_multi_build_plan(
+                anchor_ids, anchor_count, slot_id, &plan)) {
+            return;
+        }
+        const int index = uwb_passive_ds_multi_responder_index(
+            &plan, responder_id);
+        if (plan.initiator_id != initiator_id || index < 0) {
+            return;
+        }
+        expected_initiator = plan.initiator_id;
+        expected_responder = responder_id;
+        responder_index = (uint8_t)index;
+        solver_slot_id = slot_id * (uint32_t)(anchor_count - 1U) +
+                         (uint32_t)responder_index;
+    } else if (!uwb_passive_ds_slot_pair(
+                   slot_id, anchor_ids, anchor_count,
+                   config->passive_ds_schedule, &expected_initiator,
+                   &expected_responder, &responder_index) ||
+               expected_initiator != initiator_id ||
+               expected_responder != responder_id) {
         return;
     }
 
@@ -7644,12 +7761,27 @@ static void uwb_passive_ds_tag_submit_double_sided(
         ? (uint8_t)UWB_PASSIVE_DS_RANGE_PIGGYBACK_DS
         : (uint8_t)UWB_PASSIVE_DS_RANGE_NONE;
 
-    (void)wireless_telemetry_service_submit_passive_ds_observation(
-        tag_id, initiator_id, responder_id, responder_index, sequence,
-        slot_id, difference_mm, difference_mm, anchor_distance_mm, 0,
-        clock_ratio_ppb, reply_delay_us, range_source, 0U);
+    /*
+     * The N+2 runtime solves every observation locally on the receive-only
+     * tag.  Forwarding the same raw observations to the dashboard would add
+     * three telemetry packets per radio frame without contributing to the
+     * position calculation.  Keep the legacy stream for the two reference
+     * schedules, where it remains useful for offline comparison.
+     */
+    if (config->passive_ds_schedule !=
+        APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS) {
+        (void)wireless_telemetry_service_submit_passive_ds_observation(
+            tag_id, initiator_id, responder_id, responder_index, sequence,
+            solver_slot_id, difference_mm, difference_mm,
+            anchor_distance_mm, 0, clock_ratio_ppb, reply_delay_us,
+            range_source, 0U);
+    }
+    const uint16_t delay_ratio_q15 = (uint16_t)lround(
+        fmin(32767.0,
+             fmax(1.0, result->responder_delay_ratio * 32768.0)));
     (void)passive_ds_solver_service_submit_observation(
-        tag_id, initiator_id, responder_id, slot_id, difference_mm);
+        tag_id, initiator_id, responder_id, solver_slot_id, difference_mm,
+        delay_ratio_q15);
 }
 
 static void uwb_passive_ds_tag_handle_status(
@@ -7662,6 +7794,26 @@ static void uwb_passive_ds_tag_handle_status(
         uwb_passive_ds_tag_submit_double_sided(
             tag_id, initiator_id, responder_id, sequence, slot_id,
             result, anchor_ids, anchor_count);
+    }
+}
+
+static void uwb_passive_ds_multi_tag_record_status(
+    struct uwb_passive_ds_multi_tag_stats *stats,
+    enum uwb_passive_ds_tdoa_status status, uint8_t responder_id,
+    const uint8_t *anchor_ids, size_t anchor_count)
+{
+    if (stats == NULL || anchor_ids == NULL) {
+        return;
+    }
+    const size_t index = uwb_anchor_survey_id_index(
+        anchor_ids, anchor_count, responder_id);
+    if (index >= UWB_PASSIVE_DS_MULTI_MAX_ANCHORS) {
+        return;
+    }
+    if (status == UWB_PASSIVE_DS_TDOA_READY) {
+        stats->ready[index]++;
+    } else if (status == UWB_PASSIVE_DS_TDOA_REJECTED) {
+        stats->rejected[index]++;
     }
 }
 
@@ -7794,11 +7946,172 @@ static void uwb_passive_ds_tag_process_frame_double_sided(
         slot_id, &result, anchor_ids, anchor_count);
 }
 
+static void uwb_passive_ds_tag_process_frame_multipoint(
+    const struct uwb_distance_frame *frame,
+    struct uwb_passive_ds_tdoa_context *context, uint8_t tag_id,
+    const uint8_t *anchor_ids, size_t anchor_count,
+    struct uwb_passive_ds_multi_tag_stats *stats)
+{
+    if (frame == NULL || context == NULL) {
+        return;
+    }
+
+    struct uwb_passive_ds_tdoa_result result = {0};
+    uint8_t piggy_initiator = 0U;
+    uint8_t piggy_responder = 0U;
+    uint16_t piggy_sequence = 0U;
+    uint32_t piggy_frame_id = 0U;
+    uint32_t frame_id = 0U;
+
+    if (frame->type == UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_POLL) {
+        if (!uwb_passive_ds_multi_decode_poll(
+                frame->payload, frame->payload_len,
+                UWB_PASSIVE_DS_MULTI_APPLICATION_OFFSET, &frame_id)) {
+            return;
+        }
+        if (stats != NULL) {
+            stats->poll_rx++;
+        }
+        struct uwb_passive_ds_multi_plan plan = {0};
+        if (!uwb_passive_ds_multi_build_plan(
+                anchor_ids, anchor_count, frame_id, &plan) ||
+            frame->source_id != plan.initiator_id ||
+            frame->destination_id != UWB_DISTANCE_FRAME_BROADCAST_ID) {
+            return;
+        }
+
+        const enum uwb_passive_ds_tdoa_status piggy_status =
+            uwb_passive_ds_accept_piggyback(
+                frame, UWB_PASSIVE_DS_MULTI_POLL_PIGGYBACK_OFFSET,
+                anchor_ids, anchor_count, context, &result,
+                &piggy_initiator, &piggy_responder, &piggy_sequence,
+                &piggy_frame_id);
+        uwb_passive_ds_tag_handle_status(
+            piggy_status, tag_id, piggy_initiator, piggy_responder,
+            piggy_sequence, piggy_frame_id, &result, anchor_ids,
+            anchor_count);
+        uwb_passive_ds_multi_tag_record_status(
+            stats, piggy_status, piggy_responder, anchor_ids,
+            anchor_count);
+        uwb_passive_ds_multi_tag_record_piggyback_lag(
+            stats, frame_id, piggy_initiator, piggy_frame_id);
+
+        for (uint8_t index = 0U; index < plan.responder_count; ++index) {
+            memset(&result, 0, sizeof(result));
+            const enum uwb_passive_ds_tdoa_status status =
+                uwb_passive_ds_tdoa_record_poll(
+                    context, plan.initiator_id,
+                    plan.responder_ids[index], frame->sequence, frame_id,
+                    frame->rx_timestamp, &result);
+            uwb_passive_ds_tag_handle_status(
+                status, tag_id, plan.initiator_id,
+                plan.responder_ids[index], frame->sequence, frame_id,
+                &result, anchor_ids, anchor_count);
+        }
+        return;
+    }
+
+    if (frame->type == UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_RESP) {
+        uint8_t responder_index = 0U;
+        uint32_t reply_dtu = 0U;
+        if (!uwb_passive_ds_multi_decode_response(
+                frame->payload, frame->payload_len,
+                UWB_PASSIVE_DS_MULTI_APPLICATION_OFFSET, &frame_id,
+                &responder_index, &reply_dtu)) {
+            return;
+        }
+        struct uwb_passive_ds_multi_plan plan = {0};
+        if (!uwb_passive_ds_multi_build_plan(
+                anchor_ids, anchor_count, frame_id, &plan) ||
+            responder_index >= plan.responder_count ||
+            frame->source_id != plan.responder_ids[responder_index] ||
+            frame->destination_id != plan.initiator_id) {
+            return;
+        }
+        if (stats != NULL) {
+            stats->response_rx[responder_index]++;
+        }
+
+        const enum uwb_passive_ds_tdoa_status piggy_status =
+            uwb_passive_ds_accept_piggyback(
+                frame, UWB_PASSIVE_DS_MULTI_RESP_PIGGYBACK_OFFSET,
+                anchor_ids, anchor_count, context, &result,
+                &piggy_initiator, &piggy_responder, &piggy_sequence,
+                &piggy_frame_id);
+        uwb_passive_ds_tag_handle_status(
+            piggy_status, tag_id, piggy_initiator, piggy_responder,
+            piggy_sequence, piggy_frame_id, &result, anchor_ids,
+            anchor_count);
+        uwb_passive_ds_multi_tag_record_status(
+            stats, piggy_status, piggy_responder, anchor_ids,
+            anchor_count);
+        uwb_passive_ds_multi_tag_record_piggyback_lag(
+            stats, frame_id, piggy_initiator, piggy_frame_id);
+
+        memset(&result, 0, sizeof(result));
+        const enum uwb_passive_ds_tdoa_status status =
+            uwb_passive_ds_tdoa_record_response(
+                context, plan.initiator_id, frame->source_id,
+                frame->sequence, frame_id, frame->rx_timestamp, reply_dtu,
+                &result);
+        uwb_passive_ds_tag_handle_status(
+            status, tag_id, plan.initiator_id, frame->source_id,
+            frame->sequence, frame_id, &result, anchor_ids, anchor_count);
+        return;
+    }
+
+    if (frame->type != UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_FINAL) {
+        return;
+    }
+    struct uwb_passive_ds_multi_final final = {0};
+    if (!uwb_passive_ds_multi_decode_final(
+            frame->payload, frame->payload_len,
+            UWB_PASSIVE_DS_MULTI_APPLICATION_OFFSET, &final)) {
+        return;
+    }
+    struct uwb_passive_ds_multi_plan plan = {0};
+    if (!uwb_passive_ds_multi_build_plan(
+            anchor_ids, anchor_count, final.frame_id, &plan) ||
+        frame->source_id != plan.initiator_id ||
+        frame->destination_id != UWB_DISTANCE_FRAME_BROADCAST_ID) {
+        return;
+    }
+    if (stats != NULL) {
+        stats->final_rx++;
+        stats->final_entries += final.responder_count;
+    }
+    for (uint8_t index = 0U; index < final.responder_count; ++index) {
+        const uint8_t responder_id =
+            final.responders[index].responder_id;
+        if (uwb_passive_ds_multi_responder_index(
+                &plan, responder_id) < 0) {
+            continue;
+        }
+        memset(&result, 0, sizeof(result));
+        const enum uwb_passive_ds_tdoa_status status =
+            uwb_passive_ds_tdoa_record_final(
+                context, plan.initiator_id, responder_id,
+                frame->sequence, final.frame_id, frame->rx_timestamp,
+                final.initiator_poll_tx,
+                final.responders[index].initiator_response_rx,
+                final.initiator_final_tx, &result);
+        uwb_passive_ds_tag_handle_status(
+            status, tag_id, plan.initiator_id, responder_id,
+            frame->sequence, final.frame_id, &result, anchor_ids,
+            anchor_count);
+        uwb_passive_ds_multi_tag_record_status(
+            stats, status, responder_id, anchor_ids, anchor_count);
+    }
+}
+
 static void uwb_passive_ds_tag_loop(const uint8_t *anchor_ids,
                                     size_t anchor_count)
 {
     struct uwb_passive_ds_tdoa_context context;
     uwb_passive_ds_tdoa_init(&context);
+    struct uwb_passive_ds_multi_tag_stats multi_stats = {
+        .summary_started_us = esp_timer_get_time(),
+    };
     const esp_err_t solver_err = passive_ds_solver_service_start();
     if (solver_err != ESP_OK) {
         ESP_LOGW(TAG, "PASSIVE_DS local solver unavailable: %s",
@@ -7816,13 +8129,87 @@ static void uwb_passive_ds_tag_loop(const uint8_t *anchor_ids,
         const esp_err_t err = uwb_distance_receive_next(
             &frame, config->passive_ds_rx_slice_ms);
         if (err == ESP_OK) {
-            uwb_passive_ds_tag_process_frame_double_sided(
-                &frame, &context, s_source_id, anchor_ids, anchor_count);
+            if (config->passive_ds_schedule ==
+                APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS) {
+                uwb_passive_ds_tag_process_frame_multipoint(
+                    &frame, &context, s_source_id, anchor_ids,
+                    anchor_count, &multi_stats);
+            } else {
+                uwb_passive_ds_tag_process_frame_double_sided(
+                    &frame, &context, s_source_id, anchor_ids,
+                    anchor_count);
+            }
         } else if (err != ESP_ERR_TIMEOUT &&
                    !uwb_dw3000_runtime_switch_pending()) {
             ESP_LOGW(TAG, "PASSIVE_DS tag RX failed: %s",
                      esp_err_to_name(err));
             uwb_dw3000_delay_ms(2);
+        }
+        if (config->passive_ds_schedule ==
+                APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS &&
+            esp_timer_get_time() - multi_stats.summary_started_us >=
+                1000000LL) {
+            ESP_LOGI(
+                TAG,
+                "PASSIVE_DS tag N+2 rx poll=%lu resp=%lu/%lu/%lu final=%lu entries=%lu ready=%lu/%lu/%lu/%lu reject=%lu/%lu/%lu/%lu",
+                (unsigned long)multi_stats.poll_rx,
+                (unsigned long)multi_stats.response_rx[0],
+                (unsigned long)multi_stats.response_rx[1],
+                (unsigned long)multi_stats.response_rx[2],
+                (unsigned long)multi_stats.final_rx,
+                (unsigned long)multi_stats.final_entries,
+                (unsigned long)multi_stats.ready[0],
+                (unsigned long)multi_stats.ready[1],
+                (unsigned long)multi_stats.ready[2],
+                (unsigned long)multi_stats.ready[3],
+                (unsigned long)multi_stats.rejected[0],
+                (unsigned long)multi_stats.rejected[1],
+                (unsigned long)multi_stats.rejected[2],
+                (unsigned long)multi_stats.rejected[3]);
+            ESP_LOGI(
+                TAG,
+                "PASSIVE_DS tag N+2 assembly ready=%lu calc_reject=%lu missing_final=%lu missing_exchange=%lu evicted=%lu",
+                (unsigned long)(context.ready_count -
+                    multi_stats.previous_ready_count),
+                (unsigned long)(context.calculation_rejected_count -
+                    multi_stats.previous_calculation_rejected_count),
+                (unsigned long)(context.missing_final_context_count -
+                    multi_stats.previous_missing_final_context_count),
+                (unsigned long)(context.missing_exchange_context_count -
+                    multi_stats.previous_missing_exchange_context_count),
+                (unsigned long)(context.pending_replacement_count -
+                    multi_stats.previous_pending_replacement_count));
+            ESP_LOGI(
+                TAG,
+                "PASSIVE_DS tag N+2 piggyback lag frames 0/1/2/3/4/5/6/7+=%lu/%lu/%lu/%lu/%lu/%lu/%lu/%lu",
+                (unsigned long)multi_stats.piggyback_lag[0],
+                (unsigned long)multi_stats.piggyback_lag[1],
+                (unsigned long)multi_stats.piggyback_lag[2],
+                (unsigned long)multi_stats.piggyback_lag[3],
+                (unsigned long)multi_stats.piggyback_lag[4],
+                (unsigned long)multi_stats.piggyback_lag[5],
+                (unsigned long)multi_stats.piggyback_lag[6],
+                (unsigned long)multi_stats.piggyback_lag[7]);
+            const uint32_t ready_count = context.ready_count;
+            const uint32_t calculation_rejected_count =
+                context.calculation_rejected_count;
+            const uint32_t missing_final_context_count =
+                context.missing_final_context_count;
+            const uint32_t missing_exchange_context_count =
+                context.missing_exchange_context_count;
+            const uint32_t pending_replacement_count =
+                context.pending_replacement_count;
+            memset(&multi_stats, 0, sizeof(multi_stats));
+            multi_stats.previous_ready_count = ready_count;
+            multi_stats.previous_calculation_rejected_count =
+                calculation_rejected_count;
+            multi_stats.previous_missing_final_context_count =
+                missing_final_context_count;
+            multi_stats.previous_missing_exchange_context_count =
+                missing_exchange_context_count;
+            multi_stats.previous_pending_replacement_count =
+                pending_replacement_count;
+            multi_stats.summary_started_us = esp_timer_get_time();
         }
     }
 }
@@ -7842,12 +8229,12 @@ static esp_err_t uwb_passive_ds_schedule_timer_init(void)
     return esp_timer_create(&args, &s_passive_ds_schedule_timer);
 }
 
-static void uwb_passive_ds_arm_schedule_alarm(int64_t poll_due_host_us)
+static void uwb_passive_ds_arm_schedule_alarm(int64_t poll_due_host_us,
+                                               int64_t lead_us)
 {
     (void)esp_timer_stop(s_passive_ds_schedule_timer);
     s_passive_ds_schedule_alarm_fired = false;
-    const int64_t alarm_us = poll_due_host_us -
-                             UWB_PASSIVE_DS_POLL_TX_LEAD_US -
+    const int64_t alarm_us = poll_due_host_us - lead_us -
                              esp_timer_get_time();
     if (alarm_us > 0) {
         const esp_err_t err = esp_timer_start_once(
@@ -8120,7 +8507,8 @@ static void uwb_passive_ds_anchor_loop_deadline(
             armed_alarm_due_host_us !=
                 schedule.next_owned_poll_host_us) {
             uwb_passive_ds_arm_schedule_alarm(
-                schedule.next_owned_poll_host_us);
+                schedule.next_owned_poll_host_us,
+                UWB_PASSIVE_DS_POLL_TX_LEAD_US);
             armed_alarm_due_host_us =
                 schedule.next_owned_poll_host_us;
         } else if (!schedule.synced &&
@@ -8306,9 +8694,495 @@ static void uwb_passive_ds_anchor_loop_deadline(
     s_passive_ds_schedule_alarm_fired = false;
 }
 
+static void uwb_passive_ds_multi_schedule_from_poll(
+    struct uwb_passive_ds_multi_schedule *schedule,
+    uint32_t frame_id, uint64_t poll_radio_ts, int64_t poll_host_us,
+    const uint8_t *anchor_ids, size_t anchor_count,
+    const app_runtime_config_t *config)
+{
+    if (schedule == NULL || config == NULL) {
+        return;
+    }
+    const uint32_t next_frame_id = frame_id + 1U;
+    struct uwb_passive_ds_multi_plan next = {0};
+    const uint32_t period_us =
+        (config->passive_ds_slot_ms + config->passive_ds_round_gap_ms) *
+        1000U;
+    schedule->last_poll_host_us = poll_host_us;
+    schedule->synced =
+        uwb_passive_ds_multi_build_plan(
+            anchor_ids, anchor_count, next_frame_id, &next) &&
+        next.initiator_id == s_source_id;
+    if (!schedule->synced) {
+        return;
+    }
+    schedule->next_frame_id = next_frame_id;
+    schedule->next_poll_radio_ts = uwb_dw3000_add_timestamp_delta(
+        poll_radio_ts, uwb_dw3000_us_to_dtu(period_us));
+    schedule->next_poll_host_us = poll_host_us + (int64_t)period_us;
+}
+
+static esp_err_t uwb_passive_ds_multi_initiate_frame(
+    const uint8_t *anchor_ids, size_t anchor_count, uint32_t frame_id,
+    uint64_t scheduled_poll_ts, uint64_t *poll_tx_out,
+    int64_t *poll_host_out, uint8_t *responses_out)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    struct uwb_passive_ds_multi_plan plan = {0};
+    if (!uwb_passive_ds_multi_build_plan(
+            anchor_ids, anchor_count, frame_id, &plan) ||
+        plan.initiator_id != s_source_id) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const uint16_t sequence = (uint16_t)(frame_id & 0xffffU);
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_POLL,
+                             UWB_DISTANCE_FRAME_BROADCAST_ID, sequence,
+                             payload);
+    if (uwb_passive_ds_multi_encode_poll(
+            payload, sizeof(payload),
+            UWB_PASSIVE_DS_MULTI_APPLICATION_OFFSET, frame_id) == 0U) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    uwb_passive_ds_write_piggyback(
+        payload, UWB_PASSIVE_DS_MULTI_POLL_PIGGYBACK_OFFSET);
+
+    uint64_t poll_tx_ts = 0U;
+    const int64_t poll_stage_started_us = esp_timer_get_time();
+    esp_err_t err = ESP_OK;
+    if (scheduled_poll_ts != 0U) {
+        uint64_t programmed_poll_ts = 0U;
+        err = uwb_dw3000_send_payload_delayed_expect_rx(
+            payload, UWB_PASSIVE_DS_MULTI_POLL_LEN,
+            scheduled_poll_ts, config->passive_ds_auto_rx_delay_uus,
+            config->passive_ds_rx_timeout_ms, &programmed_poll_ts,
+            &poll_tx_ts);
+        const uint64_t expected_poll_ts =
+            uwb_dw3000_programmed_tx_timestamp(
+                uwb_dw3000_delayed_time_word(scheduled_poll_ts));
+        if (err == ESP_OK && programmed_poll_ts != expected_poll_ts) {
+            err = ESP_ERR_INVALID_STATE;
+        }
+    } else {
+        err = uwb_dw3000_send_payload_expect_rx(
+            payload, UWB_PASSIVE_DS_MULTI_POLL_LEN,
+            config->passive_ds_auto_rx_delay_uus,
+            config->passive_ds_rx_timeout_ms, &poll_tx_ts);
+    }
+    uwb_passive_ds_record_stage(
+        &s_passive_ds_pipeline_stats.poll_tx, poll_stage_started_us,
+        err == ESP_OK);
+    const int64_t poll_host_us = esp_timer_get_time();
+    if (poll_tx_out != NULL) {
+        *poll_tx_out = poll_tx_ts;
+    }
+    if (poll_host_out != NULL) {
+        *poll_host_out = poll_host_us;
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    const uint32_t final_from_poll_us =
+        uwb_passive_ds_multi_final_delay_from_poll_us(
+            config->passive_ds_resp_delay_us, plan.responder_count,
+            config->passive_ds_final_delay_us);
+    const uint64_t final_due = uwb_dw3000_add_timestamp_delta(
+        poll_tx_ts, uwb_dw3000_us_to_dtu(final_from_poll_us));
+    const uint64_t expected_final_tx =
+        uwb_dw3000_programmed_tx_timestamp(
+            uwb_dw3000_delayed_time_word(final_due));
+    const uint32_t final_program_guard_us =
+        config->passive_ds_final_delay_us / 2U > 500U
+            ? config->passive_ds_final_delay_us / 2U
+            : 500U;
+    const int64_t collect_deadline_us =
+        poll_host_us + (int64_t)final_from_poll_us -
+        (int64_t)final_program_guard_us;
+    uint64_t response_rx[UWB_PASSIVE_DS_MULTI_MAX_RESPONDERS] = {0};
+    bool received[UWB_PASSIVE_DS_MULTI_MAX_RESPONDERS] = {false};
+    uint8_t response_count = 0U;
+
+    while (response_count < plan.responder_count &&
+           esp_timer_get_time() < collect_deadline_us) {
+        const int64_t remaining_us =
+            collect_deadline_us - esp_timer_get_time();
+        const uint32_t timeout_ms = remaining_us > 0
+            ? (uint32_t)((remaining_us + 999LL) / 1000LL)
+            : 1U;
+        struct uwb_distance_frame response = {0};
+        const esp_err_t rx_err = uwb_distance_receive_next(
+            &response, timeout_ms > config->passive_ds_rx_timeout_ms
+                           ? config->passive_ds_rx_timeout_ms
+                           : timeout_ms);
+        if (rx_err != ESP_OK) {
+            if (rx_err == ESP_ERR_TIMEOUT ||
+                rx_err == ESP_ERR_NOT_FINISHED) {
+                continue;
+            }
+            break;
+        }
+        if (response.type !=
+                UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_RESP ||
+            response.sequence != sequence ||
+            response.destination_id != s_source_id) {
+            continue;
+        }
+        uint32_t response_frame_id = 0U;
+        uint8_t response_index = 0U;
+        uint32_t reply_dtu = 0U;
+        if (!uwb_passive_ds_multi_decode_response(
+                response.payload, response.payload_len,
+                UWB_PASSIVE_DS_MULTI_APPLICATION_OFFSET,
+                &response_frame_id, &response_index, &reply_dtu) ||
+            response_frame_id != frame_id ||
+            response_index >= plan.responder_count ||
+            response.source_id != plan.responder_ids[response_index] ||
+            received[response_index]) {
+            continue;
+        }
+        received[response_index] = true;
+        response_rx[response_index] = response.rx_timestamp;
+        response_count++;
+    }
+
+    struct uwb_passive_ds_multi_final final = {
+        .frame_id = frame_id,
+        .initiator_poll_tx = poll_tx_ts,
+        .initiator_final_tx = expected_final_tx,
+    };
+    for (uint8_t index = 0U; index < plan.responder_count; ++index) {
+        if (!received[index]) {
+            continue;
+        }
+        const uint8_t output = final.responder_count++;
+        final.responders[output].responder_id = plan.responder_ids[index];
+        final.responders[output].initiator_response_rx =
+            response_rx[index];
+    }
+    if (responses_out != NULL) {
+        *responses_out = response_count;
+    }
+    if (final.responder_count == 0U) {
+        s_passive_ds_pipeline_stats.response_timeout_count++;
+    }
+
+    memset(payload, 0, sizeof(payload));
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_FINAL,
+                             UWB_DISTANCE_FRAME_BROADCAST_ID, sequence,
+                             payload);
+    const size_t final_length = uwb_passive_ds_multi_encode_final(
+        payload, sizeof(payload), UWB_PASSIVE_DS_MULTI_APPLICATION_OFFSET,
+        &final);
+    if (final_length == 0U) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    uint64_t programmed_final_ts = 0U;
+    uint64_t actual_final_ts = 0U;
+    const int64_t final_started_us = esp_timer_get_time();
+    err = uwb_dw3000_send_payload_delayed(
+        payload, final_length, final_due, &programmed_final_ts,
+        &actual_final_ts);
+    const bool final_ok =
+        err == ESP_OK && programmed_final_ts == expected_final_tx;
+    uwb_passive_ds_record_stage(
+        &s_passive_ds_pipeline_stats.final_tx, final_started_us, final_ok);
+    (void)actual_final_ts;
+    return final_ok ? ESP_OK
+                    : (err == ESP_OK ? ESP_ERR_INVALID_STATE : err);
+}
+
+static esp_err_t uwb_passive_ds_multi_respond_to_poll(
+    const struct uwb_distance_frame *poll,
+    const struct uwb_passive_ds_multi_plan *plan,
+    uint8_t responder_index)
+{
+    if (poll == NULL || plan == NULL ||
+        responder_index >= plan->responder_count ||
+        plan->responder_ids[responder_index] != s_source_id) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint32_t response_delay_us =
+        uwb_passive_ds_multi_response_delay_us(
+            config->passive_ds_resp_delay_us, responder_index);
+    const uint32_t final_from_poll_us =
+        uwb_passive_ds_multi_final_delay_from_poll_us(
+            config->passive_ds_resp_delay_us, plan->responder_count,
+            config->passive_ds_final_delay_us);
+    const uint64_t response_due = uwb_dw3000_add_timestamp_delta(
+        poll->rx_timestamp, uwb_dw3000_us_to_dtu(response_delay_us));
+    const uint64_t expected_response_tx =
+        uwb_dw3000_programmed_tx_timestamp(
+            uwb_dw3000_delayed_time_word(response_due));
+    const uint64_t reply_dtu = uwb_distance_delta_ts(
+        expected_response_tx, poll->rx_timestamp);
+    if (reply_dtu == 0U || reply_dtu > UINT32_MAX) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
+    uwb_distance_build_frame(UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_RESP,
+                             plan->initiator_id, poll->sequence, payload);
+    if (uwb_passive_ds_multi_encode_response(
+            payload, sizeof(payload),
+            UWB_PASSIVE_DS_MULTI_APPLICATION_OFFSET, plan->frame_id,
+            responder_index, (uint32_t)reply_dtu) == 0U) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    uwb_passive_ds_write_piggyback(
+        payload, UWB_PASSIVE_DS_MULTI_RESP_PIGGYBACK_OFFSET);
+
+    const uint32_t final_wait_us =
+        final_from_poll_us - response_delay_us;
+    const uint32_t final_wait_ms =
+        (final_wait_us + 1999U) / 1000U;
+    uint64_t programmed_response_tx = 0U;
+    uint64_t actual_response_tx = 0U;
+    const int64_t response_started_us = esp_timer_get_time();
+    esp_err_t err = uwb_dw3000_send_payload_delayed_expect_rx(
+        payload, UWB_PASSIVE_DS_MULTI_RESP_LEN, response_due,
+        config->passive_ds_auto_rx_delay_uus, final_wait_ms,
+        &programmed_response_tx, &actual_response_tx);
+    const bool response_ok =
+        err == ESP_OK && programmed_response_tx == expected_response_tx;
+    uwb_passive_ds_record_stage(
+        &s_passive_ds_pipeline_stats.response_tx, response_started_us,
+        response_ok);
+    if (!response_ok) {
+        return err == ESP_OK ? ESP_ERR_INVALID_STATE : err;
+    }
+
+    struct uwb_distance_frame final_frame = {0};
+    err = uwb_distance_receive_matching(
+        UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_FINAL,
+        plan->initiator_id, true, poll->sequence, &final_frame,
+        final_wait_ms);
+    if (err != ESP_OK) {
+        s_passive_ds_pipeline_stats.final_timeout_count++;
+        return err;
+    }
+    struct uwb_passive_ds_multi_final final = {0};
+    if (!uwb_passive_ds_multi_decode_final(
+            final_frame.payload, final_frame.payload_len,
+            UWB_PASSIVE_DS_MULTI_APPLICATION_OFFSET, &final) ||
+        final.frame_id != plan->frame_id) {
+        s_passive_ds_pipeline_stats.invalid_frame_count++;
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    uint64_t initiator_response_rx = 0U;
+    for (uint8_t index = 0U; index < final.responder_count; ++index) {
+        if (final.responders[index].responder_id == s_source_id) {
+            initiator_response_rx =
+                final.responders[index].initiator_response_rx;
+            break;
+        }
+    }
+    if (initiator_response_rx == 0U) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    struct uwb_distance_measurement measurement = {0};
+    uwb_distance_fill_measurement_from_timestamps(
+        plan->initiator_id, s_source_id, poll->sequence,
+        final.initiator_poll_tx, poll->rx_timestamp,
+        programmed_response_tx, initiator_response_rx,
+        final.initiator_final_tx, final_frame.rx_timestamp,
+        false, 0, &measurement);
+    measurement.poll_rx_diagnostics = poll->diagnostics;
+    measurement.final_rx_diagnostics = final_frame.diagnostics;
+    uwb_passive_ds_remember_responder_exchange(
+        plan->initiator_id, poll->sequence, plan->frame_id,
+        poll->rx_timestamp, final_frame.rx_timestamp, &measurement);
+    (void)uwb_flex_tdoa_store_anchor_distance(
+        s_source_id, plan->initiator_id, poll->sequence, plan->frame_id,
+        uwb_distance_meters_to_mm(measurement.distance_m),
+        uwb_distance_meters_to_mm(measurement.raw_distance_m));
+    (void)wireless_telemetry_service_submit_passive_ds_anchor_range(
+        measurement.initiator_id, measurement.responder_id,
+        measurement.sequence, plan->frame_id,
+        uwb_distance_meters_to_mm(measurement.distance_m),
+        uwb_distance_meters_to_mm(measurement.raw_distance_m));
+    (void)actual_response_tx;
+    return ESP_OK;
+}
+
+static void uwb_passive_ds_anchor_loop_multipoint(
+    const uint8_t *anchor_ids, size_t anchor_count)
+{
+    if (uwb_passive_ds_schedule_timer_init() != ESP_OK) {
+        s_status = UWB_DW3000_STATUS_FAILED;
+        return;
+    }
+    struct uwb_passive_ds_multi_schedule schedule = {
+        .last_poll_host_us =
+            esp_timer_get_time() -
+            (s_runtime_hot_entry
+                 ? UWB_PASSIVE_DS_BOOTSTRAP_LISTEN_US -
+                       UWB_HOT_SWITCH_BOOTSTRAP_GUARD_US
+                 : 0),
+    };
+    uint32_t good_frames = 0U;
+    uint32_t partial_frames = 0U;
+    uint32_t failed_frames = 0U;
+    int64_t summary_started_us = esp_timer_get_time();
+    int64_t armed_alarm_due_host_us = 0;
+    s_status = UWB_DW3000_STATUS_READY;
+
+    while (!uwb_dw3000_runtime_switch_pending()) {
+        const app_runtime_config_t *config = app_runtime_config_get();
+        const int64_t now_us = esp_timer_get_time();
+        const int64_t frame_period_us =
+            (int64_t)(config->passive_ds_slot_ms +
+                      config->passive_ds_round_gap_ms) *
+            1000LL;
+        const int64_t recovery_listen_us =
+            frame_period_us * UWB_PASSIVE_DS_MULTI_RECOVERY_FRAMES >
+                    UWB_PASSIVE_DS_MULTI_RECOVERY_MIN_US
+                ? frame_period_us *
+                      UWB_PASSIVE_DS_MULTI_RECOVERY_FRAMES
+                : UWB_PASSIVE_DS_MULTI_RECOVERY_MIN_US;
+        bool bootstrap = false;
+        bool initiate = schedule.synced &&
+            now_us >= schedule.next_poll_host_us -
+                          UWB_PASSIVE_DS_MULTI_POLL_TX_LEAD_US;
+        uint32_t frame_id = schedule.next_frame_id;
+        if (!schedule.synced && s_source_id == anchor_ids[0] &&
+            now_us - schedule.last_poll_host_us >=
+                recovery_listen_us) {
+            initiate = true;
+            bootstrap = true;
+            frame_id = 0U;
+            schedule.bootstrap_count++;
+        }
+
+        if (initiate) {
+            if (armed_alarm_due_host_us != 0) {
+                (void)esp_timer_stop(s_passive_ds_schedule_timer);
+                armed_alarm_due_host_us = 0;
+                s_passive_ds_schedule_alarm_fired = false;
+            }
+            const int64_t lateness_us = bootstrap
+                ? 0
+                : now_us - schedule.next_poll_host_us;
+            bool immediate_poll = bootstrap;
+            if (!bootstrap && lateness_us > UWB_PASSIVE_DS_POLL_LATE_US) {
+                /* Actual POLL timestamps are carried in the DS exchange, so
+                 * an immediate recovery POLL preserves ranging accuracy. */
+                schedule.late_count++;
+                immediate_poll = true;
+            }
+            uint64_t poll_tx = 0U;
+            int64_t poll_host = now_us;
+            uint8_t responses = 0U;
+            const esp_err_t err = uwb_passive_ds_multi_initiate_frame(
+                anchor_ids, anchor_count, frame_id,
+                immediate_poll ? 0U : schedule.next_poll_radio_ts,
+                &poll_tx, &poll_host, &responses);
+            schedule.synced = false;
+            schedule.last_poll_host_us = poll_host;
+            if (err == ESP_OK) {
+                if (responses == anchor_count - 1U) {
+                    good_frames++;
+                } else {
+                    partial_frames++;
+                }
+            } else {
+                failed_frames++;
+            }
+            continue;
+        }
+
+        if (schedule.synced &&
+            armed_alarm_due_host_us != schedule.next_poll_host_us) {
+            uwb_passive_ds_arm_schedule_alarm(
+                schedule.next_poll_host_us,
+                UWB_PASSIVE_DS_MULTI_POLL_TX_LEAD_US);
+            armed_alarm_due_host_us = schedule.next_poll_host_us;
+        } else if (!schedule.synced && armed_alarm_due_host_us != 0) {
+            (void)esp_timer_stop(s_passive_ds_schedule_timer);
+            s_passive_ds_schedule_alarm_fired = false;
+            armed_alarm_due_host_us = 0;
+        }
+
+        struct uwb_distance_frame poll = {0};
+        const esp_err_t rx_err = uwb_distance_receive_next(
+            &poll, config->passive_ds_rx_slice_ms);
+        if (s_passive_ds_schedule_alarm_fired) {
+            s_passive_ds_schedule_alarm_fired = false;
+            armed_alarm_due_host_us = 0;
+        }
+        if (rx_err != ESP_OK) {
+            if (rx_err != ESP_ERR_TIMEOUT &&
+                rx_err != ESP_ERR_NOT_FINISHED) {
+                failed_frames++;
+            }
+            continue;
+        }
+        if (poll.type != UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_POLL ||
+            poll.destination_id != UWB_DISTANCE_FRAME_BROADCAST_ID) {
+            continue;
+        }
+        uint32_t received_frame_id = 0U;
+        struct uwb_passive_ds_multi_plan plan = {0};
+        if (!uwb_passive_ds_multi_decode_poll(
+                poll.payload, poll.payload_len,
+                UWB_PASSIVE_DS_MULTI_APPLICATION_OFFSET,
+                &received_frame_id) ||
+            !uwb_passive_ds_multi_build_plan(
+                anchor_ids, anchor_count, received_frame_id, &plan) ||
+            poll.source_id != plan.initiator_id ||
+            poll.sequence != (uint16_t)(received_frame_id & 0xffffU)) {
+            s_passive_ds_pipeline_stats.invalid_frame_count++;
+            continue;
+        }
+
+        uwb_passive_ds_multi_schedule_from_poll(
+            &schedule, received_frame_id, poll.rx_timestamp,
+            poll.rx_host_time_us, anchor_ids, anchor_count, config);
+        const int responder_index =
+            uwb_passive_ds_multi_responder_index(&plan, s_source_id);
+        if (responder_index >= 0) {
+            const esp_err_t response_err =
+                uwb_passive_ds_multi_respond_to_poll(
+                    &poll, &plan, (uint8_t)responder_index);
+            if (response_err != ESP_OK) {
+                failed_frames++;
+            }
+        }
+
+        const int64_t summary_now_us = esp_timer_get_time();
+        if (summary_now_us - summary_started_us >= 1000000LL) {
+            ESP_LOGI(TAG,
+                     "PASSIVE_DS multipoint N+2 full=%lu partial=%lu "
+                     "fail=%lu late_recover=%lu frame_ms=%lu packets=5",
+                     (unsigned long)good_frames,
+                     (unsigned long)partial_frames,
+                     (unsigned long)failed_frames,
+                     (unsigned long)schedule.late_count,
+                     (unsigned long)(config->passive_ds_slot_ms +
+                                     config->passive_ds_round_gap_ms));
+            good_frames = 0U;
+            partial_frames = 0U;
+            failed_frames = 0U;
+            schedule.late_count = 0U;
+            summary_started_us = summary_now_us;
+        }
+    }
+    (void)esp_timer_stop(s_passive_ds_schedule_timer);
+    s_passive_ds_schedule_alarm_fired = false;
+}
+
 static void uwb_passive_ds_anchor_loop(const uint8_t *anchor_ids,
                                        size_t anchor_count)
 {
+    if (app_runtime_config_get()->passive_ds_schedule ==
+        APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS) {
+        uwb_passive_ds_anchor_loop_multipoint(anchor_ids, anchor_count);
+        return;
+    }
     if (app_runtime_config_get()->passive_ds_pipeline_mode ==
         APP_RUNTIME_PASSIVE_DS_PIPELINE_DEADLINE) {
         uwb_passive_ds_anchor_loop_deadline(anchor_ids, anchor_count);
@@ -8339,19 +9213,26 @@ static void uwb_dw3000_passive_ds_twr_loop(void)
         return;
     }
 
+    const bool multipoint =
+        config->passive_ds_schedule ==
+        APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS;
     const uint32_t slots_per_frame = (uint32_t)anchor_count - 1U;
-    const uint32_t frame_ms =
-        slots_per_frame * config->passive_ds_slot_ms +
-        config->passive_ds_round_gap_ms;
+    const uint32_t frame_ms = multipoint
+        ? config->passive_ds_slot_ms + config->passive_ds_round_gap_ms
+        : slots_per_frame * config->passive_ds_slot_ms +
+              config->passive_ds_round_gap_ms;
+    const char *schedule_name = multipoint
+        ? "multipoint_full_ds_n_plus_2"
+        : (config->passive_ds_schedule ==
+                   APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING
+               ? "robust_rotating"
+               : "fast_star");
     ESP_LOGI(TAG,
              "PASSIVE_DS runtime source=%u schedule=%s anchors=%u "
              "frame=%lu ms slot=%lu ms pipeline=%s solve=%s; "
              "non-anchors are receive-only tags",
              (unsigned)s_source_id,
-             config->passive_ds_schedule ==
-                     APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING
-                 ? "robust_rotating"
-                 : "fast_star",
+             schedule_name,
              (unsigned)anchor_count, (unsigned long)frame_ms,
              (unsigned long)config->passive_ds_slot_ms,
              config->passive_ds_pipeline_mode ==
@@ -9154,8 +10035,8 @@ static esp_err_t uwb_dw3000_reinitialize_runtime(
         err = uwb_dw3000_enable_operational_spi(s_device_id);
     }
     if (err == ESP_OK &&
-        runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
-        err = uwb_dw3000_configure_flex_rx_double_buffer();
+        uwb_dw3000_runtime_uses_high_rate_rx_buffer(runtime_mode)) {
+        err = uwb_dw3000_configure_high_rate_rx_double_buffer();
     }
     if (err != ESP_OK) {
         s_status = UWB_DW3000_STATUS_FAILED;
@@ -9285,8 +10166,8 @@ static void uwb_dw3000_task(void *arg)
         return;
     }
 
-    if (s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
-        err = uwb_dw3000_configure_flex_rx_double_buffer();
+    if (uwb_dw3000_runtime_uses_high_rate_rx_buffer(s_runtime_mode)) {
+        err = uwb_dw3000_configure_high_rate_rx_double_buffer();
         if (err != ESP_OK) {
             s_status = UWB_DW3000_STATUS_FAILED;
             ESP_LOGE(TAG, "DW3000 FlexTDOA RX buffer setup failed: %s",
@@ -9343,7 +10224,7 @@ static esp_err_t uwb_dw3000_start_runtime(
     s_requested_runtime_mode = runtime_mode;
 
     const BaseType_t created = xTaskCreatePinnedToCore(
-        uwb_dw3000_task, "uwb_dw3000", UWB_DW3000_TASK_STACK_WORDS, NULL,
+        uwb_dw3000_task, "uwb_dw3000", UWB_DW3000_TASK_STACK_BYTES, NULL,
         UWB_DW3000_TASK_PRIORITY, NULL, UWB_DW3000_TASK_CORE);
     if (created != pdPASS) {
         s_status = UWB_DW3000_STATUS_FAILED;

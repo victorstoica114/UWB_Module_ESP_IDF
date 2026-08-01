@@ -564,16 +564,24 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         config->ranging_auto_rx_delay_uus == 0 ||
         (config->passive_ds_schedule != APP_RUNTIME_PASSIVE_DS_FAST_STAR &&
          config->passive_ds_schedule !=
-             APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING) ||
+             APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING &&
+         config->passive_ds_schedule !=
+             APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS) ||
         !ms_valid(config->passive_ds_slot_ms) ||
         !ms_valid(config->passive_ds_round_gap_ms) ||
         !ms_valid(config->passive_ds_rx_slice_ms) ||
         !ms_valid(config->passive_ds_rx_timeout_ms) ||
         !us_valid(config->passive_ds_resp_delay_us) ||
         !us_valid(config->passive_ds_final_delay_us) ||
-        config->passive_ds_resp_delay_us +
-                config->passive_ds_final_delay_us >=
-            config->passive_ds_slot_ms * 1000U ||
+        ((config->passive_ds_schedule ==
+              APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS
+              ? config->passive_ds_resp_delay_us +
+                    APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US *
+                        (config->anchor_count - 2U) +
+                    config->passive_ds_final_delay_us
+              : config->passive_ds_resp_delay_us +
+                    config->passive_ds_final_delay_us) >=
+         config->passive_ds_slot_ms * 1000U) ||
         config->passive_ds_auto_rx_delay_uus == 0 ||
         (config->passive_ds_pipeline_mode !=
              APP_RUNTIME_PASSIVE_DS_PIPELINE_LEGACY &&
