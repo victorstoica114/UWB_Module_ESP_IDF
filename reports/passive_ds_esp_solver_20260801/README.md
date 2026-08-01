@@ -42,8 +42,31 @@ star and is not a new statistically independent frame.
 - radio star: 6 ms; independent position window: 12 ms
 
 This is a low-latency raw measurement mode, not interpolation or filtering.
-The next experiment increases each solve to three radio stars to target the
-precision of Native DS-TWR while retaining a high-rate overlapping stream.
+
+## Native-precision high-rate checkpoint
+
+The `nplus2_triple_star_dual_overlap_queue512_prio5_60s` capture increases
+each solve to three consecutive radio stars (nine raw listener observations).
+One non-overlapping precision window plus two explicitly labelled overlapping
+windows in every six-star cycle preserve a high-rate display stream without
+interpolation or temporal filtering.
+
+- 5,850 raw positions in 60.03 s (97.45 results/s)
+- 2,918 independent positions (48.61 independent frames/s)
+- 2,932 overlapping positions (48.84 results/s)
+- X/Y standard deviation, all results: 1.12/1.15 cm
+- precision CEP95 about the measured mean: 2.78 cm
+- P95 error from the surveyed centre: 4.09 cm
+- RMSE from the surveyed centre: 2.51 cm
+- position rejects: 0; solver queue drops: 0
+- radio star: 6 ms; nominal measurement window: 18 ms
+
+For context, the calibrated 60 ms Native DS-TWR reference recorded a 2.76 cm
+CEP95 and 4.14 cm surveyed-centre P95 at 68.46 rolling updates/s. Within this
+static 3 m-square experiment, the receive-only ESP32 solver therefore matches
+the Native DS-TWR precision band while delivering 97.45 raw results/s. The
+overlapping results reuse complete radio stars and must not be interpreted as
+97.45 statistically independent measurements per second.
 
 The reference geometry is a surveyed 3 m square with the receive-only tag at
 its centre (1.5 m, 1.5 m). The firmware reports `position_filter=none` and

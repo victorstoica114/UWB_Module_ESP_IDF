@@ -8560,8 +8560,8 @@ function updatePositionLiveMetrics(model) {
         ? item.position_filter === "none"
           ? " · raw ESP32 solve" +
             (item.independent_frame
-              ? " · independent two-star window"
-              : " · overlapping two-star window")
+              ? " · independent three-star window"
+              : " · overlapping three-star window")
           : ` · ${item.filter_correction ? "EKF correction" : "EKF predict-only"}` +
             (item.complete_superframe
               ? " · complete superframe"
@@ -12587,9 +12587,9 @@ function renderPassiveDsMultipointTiming(root, config) {
   const guardMs = Math.max(0, config.slotMs - radioMs);
   const radioStarMs = config.slotMs + config.gapMs;
   const radioStarHz = radioStarMs > 0 ? 1000 / radioStarMs : NaN;
-  const independentWindowMs = radioStarMs * 2;
-  const independentHz = radioStarHz / 2;
-  const supplementalHz = radioStarHz / 8;
+  const independentWindowMs = radioStarMs * 3;
+  const independentHz = radioStarHz / 3;
+  const supplementalHz = 2 * radioStarHz / 6;
   const nominalRawSolveHz = independentHz + supplementalHz;
   const segments = [
     ...Array.from({length: responderCount}, (_, index) => ({
@@ -12659,9 +12659,9 @@ function renderPassiveDsMultipointTiming(root, config) {
       ${config.live ? "Live configuration" : "Configured fallback"} ·
       first RESP ${fmtFixed(firstResponseDelayMs, 3)} ms · response spacing ${fmtFixed(responseSpacingMs, 3)} ms ·
       FINAL guard ${fmtFixed(finalGuardMs, 3)} ms · guard time ${fmtFixed(guardMs, 3)} ms.
-      * Independent results use non-overlapping pairs of stars. One extra raw
-      overlapping pair per eight stars raises display rate without adding
-      radio traffic; overlapping results reuse measurements and are reported separately.
+      * Independent results use non-overlapping groups of three stars. Two raw
+      overlapping three-star windows per six-star cycle raise the update rate
+      without adding radio traffic; reused measurements are reported separately.
       ${overrun ? " Warning: response train and FINAL guard exceed the exchange budget." : ""}
     </div>`;
 }

@@ -25,15 +25,17 @@ enum {
     PASSIVE_DS_SOLVER_FRAME_MAX_AGE_MS = 250,
     PASSIVE_DS_SOLVER_IDLE_WINDOW_MS = 500,
     PASSIVE_DS_SOLVER_GEOMETRY_SAMPLES_PER_PAIR = 8,
-    PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION = 2,
+    PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION = 3,
     /*
-     * Preserve the non-overlapping two-star precision stream, then publish
-     * one additional raw two-star window at each eight-star boundary.  The
-     * supplemental result reuses two radio stars and is therefore marked as
-     * non-independent; it is neither averaged nor temporally filtered.
+     * Preserve a non-overlapping three-star precision stream, then publish
+     * two additional raw three-star windows in each six-star cycle.  The
+     * supplemental results reuse complete radio stars and are therefore
+     * marked as non-independent; they are neither averaged nor temporally
+     * filtered.
      */
-    PASSIVE_DS_SOLVER_SUPPLEMENTAL_PERIOD_STARS = 8,
-    PASSIVE_DS_SOLVER_SUPPLEMENTAL_FIRST_PHASE = 3,
+    PASSIVE_DS_SOLVER_SUPPLEMENTAL_PERIOD_STARS = 6,
+    PASSIVE_DS_SOLVER_SUPPLEMENTAL_A_FIRST_PHASE = 1,
+    PASSIVE_DS_SOLVER_SUPPLEMENTAL_B_FIRST_PHASE = 2,
     PASSIVE_DS_SOLVER_MAX_OBSERVATIONS =
         PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION *
         (APP_RUNTIME_CONFIG_MAX_ANCHORS - 1),
@@ -51,8 +53,10 @@ enum {
 static const double PASSIVE_DS_SOLVER_TIMING_COMMON_CORRELATION = 0.25;
 
 /* Keep supplemental frame keys disjoint from the baseline frame counter. */
-static const uint32_t PASSIVE_DS_SOLVER_SUPPLEMENTAL_FRAME_NAMESPACE =
+static const uint32_t PASSIVE_DS_SOLVER_SUPPLEMENTAL_A_FRAME_NAMESPACE =
     UINT32_C(0x80000000);
+static const uint32_t PASSIVE_DS_SOLVER_SUPPLEMENTAL_B_FRAME_NAMESPACE =
+    UINT32_C(0xc0000000);
 
 enum passive_ds_solver_item_type {
     PASSIVE_DS_SOLVER_ITEM_RANGE,
@@ -814,38 +818,58 @@ static void handle_observation(
     const uint32_t radio_slot_index = item->slot_id % slots_per_star;
     if (multipoint) {
         /*
-         * Keep the precision baseline deliberately simple: two consecutive
+         * Keep the precision baseline deliberately simple: three consecutive
          * radio stars form one position window and every star is consumed
-         * exactly once.  At the validated 6 ms radio cadence this yields an
-         * 83.3 Hz raw, unfiltered position stream without duplicate solver
-         * work or host-side frame synchronization.
+         * exactly once.  At the validated 6 ms radio cadence this yields a
+         * 55.6 Hz independent raw stream.  Nine unfiltered observations
+         * reduce measurement noise before the position solve without any
+         * temporal position filter or host-side frame synchronization.
          */
         (void)stage_observation(
-            state, item, now, radio_frame_id / 2U,
-            radio_frame_id % 2U, radio_slot_index, true);
+            state, item, now,
+            radio_frame_id /
+                PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION,
+            radio_frame_id %
+                PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION,
+            radio_slot_index, true);
 
         /*
-         * A sparse overlapping window lifts the displayed raw update rate
-         * above FlexTDOA's measured ~85 Hz without changing the validated
-         * 6 ms radio exchange or contaminating the independent trail.  One
-         * window is formed from phases 3 and 4 of every eight radio stars.
-         * Both stars are complete native measurements; the only reuse is
-         * across adjacent solver windows.
+         * Two overlapping three-star windows target Native DS-TWR precision
+         * while retaining a theoretical 111.1 raw solves/s.  Window A uses
+         * phases 1..3 and window B phases 2..4 of every six-star cycle.  All
+         * inputs remain complete native measurements; reuse occurs only
+         * between explicitly labelled solver windows.
          */
         const uint32_t supplemental_phase =
             radio_frame_id % PASSIVE_DS_SOLVER_SUPPLEMENTAL_PERIOD_STARS;
-        if (supplemental_phase ==
-                PASSIVE_DS_SOLVER_SUPPLEMENTAL_FIRST_PHASE ||
-            supplemental_phase ==
-                PASSIVE_DS_SOLVER_SUPPLEMENTAL_FIRST_PHASE + 1U) {
+        if (supplemental_phase >=
+                PASSIVE_DS_SOLVER_SUPPLEMENTAL_A_FIRST_PHASE &&
+            supplemental_phase <
+                PASSIVE_DS_SOLVER_SUPPLEMENTAL_A_FIRST_PHASE +
+                    PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION) {
             const uint32_t supplemental_frame_id =
-                PASSIVE_DS_SOLVER_SUPPLEMENTAL_FRAME_NAMESPACE |
+                PASSIVE_DS_SOLVER_SUPPLEMENTAL_A_FRAME_NAMESPACE |
                 (radio_frame_id /
                  PASSIVE_DS_SOLVER_SUPPLEMENTAL_PERIOD_STARS);
             (void)stage_observation(
                 state, item, now, supplemental_frame_id,
                 supplemental_phase -
-                    PASSIVE_DS_SOLVER_SUPPLEMENTAL_FIRST_PHASE,
+                    PASSIVE_DS_SOLVER_SUPPLEMENTAL_A_FIRST_PHASE,
+                radio_slot_index, false);
+        }
+        if (supplemental_phase >=
+                PASSIVE_DS_SOLVER_SUPPLEMENTAL_B_FIRST_PHASE &&
+            supplemental_phase <
+                PASSIVE_DS_SOLVER_SUPPLEMENTAL_B_FIRST_PHASE +
+                    PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION) {
+            const uint32_t supplemental_frame_id =
+                PASSIVE_DS_SOLVER_SUPPLEMENTAL_B_FRAME_NAMESPACE |
+                (radio_frame_id /
+                 PASSIVE_DS_SOLVER_SUPPLEMENTAL_PERIOD_STARS);
+            (void)stage_observation(
+                state, item, now, supplemental_frame_id,
+                supplemental_phase -
+                    PASSIVE_DS_SOLVER_SUPPLEMENTAL_B_FIRST_PHASE,
                 radio_slot_index, false);
         }
     } else {
