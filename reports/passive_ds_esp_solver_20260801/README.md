@@ -89,6 +89,24 @@ is about 20% higher and its precision CEP95 is about 2.1 times smaller than
 the current FlexTDOA implementation. This is a controlled static result, not
 yet evidence for the same advantage during motion or under NLOS conditions.
 
+## 180-second stability validation
+
+The `nplus2_triple_star_dual_overlap_stability_180s` capture validates the
+same Passive DS-TWR configuration for the maximum permitted test duration.
+
+- 17,501 positions in 180.02 s (97.22 positions/s)
+- per-minute rates: 96.22, 97.52 and 97.93 positions/s
+- per-minute precision CEP95: 2.87, 2.85 and 2.85 cm
+- all-capture X/Y standard deviation: 1.07/1.24 cm
+- all-capture precision CEP95: 2.86 cm
+- 0 position rejects and 0 solver queue drops
+- 39 recovered DW3000 RX errors in 180 s
+
+The stable per-minute precision and rate show no warm-up or sustained-load
+degradation. The surveyed-centre bias changed after the intervening
+FlexTDOA-to-Passive hot switch because the live anchor geometry was rebuilt;
+the precision about each minute's own mean did not change.
+
 The reference geometry is a surveyed 3 m square with the receive-only tag at
 its centre (1.5 m, 1.5 m). The firmware reports `position_filter=none` and
 `solver_location=esp32_tag` for every captured position.
