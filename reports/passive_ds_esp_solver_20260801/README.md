@@ -68,6 +68,27 @@ the Native DS-TWR precision band while delivering 97.45 raw results/s. The
 overlapping results reuse complete radio stars and must not be interpreted as
 97.45 statistically independent measurements per second.
 
+## Fresh same-geometry FlexTDOA comparison
+
+Immediately after the triple-star capture, the unchanged five-module setup
+was hot-switched to the existing 12 ms FlexTDOA profile for 60.03 s and then
+returned to Passive DS-TWR. The anchors and tag were not moved. Both captures
+contain unfiltered position output from module 1.
+
+| Metric | Passive DS-TWR ESP32 | FlexTDOA |
+| --- | ---: | ---: |
+| Final positions/s | 97.45 | 81.36 |
+| X/Y standard deviation | 1.12/1.15 cm | 2.30/2.50 cm |
+| Precision CEP95 | 2.78 cm | 5.93 cm |
+| Surveyed-centre bias | 1.92 cm | 5.18 cm |
+| Surveyed-centre RMSE | 2.51 cm | 6.19 cm |
+| Surveyed-centre P95 | 4.09 cm | 9.46 cm |
+
+Thus, for this static centre test, the receive-only Passive DS-TWR result rate
+is about 20% higher and its precision CEP95 is about 2.1 times smaller than
+the current FlexTDOA implementation. This is a controlled static result, not
+yet evidence for the same advantage during motion or under NLOS conditions.
+
 The reference geometry is a surveyed 3 m square with the receive-only tag at
 its centre (1.5 m, 1.5 m). The firmware reports `position_filter=none` and
 `solver_location=esp32_tag` for every captured position.
