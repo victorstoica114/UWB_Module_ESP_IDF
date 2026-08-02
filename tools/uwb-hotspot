@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly AP_MAC="3c:64:cf:a2:d2:24"
+readonly AP_ADDRESS="192.168.50.1/24"
+readonly RUNTIME_DIR="/run/uwb-hotspot"
+readonly STATE_DIR="/var/lib/uwb-hotspot"
+readonly TEMPLATE="/etc/uwb-hotspot/hostapd.conf.in"
+readonly RUNTIME_CONFIG="${RUNTIME_DIR}/hostapd.conf"
+readonly CLIENT_NETWORK="192.168.50.0/24"
+readonly POLICY_TABLE="1050"
+readonly POLICY_PRIORITY="1050"
+
+find_interface() {
+    local path address
+    for path in /sys/class/net/*; do
+        [[ -r "${path}/address" ]] || continue
+        read -r address < "${path}/address"
+        if [[ "${address,,}" == "${AP_MAC}" ]]; then
+            basename "${path}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+ap_interface=""
+for _ in {1..30}; do
+    if ap_interface="$(find_interface)"; then
+        break
+    fi
+    sleep 1
+done
+
+if [[ -z "${ap_interface}" ]]; then
+    echo "UWB hotspot adapter ${AP_MAC} was not found" >&2
+    exit 1
+fi
+
+upstream_interface="$(ip -4 route show default | awk -v ap="${ap_interface}" '$5 != "tun0" && $5 != ap {print $5; exit}')"
+if [[ -z "${upstream_interface}" ]]; then
+    echo "No non-VPN internet uplink was found for the UWB hotspot" >&2
+    exit 1
+fi
+upstream_gateway="$(ip -4 route show default dev "${upstream_interface}" | awk '$1 == "default" {print $3; exit}')"
+if [[ -z "${upstream_gateway}" ]]; then
+    echo "No IPv4 gateway was found on ${upstream_interface}" >&2
+    exit 1
+fi
+
+mkdir -p "${RUNTIME_DIR}" "${STATE_DIR}"
+ip link set wlan0 down 2>/dev/null || true
+ip addr flush dev "${ap_interface}"
+ip addr add "${AP_ADDRESS}" dev "${ap_interface}"
+ip link set "${ap_interface}" up
+sysctl -q -w net.ipv4.ip_forward=1
+ip route replace table "${POLICY_TABLE}" default via "${upstream_gateway}" dev "${upstream_interface}"
+# Select the dedicated uplink only for packets forwarded from the hotspot.
+# A source-only rule also catches dnsmasq replies sourced from 192.168.50.1 and
+# incorrectly sends them toward the internet instead of back to the clients.
+ip rule add priority "${POLICY_PRIORITY}" iif "${ap_interface}" table "${POLICY_TABLE}" 2>/dev/null || true
+iptables -t nat -C POSTROUTING -s "${CLIENT_NETWORK}" -o "${upstream_interface}" -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -s "${CLIENT_NETWORK}" -o "${upstream_interface}" -j MASQUERADE
+iptables -C FORWARD -i "${ap_interface}" -o "${upstream_interface}" -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -i "${ap_interface}" -o "${upstream_interface}" -j ACCEPT
+iptables -C FORWARD -i "${upstream_interface}" -o "${ap_interface}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -i "${upstream_interface}" -o "${ap_interface}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+sed "s/@INTERFACE@/${ap_interface}/g" "${TEMPLATE}" > "${RUNTIME_CONFIG}"
+chmod 600 "${RUNTIME_CONFIG}"
+
+hostapd_pid=""
+dnsmasq_pid=""
+cleanup() {
+    trap - EXIT INT TERM
+    [[ -z "${dnsmasq_pid}" ]] || kill "${dnsmasq_pid}" 2>/dev/null || true
+    [[ -z "${hostapd_pid}" ]] || kill "${hostapd_pid}" 2>/dev/null || true
+    [[ -z "${dnsmasq_pid}" ]] || wait "${dnsmasq_pid}" 2>/dev/null || true
+    [[ -z "${hostapd_pid}" ]] || wait "${hostapd_pid}" 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -s "${CLIENT_NETWORK}" -o "${upstream_interface}" -j MASQUERADE 2>/dev/null || true
+    iptables -D FORWARD -i "${ap_interface}" -o "${upstream_interface}" -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -i "${upstream_interface}" -o "${ap_interface}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+    ip rule del priority "${POLICY_PRIORITY}" iif "${ap_interface}" table "${POLICY_TABLE}" 2>/dev/null || true
+    ip route flush table "${POLICY_TABLE}" 2>/dev/null || true
+    ip addr flush dev "${ap_interface}" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+/usr/sbin/hostapd "${RUNTIME_CONFIG}" &
+hostapd_pid=$!
+sleep 1
+
+/usr/sbin/dnsmasq \
+    --no-daemon \
+    --conf-file=/dev/null \
+    --no-hosts \
+    --bind-interfaces \
+    --except-interface=lo \
+    --interface="${ap_interface}" \
+    --clear-on-reload \
+    --strict-order \
+    --listen-address=192.168.50.1 \
+    --dhcp-range=192.168.50.10,192.168.50.254,3600 \
+    --dhcp-leasefile="${STATE_DIR}/dnsmasq.leases" \
+    --pid-file="${RUNTIME_DIR}/dnsmasq.pid" &
+dnsmasq_pid=$!
+
+set +e
+wait -n "${hostapd_pid}" "${dnsmasq_pid}"
+child_status=$?
+set -e
+
+if [[ "${child_status}" -eq 0 ]]; then
+    child_status=1
+fi
+exit "${child_status}"

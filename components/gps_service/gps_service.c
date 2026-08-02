@@ -726,6 +726,10 @@ static void gps_handle_nmea_line(const char *line)
         return;
     }
 
+    if (strstr(line, "GGA") != NULL) {
+        gps_moving_base_set_gga(line);
+    }
+
     char work[GPS_NMEA_LINE_MAX] = {0};
     snprintf(work, sizeof(work), "%s", line);
 
@@ -844,6 +848,19 @@ static void gps_copy_snapshot(gps_service_snapshot_t *snapshot)
             moving_base.rtcm_preamble_count;
         snapshot->moving_base_last_downlink_source_id =
             moving_base.last_downlink_source_id;
+        snapshot->ntrip_configured = moving_base.ntrip_configured;
+        snapshot->ntrip_running = moving_base.ntrip_running;
+        snapshot->ntrip_tls_connected = moving_base.ntrip_tls_connected;
+        snapshot->ntrip_stream_active = moving_base.ntrip_stream_active;
+        snapshot->ntrip_http_status = moving_base.ntrip_http_status;
+        snapshot->ntrip_connect_count = moving_base.ntrip_connect_count;
+        snapshot->ntrip_reconnect_count = moving_base.ntrip_reconnect_count;
+        snapshot->ntrip_error_count = moving_base.ntrip_error_count;
+        snapshot->ntrip_rtcm_frame_count = moving_base.ntrip_rtcm_frame_count;
+        snapshot->ntrip_rtcm_byte_count = moving_base.ntrip_rtcm_byte_count;
+        snapshot->ntrip_last_data_age_ms = moving_base.ntrip_last_data_age_ms;
+        snprintf(snapshot->ntrip_state, sizeof(snapshot->ntrip_state), "%s",
+                 moving_base.ntrip_state);
         snprintf(snapshot->moving_base_role,
                  sizeof(snapshot->moving_base_role), "%s",
                  gps_moving_base_role_to_string(moving_base.role));

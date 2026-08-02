@@ -9,6 +9,7 @@
 #include "app_config.h"
 #include "board_config.h"
 #include "esp_log.h"
+#include "gps_ntrip_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/inet.h"
@@ -134,7 +135,11 @@ static gps_moving_base_role_t role_for_module(uint8_t module_id)
     case 2:
         return GPS_MB_ROLE_MOVING_ROVER;
     case 3:
-        return GPS_MB_ROLE_LOCAL_BASE;
+        /* PointPerfect replaces the temporary local-base correction source.
+         * Keeping M3 out of base mode prevents two independent correction
+         * streams from reaching the precisely-kinematic base. */
+        return gps_ntrip_client_is_enabled() ? GPS_MB_ROLE_NONE
+                                             : GPS_MB_ROLE_LOCAL_BASE;
     default:
         return GPS_MB_ROLE_NONE;
     }
@@ -339,6 +344,16 @@ static esp_err_t correction_uart_init(void)
     return ESP_OK;
 }
 
+static int ntrip_write_corrections(const uint8_t *data, size_t length,
+                                   void *context)
+{
+    (void)context;
+    if (!s_snapshot.correction_uart_ready || data == NULL || length == 0) {
+        return -1;
+    }
+    return uart_write_bytes(GPS_MB_CORRECTION_UART, data, length);
+}
+
 static esp_err_t socket_init(void)
 {
     s_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
@@ -413,7 +428,9 @@ static esp_err_t send_datagram(uint8_t kind, const uint8_t *payload,
 
 static bool downlink_source_allowed(uint8_t source_id)
 {
-    return (s_snapshot.role == GPS_MB_ROLE_PRECISE_BASE && source_id == 3) ||
+    return (s_snapshot.role == GPS_MB_ROLE_PRECISE_BASE &&
+            !gps_ntrip_client_is_enabled_for_module(s_module_id) &&
+            source_id == 3) ||
            (s_snapshot.role == GPS_MB_ROLE_MOVING_ROVER && source_id == 1);
 }
 
@@ -594,6 +611,12 @@ esp_err_t gps_moving_base_start(uart_port_t primary_uart, uint8_t module_id)
 
     s_snapshot.active = true;
     s_started_ms = ticks_to_ms();
+    err = gps_ntrip_client_start(s_module_id, ntrip_write_corrections, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NTRIP client start failed: %s", esp_err_to_name(err));
+        gps_moving_base_stop();
+        return err;
+    }
     ESP_LOGI(TAG, "Local moving-base role=%s module=%u relay=%s:%u",
              gps_moving_base_role_to_string(s_snapshot.role),
              (unsigned)s_module_id, APP_WIRELESS_LOG_TARGET,
@@ -603,6 +626,7 @@ esp_err_t gps_moving_base_start(uart_port_t primary_uart, uint8_t module_id)
 
 void gps_moving_base_stop(void)
 {
+    gps_ntrip_client_stop();
     if (s_snapshot.correction_uart_ready) {
         (void)uart_driver_delete(GPS_MB_CORRECTION_UART);
     }
@@ -620,6 +644,11 @@ void gps_moving_base_stop(void)
     s_uplink_sequence = 0;
     s_last_downlink_sequence = 0;
     s_config_step = 0;
+}
+
+void gps_moving_base_set_gga(const char *sentence)
+{
+    gps_ntrip_client_set_gga(sentence);
 }
 
 void gps_moving_base_process_primary_bytes(const uint8_t *data, size_t length)
@@ -748,4 +777,19 @@ void gps_moving_base_get_snapshot(gps_moving_base_snapshot_t *snapshot)
     const uint32_t now_ms = ticks_to_ms();
     snapshot->last_uplink_age_ms = elapsed_since(now_ms, s_last_uplink_ms);
     snapshot->last_downlink_age_ms = elapsed_since(now_ms, s_last_downlink_ms);
+    gps_ntrip_snapshot_t ntrip = {0};
+    gps_ntrip_client_get_snapshot(&ntrip);
+    snapshot->ntrip_configured = ntrip.configured;
+    snapshot->ntrip_running = ntrip.running;
+    snapshot->ntrip_tls_connected = ntrip.tls_connected;
+    snapshot->ntrip_stream_active = ntrip.stream_active;
+    snapshot->ntrip_http_status = ntrip.http_status;
+    snapshot->ntrip_connect_count = ntrip.connect_count;
+    snapshot->ntrip_reconnect_count = ntrip.reconnect_count;
+    snapshot->ntrip_error_count = ntrip.error_count;
+    snapshot->ntrip_rtcm_frame_count = ntrip.rtcm_frame_count;
+    snapshot->ntrip_rtcm_byte_count = ntrip.rtcm_byte_count;
+    snapshot->ntrip_last_data_age_ms = ntrip.last_data_age_ms;
+    snprintf(snapshot->ntrip_state, sizeof(snapshot->ntrip_state), "%s",
+             ntrip.state);
 }

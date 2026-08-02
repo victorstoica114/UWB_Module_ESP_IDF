@@ -51,11 +51,24 @@ typedef struct {
     uint32_t binary_meas_time_count;
     uint32_t binary_raw_meas_count;
     uint32_t rtcm_preamble_count;
+    bool ntrip_configured;
+    bool ntrip_running;
+    bool ntrip_tls_connected;
+    bool ntrip_stream_active;
+    uint16_t ntrip_http_status;
+    uint32_t ntrip_connect_count;
+    uint32_t ntrip_reconnect_count;
+    uint32_t ntrip_error_count;
+    uint32_t ntrip_rtcm_frame_count;
+    uint32_t ntrip_rtcm_byte_count;
+    uint32_t ntrip_last_data_age_ms;
+    char ntrip_state[24];
 } gps_moving_base_snapshot_t;
 
 esp_err_t gps_moving_base_start(uart_port_t primary_uart, uint8_t module_id);
 void gps_moving_base_stop(void);
 void gps_moving_base_process_primary_bytes(const uint8_t *data, size_t length);
+void gps_moving_base_set_gga(const char *sentence);
 void gps_moving_base_poll(void);
 void gps_moving_base_get_snapshot(gps_moving_base_snapshot_t *snapshot);
 const char *gps_moving_base_role_to_string(gps_moving_base_role_t role);

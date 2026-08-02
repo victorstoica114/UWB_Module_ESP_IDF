@@ -85,6 +85,18 @@ typedef struct {
     uint32_t moving_base_rtcm_preamble_count;
     uint8_t moving_base_last_downlink_source_id;
     char moving_base_role[20];
+    bool ntrip_configured;
+    bool ntrip_running;
+    bool ntrip_tls_connected;
+    bool ntrip_stream_active;
+    uint16_t ntrip_http_status;
+    uint32_t ntrip_connect_count;
+    uint32_t ntrip_reconnect_count;
+    uint32_t ntrip_error_count;
+    uint32_t ntrip_rtcm_frame_count;
+    uint32_t ntrip_rtcm_byte_count;
+    uint32_t ntrip_last_data_age_ms;
+    char ntrip_state[24];
     char rmc_status;
     char rmc_mode;
     char utc_time[16];

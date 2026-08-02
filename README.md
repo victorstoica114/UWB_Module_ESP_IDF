@@ -2149,9 +2149,22 @@ does not waste current through idle-high UART lines. When enabled, the
 `$PSTI,030` summary sentences. `/status` exposes GPS power/UART state, fix
 quality, mode, satellites used/in view, HDOP, position, altitude, RTK age/ratio
 when present, and parser counters. The dashboard Info tab shows the same GPS
-status per module. NTRIP/RTCM correction forwarding is intentionally not enabled yet; the
-current implementation is a passive GNSS diagnostic suitable for testing
-modules with antennas, currently modules 3 and 5 near the window.
+status per module. The production RTK path uses the isolated
+`gps_ntrip_client` on module 1: it opens an NTRIP v2 TLS 1.2 connection using
+the ESP certificate bundle, sends the current GGA to the NEAR mountpoint,
+periodically refreshes that GGA, and writes the received RTCM3 stream to the
+receiver's RXD2 input through UART2/GPIO1. Connection, HTTP, RTCM frame/byte,
+reconnect, error, and freshness counters are exported in `/status` and shown in
+the GPS dashboard. The caster configuration is supplied by `NTRIP_*`
+definitions in `secrets.h`; no credential is emitted to logs.
+
+The UWB-Lab hotspot forwards client internet traffic through the non-VPN Wi-Fi
+uplink using the version-controlled `tools/uwb-hotspot` service script. Its
+policy route matches packets arriving on the AP interface, rather than every
+packet sourced from `192.168.50.0/24`, so local dnsmasq replies still return to
+the ESP32 clients. Module 1 is the precisely-kinematic base and module 2 is the
+moving-base rover. When NTRIP is enabled, module 3's temporary local-base role
+is disabled so two independent correction sources cannot reach module 1.
 
 The BQ25792 Li-Po charger monitor runs on the shared I2C bus
 (`GPIO9/GPIO10`, address `0x6B`) at 1 MHz. A complete register-window dump

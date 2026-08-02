@@ -1500,6 +1500,18 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"gps_moving_base_binary_meas_time_count\":%lu,"
         "\"gps_moving_base_binary_raw_meas_count\":%lu,"
         "\"gps_moving_base_rtcm_preambles\":%lu,"
+        "\"gps_ntrip_configured\":%s,"
+        "\"gps_ntrip_running\":%s,"
+        "\"gps_ntrip_tls_connected\":%s,"
+        "\"gps_ntrip_stream_active\":%s,"
+        "\"gps_ntrip_http_status\":%u,"
+        "\"gps_ntrip_connect_count\":%lu,"
+        "\"gps_ntrip_reconnect_count\":%lu,"
+        "\"gps_ntrip_error_count\":%lu,"
+        "\"gps_ntrip_rtcm_frames\":%lu,"
+        "\"gps_ntrip_rtcm_bytes\":%lu,"
+        "\"gps_ntrip_last_data_age_ms\":%lu,"
+        "\"gps_ntrip_state\":\"%s\","
         "\"gps_checksum_errors\":%lu,"
         "\"gps_parse_errors\":%lu,"
         "\"charger_monitor_enabled\":%s,"
@@ -2060,6 +2072,18 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)gps_snapshot.moving_base_binary_meas_time_count,
         (unsigned long)gps_snapshot.moving_base_binary_raw_meas_count,
         (unsigned long)gps_snapshot.moving_base_rtcm_preamble_count,
+        gps_snapshot.ntrip_configured ? "true" : "false",
+        gps_snapshot.ntrip_running ? "true" : "false",
+        gps_snapshot.ntrip_tls_connected ? "true" : "false",
+        gps_snapshot.ntrip_stream_active ? "true" : "false",
+        (unsigned)gps_snapshot.ntrip_http_status,
+        (unsigned long)gps_snapshot.ntrip_connect_count,
+        (unsigned long)gps_snapshot.ntrip_reconnect_count,
+        (unsigned long)gps_snapshot.ntrip_error_count,
+        (unsigned long)gps_snapshot.ntrip_rtcm_frame_count,
+        (unsigned long)gps_snapshot.ntrip_rtcm_byte_count,
+        (unsigned long)gps_snapshot.ntrip_last_data_age_ms,
+        gps_snapshot.ntrip_state,
         (unsigned long)gps_snapshot.checksum_error_count,
         (unsigned long)gps_snapshot.parse_error_count,
         charger_snapshot.monitor_enabled ? "true" : "false",

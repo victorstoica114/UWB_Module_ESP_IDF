@@ -9673,6 +9673,9 @@ function renderGpsCell(item) {
   const linkAge = movingRole === "local_base"
     ? `up ${fmtAgeMs(item.gps_moving_base_last_uplink_age_ms)}`
     : `down ${fmtAgeMs(item.gps_moving_base_last_downlink_age_ms)} · gaps ${esc(item.gps_moving_base_downlink_gaps ?? 0)}`;
+  const ntrip = item.gps_ntrip_configured
+    ? `<br><span class="${item.gps_ntrip_stream_active ? "ok" : "bad"}">NTRIP ${esc(item.gps_ntrip_state || "unknown")}</span> · HTTP ${esc(item.gps_ntrip_http_status || "-")} · ${esc(item.gps_ntrip_rtcm_frames ?? 0)} RTCM`
+    : "";
   return `
     <span class="${enabled ? "ok" : "muted"}">${esc(statusText)}</span><br>
     <span class="gps-fix-message ${fixState.className}">${esc(fixState.label)}</span><br>
@@ -9680,7 +9683,7 @@ function renderGpsCell(item) {
     <span class="gps-fix-explanation ${fixState.className}">${esc(fixState.explanation)}</span><br>
     sats ${esc(satsUsed)}/${esc(satsView)} · hdop ${fmtMaybeNumber(item.gps_hdop, 2)}<br>
 	    ${location}<br>
-	    <span class="muted">rx ${fmtAgeMs(item.gps_last_rx_age_ms)} · sent ${esc(sentences)} · err ${esc(item.gps_checksum_errors ?? "-")}/${esc(item.gps_parse_errors ?? "-")}</span>${movingBase}<br>
+	    <span class="muted">rx ${fmtAgeMs(item.gps_last_rx_age_ms)} · sent ${esc(sentences)} · err ${esc(item.gps_checksum_errors ?? "-")}/${esc(item.gps_parse_errors ?? "-")}</span>${movingBase}${ntrip}<br>
         <span class="muted">${esc(linkAge)}</span>`;
 }
 
@@ -10260,6 +10263,10 @@ function renderGps(statuses) {
          config ${item.gps_moving_base_receiver_config_sent ? "sent" : "pending"} · ACK/NACK ${esc(item.gps_moving_base_receiver_ack_count ?? 0)}/${esc(item.gps_moving_base_receiver_nack_count ?? 0)}<br>
          uplink ${esc(item.gps_moving_base_uplink_packets ?? 0)} pkt / ${fmtBytes(item.gps_moving_base_uplink_bytes)} · age ${fmtAgeMs(item.gps_moving_base_last_uplink_age_ms)}<br>
          ${downlinkRole ? `downlink ${esc(item.gps_moving_base_downlink_packets ?? 0)} pkt / ${fmtBytes(item.gps_moving_base_downlink_bytes)} · age ${fmtAgeMs(item.gps_moving_base_last_downlink_age_ms)}<br>source M${esc(item.gps_moving_base_last_downlink_source_id ?? 0)} · gaps/errors ${esc(item.gps_moving_base_downlink_gaps ?? 0)}/${esc(item.gps_moving_base_downlink_errors ?? 0)}` : "RTCM source stream"}`;
+    const ntripLink = item.gps_ntrip_configured
+      ? `<br><span class="${item.gps_ntrip_stream_active ? "ok" : "bad"}">NTRIP ${esc(item.gps_ntrip_state || "unknown")}</span> · TLS ${item.gps_ntrip_tls_connected ? "connected" : "down"} · HTTP ${esc(item.gps_ntrip_http_status || "-")}<br>
+         RTCM ${esc(item.gps_ntrip_rtcm_frames ?? 0)} frames / ${fmtBytes(item.gps_ntrip_rtcm_bytes)} · age ${fmtAgeMs(item.gps_ntrip_last_data_age_ms)} · reconnect/errors ${esc(item.gps_ntrip_reconnect_count ?? 0)}/${esc(item.gps_ntrip_error_count ?? 0)}`
+      : "";
     const baselineText = item.gps_baseline_valid
       ? `<span class="ok">PSTI${String(item.gps_baseline_source || "").padStart(3, "0")} ${fmtMaybeNumber(item.gps_baseline_length_m, 3)} m</span><br>
          course ${fmtMaybeNumber(item.gps_baseline_course_deg, 2)}° · E/N/U ${fmtMaybeNumber(item.gps_baseline_east_m, 3)} / ${fmtMaybeNumber(item.gps_baseline_north_m, 3)} / ${fmtMaybeNumber(item.gps_baseline_up_m, 3)} m`
@@ -10282,7 +10289,7 @@ function renderGps(statuses) {
         <div class="gps-detail">${esc(item.gps_satellites_in_view ?? "-")} in view<br>HDOP ${fmtMaybeNumber(item.gps_hdop, 2)}</div></td>
       <td>${position}</td>
       <td><div>speed ${fmtMaybeNumber(item.gps_speed_mps, 2)} m/s<br>course ${fmtMaybeNumber(item.gps_course_deg, 1)} deg</div>
-        <div class="gps-detail">UTC ${formatGpsUtcTime(item.gps_utc_time)}<br>date ${formatGpsUtcDate(item.gps_utc_date)}<br>${rtkText}<br>${baselineText}${headingText}<br>${movingLink}</div></td>
+        <div class="gps-detail">UTC ${formatGpsUtcTime(item.gps_utc_time)}<br>date ${formatGpsUtcDate(item.gps_utc_date)}<br>${rtkText}<br>${baselineText}${headingText}<br>${movingLink}${ntripLink}</div></td>
       <td><div class="gps-primary-value">${esc(item.gps_sentence_count ?? 0)} sentences</div>
         <div class="gps-detail">${fmtBytes(item.gps_byte_count)} · RX age ${fmtAgeMs(item.gps_last_rx_age_ms)}<br>
         GGA ${esc(item.gps_gga_count ?? 0)} · RMC ${esc(item.gps_rmc_count ?? 0)} · GSA ${esc(item.gps_gsa_count ?? 0)}<br>
