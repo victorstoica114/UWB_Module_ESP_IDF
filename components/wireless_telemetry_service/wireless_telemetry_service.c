@@ -45,6 +45,7 @@ enum {
     WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V2_SAMPLE_LEN = 40,
     WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V3_SAMPLE_LEN = 49,
     WIRELESS_TELEMETRY_PASSIVE_DS_POSITION_V4_SAMPLE_LEN = 63,
+    WIRELESS_TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN = 24,
     WIRELESS_TELEMETRY_FRAME_VERSION = 1,
     WIRELESS_TELEMETRY_STREAM_BNO085_ACCEL = 1,
     WIRELESS_TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION = 2,
@@ -58,6 +59,8 @@ enum {
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V2 = 10,
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3 = 11,
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V4 = 12,
+    WIRELESS_TELEMETRY_STREAM_NATIVE_DS_TAG_RANGE = 13,
+    WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_GEOMETRY = 14,
     WIRELESS_TELEMETRY_RECONNECT_MS = 2000,
     WIRELESS_TELEMETRY_WIFI_WAIT_MS = 500,
     WIRELESS_TELEMETRY_QUEUE_WAIT_MS = 20,
@@ -80,6 +83,8 @@ typedef enum {
     WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_ANCHOR_RANGE,
     WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_POSITION,
     WIRELESS_TELEMETRY_ITEM_NATIVE_DS_ANCHOR_RANGE,
+    WIRELESS_TELEMETRY_ITEM_NATIVE_DS_TAG_RANGE,
+    WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_GEOMETRY,
 } wireless_telemetry_item_type_t;
 
 typedef struct {
@@ -140,6 +145,17 @@ typedef struct {
 } wireless_telemetry_flex_position_t;
 
 typedef struct {
+    uint32_t geometry_version;
+    int32_t x_mm;
+    int32_t y_mm;
+    int32_t fit_rms_mm;
+    uint8_t anchor_id;
+    uint8_t anchor_count;
+    uint8_t tag_id;
+    uint8_t flags;
+} wireless_telemetry_passive_ds_geometry_t;
+
+typedef struct {
     wireless_telemetry_item_type_t type;
     uint32_t uptime_ms;
     union {
@@ -148,6 +164,7 @@ typedef struct {
         wireless_telemetry_flex_observation_t flex_observation;
         wireless_telemetry_flex_anchor_range_t flex_anchor_range;
         wireless_telemetry_flex_position_t flex_position;
+        wireless_telemetry_passive_ds_geometry_t passive_ds_geometry;
     } data;
 } wireless_telemetry_item_t;
 
@@ -546,6 +563,14 @@ static bool wireless_telemetry_binary_item_info(
         *stream_type = WIRELESS_TELEMETRY_STREAM_NATIVE_DS_ANCHOR_RANGE;
         *sample_len = WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN;
         return true;
+    case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_TAG_RANGE:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_NATIVE_DS_TAG_RANGE;
+        *sample_len = WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN;
+        return true;
+    case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_GEOMETRY:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_GEOMETRY;
+        *sample_len = WIRELESS_TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN;
+        return true;
     default:
         return false;
     }
@@ -671,6 +696,7 @@ static bool wireless_telemetry_append_binary_sample(
     case WIRELESS_TELEMETRY_ITEM_FLEX_ANCHOR_RANGE:
     case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_ANCHOR_RANGE:
     case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_ANCHOR_RANGE:
+    case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_TAG_RANGE:
         wireless_telemetry_write_i32_le(
             &sample[8], item->data.flex_anchor_range.distance_mm);
         wireless_telemetry_write_i32_le(
@@ -739,6 +765,20 @@ static bool wireless_telemetry_append_binary_sample(
             &sample[57], item->data.flex_position.rejected_since_last);
         wireless_telemetry_write_u32_le(
             &sample[59], item->data.flex_position.position_rejected_count);
+        break;
+    case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_GEOMETRY:
+        wireless_telemetry_write_u32_le(
+            &sample[4], item->data.passive_ds_geometry.geometry_version);
+        wireless_telemetry_write_i32_le(
+            &sample[8], item->data.passive_ds_geometry.x_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[12], item->data.passive_ds_geometry.y_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[16], item->data.passive_ds_geometry.fit_rms_mm);
+        sample[20] = item->data.passive_ds_geometry.anchor_id;
+        sample[21] = item->data.passive_ds_geometry.anchor_count;
+        sample[22] = item->data.passive_ds_geometry.tag_id;
+        sample[23] = item->data.passive_ds_geometry.flags;
         break;
     default:
         return false;
@@ -1398,6 +1438,32 @@ bool wireless_telemetry_service_submit_native_ds_anchor_range(
     return wireless_telemetry_enqueue(&item);
 }
 
+bool wireless_telemetry_service_submit_native_ds_tag_range(
+    uint8_t tag_id, uint8_t anchor_id, uint16_t sequence,
+    uint32_t slot_id, int32_t distance_mm, int32_t raw_distance_mm)
+{
+    if (!s_connected) {
+        return false;
+    }
+
+    const wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_NATIVE_DS_TAG_RANGE,
+        .uptime_ms =
+            (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
+        .data = {
+            .flex_anchor_range = {
+                .slot_id = slot_id,
+                .distance_mm = distance_mm,
+                .raw_distance_mm = raw_distance_mm,
+                .sequence = sequence,
+                .initiator_id = tag_id,
+                .responder_id = anchor_id,
+            },
+        },
+    };
+    return wireless_telemetry_enqueue(&item);
+}
+
 bool wireless_telemetry_service_submit_passive_ds_position(
     uint8_t tag_id, uint32_t slot_id, int32_t filtered_x_mm,
     int32_t filtered_y_mm, int32_t raw_x_mm, int32_t raw_y_mm,
@@ -1408,7 +1474,7 @@ bool wireless_telemetry_service_submit_passive_ds_position(
     uint32_t independent_frame_count, uint16_t batch_span_ms,
     uint16_t batch_max_age_ms, uint16_t observation_mask,
     uint16_t rejection_reason_mask, uint16_t rejected_since_last,
-    uint32_t position_rejected_count)
+    uint32_t position_rejected_count, bool unfiltered_esp_solver)
 {
     if (!s_connected) {
         return false;
@@ -1443,7 +1509,35 @@ bool wireless_telemetry_service_submit_passive_ds_position(
                     8U |
                     (independent_frame ? 1U : 0U) |
                     (complete_superframe ? 2U : 0U) |
-                    (filter_correction ? 4U : 0U),
+                    (filter_correction ? 4U : 0U) |
+                    (unfiltered_esp_solver ? 16U : 0U),
+            },
+        },
+    };
+    return wireless_telemetry_enqueue(&item);
+}
+
+bool wireless_telemetry_service_submit_passive_ds_geometry(
+    uint8_t anchor_id, uint8_t anchor_count, uint32_t geometry_version,
+    int32_t x_mm, int32_t y_mm, int32_t fit_rms_mm)
+{
+    if (!s_connected || anchor_id == 0U || anchor_count < 3U) {
+        return false;
+    }
+    const wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_GEOMETRY,
+        .uptime_ms =
+            (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
+        .data = {
+            .passive_ds_geometry = {
+                .geometry_version = geometry_version,
+                .x_mm = x_mm,
+                .y_mm = y_mm,
+                .fit_rms_mm = fit_rms_mm,
+                .anchor_id = anchor_id,
+                .anchor_count = anchor_count,
+                .tag_id = app_identity_get_module_id(),
+                .flags = 1U,
             },
         },
     };

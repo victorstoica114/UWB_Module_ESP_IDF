@@ -153,6 +153,56 @@ def coherent_positions(
     anchors: dict[int, tuple[float, float]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     anchor_ids = tuple(sorted(anchors))
+    shared_frames: dict[int, dict[int, dict[str, Any]]] = defaultdict(dict)
+    for row in rows:
+        anchor_id = int(row["anchor_id"])
+        if anchor_id in anchors:
+            shared_frames[int(row["_unwrapped_seq"])][anchor_id] = row
+
+    complete_shared = [
+        (frame_id, items)
+        for frame_id, items in sorted(shared_frames.items())
+        if set(items) == set(anchor_ids)
+    ]
+    # The clean NDS2 pipeline assigns one ESP-generated frame ID to all four
+    # anchor exchanges. Older Native DS-TWR builds incremented the sequence
+    # once per anchor, so they continue through the phase inference below.
+    if complete_shared:
+        positions: list[dict[str, Any]] = []
+        for frame_id, items in complete_shared:
+            timestamps = [
+                float(items[anchor_id]["received_at"])
+                for anchor_id in anchor_ids
+            ]
+            solution = trilaterate_linear(
+                anchors,
+                {
+                    anchor_id: float(items[anchor_id]["distance_m"])
+                    for anchor_id in anchor_ids
+                },
+            )
+            if solution is None:
+                continue
+            positions.append(
+                {
+                    "mode": "coherent",
+                    "received_at": max(timestamps),
+                    "frame_start_seq": frame_id,
+                    "frame_span_ms": (
+                        max(timestamps) - min(timestamps)
+                    ) * 1000.0,
+                    "anchors_used": len(anchor_ids),
+                    "x_m": solution[0],
+                    "y_m": solution[1],
+                }
+            )
+        return positions, {
+            "frame_id_scheme": "shared_esp_frame_id",
+            "candidate_frames": len(shared_frames),
+            "complete_frames": len(positions),
+            "incomplete_frames": len(shared_frames) - len(positions),
+        }
+
     anchor_index = {
         anchor_id: index for index, anchor_id in enumerate(anchor_ids)
     }
@@ -194,6 +244,7 @@ def coherent_positions(
             }
         )
     diagnostics = {
+        "frame_id_scheme": "sequential_anchor_sequence",
         "inferred_sequence_phase": phase,
         "sequence_phase_counts": {
             str(key): value for key, value in sorted(phase_counts.items())

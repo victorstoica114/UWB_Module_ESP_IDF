@@ -95,6 +95,7 @@ static const char *TAG = "app_runtime_config";
 #define KEY_BNO085_LOG "bno_log"
 #define KEY_GPS_ENABLED "gps_enabled"
 #define KEY_RADIO_CH "radio_ch"
+#define KEY_RADIO_PHY "radio_phy"
 #define KEY_TEL_PORT "tel_port"
 
 static bool s_initialized;
@@ -128,6 +129,12 @@ static bool count_valid(uint8_t count)
 static bool radio_channel_valid(uint8_t channel)
 {
     return channel == 5U || channel == 9U;
+}
+
+static bool radio_phy_mode_valid(uint8_t mode)
+{
+    return mode == APP_UWB_RADIO_PHY_FAST ||
+           mode == APP_UWB_RADIO_PHY_LONG_RANGE;
 }
 
 static bool tcp_port_valid(uint32_t port)
@@ -488,6 +495,7 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->bno085_log_interval_ms = APP_BNO085_LOG_INTERVAL_MS;
     config->gps_enabled = APP_GPS_ENABLED_DEFAULT != 0;
     config->radio_channel = (uint8_t)APP_UWB_RADIO_CHANNEL;
+    config->radio_phy_mode = (uint8_t)APP_UWB_RADIO_PHY_MODE;
     config->wireless_telemetry_port = APP_WIRELESS_TELEMETRY_PORT;
     config->from_nvs = false;
 }
@@ -564,16 +572,24 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         config->ranging_auto_rx_delay_uus == 0 ||
         (config->passive_ds_schedule != APP_RUNTIME_PASSIVE_DS_FAST_STAR &&
          config->passive_ds_schedule !=
-             APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING) ||
+             APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING &&
+         config->passive_ds_schedule !=
+             APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS) ||
         !ms_valid(config->passive_ds_slot_ms) ||
         !ms_valid(config->passive_ds_round_gap_ms) ||
         !ms_valid(config->passive_ds_rx_slice_ms) ||
         !ms_valid(config->passive_ds_rx_timeout_ms) ||
         !us_valid(config->passive_ds_resp_delay_us) ||
         !us_valid(config->passive_ds_final_delay_us) ||
-        config->passive_ds_resp_delay_us +
-                config->passive_ds_final_delay_us >=
-            config->passive_ds_slot_ms * 1000U ||
+        ((config->passive_ds_schedule ==
+              APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS
+              ? config->passive_ds_resp_delay_us +
+                    APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US *
+                        (config->anchor_count - 2U) +
+                    config->passive_ds_final_delay_us
+              : config->passive_ds_resp_delay_us +
+                    config->passive_ds_final_delay_us) >=
+         config->passive_ds_slot_ms * 1000U) ||
         config->passive_ds_auto_rx_delay_uus == 0 ||
         (config->passive_ds_pipeline_mode !=
              APP_RUNTIME_PASSIVE_DS_PIPELINE_LEGACY &&
@@ -611,6 +627,7 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         !bno085_ms_valid(config->bno085_accel_interval_ms) ||
         !bno085_ms_valid(config->bno085_log_interval_ms) ||
         !radio_channel_valid(config->radio_channel) ||
+        !radio_phy_mode_valid(config->radio_phy_mode) ||
         !tcp_port_valid(config->wireless_telemetry_port)) {
         return false;
     }
@@ -894,6 +911,7 @@ static void read_config_from_nvs(app_runtime_config_t *config)
                       &config->bno085_log_interval_ms);
     found |= read_bool(handle, KEY_GPS_ENABLED, &config->gps_enabled);
     found |= read_u8(handle, KEY_RADIO_CH, &config->radio_channel);
+    found |= read_u8(handle, KEY_RADIO_PHY, &config->radio_phy_mode);
     found |= read_u32(handle, KEY_TEL_PORT,
                       &config->wireless_telemetry_port);
     config->from_nvs = found;
@@ -915,7 +933,7 @@ esp_err_t app_runtime_config_reload(void)
     s_config = loaded;
     s_initialized = true;
     ESP_LOGI(TAG,
-             "Runtime config ready: mode=%s(%u) tag=%u anchors=[%u,%u,%u,%u] count=%u coord=%u uwb=%s bno085=%s bno_rate=%lu ms bno_log=%lu ms gps=%s radio_ch=%u tel_port=%lu source=%s",
+             "Runtime config ready: mode=%s(%u) tag=%u anchors=[%u,%u,%u,%u] count=%u coord=%u uwb=%s bno085=%s bno_rate=%lu ms bno_log=%lu ms gps=%s radio_ch=%u radio_phy=%u tel_port=%lu source=%s",
              app_runtime_config_runtime_mode_to_string(s_config.runtime_mode),
              (unsigned)s_config.runtime_mode, (unsigned)s_config.tag_id,
              (unsigned)s_config.anchor_ids[0],
@@ -930,6 +948,7 @@ esp_err_t app_runtime_config_reload(void)
              (unsigned long)s_config.bno085_log_interval_ms,
              s_config.gps_enabled ? "on" : "off",
              (unsigned)s_config.radio_channel,
+             (unsigned)s_config.radio_phy_mode,
              (unsigned long)s_config.wireless_telemetry_port,
              s_config.from_nvs ? "nvs" : "firmware");
     return ESP_OK;
@@ -1159,6 +1178,8 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
                             config->bno085_log_interval_ms));
     WRITE_OR_GOTO(write_bool(handle, KEY_GPS_ENABLED, config->gps_enabled));
     WRITE_OR_GOTO(write_u8(handle, KEY_RADIO_CH, config->radio_channel));
+    WRITE_OR_GOTO(write_u8(handle, KEY_RADIO_PHY,
+                           config->radio_phy_mode));
     WRITE_OR_GOTO(write_u32(handle, KEY_TEL_PORT,
                             config->wireless_telemetry_port));
 

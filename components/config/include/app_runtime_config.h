@@ -19,6 +19,7 @@ extern "C" {
 #define APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS 10U
 #define APP_RUNTIME_PASSIVE_DS_FAST_STAR 0U
 #define APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING 1U
+#define APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS 2U
 #define APP_RUNTIME_PASSIVE_DS_PIPELINE_LEGACY 0U
 #define APP_RUNTIME_PASSIVE_DS_PIPELINE_DEADLINE 1U
 #define APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME 0U
@@ -26,6 +27,17 @@ extern "C" {
 #define APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_INDEPENDENT 2U
 #define APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_SUPERFRAME 3U
 #define APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_MOTION 4U
+
+/*
+ * Multipoint Full-DS window policies.  These aliases deliberately reuse the
+ * persisted solve-mode values so existing NVS images remain compatible.
+ * A single-star result contains one coherent POLL/RESP/FINAL exchange only;
+ * the precision policy keeps the validated three-star estimator.
+ */
+#define APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR \
+    APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME
+#define APP_RUNTIME_PASSIVE_DS_SOLVE_PRECISION_THREE_STAR \
+    APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_INDEPENDENT
 
 typedef struct {
     uint8_t runtime_mode;
@@ -104,6 +116,7 @@ typedef struct {
     uint32_t bno085_log_interval_ms;
     bool gps_enabled;
     uint8_t radio_channel;
+    uint8_t radio_phy_mode;
     uint32_t wireless_telemetry_port;
     bool from_nvs;
 } app_runtime_config_t;

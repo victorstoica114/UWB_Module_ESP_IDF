@@ -72,6 +72,9 @@ bool wireless_telemetry_service_submit_passive_ds_anchor_range(
 bool wireless_telemetry_service_submit_native_ds_anchor_range(
     uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
     uint32_t slot_id, int32_t distance_mm, int32_t raw_distance_mm);
+bool wireless_telemetry_service_submit_native_ds_tag_range(
+    uint8_t tag_id, uint8_t anchor_id, uint16_t sequence,
+    uint32_t slot_id, int32_t distance_mm, int32_t raw_distance_mm);
 bool wireless_telemetry_service_submit_passive_ds_position(
     uint8_t tag_id, uint32_t slot_id, int32_t filtered_x_mm,
     int32_t filtered_y_mm, int32_t raw_x_mm, int32_t raw_y_mm,
@@ -82,7 +85,10 @@ bool wireless_telemetry_service_submit_passive_ds_position(
     uint32_t independent_frame_count, uint16_t batch_span_ms,
     uint16_t batch_max_age_ms, uint16_t observation_mask,
     uint16_t rejection_reason_mask, uint16_t rejected_since_last,
-    uint32_t position_rejected_count);
+    uint32_t position_rejected_count, bool unfiltered_esp_solver);
+bool wireless_telemetry_service_submit_passive_ds_geometry(
+    uint8_t anchor_id, uint8_t anchor_count, uint32_t geometry_version,
+    int32_t x_mm, int32_t y_mm, int32_t fit_rms_mm);
 
 #ifdef __cplusplus
 }

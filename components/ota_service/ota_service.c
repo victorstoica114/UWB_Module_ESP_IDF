@@ -23,6 +23,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gps_service.h"
+#include "gnss_firmware_updater.h"
 #include "i2c_bus_service.h"
 #include "max77958_service.h"
 #include "resource_monitor_service.h"
@@ -54,6 +55,10 @@ enum {
     OTA_SERVICE_MAX_QUERY_LEN = 768,
     OTA_SERVICE_STATUS_RESPONSE_SIZE = 32000,
     OTA_SERVICE_RUNTIME_RESPONSE_SIZE = 3072,
+    GNSS_PX1105R_LOADER_SOURCE_SIZE = 67064,
+    GNSS_PX1105R_PACKED_IMAGE_SIZE = 471243,
+    GNSS_PX1105R_RAW_IMAGE_SIZE = 1116336,
+    GNSS_PX1105R_PACKED_SUM8 = 189,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -69,6 +74,37 @@ static bool s_started;
 static bool s_running;
 static volatile bool s_ota_in_progress;
 static volatile enum ota_service_status s_status = OTA_SERVICE_STATUS_IDLE;
+
+typedef struct {
+    uint8_t *data;
+    size_t size;
+} gnss_cached_firmware_t;
+
+typedef struct {
+    uint8_t *data;
+    size_t size;
+} gnss_cached_loader_t;
+
+typedef struct {
+    const uint8_t *data;
+    size_t size;
+    size_t offset;
+} gnss_memory_reader_context_t;
+
+static gnss_cached_firmware_t s_gnss_cached_firmware;
+static gnss_cached_loader_t s_gnss_cached_loader;
+
+static void gnss_release_update_cache(void)
+{
+    if (s_gnss_cached_firmware.data != NULL) {
+        heap_caps_free(s_gnss_cached_firmware.data);
+    }
+    if (s_gnss_cached_loader.data != NULL) {
+        heap_caps_free(s_gnss_cached_loader.data);
+    }
+    memset(&s_gnss_cached_firmware, 0, sizeof(s_gnss_cached_firmware));
+    memset(&s_gnss_cached_loader, 0, sizeof(s_gnss_cached_loader));
+}
 
 typedef struct {
     i2c_bus_service_stats_t i2c_stats;
@@ -743,52 +779,28 @@ static void format_native_ds_pipeline_stats_json(
     if (stats == NULL || buffer == NULL || buffer_size == 0U) {
         return;
     }
-    char poll[192] = {0};
-    char response_wait[192] = {0};
-    char final_tx[192] = {0};
-    char response_tx[192] = {0};
-    char final_wait[192] = {0};
-    char formula[192] = {0};
-    char boundary[192] = {0};
-    format_passive_ds_stage_stats_json(&stats->poll_tx, poll, sizeof(poll));
-    format_passive_ds_stage_stats_json(
-        &stats->response_wait, response_wait, sizeof(response_wait));
-    format_passive_ds_stage_stats_json(
-        &stats->final_tx, final_tx, sizeof(final_tx));
-    format_passive_ds_stage_stats_json(
-        &stats->response_tx, response_tx, sizeof(response_tx));
-    format_passive_ds_stage_stats_json(
-        &stats->final_wait, final_wait, sizeof(final_wait));
-    format_passive_ds_stage_stats_json(
-        &stats->formula, formula, sizeof(formula));
-    format_passive_ds_stage_stats_json(
-        &stats->round_boundary, boundary, sizeof(boundary));
     (void)snprintf(
         buffer, buffer_size,
-        "{\"initiated\":%lu,\"completed\":%lu,\"responded\":%lu,"
-        "\"response_timeouts\":%lu,\"final_timeouts\":%lu,"
-        "\"context_mismatches\":%lu,\"timestamp_rejects\":%lu,"
-        "\"negative_tof_rejects\":%lu,\"impossible_range_rejects\":%lu,"
-        "\"slot_overruns\":%lu,\"round_boundaries\":%lu,"
-        "\"boundary_min_us\":%lu,\"boundary_max_us\":%lu,\"stages\":{"
-        "\"poll_tx\":%s,\"response_wait\":%s,\"final_tx\":%s,"
-        "\"response_tx\":%s,\"final_wait\":%s,\"formula\":%s,"
-        "\"round_boundary\":%s}}",
-        (unsigned long)stats->initiated_exchange_count,
-        (unsigned long)stats->completed_exchange_count,
-        (unsigned long)stats->responder_exchange_count,
-        (unsigned long)stats->response_timeout_count,
-        (unsigned long)stats->final_timeout_count,
-        (unsigned long)stats->context_mismatch_count,
-        (unsigned long)stats->timestamp_reject_count,
-        (unsigned long)stats->negative_tof_reject_count,
-        (unsigned long)stats->impossible_range_reject_count,
+        "{\"poll_tx\":%lu,\"poll_rx\":%lu,"
+        "\"response_tx\":%lu,\"response_rx\":%lu,"
+        "\"final_tx\":%lu,\"final_rx\":%lu,"
+        "\"completed_ranges\":%lu,\"rx_timeouts\":%lu,"
+        "\"invalid_frames\":%lu,\"delayed_tx_errors\":%lu,"
+        "\"rejected_ranges\":%lu,\"slot_overruns\":%lu,"
+        "\"last_distance_mm\":%ld}",
+        (unsigned long)stats->poll_tx_count,
+        (unsigned long)stats->poll_rx_count,
+        (unsigned long)stats->response_tx_count,
+        (unsigned long)stats->response_rx_count,
+        (unsigned long)stats->final_tx_count,
+        (unsigned long)stats->final_rx_count,
+        (unsigned long)stats->completed_range_count,
+        (unsigned long)stats->rx_timeout_count,
+        (unsigned long)stats->invalid_frame_count,
+        (unsigned long)stats->delayed_tx_error_count,
+        (unsigned long)stats->rejected_range_count,
         (unsigned long)stats->slot_overrun_count,
-        (unsigned long)stats->round_boundary_count,
-        (unsigned long)stats->round_boundary_min_us,
-        (unsigned long)stats->round_boundary_max_us,
-        poll, response_wait, final_tx, response_tx, final_wait, formula,
-        boundary);
+        (long)stats->last_distance_mm);
 }
 
 static bool ota_parse_flex_geometry(
@@ -938,7 +950,8 @@ static bool runtime_config_reboot_recommended(
            before->anchor_survey_coordinator_id !=
                after->anchor_survey_coordinator_id ||
            before->uwb_enabled != after->uwb_enabled ||
-           before->radio_channel != after->radio_channel;
+           before->radio_channel != after->radio_channel ||
+           before->radio_phy_mode != after->radio_phy_mode;
 }
 
 static bool runtime_config_hot_switch_eligible(
@@ -1015,11 +1028,61 @@ static uint8_t runtime_radio_rf_channel_bit(const app_runtime_config_t *config)
     return runtime_radio_channel(config) == 9U ? 1U : 0U;
 }
 
+static uint8_t runtime_radio_phy_mode(const app_runtime_config_t *config)
+{
+    return config != NULL &&
+                   config->radio_phy_mode == APP_UWB_RADIO_PHY_LONG_RANGE
+               ? APP_UWB_RADIO_PHY_LONG_RANGE
+               : APP_UWB_RADIO_PHY_FAST;
+}
+
+static bool runtime_radio_is_long_range(const app_runtime_config_t *config)
+{
+    return runtime_radio_phy_mode(config) == APP_UWB_RADIO_PHY_LONG_RANGE;
+}
+
 static uint8_t runtime_radio_profile(const app_runtime_config_t *config)
 {
+    if (runtime_radio_is_long_range(config)) {
+        return runtime_radio_channel(config) == 9U
+                   ? APP_UWB_RADIO_PROFILE_LONG_RANGE_CH9_850K_PLEN1024
+                   : APP_UWB_RADIO_PROFILE_LONG_RANGE_CH5_850K_PLEN1024;
+    }
     return runtime_radio_channel(config) == 9U
                ? APP_UWB_RADIO_PROFILE_LEGACY_CH9_6M8_PLEN128
                : APP_UWB_RADIO_PROFILE_LEGACY_CH5_6M8_PLEN128;
+}
+
+static uint8_t runtime_radio_preamble_len_code(
+    const app_runtime_config_t *config)
+{
+    return runtime_radio_is_long_range(config)
+               ? APP_UWB_RADIO_PLEN_1024
+               : APP_UWB_RADIO_PREAMBLE_LEN_CODE;
+}
+
+static uint8_t runtime_radio_pac(const app_runtime_config_t *config)
+{
+    return runtime_radio_is_long_range(config) ? 2U : APP_UWB_RADIO_PAC;
+}
+
+static uint8_t runtime_radio_data_rate(const app_runtime_config_t *config)
+{
+    return runtime_radio_is_long_range(config)
+               ? APP_UWB_RADIO_BR_850K
+               : APP_UWB_RADIO_DATA_RATE;
+}
+
+static uint8_t runtime_radio_phr_rate(const app_runtime_config_t *config)
+{
+    return runtime_radio_is_long_range(config) ? 0U
+                                                : APP_UWB_RADIO_PHR_RATE;
+}
+
+static uint16_t runtime_radio_sfd_timeout(
+    const app_runtime_config_t *config)
+{
+    return runtime_radio_is_long_range(config) ? 1001U : 129U;
 }
 
 static uint32_t runtime_radio_rf_tx_ctrl_2(const app_runtime_config_t *config)
@@ -1042,6 +1105,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "uwb_esp_idf\n"
         "GET  /status\n"
         "POST /ota    raw firmware image, requires X-OTA-Token header\n"
+        "POST /gnss/loader, /gnss/firmware, /gnss/firmware/run\n"
+        "             fixed PX1105R 01.07.33 update via PSRAM\n"
         "POST /config/antenna-delay?value=0x4018[&reboot=1]\n"
         "POST /config/antenna-delay?clear=1[&reboot=1]\n"
         "POST /config/runtime?mode=ranging&tag=1&anchors=2,3,4,5[&reboot=1]\n"
@@ -1387,8 +1452,54 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"gps_gsa_count\":%lu,"
         "\"gps_gsv_count\":%lu,"
         "\"gps_psti030_count\":%lu,"
+        "\"gps_psti032_count\":%lu,"
+        "\"gps_psti035_count\":%lu,"
+        "\"gps_ths_count\":%lu,"
         "\"gps_rtk_age_s\":%.2f,"
         "\"gps_rtk_ratio\":%.2f,"
+        "\"gps_baseline_valid\":%s,"
+        "\"gps_baseline_source\":%u,"
+        "\"gps_baseline_status\":\"%c\","
+        "\"gps_baseline_mode\":\"%c\","
+        "\"gps_baseline_east_m\":%.3f,"
+        "\"gps_baseline_north_m\":%.3f,"
+        "\"gps_baseline_up_m\":%.3f,"
+        "\"gps_baseline_length_m\":%.3f,"
+        "\"gps_baseline_course_deg\":%.2f,"
+        "\"gps_true_heading_valid\":%s,"
+        "\"gps_true_heading_deg\":%.2f,"
+        "\"gps_true_heading_mode\":\"%c\","
+        "\"gps_moving_base_role\":\"%s\","
+        "\"gps_moving_base_active\":%s,"
+        "\"gps_moving_base_correction_uart_ready\":%s,"
+        "\"gps_moving_base_receiver_config_sent\":%s,"
+        "\"gps_moving_base_receiver_ack_count\":%lu,"
+        "\"gps_moving_base_receiver_nack_count\":%lu,"
+        "\"gps_moving_base_receiver_last_ack_id\":%u,"
+        "\"gps_moving_base_receiver_last_nack_id\":%u,"
+        "\"gps_moving_base_uplink_packets\":%lu,"
+        "\"gps_moving_base_uplink_bytes\":%lu,"
+        "\"gps_moving_base_uplink_errors\":%lu,"
+        "\"gps_moving_base_downlink_packets\":%lu,"
+        "\"gps_moving_base_downlink_bytes\":%lu,"
+        "\"gps_moving_base_downlink_errors\":%lu,"
+        "\"gps_moving_base_downlink_gaps\":%lu,"
+        "\"gps_moving_base_last_uplink_age_ms\":%lu,"
+        "\"gps_moving_base_last_downlink_age_ms\":%lu,"
+        "\"gps_moving_base_last_downlink_source_id\":%u,"
+        "\"gps_moving_base_skytraq_frames\":%lu,"
+        "\"gps_moving_base_software_version_valid\":%s,"
+        "\"gps_moving_base_software_type\":%u,"
+        "\"gps_moving_base_software_kernel_version\":\"%08lx\","
+        "\"gps_moving_base_software_odm_version\":\"%08lx\","
+        "\"gps_moving_base_software_revision\":\"%08lx\","
+        "\"gps_moving_base_binary_output_status_valid\":%s,"
+        "\"gps_moving_base_binary_output_rate_code\":%u,"
+        "\"gps_moving_base_binary_meas_time_enabled\":%s,"
+        "\"gps_moving_base_binary_raw_meas_enabled\":%s,"
+        "\"gps_moving_base_binary_meas_time_count\":%lu,"
+        "\"gps_moving_base_binary_raw_meas_count\":%lu,"
+        "\"gps_moving_base_rtcm_preambles\":%lu,"
         "\"gps_checksum_errors\":%lu,"
         "\"gps_parse_errors\":%lu,"
         "\"charger_monitor_enabled\":%s,"
@@ -1613,6 +1724,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"pd_last_response_hex\":\"%s\","
         "\"pd_raw_hex\":\"%s\","
         "\"runtime_radio_channel\":%u,"
+        "\"runtime_radio_phy_mode\":%u,"
         "\"runtime_wireless_telemetry_port\":%lu,"
         "\"uwb_status\":\"%s\","
         "\"uwb_runtime_switching\":%s,"
@@ -1628,6 +1740,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"uwb_radio_phr_mode\":%u,"
         "\"uwb_radio_phr_rate\":%u,"
         "\"uwb_radio_sfd_type\":%u,"
+        "\"uwb_radio_sfd_timeout\":%u,"
         "\"uwb_radio_tx_pg_delay\":\"0x%02x\","
         "\"uwb_radio_tx_power\":\"0x%08lx\","
         "\"uwb_radio_rf_tx_ctrl_2\":\"0x%08lx\","
@@ -1899,8 +2012,54 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)gps_snapshot.gsa_count,
         (unsigned long)gps_snapshot.gsv_count,
         (unsigned long)gps_snapshot.psti030_count,
+        (unsigned long)gps_snapshot.psti032_count,
+        (unsigned long)gps_snapshot.psti035_count,
+        (unsigned long)gps_snapshot.ths_count,
         gps_snapshot.rtk_age_s,
         gps_snapshot.rtk_ratio,
+        gps_snapshot.baseline_valid ? "true" : "false",
+        (unsigned)gps_snapshot.baseline_source,
+        gps_snapshot.baseline_status != '\0' ? gps_snapshot.baseline_status : '-',
+        gps_snapshot.baseline_mode != '\0' ? gps_snapshot.baseline_mode : '-',
+        gps_snapshot.baseline_east_m,
+        gps_snapshot.baseline_north_m,
+        gps_snapshot.baseline_up_m,
+        gps_snapshot.baseline_length_m,
+        gps_snapshot.baseline_course_deg,
+        gps_snapshot.true_heading_valid ? "true" : "false",
+        gps_snapshot.true_heading_deg,
+        gps_snapshot.true_heading_mode != '\0' ? gps_snapshot.true_heading_mode : '-',
+        gps_snapshot.moving_base_role,
+        gps_snapshot.moving_base_active ? "true" : "false",
+        gps_snapshot.moving_base_correction_uart_ready ? "true" : "false",
+        gps_snapshot.moving_base_receiver_config_sent ? "true" : "false",
+        (unsigned long)gps_snapshot.moving_base_receiver_ack_count,
+        (unsigned long)gps_snapshot.moving_base_receiver_nack_count,
+        (unsigned)gps_snapshot.moving_base_receiver_last_ack_id,
+        (unsigned)gps_snapshot.moving_base_receiver_last_nack_id,
+        (unsigned long)gps_snapshot.moving_base_uplink_packet_count,
+        (unsigned long)gps_snapshot.moving_base_uplink_byte_count,
+        (unsigned long)gps_snapshot.moving_base_uplink_error_count,
+        (unsigned long)gps_snapshot.moving_base_downlink_packet_count,
+        (unsigned long)gps_snapshot.moving_base_downlink_byte_count,
+        (unsigned long)gps_snapshot.moving_base_downlink_error_count,
+        (unsigned long)gps_snapshot.moving_base_downlink_gap_count,
+        (unsigned long)gps_snapshot.moving_base_last_uplink_age_ms,
+        (unsigned long)gps_snapshot.moving_base_last_downlink_age_ms,
+        (unsigned)gps_snapshot.moving_base_last_downlink_source_id,
+        (unsigned long)gps_snapshot.moving_base_skytraq_frame_count,
+        gps_snapshot.moving_base_software_version_valid ? "true" : "false",
+        (unsigned)gps_snapshot.moving_base_software_type,
+        (unsigned long)gps_snapshot.moving_base_software_kernel_version,
+        (unsigned long)gps_snapshot.moving_base_software_odm_version,
+        (unsigned long)gps_snapshot.moving_base_software_revision,
+        gps_snapshot.moving_base_binary_output_status_valid ? "true" : "false",
+        (unsigned)gps_snapshot.moving_base_binary_output_rate_code,
+        gps_snapshot.moving_base_binary_meas_time_enabled ? "true" : "false",
+        gps_snapshot.moving_base_binary_raw_meas_enabled ? "true" : "false",
+        (unsigned long)gps_snapshot.moving_base_binary_meas_time_count,
+        (unsigned long)gps_snapshot.moving_base_binary_raw_meas_count,
+        (unsigned long)gps_snapshot.moving_base_rtcm_preamble_count,
         (unsigned long)gps_snapshot.checksum_error_count,
         (unsigned long)gps_snapshot.parse_error_count,
         charger_snapshot.monitor_enabled ? "true" : "false",
@@ -2135,6 +2294,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         pd_last_response_hex,
         pd_raw_hex,
         (unsigned)runtime_radio_channel(runtime_config),
+        (unsigned)runtime_radio_phy_mode(runtime_config),
         (unsigned long)runtime_config->wireless_telemetry_port,
         uwb_dw3000_status_to_string(uwb_dw3000_get_status()),
         uwb_dw3000_runtime_switch_in_progress() ? "true" : "false",
@@ -2143,13 +2303,14 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned)runtime_radio_profile(runtime_config),
         (unsigned)runtime_radio_channel(runtime_config),
         (unsigned)runtime_radio_rf_channel_bit(runtime_config),
-        (unsigned)APP_UWB_RADIO_PREAMBLE_LEN_CODE,
+        (unsigned)runtime_radio_preamble_len_code(runtime_config),
         (unsigned)APP_UWB_RADIO_PREAMBLE_CODE,
-        (unsigned)APP_UWB_RADIO_PAC,
-        (unsigned)APP_UWB_RADIO_DATA_RATE,
+        (unsigned)runtime_radio_pac(runtime_config),
+        (unsigned)runtime_radio_data_rate(runtime_config),
         (unsigned)APP_UWB_RADIO_PHR_MODE,
-        (unsigned)APP_UWB_RADIO_PHR_RATE,
+        (unsigned)runtime_radio_phr_rate(runtime_config),
         (unsigned)APP_UWB_RADIO_SFD_TYPE,
+        (unsigned)runtime_radio_sfd_timeout(runtime_config),
         (unsigned)APP_UWB_RADIO_TX_PG_DELAY,
         (unsigned long)APP_UWB_RADIO_TX_POWER,
         (unsigned long)runtime_radio_rf_tx_ctrl_2(runtime_config),
@@ -3920,6 +4081,8 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         APPLY_BOOL_PARAM("gps", gps_enabled);
         APPLY_U8_PARAM("radio_channel", radio_channel);
         APPLY_U8_PARAM("uwb_channel", radio_channel);
+        APPLY_U8_PARAM("radio_phy_mode", radio_phy_mode);
+        APPLY_U8_PARAM("uwb_phy_mode", radio_phy_mode);
         APPLY_U32_PARAM("telemetry_port", wireless_telemetry_port);
         APPLY_U32_PARAM("tel_port", wireless_telemetry_port);
 
@@ -4119,6 +4282,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         "\"runtime_bno085_log_interval_ms\":%lu,"
         "\"runtime_gps_enabled\":%s,"
         "\"runtime_radio_channel\":%u,"
+        "\"runtime_radio_phy_mode\":%u,"
         "\"runtime_wireless_telemetry_port\":%lu,"
         "\"reboot_recommended\":%s,"
         "\"rebooting\":%s,"
@@ -4177,6 +4341,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         (unsigned long)active_config->bno085_log_interval_ms,
         active_config->gps_enabled ? "true" : "false",
         (unsigned)runtime_radio_channel(active_config),
+        (unsigned)runtime_radio_phy_mode(active_config),
         (unsigned long)active_config->wireless_telemetry_port,
         reboot_recommended ? "true" : "false",
         reboot_requested ? "true" : "false",
@@ -4432,6 +4597,240 @@ static esp_err_t ota_post_handler(httpd_req_t *req)
     return response_err;
 }
 
+static esp_err_t gnss_memory_reader(void *context, uint8_t *buffer,
+                                    size_t capacity, size_t *received)
+{
+    gnss_memory_reader_context_t *reader = context;
+    if (reader == NULL || buffer == NULL || received == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (reader->offset > reader->size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const size_t remaining = reader->size - reader->offset;
+    const size_t length = remaining < capacity ? remaining : capacity;
+    if (length > 0) {
+        memcpy(buffer, &reader->data[reader->offset], length);
+        reader->offset += length;
+    }
+    *received = length;
+    return ESP_OK;
+}
+
+static esp_err_t gnss_receive_body(httpd_req_t *req, uint8_t *buffer,
+                                   size_t length)
+{
+    size_t offset = 0;
+    while (offset < length) {
+        const int received =
+            httpd_req_recv(req, (char *)&buffer[offset], length - offset);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (received <= 0 || (size_t)received > length - offset) {
+            return ESP_FAIL;
+        }
+        offset += (size_t)received;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t gnss_firmware_post_handler(httpd_req_t *req)
+{
+    if (!ota_request_authorized(req)) {
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED,
+                                   "Missing or invalid OTA token");
+    }
+    if (s_ota_in_progress) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Update already in progress");
+    }
+    if (req->content_len != GNSS_PX1105R_PACKED_IMAGE_SIZE) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Unexpected PX1105R firmware image");
+    }
+
+    const size_t image_size = (size_t)req->content_len;
+    s_ota_in_progress = true;
+    uint8_t *image = heap_caps_malloc(
+        image_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (image == NULL) {
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Unable to allocate GNSS PSRAM cache");
+    }
+    if (gnss_receive_body(req, image, image_size) != ESP_OK) {
+        heap_caps_free(image);
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Incomplete GNSS firmware upload");
+    }
+
+    const uint8_t *lzma_header = image;
+    uint64_t unpacked_size = 0;
+    for (size_t index = 0; index < 8; ++index) {
+        unpacked_size |= ((uint64_t)lzma_header[5 + index]) << (8U * index);
+    }
+    const uint32_t dictionary_size =
+        ((uint32_t)lzma_header[1]) |
+        ((uint32_t)lzma_header[2] << 8) |
+        ((uint32_t)lzma_header[3] << 16) |
+        ((uint32_t)lzma_header[4] << 24);
+    if (lzma_header[0] != 0x5D || dictionary_size != (8U * 1024U) ||
+        unpacked_size != GNSS_PX1105R_RAW_IMAGE_SIZE) {
+        heap_caps_free(image);
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid Phoenix LZMA header");
+    }
+
+    uint8_t calculated_packed_sum = 0;
+    for (size_t index = GNSS_FIRMWARE_LZMA_HEADER_SIZE; index < image_size;
+         ++index) {
+        calculated_packed_sum += image[index];
+    }
+    if (calculated_packed_sum != GNSS_PX1105R_PACKED_SUM8) {
+        heap_caps_free(image);
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "GNSS packed checksum mismatch");
+    }
+
+    if (s_gnss_cached_firmware.data != NULL) {
+        heap_caps_free(s_gnss_cached_firmware.data);
+    }
+    s_gnss_cached_firmware = (gnss_cached_firmware_t){
+        .data = image,
+        .size = image_size,
+    };
+    s_ota_in_progress = false;
+
+    char response[320] = {0};
+    const int response_length = snprintf(
+        response, sizeof(response),
+        "{\"ok\":true,\"cached\":true,\"bytes\":%u,"
+        "\"packed_bytes\":%u,\"packed_sum8\":%u,"
+        "\"psram_free\":%u}\n",
+        (unsigned)image_size,
+        (unsigned)(image_size - GNSS_FIRMWARE_LZMA_HEADER_SIZE),
+        (unsigned)calculated_packed_sum,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, response, response_length);
+}
+
+static esp_err_t gnss_loader_post_handler(httpd_req_t *req)
+{
+    if (!ota_request_authorized(req)) {
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED,
+                                   "Missing or invalid OTA token");
+    }
+    if (s_ota_in_progress) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Update already in progress");
+    }
+    if (req->content_len != GNSS_PX1105R_LOADER_SOURCE_SIZE) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid GNSS S-record loader size");
+    }
+
+    const size_t loader_size = (size_t)req->content_len;
+    s_ota_in_progress = true;
+    uint8_t *loader = heap_caps_malloc(
+        loader_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (loader == NULL) {
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Unable to allocate GNSS loader cache");
+    }
+    if (gnss_receive_body(req, loader, loader_size) != ESP_OK) {
+        heap_caps_free(loader);
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Incomplete GNSS loader upload");
+    }
+    if (loader[0] != 'S' || loader[1] != '0' || loader[loader_size - 1] != '\n') {
+        heap_caps_free(loader);
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid GNSS S-record loader");
+    }
+
+    if (s_gnss_cached_loader.data != NULL) {
+        heap_caps_free(s_gnss_cached_loader.data);
+    }
+    s_gnss_cached_loader = (gnss_cached_loader_t){
+        .data = loader,
+        .size = loader_size,
+    };
+    s_ota_in_progress = false;
+
+    char response[192] = {0};
+    const int response_length = snprintf(
+        response, sizeof(response),
+        "{\"ok\":true,\"cached\":true,\"loader_bytes\":%u,"
+        "\"psram_free\":%u}\n",
+        (unsigned)loader_size,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, response, response_length);
+}
+
+static esp_err_t gnss_firmware_run_post_handler(httpd_req_t *req)
+{
+    if (!ota_request_authorized(req)) {
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED,
+                                   "Missing or invalid OTA token");
+    }
+    if (s_ota_in_progress) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Update already in progress");
+    }
+    if (s_gnss_cached_firmware.data == NULL ||
+        s_gnss_cached_firmware.size <= GNSS_FIRMWARE_LZMA_HEADER_SIZE) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "No GNSS firmware cached in PSRAM");
+    }
+    if (s_gnss_cached_loader.data == NULL || s_gnss_cached_loader.size == 0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "No GNSS S-record loader cached in PSRAM");
+    }
+
+    gnss_memory_reader_context_t loader_reader = {
+        .data = s_gnss_cached_loader.data,
+        .size = s_gnss_cached_loader.size,
+        .offset = 0,
+    };
+    gnss_memory_reader_context_t reader = {
+        .data = &s_gnss_cached_firmware.data[GNSS_FIRMWARE_LZMA_HEADER_SIZE],
+        .size = s_gnss_cached_firmware.size -
+                GNSS_FIRMWARE_LZMA_HEADER_SIZE,
+        .offset = 0,
+    };
+    gnss_firmware_update_result_t result = {0};
+    s_ota_in_progress = true;
+    const esp_err_t err = gnss_firmware_update(
+        loader_reader.size, gnss_memory_reader, &loader_reader, reader.size,
+        s_gnss_cached_firmware.data, gnss_memory_reader, &reader, &result);
+    s_ota_in_progress = false;
+    gnss_release_update_cache();
+
+    char response[384] = {0};
+    const int response_length = snprintf(
+        response, sizeof(response),
+        "{\"ok\":%s,\"error\":\"%s\",\"stage\":\"%s\","
+        "\"feedback\":\"%s\",\"profile\":\"PX1105R-01.07.33\","
+        "\"loader_bytes\":%u,\"bytes\":%u,\"sum8\":%u,"
+        "\"psram_cache_released\":true}\n",
+        err == ESP_OK ? "true" : "false", esp_err_to_name(err),
+        result.stage, result.feedback, (unsigned)result.loader_bytes_written,
+        (unsigned)result.bytes_written, (unsigned)result.calculated_sum);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_status(req, err == ESP_OK ? "200 OK"
+                                              : "500 Internal Server Error");
+    return httpd_resp_send(req, response, response_length);
+}
+
 static esp_err_t register_uri_handler_checked(const httpd_uri_t *uri)
 {
     esp_err_t err = httpd_register_uri_handler(s_http_server, uri);
@@ -4448,7 +4847,7 @@ static esp_err_t start_http_server(void)
     config.server_port = 80;
     config.stack_size = 8192;
     config.core_id = OTA_SERVICE_HTTPD_TASK_CORE;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 11;
 
     esp_err_t err = httpd_start(&s_http_server, &config);
     if (err != ESP_OK) {
@@ -4472,6 +4871,24 @@ static esp_err_t start_http_server(void)
         .uri = "/ota",
         .method = HTTP_POST,
         .handler = ota_post_handler,
+        .user_ctx = NULL,
+    };
+    const httpd_uri_t gnss_firmware_uri = {
+        .uri = "/gnss/firmware",
+        .method = HTTP_POST,
+        .handler = gnss_firmware_post_handler,
+        .user_ctx = NULL,
+    };
+    const httpd_uri_t gnss_loader_uri = {
+        .uri = "/gnss/loader",
+        .method = HTTP_POST,
+        .handler = gnss_loader_post_handler,
+        .user_ctx = NULL,
+    };
+    const httpd_uri_t gnss_firmware_run_uri = {
+        .uri = "/gnss/firmware/run",
+        .method = HTTP_POST,
+        .handler = gnss_firmware_run_post_handler,
         .user_ctx = NULL,
     };
     const httpd_uri_t antenna_delay_uri = {
@@ -4511,6 +4928,15 @@ static esp_err_t start_http_server(void)
     }
     if (err == ESP_OK) {
         err = register_uri_handler_checked(&ota_uri);
+    }
+    if (err == ESP_OK) {
+        err = register_uri_handler_checked(&gnss_firmware_uri);
+    }
+    if (err == ESP_OK) {
+        err = register_uri_handler_checked(&gnss_loader_uri);
+    }
+    if (err == ESP_OK) {
+        err = register_uri_handler_checked(&gnss_firmware_run_uri);
     }
     if (err == ESP_OK) {
         err = register_uri_handler_checked(&antenna_delay_uri);

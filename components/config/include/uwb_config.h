@@ -119,32 +119,9 @@
 #define APP_UWB_RANGING_AUTO_RX_DELAY_UUS 500
 #endif
 
-/*
- * Native DS-TWR source-integrity limits.  A valid exchange may legitimately
- * span a large indoor installation, but a negative ToF or a distance beyond
- * this bound is never forwarded to the positioning pipeline.  Diagnostics
- * are sampled in the normal hot path; setting the interval to 1 is useful for
- * a dedicated RF-quality capture, while 0 disables the additional CIA reads.
- */
+/* Native DS-TWR rejects physically impossible results before telemetry. */
 #ifndef APP_UWB_RANGING_MAX_DISTANCE_M
 #define APP_UWB_RANGING_MAX_DISTANCE_M 100.0
-#endif
-
-#ifndef APP_UWB_RANGING_DIAGNOSTICS_EVERY
-#define APP_UWB_RANGING_DIAGNOSTICS_EVERY 64
-#endif
-
-#ifndef APP_UWB_RANGING_ROTATE_ANCHOR_ORDER
-#define APP_UWB_RANGING_ROTATE_ANCHOR_ORDER 1
-#endif
-
-/*
- * Anchor self-localization changes the active initiator and therefore needs
- * an explicit radio-state boundary.  Apply this guard both before the survey
- * command and after its DS-TWR slot; it does not lengthen ordinary tag frames.
- */
-#ifndef APP_UWB_RANGING_GEOMETRY_GUARD_MS
-#define APP_UWB_RANGING_GEOMETRY_GUARD_MS 5
 #endif
 
 /*
@@ -178,6 +155,18 @@
 
 #ifndef APP_UWB_PASSIVE_DS_FINAL_DELAY_US
 #define APP_UWB_PASSIVE_DS_FINAL_DELAY_US 1000
+#endif
+
+#ifndef APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US
+#define APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US 750
+#endif
+
+/*
+ * Validated FlexTDOA guard reused as a value, not as shared runtime state.
+ * The dynamic multipoint profile places this guard after its exchange budget.
+ */
+#ifndef APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US
+#define APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US 250
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS
@@ -395,6 +384,10 @@
 
 #define APP_UWB_RADIO_PROFILE_LEGACY_CH5_6M8_PLEN128 1
 #define APP_UWB_RADIO_PROFILE_LEGACY_CH9_6M8_PLEN128 2
+#define APP_UWB_RADIO_PROFILE_LONG_RANGE_CH5_850K_PLEN1024 3
+#define APP_UWB_RADIO_PROFILE_LONG_RANGE_CH9_850K_PLEN1024 4
+#define APP_UWB_RADIO_PHY_FAST 0
+#define APP_UWB_RADIO_PHY_LONG_RANGE 1
 #define APP_UWB_RADIO_BR_850K 0
 #define APP_UWB_RADIO_BR_6M8 1
 #define APP_UWB_RADIO_PLEN_32 0x04
@@ -409,6 +402,10 @@
 
 #ifndef APP_UWB_RADIO_PROFILE
 #define APP_UWB_RADIO_PROFILE APP_UWB_RADIO_PROFILE_LEGACY_CH5_6M8_PLEN128
+#endif
+
+#ifndef APP_UWB_RADIO_PHY_MODE
+#define APP_UWB_RADIO_PHY_MODE APP_UWB_RADIO_PHY_FAST
 #endif
 
 #ifndef APP_UWB_RADIO_CHANNEL

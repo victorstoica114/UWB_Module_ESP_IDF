@@ -1,0 +1,20 @@
+{
+  "ok": true,
+  "target": "A2",
+  "hostname": "uwb-module-2",
+  "ip": "192.168.50.142",
+  "stage": "complete",
+  "feedback": "END",
+  "loader_bytes": 68492,
+  "packed_payload_bytes": 471230,
+  "packed_payload_sum8": 189,
+  "software_kernel_version": "00030600",
+  "software_odm_version": "00010721",
+  "software_revision_before": "0017081f",
+  "software_revision_after": "0018010b",
+  "gps_task_running": true,
+  "gps_uart_ready": true,
+  "gps_last_error": "ESP_OK",
+  "gps_checksum_errors": 0,
+  "gps_parse_errors": 0
+}

@@ -1,0 +1,5 @@
+{"client":"192.168.50.198:59760","component":"uwb","host":"uwb-module-1","id":742,"level":"W","message":"PASSIVE_DS tag RX failed: ESP_FAIL","module_id":1,"received_at":1785540774.40426,"tag":"uwb_dw3000","uptime_ms":38455}
+{"client":"192.168.50.198:59760","component":"uwb","host":"uwb-module-1","id":839,"level":"W","message":"PASSIVE_DS tag RX failed: ESP_FAIL","module_id":1,"received_at":1785540781.702376,"tag":"uwb_dw3000","uptime_ms":45775}
+{"client":"192.168.50.198:59760","component":"uwb","host":"uwb-module-1","id":1112,"level":"W","message":"PASSIVE_DS tag RX failed: ESP_FAIL","module_id":1,"received_at":1785540803.3747807,"tag":"uwb_dw3000","uptime_ms":67445}
+{"client":"192.168.50.198:59760","component":"uwb","host":"uwb-module-1","id":1134,"level":"W","message":"PASSIVE_DS tag RX failed: ESP_FAIL","module_id":1,"received_at":1785540805.0234833,"tag":"uwb_dw3000","uptime_ms":69105}
+{"client":"192.168.50.198:59760","component":"uwb","host":"uwb-module-1","id":1211,"level":"W","message":"PASSIVE_DS tag RX failed: ESP_FAIL","module_id":1,"received_at":1785540808.5968814,"tag":"uwb_dw3000","uptime_ms":72685}
