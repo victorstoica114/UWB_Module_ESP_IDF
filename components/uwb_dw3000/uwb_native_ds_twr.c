@@ -22,7 +22,7 @@ static const char *TAG = "native_ds_twr";
 #define NATIVE_DS_FINAL_LEN 26U
 #define NATIVE_DS_SURVEY_GUARD_MS 1U
 #define NATIVE_DS_SURVEY_INTERVAL_FRAMES 4U
-#define NATIVE_DS_SURVEY_RX_TIMEOUT_MS 4U
+#define NATIVE_DS_DIAGNOSTIC_INTERVAL_FRAMES 5U
 #define NATIVE_DS_TIMESTAMP_MASK ((1ULL << 40U) - 1ULL)
 #define NATIVE_DS_TIME_UNIT_SECONDS 15.650040064102564e-12
 #define NATIVE_DS_SPEED_OF_LIGHT_MPS 299702547.0
@@ -244,10 +244,19 @@ static esp_err_t initiator_exchange(
     err = radio->send_delayed(
         radio->context, payload, NATIVE_DS_FINAL_LEN, final_due,
         &programmed_final_tx, &actual_final_tx);
-    (void)actual_final_tx;
     if (err != ESP_OK || programmed_final_tx != expected_final_tx) {
         s_stats.delayed_tx_error_count++;
         return err == ESP_OK ? ESP_ERR_INVALID_STATE : err;
+    }
+    if (actual_final_tx != programmed_final_tx) {
+        ESP_LOGW(TAG,
+                 "final TX timestamp mismatch frame=%u dst=%u "
+                 "programmed=0x%010llx actual=0x%010llx delta=%llu dtu",
+                 (unsigned)frame_id, (unsigned)anchor_id,
+                 (unsigned long long)programmed_final_tx,
+                 (unsigned long long)actual_final_tx,
+                 (unsigned long long)timestamp_delta(actual_final_tx,
+                                                     programmed_final_tx));
     }
     s_stats.final_tx_count++;
     return ESP_OK;
@@ -354,10 +363,19 @@ static esp_err_t anchor_exchange(
         radio->context, payload, NATIVE_DS_RESPONSE_LEN, response_due,
         config->auto_rx_delay_uus, config->rx_timeout_ms,
         &response_tx, &response_actual);
-    (void)response_actual;
     if (err != ESP_OK) {
         s_stats.delayed_tx_error_count++;
         return err;
+    }
+    if (response_actual != response_tx) {
+        ESP_LOGW(TAG,
+                 "response TX timestamp mismatch frame=%u dst=%u "
+                 "programmed=0x%010llx actual=0x%010llx delta=%llu dtu",
+                 (unsigned)poll->frame_id, (unsigned)poll->source_id,
+                 (unsigned long long)response_tx,
+                 (unsigned long long)response_actual,
+                 (unsigned long long)timestamp_delta(response_actual,
+                                                     response_tx));
     }
     s_stats.response_tx_count++;
 
@@ -384,6 +402,26 @@ static esp_err_t anchor_exchange(
             final.rx_timestamp, &distance_m)) {
         s_stats.rejected_range_count++;
         return ESP_ERR_INVALID_RESPONSE;
+    }
+    if ((poll->frame_id % NATIVE_DS_DIAGNOSTIC_INTERVAL_FRAMES) == 0U) {
+        ESP_LOGI(
+            TAG,
+            "NATIVE_DS_RANGE_DIAG local=%u frame=%u exchange=%s src=%u "
+            "poll_tx=0x%010llx poll_rx=0x%010llx "
+            "response_tx=0x%010llx response_rx=0x%010llx "
+            "final_tx=0x%010llx final_rx=0x%010llx distance=%.4f",
+            (unsigned)config->source_id, (unsigned)poll->frame_id,
+            poll->source_id == config->tag_id ? "tag" : "survey",
+            (unsigned)poll->source_id,
+            (unsigned long long)get_ts40(
+                final.payload, NATIVE_DS_FINAL_POLL_TX_OFFSET),
+            (unsigned long long)poll->rx_timestamp,
+            (unsigned long long)response_tx,
+            (unsigned long long)get_ts40(
+                final.payload, NATIVE_DS_FINAL_RESPONSE_RX_OFFSET),
+            (unsigned long long)get_ts40(
+                final.payload, NATIVE_DS_FINAL_FINAL_TX_OFFSET),
+            (unsigned long long)final.rx_timestamp, distance_m);
     }
     s_stats.completed_range_count++;
     s_stats.last_distance_mm = (int32_t)(distance_m * 1000.0 + 0.5);
@@ -456,7 +494,7 @@ static void run_anchor(const struct uwb_native_ds_config *config,
             radio->delay_ms(radio->context, NATIVE_DS_SURVEY_GUARD_MS);
             const esp_err_t survey_err = initiator_exchange(
                 config, radio, survey_peer_id, poll.frame_id, 0U,
-                NATIVE_DS_SURVEY_RX_TIMEOUT_MS);
+                config->rx_timeout_ms);
             if (survey_err != ESP_OK && survey_err != ESP_ERR_TIMEOUT) {
                 ESP_LOGW(TAG,
                          "geometry exchange peer=%u frame=%u failed: %s",

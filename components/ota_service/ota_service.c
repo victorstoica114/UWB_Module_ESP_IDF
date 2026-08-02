@@ -914,7 +914,8 @@ static bool runtime_config_reboot_recommended(
            before->anchor_survey_coordinator_id !=
                after->anchor_survey_coordinator_id ||
            before->uwb_enabled != after->uwb_enabled ||
-           before->radio_channel != after->radio_channel;
+           before->radio_channel != after->radio_channel ||
+           before->radio_phy_mode != after->radio_phy_mode;
 }
 
 static bool runtime_config_hot_switch_eligible(
@@ -991,11 +992,61 @@ static uint8_t runtime_radio_rf_channel_bit(const app_runtime_config_t *config)
     return runtime_radio_channel(config) == 9U ? 1U : 0U;
 }
 
+static uint8_t runtime_radio_phy_mode(const app_runtime_config_t *config)
+{
+    return config != NULL &&
+                   config->radio_phy_mode == APP_UWB_RADIO_PHY_LONG_RANGE
+               ? APP_UWB_RADIO_PHY_LONG_RANGE
+               : APP_UWB_RADIO_PHY_FAST;
+}
+
+static bool runtime_radio_is_long_range(const app_runtime_config_t *config)
+{
+    return runtime_radio_phy_mode(config) == APP_UWB_RADIO_PHY_LONG_RANGE;
+}
+
 static uint8_t runtime_radio_profile(const app_runtime_config_t *config)
 {
+    if (runtime_radio_is_long_range(config)) {
+        return runtime_radio_channel(config) == 9U
+                   ? APP_UWB_RADIO_PROFILE_LONG_RANGE_CH9_850K_PLEN1024
+                   : APP_UWB_RADIO_PROFILE_LONG_RANGE_CH5_850K_PLEN1024;
+    }
     return runtime_radio_channel(config) == 9U
                ? APP_UWB_RADIO_PROFILE_LEGACY_CH9_6M8_PLEN128
                : APP_UWB_RADIO_PROFILE_LEGACY_CH5_6M8_PLEN128;
+}
+
+static uint8_t runtime_radio_preamble_len_code(
+    const app_runtime_config_t *config)
+{
+    return runtime_radio_is_long_range(config)
+               ? APP_UWB_RADIO_PLEN_1024
+               : APP_UWB_RADIO_PREAMBLE_LEN_CODE;
+}
+
+static uint8_t runtime_radio_pac(const app_runtime_config_t *config)
+{
+    return runtime_radio_is_long_range(config) ? 2U : APP_UWB_RADIO_PAC;
+}
+
+static uint8_t runtime_radio_data_rate(const app_runtime_config_t *config)
+{
+    return runtime_radio_is_long_range(config)
+               ? APP_UWB_RADIO_BR_850K
+               : APP_UWB_RADIO_DATA_RATE;
+}
+
+static uint8_t runtime_radio_phr_rate(const app_runtime_config_t *config)
+{
+    return runtime_radio_is_long_range(config) ? 0U
+                                                : APP_UWB_RADIO_PHR_RATE;
+}
+
+static uint16_t runtime_radio_sfd_timeout(
+    const app_runtime_config_t *config)
+{
+    return runtime_radio_is_long_range(config) ? 1001U : 129U;
 }
 
 static uint32_t runtime_radio_rf_tx_ctrl_2(const app_runtime_config_t *config)
@@ -1589,6 +1640,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"pd_last_response_hex\":\"%s\","
         "\"pd_raw_hex\":\"%s\","
         "\"runtime_radio_channel\":%u,"
+        "\"runtime_radio_phy_mode\":%u,"
         "\"runtime_wireless_telemetry_port\":%lu,"
         "\"uwb_status\":\"%s\","
         "\"uwb_runtime_switching\":%s,"
@@ -1604,6 +1656,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"uwb_radio_phr_mode\":%u,"
         "\"uwb_radio_phr_rate\":%u,"
         "\"uwb_radio_sfd_type\":%u,"
+        "\"uwb_radio_sfd_timeout\":%u,"
         "\"uwb_radio_tx_pg_delay\":\"0x%02x\","
         "\"uwb_radio_tx_power\":\"0x%08lx\","
         "\"uwb_radio_rf_tx_ctrl_2\":\"0x%08lx\","
@@ -2111,6 +2164,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         pd_last_response_hex,
         pd_raw_hex,
         (unsigned)runtime_radio_channel(runtime_config),
+        (unsigned)runtime_radio_phy_mode(runtime_config),
         (unsigned long)runtime_config->wireless_telemetry_port,
         uwb_dw3000_status_to_string(uwb_dw3000_get_status()),
         uwb_dw3000_runtime_switch_in_progress() ? "true" : "false",
@@ -2119,13 +2173,14 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned)runtime_radio_profile(runtime_config),
         (unsigned)runtime_radio_channel(runtime_config),
         (unsigned)runtime_radio_rf_channel_bit(runtime_config),
-        (unsigned)APP_UWB_RADIO_PREAMBLE_LEN_CODE,
+        (unsigned)runtime_radio_preamble_len_code(runtime_config),
         (unsigned)APP_UWB_RADIO_PREAMBLE_CODE,
-        (unsigned)APP_UWB_RADIO_PAC,
-        (unsigned)APP_UWB_RADIO_DATA_RATE,
+        (unsigned)runtime_radio_pac(runtime_config),
+        (unsigned)runtime_radio_data_rate(runtime_config),
         (unsigned)APP_UWB_RADIO_PHR_MODE,
-        (unsigned)APP_UWB_RADIO_PHR_RATE,
+        (unsigned)runtime_radio_phr_rate(runtime_config),
         (unsigned)APP_UWB_RADIO_SFD_TYPE,
+        (unsigned)runtime_radio_sfd_timeout(runtime_config),
         (unsigned)APP_UWB_RADIO_TX_PG_DELAY,
         (unsigned long)APP_UWB_RADIO_TX_POWER,
         (unsigned long)runtime_radio_rf_tx_ctrl_2(runtime_config),
@@ -3896,6 +3951,8 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         APPLY_BOOL_PARAM("gps", gps_enabled);
         APPLY_U8_PARAM("radio_channel", radio_channel);
         APPLY_U8_PARAM("uwb_channel", radio_channel);
+        APPLY_U8_PARAM("radio_phy_mode", radio_phy_mode);
+        APPLY_U8_PARAM("uwb_phy_mode", radio_phy_mode);
         APPLY_U32_PARAM("telemetry_port", wireless_telemetry_port);
         APPLY_U32_PARAM("tel_port", wireless_telemetry_port);
 
@@ -4095,6 +4152,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         "\"runtime_bno085_log_interval_ms\":%lu,"
         "\"runtime_gps_enabled\":%s,"
         "\"runtime_radio_channel\":%u,"
+        "\"runtime_radio_phy_mode\":%u,"
         "\"runtime_wireless_telemetry_port\":%lu,"
         "\"reboot_recommended\":%s,"
         "\"rebooting\":%s,"
@@ -4153,6 +4211,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
         (unsigned long)active_config->bno085_log_interval_ms,
         active_config->gps_enabled ? "true" : "false",
         (unsigned)runtime_radio_channel(active_config),
+        (unsigned)runtime_radio_phy_mode(active_config),
         (unsigned long)active_config->wireless_telemetry_port,
         reboot_recommended ? "true" : "false",
         reboot_requested ? "true" : "false",

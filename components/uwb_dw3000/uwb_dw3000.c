@@ -1310,11 +1310,69 @@ static uint8_t uwb_dw3000_runtime_radio_rf_channel_bit(void)
     return uwb_dw3000_runtime_radio_channel() == 9U ? 1U : 0U;
 }
 
+static uint8_t uwb_dw3000_runtime_radio_phy_mode(void)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    return config->radio_phy_mode == APP_UWB_RADIO_PHY_LONG_RANGE
+               ? APP_UWB_RADIO_PHY_LONG_RANGE
+               : APP_UWB_RADIO_PHY_FAST;
+}
+
+static bool uwb_dw3000_runtime_radio_is_long_range(void)
+{
+    return uwb_dw3000_runtime_radio_phy_mode() ==
+           APP_UWB_RADIO_PHY_LONG_RANGE;
+}
+
 static uint8_t uwb_dw3000_runtime_radio_profile(void)
 {
+    if (uwb_dw3000_runtime_radio_is_long_range()) {
+        return uwb_dw3000_runtime_radio_channel() == 9U
+                   ? APP_UWB_RADIO_PROFILE_LONG_RANGE_CH9_850K_PLEN1024
+                   : APP_UWB_RADIO_PROFILE_LONG_RANGE_CH5_850K_PLEN1024;
+    }
     return uwb_dw3000_runtime_radio_channel() == 9U
                ? APP_UWB_RADIO_PROFILE_LEGACY_CH9_6M8_PLEN128
                : APP_UWB_RADIO_PROFILE_LEGACY_CH5_6M8_PLEN128;
+}
+
+static uint8_t uwb_dw3000_runtime_radio_preamble_len_code(void)
+{
+    return uwb_dw3000_runtime_radio_is_long_range()
+               ? APP_UWB_RADIO_PLEN_1024
+               : APP_UWB_RADIO_PREAMBLE_LEN_CODE;
+}
+
+static uint8_t uwb_dw3000_runtime_radio_preamble_code(void)
+{
+    return APP_UWB_RADIO_PREAMBLE_CODE;
+}
+
+static uint8_t uwb_dw3000_runtime_radio_pac(void)
+{
+    /* DWT_PAC32 is recommended for preambles of 512 symbols or longer. */
+    return uwb_dw3000_runtime_radio_is_long_range() ? 2U
+                                                     : APP_UWB_RADIO_PAC;
+}
+
+static uint8_t uwb_dw3000_runtime_radio_data_rate(void)
+{
+    return uwb_dw3000_runtime_radio_is_long_range()
+               ? APP_UWB_RADIO_BR_850K
+               : APP_UWB_RADIO_DATA_RATE;
+}
+
+static uint8_t uwb_dw3000_runtime_radio_phr_rate(void)
+{
+    return uwb_dw3000_runtime_radio_is_long_range()
+               ? 0U
+               : APP_UWB_RADIO_PHR_RATE;
+}
+
+static uint16_t uwb_dw3000_runtime_radio_sfd_timeout(void)
+{
+    /* plen + 1 + 8-symbol Qorvo SFD - PAC. */
+    return uwb_dw3000_runtime_radio_is_long_range() ? 1001U : 129U;
 }
 
 static uint32_t uwb_dw3000_runtime_rf_tx_ctrl_2(void)
@@ -2332,6 +2390,15 @@ static bool uwb_dw3000_payload_is_distance_frame(const uint8_t *payload,
            payload[4] == UWB_DISTANCE_FRAME_VERSION;
 }
 
+static bool uwb_dw3000_payload_is_native_ds_frame(const uint8_t *payload,
+                                                  size_t payload_len)
+{
+    return payload != NULL && payload_len >= 10U &&
+           payload[0] == 'N' && payload[1] == 'D' &&
+           payload[2] == 'S' && payload[3] == '2' && payload[4] == 2U &&
+           payload[5] >= 1U && payload[5] <= 3U;
+}
+
 static bool uwb_dw3000_should_capture_rx_diagnostics(const uint8_t *payload,
                                                      size_t payload_len)
 {
@@ -2339,7 +2406,14 @@ static bool uwb_dw3000_should_capture_rx_diagnostics(const uint8_t *payload,
     const app_runtime_config_t *config = app_runtime_config_get();
     if (config != NULL &&
         config->runtime_mode == APP_RUNTIME_MODE_UWB_RANGING) {
-        return false;
+        if (!uwb_dw3000_payload_is_native_ds_frame(payload, payload_len) ||
+            APP_UWB_DIAGNOSTICS_LOG_EVERY == 0) {
+            return false;
+        }
+        const uint16_t sequence =
+            (uint16_t)(((uint16_t)payload[8]) |
+                       ((uint16_t)payload[9] << 8));
+        return (sequence % APP_UWB_DIAGNOSTICS_LOG_EVERY) == 0;
     }
 
     if (!uwb_dw3000_payload_is_distance_frame(payload, payload_len) ||
@@ -3116,16 +3190,18 @@ static uint16_t uwb_dw3000_preamble_len_symbols(uint8_t preamble_len_code)
 
 static esp_err_t uwb_dw3000_validate_radio_profile(void)
 {
+    const uint8_t preamble_len =
+        uwb_dw3000_runtime_radio_preamble_len_code();
+    const uint8_t preamble_code = uwb_dw3000_runtime_radio_preamble_code();
+    const uint8_t data_rate = uwb_dw3000_runtime_radio_data_rate();
     if (uwb_dw3000_runtime_radio_rf_channel_bit() > 1 ||
         APP_UWB_RADIO_SFD_TYPE > 3 ||
-        APP_UWB_RADIO_PREAMBLE_CODE > 31 ||
-        APP_UWB_RADIO_PREAMBLE_LEN_CODE > 0x0F ||
-        APP_UWB_RADIO_DATA_RATE > APP_UWB_RADIO_BR_6M8) {
+        preamble_code > 31 || preamble_len > 0x0F ||
+        data_rate > APP_UWB_RADIO_BR_6M8) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (uwb_dw3000_preamble_len_symbols(APP_UWB_RADIO_PREAMBLE_LEN_CODE) ==
-        0) {
+    if (uwb_dw3000_preamble_len_symbols(preamble_len) == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -3151,22 +3227,27 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
 
     const uint8_t channel = uwb_dw3000_runtime_radio_rf_channel_bit();
     const uint8_t channel_number = uwb_dw3000_runtime_radio_channel();
-    const uint8_t preamble_len = APP_UWB_RADIO_PREAMBLE_LEN_CODE;
-    const uint8_t preamble_code = APP_UWB_RADIO_PREAMBLE_CODE;
-    const uint8_t pac = APP_UWB_RADIO_PAC;
-    const uint8_t datarate = APP_UWB_RADIO_DATA_RATE;
+    const uint8_t preamble_len =
+        uwb_dw3000_runtime_radio_preamble_len_code();
+    const uint8_t preamble_code = uwb_dw3000_runtime_radio_preamble_code();
+    const uint8_t pac = uwb_dw3000_runtime_radio_pac();
+    const uint8_t datarate = uwb_dw3000_runtime_radio_data_rate();
     const uint8_t phr_mode = APP_UWB_RADIO_PHR_MODE;
-    const uint8_t phr_rate = APP_UWB_RADIO_PHR_RATE;
+    const uint8_t phr_rate = uwb_dw3000_runtime_radio_phr_rate();
     const uint8_t sfd_type = APP_UWB_RADIO_SFD_TYPE;
+    const uint16_t sfd_timeout =
+        uwb_dw3000_runtime_radio_sfd_timeout();
 
     ESP_LOGI(TAG,
-             "DW3000 radio profile: profile=%u channel=%u rf_bit=%u plen=%u(code=0x%02x) pcode=%u pac=%u br=%s phr_mode=%u phr_rate=%u sfd=%u",
+             "DW3000 radio profile: profile=%u phy=%u channel=%u rf_bit=%u plen=%u(code=0x%02x) pcode=%u pac=%u br=%s phr_mode=%u phr_rate=%u sfd=%u sfd_timeout=%u",
              (unsigned)uwb_dw3000_runtime_radio_profile(),
+             (unsigned)uwb_dw3000_runtime_radio_phy_mode(),
              (unsigned)channel_number, (unsigned)channel,
              (unsigned)uwb_dw3000_preamble_len_symbols(preamble_len),
              (unsigned)preamble_len, (unsigned)preamble_code, (unsigned)pac,
              uwb_dw3000_radio_data_rate_name(datarate), (unsigned)phr_mode,
-             (unsigned)phr_rate, (unsigned)sfd_type);
+             (unsigned)phr_rate, (unsigned)sfd_type,
+             (unsigned)sfd_timeout);
     ESP_LOGI(TAG,
              "DW3000 RF profile: pg=0x%02x power=0x%08lx rf_tx2=0x%08lx pll=0x%04x pll_final=0x%04x",
              (unsigned)APP_UWB_RADIO_TX_PG_DELAY,
@@ -3245,7 +3326,8 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
     s_tx_fctrl_base_valid = true;
     s_tx_fctrl_payload_len = SIZE_MAX;
 
-    ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_DRX, 0x02, 0x81),
+    ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_DRX, 0x02,
+                                                  sfd_timeout),
                         TAG, "DRX 0x02 write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x1C,
@@ -3545,7 +3627,11 @@ static esp_err_t uwb_dw3000_radio_init(void)
         uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x18, 0xE5E5), TAG,
         "THR_64 write failed");
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_write_u32_auto(DW3000_REG_DRX, 0x00, 0x81101C), TAG,
+        uwb_dw3000_write_u32_auto(
+            DW3000_REG_DRX, 0x00,
+            ((uint32_t)uwb_dw3000_runtime_radio_sfd_timeout() << 16U) |
+                0x101CU | uwb_dw3000_runtime_radio_pac()),
+        TAG,
         "DRX PAC write failed");
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_auto(DW3000_REG_RF_CONF, 0x34, 0x04), TAG,
@@ -9491,6 +9577,33 @@ static esp_err_t native_ds_receive(
     frame->payload_len = radio_frame.payload_len;
     frame->rx_timestamp = radio_frame.rx_timestamp;
     memcpy(frame->payload, radio_frame.payload, radio_frame.payload_len);
+    if (uwb_dw3000_payload_is_native_ds_frame(
+            radio_frame.payload, radio_frame.payload_len) &&
+        radio_frame.diagnostics.valid) {
+        const uint16_t frame_id =
+            (uint16_t)(((uint16_t)radio_frame.payload[8]) |
+                       ((uint16_t)radio_frame.payload[9] << 8));
+        ESP_LOGI(
+            TAG,
+            "NATIVE_DS_RX_DIAG local=%u frame=%u type=%u src=%u dst=%u "
+            "rx_ts=0x%010llx pacc=%u fp=%.2f peak_idx=%u peak_amp=%lu "
+            "power=%lu f1=%lu f2=%lu f3=%lu acc=%u xtal=%d",
+            (unsigned)s_source_id, (unsigned)frame_id,
+            (unsigned)radio_frame.payload[5],
+            (unsigned)radio_frame.payload[6],
+            (unsigned)radio_frame.payload[7],
+            (unsigned long long)radio_frame.rx_timestamp,
+            (unsigned)radio_frame.diagnostics.rx_pacc,
+            (double)radio_frame.diagnostics.ipatov_fp_index / 64.0,
+            (unsigned)radio_frame.diagnostics.ipatov_peak_index,
+            (unsigned long)radio_frame.diagnostics.ipatov_peak_amp,
+            (unsigned long)radio_frame.diagnostics.ipatov_power,
+            (unsigned long)radio_frame.diagnostics.ipatov_f1,
+            (unsigned long)radio_frame.diagnostics.ipatov_f2,
+            (unsigned long)radio_frame.diagnostics.ipatov_f3,
+            (unsigned)radio_frame.diagnostics.ipatov_accum_count,
+            (int)radio_frame.diagnostics.xtal_offset);
+    }
     return ESP_OK;
 }
 

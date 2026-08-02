@@ -26,6 +26,7 @@ from typing import Any, Callable
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+LEAFLET_ROOT = pathlib.Path("/usr/share/javascript/leaflet")
 LOG_RE = re.compile(
     r"^\[(?P<host>[^\]]+)\]\s+\[\s*(?P<uptime>\d+)\s+ms\]\s+"
     r"\[(?P<level>[DIWE])\]\[(?P<tag>[^\]]+)\]\s*(?P<message>.*)$"
@@ -283,6 +284,8 @@ RUNTIME_PARAM_STATUS_FIELDS = {
         "runtime_passive_ds_rolling_max_hz",
     "radio_channel": "runtime_radio_channel",
     "uwb_channel": "runtime_radio_channel",
+    "radio_phy_mode": "runtime_radio_phy_mode",
+    "uwb_phy_mode": "runtime_radio_phy_mode",
     "telemetry_port": "runtime_wireless_telemetry_port",
     "tel_port": "runtime_wireless_telemetry_port",
 }
@@ -2355,6 +2358,8 @@ INDEX_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UWB Dashboard</title>
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+<script src="/vendor/leaflet/leaflet.min.js"></script>
 <style>
 :root {
   color-scheme: light;
@@ -2419,6 +2424,7 @@ main { padding: 14px 18px 18px; min-height: 0; }
 .page { display: none; height: calc(100vh - 116px); min-height: 520px; }
 .page.active { display: block; }
 #graphs, #gps { overflow: auto; }
+#map { overflow: hidden; }
 .terminal-grid { height: 100%; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .terminal-grid.single { grid-template-columns: minmax(360px, 1fr); max-width: 920px; }
 .terminal-grid.all { grid-template-columns: 1fr; }
@@ -2588,6 +2594,144 @@ th { color: var(--muted); font-weight: 700; }
 .gps-fix-message { display: inline-block; margin-top: 2px; font-weight: 700; }
 .gps-fix-explanation { display: inline-block; margin: 2px 0; font-size: 12px; line-height: 1.35; }
 .gps-coordinates { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.gps-map-layout {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 12px;
+}
+.gps-map-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(rgba(217, 222, 232, 0.5) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(217, 222, 232, 0.5) 1px, transparent 1px),
+    #eef2f7;
+  background-size: 40px 40px;
+}
+#gpsMapCanvas { width: 100%; height: 100%; min-height: 520px; }
+.gps-map-banner {
+  position: absolute;
+  z-index: 800;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(620px, calc(100% - 120px));
+  padding: 8px 12px;
+  border: 1px solid #e5a84a;
+  background: rgba(255, 249, 235, 0.96);
+  color: var(--orange);
+  font-size: 12px;
+  box-shadow: 0 2px 8px rgba(23, 32, 42, 0.12);
+}
+.gps-map-banner[hidden] { display: none; }
+.gps-map-panel {
+  min-width: 0;
+  height: 100%;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 12px;
+}
+.gps-map-panel h2 { margin: 0 0 10px; font-size: 15px; }
+.gps-map-controls { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
+.gps-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 9px 0 11px;
+  color: var(--muted);
+  font-size: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.gps-map-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.gps-map-dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+.gps-map-dot.tag { background: #d7352a; }
+.gps-map-dot.anchor { background: #16833a; }
+.gps-map-dot.stale { background: #8792a2; }
+.gps-map-summary { margin: 10px 0; font-size: 13px; line-height: 1.45; }
+.gps-map-distance-section {
+  margin: 12px 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.gps-map-distance-section h3 { margin: 0 0 4px; font-size: 13px; }
+.gps-map-distance-note { margin-bottom: 7px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.gps-map-distance-table { width: 100%; font-size: 12px; }
+.gps-map-distance-table th,
+.gps-map-distance-table td { padding: 4px 5px; text-align: right; white-space: nowrap; }
+.gps-map-distance-table th:first-child,
+.gps-map-distance-table td:first-child { text-align: left; }
+.gps-map-distance-tooltip {
+  padding: 1px 4px;
+  border: 1px solid rgba(43, 100, 216, 0.45);
+  background: rgba(255, 255, 255, 0.92);
+  color: #173c83;
+  font-size: 11px;
+  font-weight: 700;
+  box-shadow: 0 1px 3px rgba(23, 32, 42, 0.15);
+}
+.gps-map-distance-tooltip::before { display: none; }
+.gps-map-module-list { display: grid; gap: 8px; }
+.gps-map-module {
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  background: #fbfcfe;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.gps-map-module-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.gps-map-module-name { font-weight: 700; font-size: 14px; }
+.gps-map-coords { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.gps-map-links { display: flex; gap: 10px; margin-top: 5px; }
+.gps-map-links a { color: var(--blue); text-decoration: none; }
+.gps-map-links a:hover { text-decoration: underline; }
+.gps-map-div-icon { background: transparent; border: 0; }
+.gps-map-marker {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  transform: translate(-2px, -2px);
+}
+.gps-map-marker-pin {
+  position: absolute;
+  left: 5px;
+  top: 5px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  box-shadow: 0 1px 5px rgba(23, 32, 42, 0.5);
+  background: #16833a;
+}
+.gps-map-marker.tag .gps-map-marker-pin { background: #d7352a; }
+.gps-map-marker.stale .gps-map-marker-pin { background: #8792a2; }
+.gps-map-marker-label {
+  position: absolute;
+  left: 25px;
+  top: 4px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.9);
+  color: #17202a;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(23, 32, 42, 0.16);
+}
+.gps-map-marker-label.left { left: auto; right: 25px; }
+.gps-map-marker-label.top { top: -11px; }
+.gps-map-marker-label.bottom { top: 18px; }
+.leaflet-container { font-family: inherit; background: transparent; }
+.leaflet-popup-content { margin: 10px 12px; line-height: 1.45; }
+@media (max-width: 980px) {
+  .gps-map-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(520px, 65vh) auto; }
+  .gps-map-panel { height: auto; max-height: none; }
+}
 .resource-cell {
   min-width: 190px;
   max-width: 260px;
@@ -3481,6 +3625,7 @@ tr.status-stale td { color: #4f3b1d; }
     <button class="tab" data-tab="position">Position</button>
     <button class="tab" data-tab="graphs">Graphs</button>
     <button class="tab" data-tab="gps">GPS</button>
+    <button class="tab" data-tab="map">Map</button>
     <button class="tab" data-tab="info">Info</button>
     <button class="tab" data-tab="batteryCharger">Battery Charger</button>
     <button class="tab" data-tab="usbPd">USB-C PD</button>
@@ -3653,6 +3798,46 @@ tr.status-stale td { color: #4f3b1d; }
             <tbody id="gpsRows"></tbody>
           </table>
         </div>
+      </div>
+    </section>
+    <section id="map" class="page">
+      <div class="gps-map-layout">
+        <div class="gps-map-stage">
+          <div id="gpsMapCanvas" aria-label="Live GPS map"></div>
+          <div id="gpsMapBanner" class="gps-map-banner" hidden></div>
+        </div>
+        <aside class="gps-map-panel">
+          <h2>Absolute GPS Positions</h2>
+          <div class="gps-map-controls">
+            <button class="primary" id="gpsMapFitAll">Fit all modules</button>
+            <button id="gpsMapCenterTag">Center on tag</button>
+            <button id="gpsMapClearTrail">Clear tag trail</button>
+          </div>
+          <div class="checkbox-row">
+            <input id="gpsMapFollowTag" type="checkbox">
+            <label for="gpsMapFollowTag">Follow tag</label>
+          </div>
+          <div class="checkbox-row">
+            <input id="gpsMapShowTrail" type="checkbox" checked>
+            <label for="gpsMapShowTrail">Show tag trail</label>
+          </div>
+          <div class="checkbox-row">
+            <input id="gpsMapShowDistances" type="checkbox" checked>
+            <label for="gpsMapShowDistances">Show GPS pair distances</label>
+          </div>
+          <div class="gps-map-legend">
+            <span><i class="gps-map-dot tag"></i>tag</span>
+            <span><i class="gps-map-dot anchor"></i>anchor</span>
+            <span><i class="gps-map-dot stale"></i>last known / stale</span>
+          </div>
+          <div id="gpsMapSummary" class="gps-map-summary muted">Waiting for GPS fixes...</div>
+          <div class="gps-map-distance-section">
+            <h3>GPS pair distances</h3>
+            <div class="gps-map-distance-note">Direct horizontal distance from fresh GPS coordinates. 3D also includes the reported altitude difference.</div>
+            <div id="gpsMapDistanceList" class="muted">Waiting for at least two fresh fixes...</div>
+          </div>
+          <div id="gpsMapModuleList" class="gps-map-module-list"></div>
+        </aside>
       </div>
     </section>
     <section id="info" class="page">
@@ -4505,6 +4690,11 @@ tr.status-stale td { color: #4f3b1d; }
                   <option value="5">CH5</option>
                   <option value="9">CH9</option>
                 </select>
+                <label for="uwbRadioPhyMode">Radio PHY</label>
+                <select id="uwbRadioPhyMode">
+                  <option value="0">Fast · 6.8 Mb/s · preamble 128</option>
+                  <option value="1">Long range · 850 kb/s · preamble 1024</option>
+                </select>
                 <label for="uwbSurveyRxMs">RX slice ms</label>
                 <input id="uwbSurveyRxMs" value="100" type="number" min="1" step="1">
                 <label for="uwbSurveyDelayMs">Command delay ms</label>
@@ -4733,8 +4923,11 @@ tr.status-stale td { color: #4f3b1d; }
   </main>
 </div>
 <script>
+const requestedInitialTab = String(location.hash || "").replace(/^#/, "");
 const state = {
-  activeTab: localStorage.getItem("uwbDash.activeTab") || "logs12",
+  activeTab: (requestedInitialTab && document.getElementById(requestedInitialTab))
+    ? requestedInitialTab
+    : (localStorage.getItem("uwbDash.activeTab") || "logs12"),
   logs: [],
   lastId: 0,
   lastAccelId: 0,
@@ -4788,6 +4981,17 @@ const state = {
   positionSettingsSolver: null,
   flexTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.flexTimingSlotSelect") || 0),
   dsTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.dsTimingSlotSelect") || 0),
+  gpsMap: null,
+  gpsMapTileLayer: null,
+  gpsMapMarkers: new Map(),
+  gpsMapLastValid: new Map(),
+  gpsMapTrail: [],
+  gpsMapTrailLayer: null,
+  gpsMapAnchorPolygon: null,
+  gpsMapDistanceLayer: null,
+  gpsMapLastTrailToken: "",
+  gpsMapHasFit: false,
+  gpsMapTileErrors: 0,
 };
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
@@ -5640,6 +5844,63 @@ function positionSettings() {
   };
 }
 
+function synchronizePositionAnchorsFromRuntime(statuses) {
+  const countElement = document.getElementById("positionAnchorCount");
+  const anchorsElement = document.getElementById("positionAnchors");
+  const solverElement = document.getElementById("positionSolver");
+  if (!countElement || !anchorsElement || !solverElement) return false;
+
+  const solver = normalizePositionSolver(solverElement.value || "flextdoa");
+  const expectedMode = {
+    flextdoa: "uwb_flex_tdoa",
+    ranging: "uwb_ranging",
+    passive_ds: "uwb_passive_ds_twr",
+  }[solver];
+  if (!expectedMode) return false;
+
+  const status = (statuses || []).find(item =>
+    statusIsFresh(item) &&
+    String(item.runtime_mode_name || "") === expectedMode &&
+    Array.isArray(item.runtime_anchor_ids) &&
+    item.runtime_anchor_ids.length >= 3);
+  if (!status) return false;
+
+  const runtimeIds = status.runtime_anchor_ids
+    .map(Number)
+    .filter(id => Number.isInteger(id) && id > 0)
+    .slice(0, 4);
+  if (runtimeIds.length < 3) return false;
+
+  const configuredCount = Math.max(
+    3, Math.min(4, Number(countElement.value || 4)));
+  const configuredIds = parseIdList(anchorsElement.value, configuredCount);
+  // Position Setup must describe the topology that is actually running on
+  // the radios.  Treating a valid subset as synchronized left the browser in
+  // the temporary three-anchor field workaround even after the fourth link
+  // had recovered, so the dashboard silently ignored A2.  A deliberate
+  // three-anchor setup is still supported by configuring three anchors in the
+  // runtime; a four-anchor runtime is displayed and solved as four anchors.
+  const selectionIsActive = configuredIds.length === configuredCount &&
+    configuredCount === runtimeIds.length &&
+    runtimeIds.every(id => configuredIds.includes(id));
+  if (selectionIsActive) return false;
+
+  const nextCount = Math.max(3, Math.min(4, runtimeIds.length));
+  const nextIds = runtimeIds.slice(0, nextCount);
+  countElement.value = String(nextCount);
+  anchorsElement.value = nextIds.join(",");
+  localStorage.setItem(settingKey("positionAnchorCount"), String(nextCount));
+  localStorage.setItem(settingKey("positionAnchors"), nextIds.join(","));
+  resetPositionTagTrails();
+  resetNativeDsFrameAssembler();
+  state.positionSeeds = {};
+  state.positionStreamRxTimes = [];
+  state.positionStreamIndependentTimes = [];
+  state.positionStreamRenderTimes = [];
+  state.positionGeometry = {key: "", ekf: null};
+  return true;
+}
+
 function positionKnownReference(settings, anchors) {
   if (settings.referenceMode === "centroid") {
     const points = settings.anchorIds.map(id => anchors[id]).filter(Boolean);
@@ -5935,6 +6196,14 @@ function selectedAnchorPairs(anchorIds) {
   return pairs;
 }
 
+function minimumObservableAnchorEdges(anchorIds) {
+  const count = anchorIds.map(Number).filter(Number.isFinite).length;
+  // A planar graph has 2N-3 independent degrees of freedom after removing
+  // translation and rotation.  Three anchors still need their full triangle;
+  // four anchors can therefore be reconstructed from five independent edges.
+  return Math.max(0, 2 * count - 3);
+}
+
 function anchorGeometryResiduals(anchors, distanceItems) {
   const residuals = {};
   for (const [key, item] of Object.entries(distanceItems || {})) {
@@ -5952,6 +6221,7 @@ function anchorGeometryFitQuality(anchorIds, residuals) {
     .map(Number)
     .filter(Number.isFinite);
   const expected = selectedAnchorPairs(anchorIds).length;
+  const minimum = minimumObservableAnchorEdges(anchorIds);
   const rmsM = values.length
     ? Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length)
     : NaN;
@@ -5959,11 +6229,14 @@ function anchorGeometryFitQuality(anchorIds, residuals) {
   // The paper uses R = 10 cm^2. Three standard deviations is 9.49 cm.
   const fixLimitM = 3 * Math.sqrt(10) * 0.01;
   return {
-    complete: values.length === expected,
+    complete: values.length >= minimum,
+    fullPairGraph: values.length === expected,
+    observedEdges: values.length,
+    expectedEdges: expected,
     rmsM,
     maxM,
     fixLimitM,
-    acceptable: values.length === expected && Number.isFinite(rmsM) && rmsM <= fixLimitM,
+    acceptable: values.length >= minimum && Number.isFinite(rmsM) && rmsM <= fixLimitM,
   };
 }
 
@@ -5976,7 +6249,13 @@ const paperGeometryGuard = Object.freeze({
   candidateMaxAgeSec: 4,
   relocationMinEdges: 2,
   relocationFitLimitM: 0.12,
-  acceptedHoldSec: 15,
+  // Anchor-to-anchor maintenance is deliberately sparse and a marginal
+  // outdoor edge may need many retries.  Once a complete UWB geometry has
+  // been measured, losing one maintenance edge must not blank the tag.  Keep
+  // that last-good edge as an initialization/continuity constraint until a
+  // new accepted measurement or an explicit geometry reset replaces it.
+  // Tag ranges remain governed by the strict Position Setup freshness.
+  acceptedHoldSec: Number.POSITIVE_INFINITY,
   publishedMaxStepM: 0.05,
 });
 
@@ -6233,6 +6512,7 @@ function currentAnchorDistanceBatch(anchorIds, maxAge, solver) {
   const ids = anchorIds.map(Number).filter(id => Number.isInteger(id) && id > 0);
   const expectedProtocol = positionGeometryProtocol(solver);
   const selected = new Set(ids);
+  const expectedPairs = selectedAnchorPairs(ids);
   const liveItems = {};
   const groups = new Map();
   for (const sample of state.tdoa?.recent_anchor_ranges || []) {
@@ -6269,13 +6549,36 @@ function currentAnchorDistanceBatch(anchorIds, maxAge, solver) {
     groups.set(frameId, group);
   }
 
-  const expectedPairs = selectedAnchorPairs(ids);
+  // The detailed event list is intentionally bounded, while the server also
+  // retains the latest validated result for every anchor pair. Native DS uses
+  // those summaries to survive a browser refresh between sparse survey
+  // exchanges. They are never used for tag-range freshness.
+  if (expectedProtocol === "native_ds") {
+    const now = Date.now() / 1000;
+    for (const [a, b] of expectedPairs) {
+      const key = anchorPairKey(a, b);
+      if (liveItems[key]) continue;
+      const summary = freshAnchorPairDistance(a, b, maxAge);
+      if (!summary ||
+          String(summary.tdoa_protocol || "") !== expectedProtocol ||
+          !Number.isFinite(Number(summary.distance_m)) ||
+          Number(summary.distance_m) <= 0) continue;
+      liveItems[key] = {
+        ...summary,
+        received_at: now - Math.max(0, Number(summary.age_sec) || 0),
+      };
+    }
+  }
+
   const complete = [...groups.values()]
     .filter(group => expectedPairs.every(([a, b]) => group.items[anchorPairKey(a, b)]))
     .sort((left, right) => right.frameId - left.frameId)[0];
   const distanceItems = complete?.items || liveItems;
   const missingPairs = expectedPairs.filter(
     ([a, b]) => !distanceItems[anchorPairKey(a, b)]);
+  const observedEdgeCount = expectedPairs.length - missingPairs.length;
+  const sparseObservableGeometry = expectedProtocol !== "passive_ds" &&
+    observedEdgeCount >= minimumObservableAnchorEdges(ids);
   const updateToken = complete
     ? `${expectedProtocol}:frame:${complete.frameId}`
     : `${expectedProtocol}:live:` + expectedPairs.map(([a, b]) => {
@@ -6287,11 +6590,142 @@ function currentAnchorDistanceBatch(anchorIds, maxAge, solver) {
     ids,
     distanceItems,
     missingPairs,
-    coherent: Boolean(complete) || missingPairs.length === 0,
+    coherent: Boolean(complete) || missingPairs.length === 0 ||
+      sparseObservableGeometry,
     frameId: complete?.frameId ?? null,
     updateToken,
     protocol: expectedProtocol,
   };
+}
+
+function circleIntersectionCandidates(first, firstRadius, second, secondRadius) {
+  const dx = second.x - first.x;
+  const dy = second.y - first.y;
+  const baseline = Math.hypot(dx, dy);
+  if (!Number.isFinite(baseline) || baseline < 1e-6 ||
+      baseline > firstRadius + secondRadius + 0.02 ||
+      baseline < Math.abs(firstRadius - secondRadius) - 0.02) return [];
+  const along = (firstRadius * firstRadius - secondRadius * secondRadius +
+    baseline * baseline) / (2 * baseline);
+  const heightSquared = firstRadius * firstRadius - along * along;
+  if (heightSquared < -0.02) return [];
+  const height = Math.sqrt(Math.max(0, heightSquared));
+  const ux = dx / baseline;
+  const uy = dy / baseline;
+  const center = {
+    x: first.x + along * ux,
+    y: first.y + along * uy,
+  };
+  return [
+    {x: center.x - height * uy, y: center.y + height * ux},
+    {x: center.x + height * uy, y: center.y - height * ux},
+  ];
+}
+
+function normalizePaperAnchorCoordinates(anchorIds, anchors) {
+  const ids = anchorIds.map(Number);
+  const origin = anchors[ids[0]];
+  const axis = anchors[ids[1]];
+  if (!origin || !axis) return null;
+  const dx = axis.x - origin.x;
+  const dy = axis.y - origin.y;
+  const length = Math.hypot(dx, dy);
+  if (!Number.isFinite(length) || length < 1e-6) return null;
+  const ux = dx / length;
+  const uy = dy / length;
+  return Object.fromEntries(ids.map(id => {
+    const point = anchors[id];
+    const tx = point.x - origin.x;
+    const ty = point.y - origin.y;
+    return [id, {
+      x: uy * tx - ux * ty,
+      y: ux * tx + uy * ty,
+    }];
+  }));
+}
+
+function sparsePaperAnchorCoordinates(anchorIds, distanceItems) {
+  const ids = anchorIds.map(Number);
+  if (ids.length !== 4) return null;
+  const distance = (a, b) =>
+    Number(distanceItems[anchorPairKey(a, b)]?.distance_m);
+  const triangles = [];
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      for (let k = j + 1; k < ids.length; k++) {
+        const triangle = [ids[i], ids[j], ids[k]];
+        const edges = [
+          distance(triangle[0], triangle[1]),
+          distance(triangle[0], triangle[2]),
+          distance(triangle[1], triangle[2]),
+        ];
+        if (edges.every(value => Number.isFinite(value) && value > 0)) {
+          triangles.push({triangle, edges});
+        }
+      }
+    }
+  }
+  // Prefer the triangle with the largest baseline.  It gives the most stable
+  // circle intersection when one of the six four-anchor edges is unavailable.
+  triangles.sort((left, right) =>
+    Math.max(...right.edges) - Math.max(...left.edges));
+  for (const candidate of triangles) {
+    const [firstId, secondId, thirdId] = candidate.triangle;
+    const d01 = distance(firstId, secondId);
+    const d02 = distance(firstId, thirdId);
+    const d12 = distance(secondId, thirdId);
+    const y2 = (d02 * d02 + d01 * d01 - d12 * d12) / (2 * d01);
+    const x2Squared = d02 * d02 - y2 * y2;
+    if (x2Squared < -0.02) continue;
+    const placed = {
+      [firstId]: {x: 0, y: 0},
+      [secondId]: {x: 0, y: d01},
+      [thirdId]: {x: Math.sqrt(Math.max(0, x2Squared)), y: y2},
+    };
+    const remainingId = ids.find(id => !candidate.triangle.includes(id));
+    const links = candidate.triangle
+      .map(id => ({id, radius: distance(id, remainingId)}))
+      .filter(link => Number.isFinite(link.radius) && link.radius > 0);
+    if (links.length < 2) continue;
+    const intersections = circleIntersectionCandidates(
+      placed[links[0].id], links[0].radius,
+      placed[links[1].id], links[1].radius);
+    if (!intersections.length) continue;
+
+    let selected = intersections[0];
+    if (links.length >= 3) {
+      intersections.sort((left, right) =>
+        Math.abs(Math.hypot(
+          left.x - placed[links[2].id].x,
+          left.y - placed[links[2].id].y) - links[2].radius) -
+        Math.abs(Math.hypot(
+          right.x - placed[links[2].id].x,
+          right.y - placed[links[2].id].y) - links[2].radius));
+      selected = intersections[0];
+    } else if (intersections.length > 1) {
+      // Five edges leave a mirror ambiguity.  In this deployment A2-A3 and
+      // A4-A5 are the two opposing perimeter sides.  If one of those sides is
+      // missing, its two endpoints must stay on the same side of the measured
+      // opposite edge.  This convention is UWB-only and matches both the
+      // original square and the current field layout.
+      const baselineA = placed[links[0].id];
+      const baselineB = placed[links[1].id];
+      const otherId = candidate.triangle.find(
+        id => id !== links[0].id && id !== links[1].id);
+      const side = point =>
+        (baselineB.x - baselineA.x) * (point.y - baselineA.y) -
+        (baselineB.y - baselineA.y) * (point.x - baselineA.x);
+      const otherSide = side(placed[otherId]);
+      const sameSide = intersections.find(point => side(point) * otherSide > 0);
+      selected = sameSide || intersections
+        .slice()
+        .sort((left, right) => Math.abs(side(right)) - Math.abs(side(left)))[0];
+    }
+    placed[remainingId] = selected;
+    const normalized = normalizePaperAnchorCoordinates(ids, placed);
+    if (normalized) return normalized;
+  }
+  return null;
 }
 
 function initialPaperAnchorCoordinates(anchorIds, distanceItems) {
@@ -6301,7 +6735,9 @@ function initialPaperAnchorCoordinates(anchorIds, distanceItems) {
   const d01 = distance(ids[0], ids[1]);
   const d02 = distance(ids[0], ids[2]);
   const d12 = distance(ids[1], ids[2]);
-  if (![d01, d02, d12].every(value => Number.isFinite(value) && value > 0)) return null;
+  if (![d01, d02, d12].every(value => Number.isFinite(value) && value > 0)) {
+    return sparsePaperAnchorCoordinates(ids, distanceItems);
+  }
 
   // Paper frame convention adapted to 2D: A0=(0,0), A1 on +Y, A2 on +X.
   const y2 = (d02 * d02 + d01 * d01 - d12 * d12) / (2 * d01);
@@ -6317,7 +6753,9 @@ function initialPaperAnchorCoordinates(anchorIds, distanceItems) {
     const d03 = distance(ids[0], ids[3]);
     const d13 = distance(ids[1], ids[3]);
     const d23 = distance(ids[2], ids[3]);
-    if (![d03, d13, d23].every(value => Number.isFinite(value) && value > 0)) return null;
+    if (![d03, d13, d23].every(value => Number.isFinite(value) && value > 0)) {
+      return sparsePaperAnchorCoordinates(ids, distanceItems);
+    }
     const y3 = (d03 * d03 + d01 * d01 - d13 * d13) / (2 * d01);
     const x3sq = d03 * d03 - y3 * y3;
     if (x3sq < -0.02) return null;
@@ -6372,7 +6810,9 @@ function multiplyMatrixVector(matrix, vector) {
     (sum, value, index) => sum + value * vector[index], 0));
 }
 
-function updatePaperAnchorEkf(ekf, anchorIds, distanceItems) {
+function updatePaperAnchorEkf(
+  ekf, anchorIds, distanceItems, options = {}
+) {
   const variables = ekf.variables;
   const n = variables.length;
   const measurements = Object.values(distanceItems || {});
@@ -6401,8 +6841,10 @@ function updatePaperAnchorEkf(ekf, anchorIds, distanceItems) {
     const predicted = Math.max(1e-6, Math.hypot(dx, dy));
     const innovation = measured - predicted;
     const huberScaleM = 0.06;
-    const robustWeight = Math.min(
-      1, huberScaleM / Math.max(huberScaleM, Math.abs(innovation)));
+    const robustWeight = options.robust === false
+      ? 1
+      : Math.min(
+        1, huberScaleM / Math.max(huberScaleM, Math.abs(innovation)));
     const effectiveVariance = rVarianceM2 / robustWeight;
     const gradient = Array(n).fill(0);
     const ax = indexFor.get(`${item.anchor_a_id}:x`);
@@ -6603,8 +7045,22 @@ function createPaperAnchorEkf(batch, previous = null) {
   // Balance all six robust bootstrap edges before the first paint. The direct
   // coordinate construction exactly satisfies its first triangle and can
   // otherwise leave the fourth anchor visibly biased until its next range.
-  for (let iteration = 0; iteration < 3; iteration++) {
-    if (!updatePaperAnchorEkf(ekf, batch.ids, bootstrapItems)) break;
+  // Large outdoor layouts need a few more linearization steps than the former
+  // 3 m test square. Stop as soon as the same paper-derived fit gate used by
+  // the live estimator is satisfied; the extra work happens only at startup.
+  for (let iteration = 0; iteration < 12; iteration++) {
+    if (!updatePaperAnchorEkf(
+      ekf,
+      batch.ids,
+      bootstrapItems,
+      {robust: batch.protocol !== "native_ds"})) break;
+    const fit = anchorGeometryFitQuality(
+      batch.ids,
+      anchorGeometryResiduals(
+        paperAnchorCoordinatesFromState(
+          batch.ids, ekf.variables, ekf.state),
+        bootstrapItems));
+    if (iteration >= 2 && fit.acceptable) break;
   }
   ekf.publishedAnchors = previous?.publishedAnchors
     ? cloneAnchorCoordinates(previous.publishedAnchors)
@@ -6709,8 +7165,29 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
   }
   const session = state.positionGeometry;
   let geometryUpdated = false;
-  if (!session.ekf && batch.coherent && batch.missingPairs.length === 0) {
-    session.ekf = createPaperAnchorEkf(batch);
+  let bootstrapBatch = batch;
+  if (!session.ekf && protocol === "native_ds" &&
+      (!batch.coherent || batch.missingPairs.length)) {
+    // Native DS anchor maintenance intentionally runs more slowly than the
+    // tag ranging loop.  A single missed long-link exchange can therefore
+    // make one pair older than the strict 3 s live threshold even though its
+    // latest measurements form a tight, trustworthy cluster.  Bootstrap the
+    // geometry from the existing last-good hold window; subsequent updates
+    // still use only the normal fresh batch above.  geometryBootstrapItem()
+    // selects the robust median once at least three samples are available.
+    bootstrapBatch = currentAnchorDistanceBatch(
+      anchorIds,
+      paperGeometryGuard.acceptedHoldSec,
+      solver);
+  }
+  const bootstrapEdgeCount = Object.keys(
+    bootstrapBatch.distanceItems || {}).length;
+  const sparseObservableBootstrap = protocol !== "passive_ds" &&
+    bootstrapEdgeCount >= minimumObservableAnchorEdges(anchorIds);
+  if (!session.ekf && bootstrapBatch.coherent &&
+      (bootstrapBatch.missingPairs.length === 0 ||
+       sparseObservableBootstrap)) {
+    session.ekf = createPaperAnchorEkf(bootstrapBatch);
     geometryUpdated = Boolean(session.ekf);
   }
 
@@ -6757,9 +7234,15 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
       geometryUpdated = true;
     }
   }
+  const geometryUpdateItems = protocol === "native_ds"
+    ? conditioned.acceptedItems
+    : conditioned.updateItems;
   if (Object.keys(conditioned.updateItems).length &&
       updatePaperAnchorEkf(
-        session.ekf, batch.ids, conditioned.updateItems)) {
+        session.ekf,
+        batch.ids,
+        geometryUpdateItems,
+        {robust: protocol !== "native_ds"})) {
     session.ekf.lastUpdateToken = batch.updateToken;
     session.ekf.lastFrameId = batch.frameId;
     geometryUpdated = true;
@@ -6774,12 +7257,21 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
   const residuals = anchorGeometryResiduals(anchors, acceptedItems);
   const fitQuality = anchorGeometryFitQuality(anchorIds, residuals);
   const expectedPairCount = selectedAnchorPairs(anchorIds).length;
-  const acceptedComplete = Object.keys(acceptedItems).length === expectedPairCount;
+  const requiredPairCount = protocol === "passive_ds"
+    ? expectedPairCount
+    : minimumObservableAnchorEdges(anchorIds);
+  const acceptedComplete = Object.keys(acceptedItems).length >= requiredPairCount;
   const estimateAgeSec = Math.max(
     0, now - Number(session.ekf.lastGoodAt || 0));
+  // A complete, recent range graph is sufficient to obtain the best-fit 2D
+  // geometry.  Do not use the paper's 3-sigma residual as an availability
+  // switch: outdoor UWB ranges are three-dimensional, so anchors at different
+  // heights can legitimately leave a residual above that planar diagnostic
+  // limit.  Keep fitQuality.acceptable as a visible quality warning, while
+  // continuing to solve and display the position.
   const positionReady = acceptedComplete &&
     estimateAgeSec <= paperGeometryGuard.acceptedHoldSec &&
-    fitQuality.acceptable;
+    Number.isFinite(fitQuality.rmsM);
   const sigmaValues = session.ekf.covariance.map(
     (row, index) => Math.sqrt(Math.max(0, Number(row[index]))));
   const candidatePairs = Object.entries(session.ekf.pairStates || {})
@@ -9009,6 +9501,15 @@ function setActiveTab(id) {
   requestAnimationFrame(renderPosition);
   if (id === "rangingSettings") requestAnimationFrame(updateRangingSettingsProtocol);
   if (id === "graphs") fetchAccel();
+  if (id === "map") {
+    requestAnimationFrame(() => {
+      renderGpsMap(state.statuses);
+      if (state.gpsMap) {
+        state.gpsMap.invalidateSize();
+        if (!state.gpsMapHasFit) fitGpsMapToModules();
+      }
+    });
+  }
   scheduleAccelRender();
 }
 
@@ -9285,6 +9786,388 @@ function formatGpsUtcDate(value) {
   const raw = String(value || "");
   if (raw.length < 6) return "-";
   return `${raw.slice(0, 2)}/${raw.slice(2, 4)}/${raw.slice(4, 6)}`;
+}
+
+function gpsMapModuleLabel(item) {
+  const moduleId = Number(item?.module_id || 0);
+  return moduleId === 1 ? "T1" : `A${moduleId || "?"}`;
+}
+
+function gpsMapHasValidCoordinates(item) {
+  const lat = Number(item?.gps_latitude_deg);
+  const lng = Number(item?.gps_longitude_deg);
+  return Boolean(
+    item?.gps_fix_valid &&
+    gpsRxIsFresh(item) &&
+    Number.isFinite(lat) && lat >= -90 && lat <= 90 &&
+    Number.isFinite(lng) && lng >= -180 && lng <= 180
+  );
+}
+
+function setGpsMapBanner(message = "") {
+  const banner = document.getElementById("gpsMapBanner");
+  if (!banner) return;
+  banner.textContent = message;
+  banner.hidden = !message;
+}
+
+function ensureGpsMap() {
+  if (state.gpsMap) return true;
+  const container = document.getElementById("gpsMapCanvas");
+  if (!container) return false;
+  if (typeof L === "undefined") {
+    setGpsMapBanner("Leaflet is unavailable. Install libjs-leaflet and restart the dashboard.");
+    return false;
+  }
+
+  state.gpsMap = L.map(container, {
+    preferCanvas: true,
+    zoomControl: true,
+    attributionControl: true,
+    minZoom: 2,
+    maxZoom: 24,
+    zoomSnap: 0.25,
+    zoomDelta: 0.5,
+  }).setView([44.33622, 25.94750], 18);
+  state.gpsMapTileLayer = L.tileLayer(
+    "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    {
+      minZoom: 2,
+      maxNativeZoom: 19,
+      maxZoom: 24,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>',
+    }
+  );
+  state.gpsMapTileLayer.on("tileerror", () => {
+    state.gpsMapTileErrors += 1;
+    if (state.gpsMapTileErrors >= 3) {
+      setGpsMapBanner("Map background unavailable. Live GPS markers remain active; check the Internet connection.");
+    }
+  });
+  state.gpsMapTileLayer.on("tileload", () => {
+    state.gpsMapTileErrors = 0;
+    setGpsMapBanner("");
+  });
+  state.gpsMapTileLayer.addTo(state.gpsMap);
+  L.control.scale({imperial: false, metric: true, maxWidth: 180}).addTo(state.gpsMap);
+
+  state.gpsMapTrailLayer = L.polyline([], {
+    color: "#2b64d8",
+    weight: 3,
+    opacity: 0.82,
+    lineJoin: "round",
+  });
+  if (document.getElementById("gpsMapShowTrail")?.checked !== false) {
+    state.gpsMapTrailLayer.addTo(state.gpsMap);
+  }
+  state.gpsMapAnchorPolygon = L.polygon([], {
+    color: "#16833a",
+    weight: 2,
+    opacity: 0.7,
+    fillColor: "#16833a",
+    fillOpacity: 0.06,
+    dashArray: "7 5",
+  }).addTo(state.gpsMap);
+  state.gpsMapDistanceLayer = L.layerGroup();
+  if (document.getElementById("gpsMapShowDistances")?.checked !== false) {
+    state.gpsMapDistanceLayer.addTo(state.gpsMap);
+  }
+  return true;
+}
+
+function gpsMapMarkerIcon(item, stale) {
+  const tag = Number(item?.module_id) === 1;
+  const moduleId = Number(item?.module_id || 0);
+  const labelClass = moduleId === 2
+    ? "left top"
+    : (moduleId === 3 ? "left bottom" : (moduleId === 4 ? "top" : (moduleId === 5 ? "bottom" : "")));
+  const classes = ["gps-map-marker", tag ? "tag" : "anchor", stale ? "stale" : ""]
+    .filter(Boolean).join(" ");
+  return L.divIcon({
+    className: "gps-map-div-icon",
+    html: `<div class="${classes}"><span class="gps-map-marker-pin"></span><span class="gps-map-marker-label ${labelClass}">${esc(gpsMapModuleLabel(item))}</span></div>`,
+    iconSize: [28, 28],
+    iconAnchor: [14, 14],
+  });
+}
+
+function gpsMapPopup(item, position, stale) {
+  const fixState = gpsFixState(item);
+  const lat = Number(position.lat);
+  const lng = Number(position.lng);
+  const googleUrl = `https://www.google.com/maps?q=${lat.toFixed(8)},${lng.toFixed(8)}`;
+  const osmUrl = `https://www.openstreetmap.org/?mlat=${lat.toFixed(8)}&mlon=${lng.toFixed(8)}#map=19/${lat.toFixed(8)}/${lng.toFixed(8)}`;
+  return `<b>${esc(gpsMapModuleLabel(item))} · ${esc(item.hostname || `module ${item.module_id}`)}</b><br>
+    <span class="${stale ? "warn" : fixState.className}">${stale ? "last known position" : esc(fixState.label)}</span><br>
+    <span class="gps-map-coords">${lat.toFixed(8)}, ${lng.toFixed(8)}</span><br>
+    altitude ${fmtMaybeNumber(item.gps_altitude_m, 2)} m · HDOP ${fmtMaybeNumber(item.gps_hdop, 2)}<br>
+    satellites ${esc(item.gps_satellites ?? "-")} / ${esc(item.gps_satellites_in_view ?? "-")} · fix age ${fmtAgeMs(item.gps_last_fix_age_ms)}<br>
+    <a href="${googleUrl}" target="_blank" rel="noopener">Google Maps</a> ·
+    <a href="${osmUrl}" target="_blank" rel="noopener">OpenStreetMap</a>`;
+}
+
+function gpsMapVisiblePositions() {
+  return [...state.gpsMapLastValid.values()].map(position => [position.lat, position.lng]);
+}
+
+function gpsMapDistanceMeters(first, second) {
+  const lat1 = Number(first?.lat) * Math.PI / 180;
+  const lat2 = Number(second?.lat) * Math.PI / 180;
+  const deltaLat = lat2 - lat1;
+  const deltaLng = (Number(second?.lng) - Number(first?.lng)) * Math.PI / 180;
+  if (![lat1, lat2, deltaLat, deltaLng].every(Number.isFinite)) return NaN;
+  const sinLat = Math.sin(deltaLat / 2);
+  const sinLng = Math.sin(deltaLng / 2);
+  const a = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng;
+  return 6371008.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+}
+
+function gpsMapDistanceText(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  if (number < 10) return `${number.toFixed(2)} m`;
+  if (number < 100) return `${number.toFixed(1)} m`;
+  return `${number.toFixed(0)} m`;
+}
+
+function gpsMapPairDistances(sorted, currentValid) {
+  const available = sorted
+    .map(item => ({item, position: currentValid.get(Number(item.module_id))}))
+    .filter(entry => entry.position);
+  const pairs = [];
+  for (let firstIndex = 0; firstIndex < available.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < available.length; secondIndex += 1) {
+      const first = available[firstIndex];
+      const second = available[secondIndex];
+      const horizontal = gpsMapDistanceMeters(first.position, second.position);
+      const firstAltitude = Number(first.item.gps_altitude_m);
+      const secondAltitude = Number(second.item.gps_altitude_m);
+      const altitudeDelta = Number.isFinite(firstAltitude) && Number.isFinite(secondAltitude)
+        ? secondAltitude - firstAltitude
+        : NaN;
+      const distance3d = Number.isFinite(horizontal) && Number.isFinite(altitudeDelta)
+        ? Math.hypot(horizontal, altitudeDelta)
+        : NaN;
+      pairs.push({
+        first,
+        second,
+        horizontal,
+        altitudeDelta,
+        distance3d,
+        label: `${gpsMapModuleLabel(first.item)}–${gpsMapModuleLabel(second.item)}`,
+      });
+    }
+  }
+  return pairs;
+}
+
+function fitGpsMapToModules() {
+  if (!ensureGpsMap()) return;
+  const points = gpsMapVisiblePositions();
+  if (!points.length) return;
+  if (points.length === 1) {
+    state.gpsMap.setView(points[0], 22);
+  } else {
+    state.gpsMap.fitBounds(L.latLngBounds(points), {padding: [45, 45], maxZoom: 22});
+  }
+  state.gpsMapHasFit = true;
+}
+
+function centerGpsMapOnTag() {
+  if (!ensureGpsMap()) return;
+  const tag = state.gpsMapLastValid.get(1);
+  if (tag) state.gpsMap.setView([tag.lat, tag.lng], Math.max(22, state.gpsMap.getZoom()));
+}
+
+function clearGpsMapTrail() {
+  state.gpsMapTrail = [];
+  state.gpsMapLastTrailToken = "";
+  if (state.gpsMapTrailLayer) state.gpsMapTrailLayer.setLatLngs([]);
+  renderGpsMap(state.statuses);
+}
+
+function wireGpsMapControls() {
+  const follow = document.getElementById("gpsMapFollowTag");
+  const showTrail = document.getElementById("gpsMapShowTrail");
+  const showDistances = document.getElementById("gpsMapShowDistances");
+  if (follow) {
+    follow.checked = localStorage.getItem("uwbDash.gpsMapFollowTag") === "1";
+    follow.addEventListener("change", () => {
+      localStorage.setItem("uwbDash.gpsMapFollowTag", follow.checked ? "1" : "0");
+    });
+  }
+  if (showTrail) {
+    showTrail.checked = localStorage.getItem("uwbDash.gpsMapShowTrail") !== "0";
+    showTrail.addEventListener("change", () => {
+      localStorage.setItem("uwbDash.gpsMapShowTrail", showTrail.checked ? "1" : "0");
+      if (!ensureGpsMap() || !state.gpsMapTrailLayer) return;
+      if (showTrail.checked && !state.gpsMap.hasLayer(state.gpsMapTrailLayer)) {
+        state.gpsMapTrailLayer.addTo(state.gpsMap);
+      } else if (!showTrail.checked && state.gpsMap.hasLayer(state.gpsMapTrailLayer)) {
+        state.gpsMap.removeLayer(state.gpsMapTrailLayer);
+      }
+    });
+  }
+  if (showDistances) {
+    showDistances.checked = localStorage.getItem("uwbDash.gpsMapShowDistances") !== "0";
+    showDistances.addEventListener("change", () => {
+      localStorage.setItem("uwbDash.gpsMapShowDistances", showDistances.checked ? "1" : "0");
+      if (!ensureGpsMap() || !state.gpsMapDistanceLayer) return;
+      if (showDistances.checked && !state.gpsMap.hasLayer(state.gpsMapDistanceLayer)) {
+        state.gpsMapDistanceLayer.addTo(state.gpsMap);
+      } else if (!showDistances.checked && state.gpsMap.hasLayer(state.gpsMapDistanceLayer)) {
+        state.gpsMap.removeLayer(state.gpsMapDistanceLayer);
+      }
+    });
+  }
+  document.getElementById("gpsMapFitAll")?.addEventListener("click", fitGpsMapToModules);
+  document.getElementById("gpsMapCenterTag")?.addEventListener("click", centerGpsMapOnTag);
+  document.getElementById("gpsMapClearTrail")?.addEventListener("click", clearGpsMapTrail);
+}
+
+function renderGpsMap(statuses) {
+  const sorted = [...(statuses || [])].sort((a, b) => Number(a.module_id || 0) - Number(b.module_id || 0));
+  const currentValid = new Map();
+  for (const item of sorted) {
+    if (!gpsMapHasValidCoordinates(item)) continue;
+    const position = {
+      lat: Number(item.gps_latitude_deg),
+      lng: Number(item.gps_longitude_deg),
+      updatedAt: Date.now(),
+      item,
+    };
+    currentValid.set(Number(item.module_id), position);
+    state.gpsMapLastValid.set(Number(item.module_id), position);
+  }
+
+  const tagItem = sorted.find(item => Number(item.module_id) === 1);
+  const tagPosition = currentValid.get(1);
+  if (tagItem && tagPosition) {
+    const token = [
+      tagItem.gps_utc_date || "",
+      tagItem.gps_utc_time || "",
+      tagPosition.lat.toFixed(8),
+      tagPosition.lng.toFixed(8),
+    ].join(":");
+    if (token !== state.gpsMapLastTrailToken) {
+      state.gpsMapLastTrailToken = token;
+      state.gpsMapTrail.push({lat: tagPosition.lat, lng: tagPosition.lng, at: Date.now()});
+      if (state.gpsMapTrail.length > 3600) {
+        state.gpsMapTrail.splice(0, state.gpsMapTrail.length - 3600);
+      }
+    }
+  }
+
+  const validCount = currentValid.size;
+  const pairDistances = gpsMapPairDistances(sorted, currentValid);
+  const list = document.getElementById("gpsMapModuleList");
+  const summary = document.getElementById("gpsMapSummary");
+  const distanceList = document.getElementById("gpsMapDistanceList");
+  if (summary) {
+    summary.innerHTML = validCount
+      ? `<span class="ok">${validCount}/${sorted.length || 5} live GPS fixes</span> · tag trail ${state.gpsMapTrail.length} point${state.gpsMapTrail.length === 1 ? "" : "s"}`
+      : `<span class="warn">No fresh GPS fix is available yet.</span>`;
+  }
+  if (distanceList) {
+    distanceList.innerHTML = pairDistances.length
+      ? `<table class="gps-map-distance-table">
+           <thead><tr><th>Pair</th><th>horizontal</th><th>Δalt</th><th>3D</th></tr></thead>
+           <tbody>${pairDistances.map(pair => `<tr>
+             <td>${esc(pair.label)}</td>
+             <td><b>${gpsMapDistanceText(pair.horizontal)}</b></td>
+             <td>${Number.isFinite(pair.altitudeDelta) ? `${pair.altitudeDelta >= 0 ? "+" : ""}${pair.altitudeDelta.toFixed(2)} m` : "-"}</td>
+             <td>${gpsMapDistanceText(pair.distance3d)}</td>
+           </tr>`).join("")}</tbody>
+         </table>`
+      : `<span class="muted">Waiting for at least two fresh fixes...</span>`;
+  }
+  if (list) {
+    list.innerHTML = sorted.map(item => {
+      const moduleId = Number(item.module_id);
+      const current = currentValid.get(moduleId);
+      const position = current || state.gpsMapLastValid.get(moduleId);
+      const stale = Boolean(position && !current);
+      const fixState = gpsFixState(item);
+      const location = position
+        ? `<div class="gps-map-coords">${position.lat.toFixed(8)}, ${position.lng.toFixed(8)}</div>
+           <div>alt ${fmtMaybeNumber(item.gps_altitude_m, 2)} m · HDOP ${fmtMaybeNumber(item.gps_hdop, 2)} · ${esc(item.gps_satellites ?? "-")} sats</div>
+           <div class="gps-map-links">
+             <a href="https://www.google.com/maps?q=${position.lat.toFixed(8)},${position.lng.toFixed(8)}" target="_blank" rel="noopener">Google Maps</a>
+             <a href="https://www.openstreetmap.org/?mlat=${position.lat.toFixed(8)}&mlon=${position.lng.toFixed(8)}#map=19/${position.lat.toFixed(8)}/${position.lng.toFixed(8)}" target="_blank" rel="noopener">OSM</a>
+           </div>`
+        : `<div class="muted">No position received</div>`;
+      return `<div class="gps-map-module">
+        <div class="gps-map-module-head">
+          <span class="gps-map-module-name">${esc(gpsMapModuleLabel(item))}</span>
+          <span class="${stale ? "warn" : fixState.className}">${stale ? "last known" : esc(fixState.label)}</span>
+        </div>
+        ${location}
+      </div>`;
+    }).join("");
+  }
+
+  if (state.activeTab !== "map" || !ensureGpsMap()) return;
+  state.gpsMap.invalidateSize();
+  for (const item of sorted) {
+    const moduleId = Number(item.module_id);
+    const current = currentValid.get(moduleId);
+    const position = current || state.gpsMapLastValid.get(moduleId);
+    if (!position) continue;
+    const stale = !current;
+    const styleKey = `${gpsMapModuleLabel(item)}:${stale ? "stale" : "live"}`;
+    let marker = state.gpsMapMarkers.get(moduleId);
+    if (!marker) {
+      marker = L.marker([position.lat, position.lng], {
+        icon: gpsMapMarkerIcon(item, stale),
+        zIndexOffset: moduleId === 1 ? 1000 : 0,
+      }).addTo(state.gpsMap);
+      state.gpsMapMarkers.set(moduleId, marker);
+    } else {
+      marker.setLatLng([position.lat, position.lng]);
+      if (marker._uwbGpsStyle !== styleKey) marker.setIcon(gpsMapMarkerIcon(item, stale));
+    }
+    marker._uwbGpsStyle = styleKey;
+    marker.bindPopup(gpsMapPopup(item, position, stale));
+  }
+
+  const anchorPoints = sorted
+    .filter(item => Number(item.module_id) !== 1 && currentValid.has(Number(item.module_id)))
+    .map(item => currentValid.get(Number(item.module_id)));
+  if (anchorPoints.length >= 3) {
+    const centerLat = anchorPoints.reduce((sum, point) => sum + point.lat, 0) / anchorPoints.length;
+    const centerLng = anchorPoints.reduce((sum, point) => sum + point.lng, 0) / anchorPoints.length;
+    anchorPoints.sort((a, b) =>
+      Math.atan2(a.lat - centerLat, a.lng - centerLng) - Math.atan2(b.lat - centerLat, b.lng - centerLng));
+    state.gpsMapAnchorPolygon.setLatLngs([anchorPoints.map(point => [point.lat, point.lng])]);
+  } else {
+    state.gpsMapAnchorPolygon.setLatLngs([]);
+  }
+  if (state.gpsMapTrailLayer) {
+    state.gpsMapTrailLayer.setLatLngs(state.gpsMapTrail.map(point => [point.lat, point.lng]));
+  }
+  if (state.gpsMapDistanceLayer) {
+    state.gpsMapDistanceLayer.clearLayers();
+    for (const pair of pairDistances) {
+      const tagPair = Number(pair.first.item.module_id) === 1 || Number(pair.second.item.module_id) === 1;
+      L.polyline(
+        [[pair.first.position.lat, pair.first.position.lng], [pair.second.position.lat, pair.second.position.lng]],
+        {
+          color: tagPair ? "#d7352a" : "#2b64d8",
+          weight: tagPair ? 2 : 1.5,
+          opacity: tagPair ? 0.72 : 0.52,
+          dashArray: tagPair ? "5 5" : "3 6",
+          interactive: false,
+        }
+      ).bindTooltip(
+        `${pair.label} · ${gpsMapDistanceText(pair.horizontal)}`,
+        {permanent: true, direction: "center", className: "gps-map-distance-tooltip", opacity: 0.96}
+      ).addTo(state.gpsMapDistanceLayer);
+    }
+  }
+  if (!state.gpsMapHasFit && state.gpsMapLastValid.size) fitGpsMapToModules();
+  if (document.getElementById("gpsMapFollowTag")?.checked && tagPosition) {
+    state.gpsMap.panTo([tagPosition.lat, tagPosition.lng], {animate: false});
+  }
 }
 
 function renderGps(statuses) {
@@ -10032,6 +10915,7 @@ function renderPd(statuses) {
 
 function renderInfo(snapshot) {
   state.statuses = snapshot.statuses || [];
+  synchronizePositionAnchorsFromRuntime(state.statuses);
   state.ranging = snapshot.ranging || {distances: {}, max_age_sec: 3};
   const previousLocalPositions = state.tdoa?.local_positions || {};
   const nextTdoa = snapshot.tdoa || {observations: {}, anchor_distances: {}, local_positions: {}, local_geometries: {}, max_age_sec: 3};
@@ -10097,6 +10981,7 @@ function renderInfo(snapshot) {
   const freshStatus = state.statuses.find(statusIsFresh) || {};
   renderUwbRadio(freshStatus);
   renderGps(state.statuses);
+  renderGpsMap(state.statuses);
   renderCharger(state.statuses);
   renderPd(state.statuses);
   renderPosition();
@@ -10144,6 +11029,7 @@ function hydrateSettingsFromStatus(item) {
   setSettingIfFresh("runtimeGps", item.runtime_gps_enabled);
   setSettingIfFresh("runtimeTelemetryPort", item.runtime_wireless_telemetry_port || item.wireless_telemetry_port);
   setSettingIfFresh("uwbRadioChannel", item.runtime_radio_channel || item.uwb_radio_channel);
+  setSettingIfFresh("uwbRadioPhyMode", item.runtime_radio_phy_mode ?? 0);
   setSettingIfFresh("uwbFlexAnchors", (item.runtime_anchor_ids || []).filter(Boolean).join(","));
   setSettingIfFresh("uwbFlexK", item.runtime_flex_tdoa_responder_count);
   setSettingIfFresh("uwbFlexSlots", (item.runtime_flex_tdoa_slot_initiator_ids || []).join(","));
@@ -10182,6 +11068,7 @@ function renderUwbRadio(item) {
   if (!rows) return;
   const fields = [
     ["profile", item.uwb_radio_profile],
+    ["PHY", Number(item.runtime_radio_phy_mode) === 1 ? "long range · 850 kb/s · preamble 1024" : "fast · 6.8 Mb/s · preamble 128"],
     ["channel", item.uwb_radio_channel],
     ["rf channel bit", item.uwb_radio_rf_channel_bit],
     ["preamble len code", item.uwb_radio_preamble_len_code],
@@ -10190,6 +11077,7 @@ function renderUwbRadio(item) {
     ["data rate", item.uwb_radio_data_rate],
     ["PHR mode/rate", `${item.uwb_radio_phr_mode ?? "-"} / ${item.uwb_radio_phr_rate ?? "-"}`],
     ["SFD type", item.uwb_radio_sfd_type],
+    ["SFD timeout", item.uwb_radio_sfd_timeout],
     ["TX PG delay", item.uwb_radio_tx_pg_delay],
     ["TX power", item.uwb_radio_tx_power],
     ["STS mode", item.uwb_sts_mode],
@@ -10215,7 +11103,9 @@ async function fetchSnapshot() {
 }
 
 function snapshotPollDelayMs() {
-  return state.activeTab === "position" ? 250 : 1500;
+  if (state.activeTab === "position") return 250;
+  if (state.activeTab === "map") return 1000;
+  return 1500;
 }
 
 function scheduleSnapshotPoll() {
@@ -12931,7 +13821,7 @@ function persistedSettingIds() {
     "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
     "positionReferenceMode", "positionReferenceX",
     "positionReferenceY", "positionErrorWindowSec",
-    "uwbTargets", "uwbRadioChannel", "uwbFlexAnchors", "uwbFlexK",
+    "uwbTargets", "uwbRadioChannel", "uwbRadioPhyMode", "uwbFlexAnchors", "uwbFlexK",
     "uwbFlexSlots", "uwbFlexMasks", "uwbSurveyRxMs", "uwbSurveyDelayMs", "uwbSurveySlotMs",
     "uwbSurveyGapMs", "uwbSurveyLogEvery", "uwbRangingSlotMs",
     "uwbRangingGapMs", "uwbRangingRxMs", "uwbRangingTimeoutMs",
@@ -13464,6 +14354,7 @@ function wireSettings() {
         flex_slots: document.getElementById("uwbFlexSlots").value,
         flex_masks: document.getElementById("uwbFlexMasks").value,
         radio_channel: document.getElementById("uwbRadioChannel").value,
+        radio_phy_mode: document.getElementById("uwbRadioPhyMode").value,
         survey_rx_ms: document.getElementById("uwbSurveyRxMs").value,
         survey_delay_ms: document.getElementById("uwbSurveyDelayMs").value,
         survey_slot_ms: document.getElementById("uwbSurveySlotMs").value,
@@ -13630,6 +14521,7 @@ function wireSettings() {
 
 document.querySelectorAll(".terminal").forEach(createTerminal);
 document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => setActiveTab(tab.dataset.tab)));
+wireGpsMapControls();
 setActiveTab(state.activeTab);
 renderRangingProfileCards();
 wireSettings();
@@ -13659,6 +14551,9 @@ class HttpHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
             self.send_html(INDEX_HTML)
+            return
+        if parsed.path.startswith("/vendor/leaflet/"):
+            self.send_leaflet_asset(parsed.path[len("/vendor/leaflet/") :])
             return
         if parsed.path == "/api/snapshot":
             self.send_json(self.server.state.snapshot())
@@ -13840,6 +14735,40 @@ class HttpHandler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def send_leaflet_asset(self, relative_path: str) -> None:
+        relative = pathlib.PurePosixPath(urllib.parse.unquote(relative_path))
+        if relative.is_absolute() or ".." in relative.parts:
+            self.send_error(HTTPStatus.NOT_FOUND, "not found")
+            return
+        candidate = (LEAFLET_ROOT / pathlib.Path(*relative.parts)).resolve()
+        try:
+            candidate.relative_to(LEAFLET_ROOT.resolve())
+        except ValueError:
+            self.send_error(HTTPStatus.NOT_FOUND, "not found")
+            return
+        if not candidate.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, "not found")
+            return
+        content_types = {
+            ".css": "text/css; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".png": "image/png",
+            ".svg": "image/svg+xml",
+        }
+        raw = candidate.read_bytes()
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header(
+                "Content-Type",
+                content_types.get(candidate.suffix.lower(), "application/octet-stream"),
+            )
+            self.send_header("Cache-Control", "public, max-age=86400")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)

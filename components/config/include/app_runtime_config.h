@@ -116,6 +116,7 @@ typedef struct {
     uint32_t bno085_log_interval_ms;
     bool gps_enabled;
     uint8_t radio_channel;
+    uint8_t radio_phy_mode;
     uint32_t wireless_telemetry_port;
     bool from_nvs;
 } app_runtime_config_t;
