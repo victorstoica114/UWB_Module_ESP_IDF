@@ -1114,6 +1114,51 @@ esp_err_t gps_service_apply_runtime_config(void)
     return gps_stop_task();
 }
 
+esp_err_t gps_service_suspend_primary_uart(void)
+{
+    if (!s_service_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_task_handle == NULL) {
+        return ESP_OK;
+    }
+
+    s_stop_requested = true;
+    const uint32_t start_ms = ticks_to_ms();
+    while (s_task_handle != NULL &&
+           (uint32_t)(ticks_to_ms() - start_ms) < GPS_STOP_TIMEOUT_MS) {
+        vTaskDelay(pdMS_TO_TICKS(GPS_STOP_POLL_MS));
+    }
+    if (s_task_handle != NULL) {
+        ESP_LOGW(TAG, "GPS UART release timed out after %u ms",
+                 (unsigned)GPS_STOP_TIMEOUT_MS);
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
+esp_err_t gps_service_reset_receiver_for_update(void)
+{
+    if (!s_service_initialized || s_task_handle != NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_RETURN_ON_ERROR(gps_set_enable_level(false), TAG,
+                        "GNSS update power-off failed");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    ESP_RETURN_ON_ERROR(gps_set_enable_level(true), TAG,
+                        "GNSS update power-on failed");
+    vTaskDelay(pdMS_TO_TICKS(GPS_POWER_SETTLE_MS));
+    return ESP_OK;
+}
+
+esp_err_t gps_service_resume_primary_uart(void)
+{
+    if (!s_service_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return gps_service_apply_runtime_config();
+}
+
 esp_err_t gps_service_start(void)
 {
     if (s_service_initialized) {

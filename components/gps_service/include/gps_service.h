@@ -94,6 +94,15 @@ typedef struct {
 
 esp_err_t gps_service_start(void);
 esp_err_t gps_service_apply_runtime_config(void);
+/* Temporarily release the primary GNSS UART without changing the persisted
+ * runtime configuration or powering the receiver down.  These calls are used
+ * by the firmware updater, which must have exclusive access to UART1. */
+esp_err_t gps_service_suspend_primary_uart(void);
+/* Power-cycle only the GNSS receiver while the primary UART is suspended.
+ * This guarantees that a previous interrupted download cannot leave the
+ * receiver in its loader before a new update starts. */
+esp_err_t gps_service_reset_receiver_for_update(void);
+esp_err_t gps_service_resume_primary_uart(void);
 void gps_service_get_snapshot(gps_service_snapshot_t *snapshot);
 const char *gps_service_fix_quality_to_string(int quality);
 

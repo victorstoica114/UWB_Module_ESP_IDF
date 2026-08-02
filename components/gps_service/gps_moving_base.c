@@ -568,6 +568,14 @@ esp_err_t gps_moving_base_start(uart_port_t primary_uart, uint8_t module_id)
     s_module_id = module_id;
     s_snapshot.role = role_for_module(module_id);
     if (s_snapshot.role == GPS_MB_ROLE_NONE) {
+        /* Software identity is useful on every physical module, including
+         * anchors that do not participate in the moving-base transport.  The
+         * normal GPS task still consumes the binary 0x80 response below. */
+        const esp_err_t version_err = query_software_version();
+        if (version_err != ESP_OK) {
+            ESP_LOGW(TAG, "Software-version query failed: %s",
+                     esp_err_to_name(version_err));
+        }
         return ESP_OK;
     }
 
@@ -616,7 +624,7 @@ void gps_moving_base_stop(void)
 
 void gps_moving_base_process_primary_bytes(const uint8_t *data, size_t length)
 {
-    if (!s_snapshot.active || data == NULL || length == 0) {
+    if (s_primary_uart == UART_NUM_MAX || data == NULL || length == 0) {
         return;
     }
     for (size_t index = 0; index < length; ++index) {
@@ -624,6 +632,9 @@ void gps_moving_base_process_primary_bytes(const uint8_t *data, size_t length)
             s_snapshot.rtcm_preamble_count++;
         }
         feed_skytraq_parser(data[index]);
+    }
+    if (!s_snapshot.active) {
+        return;
     }
     if (!role_forwards_primary(s_snapshot.role)) {
         return;

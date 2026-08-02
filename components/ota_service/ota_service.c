@@ -23,6 +23,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gps_service.h"
+#include "gnss_firmware_updater.h"
 #include "i2c_bus_service.h"
 #include "max77958_service.h"
 #include "resource_monitor_service.h"
@@ -54,6 +55,10 @@ enum {
     OTA_SERVICE_MAX_QUERY_LEN = 768,
     OTA_SERVICE_STATUS_RESPONSE_SIZE = 32000,
     OTA_SERVICE_RUNTIME_RESPONSE_SIZE = 3072,
+    GNSS_PX1105R_LOADER_SOURCE_SIZE = 67064,
+    GNSS_PX1105R_PACKED_IMAGE_SIZE = 471243,
+    GNSS_PX1105R_RAW_IMAGE_SIZE = 1116336,
+    GNSS_PX1105R_PACKED_SUM8 = 189,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -69,6 +74,37 @@ static bool s_started;
 static bool s_running;
 static volatile bool s_ota_in_progress;
 static volatile enum ota_service_status s_status = OTA_SERVICE_STATUS_IDLE;
+
+typedef struct {
+    uint8_t *data;
+    size_t size;
+} gnss_cached_firmware_t;
+
+typedef struct {
+    uint8_t *data;
+    size_t size;
+} gnss_cached_loader_t;
+
+typedef struct {
+    const uint8_t *data;
+    size_t size;
+    size_t offset;
+} gnss_memory_reader_context_t;
+
+static gnss_cached_firmware_t s_gnss_cached_firmware;
+static gnss_cached_loader_t s_gnss_cached_loader;
+
+static void gnss_release_update_cache(void)
+{
+    if (s_gnss_cached_firmware.data != NULL) {
+        heap_caps_free(s_gnss_cached_firmware.data);
+    }
+    if (s_gnss_cached_loader.data != NULL) {
+        heap_caps_free(s_gnss_cached_loader.data);
+    }
+    memset(&s_gnss_cached_firmware, 0, sizeof(s_gnss_cached_firmware));
+    memset(&s_gnss_cached_loader, 0, sizeof(s_gnss_cached_loader));
+}
 
 typedef struct {
     i2c_bus_service_stats_t i2c_stats;
@@ -1069,6 +1105,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "uwb_esp_idf\n"
         "GET  /status\n"
         "POST /ota    raw firmware image, requires X-OTA-Token header\n"
+        "POST /gnss/loader, /gnss/firmware, /gnss/firmware/run\n"
+        "             fixed PX1105R 01.07.33 update via PSRAM\n"
         "POST /config/antenna-delay?value=0x4018[&reboot=1]\n"
         "POST /config/antenna-delay?clear=1[&reboot=1]\n"
         "POST /config/runtime?mode=ranging&tag=1&anchors=2,3,4,5[&reboot=1]\n"
@@ -4559,6 +4597,240 @@ static esp_err_t ota_post_handler(httpd_req_t *req)
     return response_err;
 }
 
+static esp_err_t gnss_memory_reader(void *context, uint8_t *buffer,
+                                    size_t capacity, size_t *received)
+{
+    gnss_memory_reader_context_t *reader = context;
+    if (reader == NULL || buffer == NULL || received == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (reader->offset > reader->size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const size_t remaining = reader->size - reader->offset;
+    const size_t length = remaining < capacity ? remaining : capacity;
+    if (length > 0) {
+        memcpy(buffer, &reader->data[reader->offset], length);
+        reader->offset += length;
+    }
+    *received = length;
+    return ESP_OK;
+}
+
+static esp_err_t gnss_receive_body(httpd_req_t *req, uint8_t *buffer,
+                                   size_t length)
+{
+    size_t offset = 0;
+    while (offset < length) {
+        const int received =
+            httpd_req_recv(req, (char *)&buffer[offset], length - offset);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (received <= 0 || (size_t)received > length - offset) {
+            return ESP_FAIL;
+        }
+        offset += (size_t)received;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t gnss_firmware_post_handler(httpd_req_t *req)
+{
+    if (!ota_request_authorized(req)) {
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED,
+                                   "Missing or invalid OTA token");
+    }
+    if (s_ota_in_progress) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Update already in progress");
+    }
+    if (req->content_len != GNSS_PX1105R_PACKED_IMAGE_SIZE) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Unexpected PX1105R firmware image");
+    }
+
+    const size_t image_size = (size_t)req->content_len;
+    s_ota_in_progress = true;
+    uint8_t *image = heap_caps_malloc(
+        image_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (image == NULL) {
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Unable to allocate GNSS PSRAM cache");
+    }
+    if (gnss_receive_body(req, image, image_size) != ESP_OK) {
+        heap_caps_free(image);
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Incomplete GNSS firmware upload");
+    }
+
+    const uint8_t *lzma_header = image;
+    uint64_t unpacked_size = 0;
+    for (size_t index = 0; index < 8; ++index) {
+        unpacked_size |= ((uint64_t)lzma_header[5 + index]) << (8U * index);
+    }
+    const uint32_t dictionary_size =
+        ((uint32_t)lzma_header[1]) |
+        ((uint32_t)lzma_header[2] << 8) |
+        ((uint32_t)lzma_header[3] << 16) |
+        ((uint32_t)lzma_header[4] << 24);
+    if (lzma_header[0] != 0x5D || dictionary_size != (8U * 1024U) ||
+        unpacked_size != GNSS_PX1105R_RAW_IMAGE_SIZE) {
+        heap_caps_free(image);
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid Phoenix LZMA header");
+    }
+
+    uint8_t calculated_packed_sum = 0;
+    for (size_t index = GNSS_FIRMWARE_LZMA_HEADER_SIZE; index < image_size;
+         ++index) {
+        calculated_packed_sum += image[index];
+    }
+    if (calculated_packed_sum != GNSS_PX1105R_PACKED_SUM8) {
+        heap_caps_free(image);
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "GNSS packed checksum mismatch");
+    }
+
+    if (s_gnss_cached_firmware.data != NULL) {
+        heap_caps_free(s_gnss_cached_firmware.data);
+    }
+    s_gnss_cached_firmware = (gnss_cached_firmware_t){
+        .data = image,
+        .size = image_size,
+    };
+    s_ota_in_progress = false;
+
+    char response[320] = {0};
+    const int response_length = snprintf(
+        response, sizeof(response),
+        "{\"ok\":true,\"cached\":true,\"bytes\":%u,"
+        "\"packed_bytes\":%u,\"packed_sum8\":%u,"
+        "\"psram_free\":%u}\n",
+        (unsigned)image_size,
+        (unsigned)(image_size - GNSS_FIRMWARE_LZMA_HEADER_SIZE),
+        (unsigned)calculated_packed_sum,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, response, response_length);
+}
+
+static esp_err_t gnss_loader_post_handler(httpd_req_t *req)
+{
+    if (!ota_request_authorized(req)) {
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED,
+                                   "Missing or invalid OTA token");
+    }
+    if (s_ota_in_progress) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Update already in progress");
+    }
+    if (req->content_len != GNSS_PX1105R_LOADER_SOURCE_SIZE) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid GNSS S-record loader size");
+    }
+
+    const size_t loader_size = (size_t)req->content_len;
+    s_ota_in_progress = true;
+    uint8_t *loader = heap_caps_malloc(
+        loader_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (loader == NULL) {
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Unable to allocate GNSS loader cache");
+    }
+    if (gnss_receive_body(req, loader, loader_size) != ESP_OK) {
+        heap_caps_free(loader);
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Incomplete GNSS loader upload");
+    }
+    if (loader[0] != 'S' || loader[1] != '0' || loader[loader_size - 1] != '\n') {
+        heap_caps_free(loader);
+        s_ota_in_progress = false;
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Invalid GNSS S-record loader");
+    }
+
+    if (s_gnss_cached_loader.data != NULL) {
+        heap_caps_free(s_gnss_cached_loader.data);
+    }
+    s_gnss_cached_loader = (gnss_cached_loader_t){
+        .data = loader,
+        .size = loader_size,
+    };
+    s_ota_in_progress = false;
+
+    char response[192] = {0};
+    const int response_length = snprintf(
+        response, sizeof(response),
+        "{\"ok\":true,\"cached\":true,\"loader_bytes\":%u,"
+        "\"psram_free\":%u}\n",
+        (unsigned)loader_size,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, response, response_length);
+}
+
+static esp_err_t gnss_firmware_run_post_handler(httpd_req_t *req)
+{
+    if (!ota_request_authorized(req)) {
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED,
+                                   "Missing or invalid OTA token");
+    }
+    if (s_ota_in_progress) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Update already in progress");
+    }
+    if (s_gnss_cached_firmware.data == NULL ||
+        s_gnss_cached_firmware.size <= GNSS_FIRMWARE_LZMA_HEADER_SIZE) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "No GNSS firmware cached in PSRAM");
+    }
+    if (s_gnss_cached_loader.data == NULL || s_gnss_cached_loader.size == 0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "No GNSS S-record loader cached in PSRAM");
+    }
+
+    gnss_memory_reader_context_t loader_reader = {
+        .data = s_gnss_cached_loader.data,
+        .size = s_gnss_cached_loader.size,
+        .offset = 0,
+    };
+    gnss_memory_reader_context_t reader = {
+        .data = &s_gnss_cached_firmware.data[GNSS_FIRMWARE_LZMA_HEADER_SIZE],
+        .size = s_gnss_cached_firmware.size -
+                GNSS_FIRMWARE_LZMA_HEADER_SIZE,
+        .offset = 0,
+    };
+    gnss_firmware_update_result_t result = {0};
+    s_ota_in_progress = true;
+    const esp_err_t err = gnss_firmware_update(
+        loader_reader.size, gnss_memory_reader, &loader_reader, reader.size,
+        s_gnss_cached_firmware.data, gnss_memory_reader, &reader, &result);
+    s_ota_in_progress = false;
+    gnss_release_update_cache();
+
+    char response[384] = {0};
+    const int response_length = snprintf(
+        response, sizeof(response),
+        "{\"ok\":%s,\"error\":\"%s\",\"stage\":\"%s\","
+        "\"feedback\":\"%s\",\"profile\":\"PX1105R-01.07.33\","
+        "\"loader_bytes\":%u,\"bytes\":%u,\"sum8\":%u,"
+        "\"psram_cache_released\":true}\n",
+        err == ESP_OK ? "true" : "false", esp_err_to_name(err),
+        result.stage, result.feedback, (unsigned)result.loader_bytes_written,
+        (unsigned)result.bytes_written, (unsigned)result.calculated_sum);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_status(req, err == ESP_OK ? "200 OK"
+                                              : "500 Internal Server Error");
+    return httpd_resp_send(req, response, response_length);
+}
+
 static esp_err_t register_uri_handler_checked(const httpd_uri_t *uri)
 {
     esp_err_t err = httpd_register_uri_handler(s_http_server, uri);
@@ -4575,7 +4847,7 @@ static esp_err_t start_http_server(void)
     config.server_port = 80;
     config.stack_size = 8192;
     config.core_id = OTA_SERVICE_HTTPD_TASK_CORE;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 11;
 
     esp_err_t err = httpd_start(&s_http_server, &config);
     if (err != ESP_OK) {
@@ -4599,6 +4871,24 @@ static esp_err_t start_http_server(void)
         .uri = "/ota",
         .method = HTTP_POST,
         .handler = ota_post_handler,
+        .user_ctx = NULL,
+    };
+    const httpd_uri_t gnss_firmware_uri = {
+        .uri = "/gnss/firmware",
+        .method = HTTP_POST,
+        .handler = gnss_firmware_post_handler,
+        .user_ctx = NULL,
+    };
+    const httpd_uri_t gnss_loader_uri = {
+        .uri = "/gnss/loader",
+        .method = HTTP_POST,
+        .handler = gnss_loader_post_handler,
+        .user_ctx = NULL,
+    };
+    const httpd_uri_t gnss_firmware_run_uri = {
+        .uri = "/gnss/firmware/run",
+        .method = HTTP_POST,
+        .handler = gnss_firmware_run_post_handler,
         .user_ctx = NULL,
     };
     const httpd_uri_t antenna_delay_uri = {
@@ -4638,6 +4928,15 @@ static esp_err_t start_http_server(void)
     }
     if (err == ESP_OK) {
         err = register_uri_handler_checked(&ota_uri);
+    }
+    if (err == ESP_OK) {
+        err = register_uri_handler_checked(&gnss_firmware_uri);
+    }
+    if (err == ESP_OK) {
+        err = register_uri_handler_checked(&gnss_loader_uri);
+    }
+    if (err == ESP_OK) {
+        err = register_uri_handler_checked(&gnss_firmware_run_uri);
     }
     if (err == ESP_OK) {
         err = register_uri_handler_checked(&antenna_delay_uri);

@@ -19,6 +19,8 @@ Current step:
 - native three-frame, tag-initiated 1-tag/4-anchor DS-TWR ranging runtime with dashboard
   position view
 - optional BNO085 accelerometer hardware test via `components/bno085_service`
+- fixed PX1105R firmware update through ESP32 PSRAM; see
+  `PX1105R-firmware/validated/README.md`
 
 The board boot log confirms 16 MB QIO flash, 8 MB octal PSRAM at 80 MHz, and
 the app running from the `ota_0` partition.
