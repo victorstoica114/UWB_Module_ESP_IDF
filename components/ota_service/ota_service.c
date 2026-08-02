@@ -1414,8 +1414,54 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"gps_gsa_count\":%lu,"
         "\"gps_gsv_count\":%lu,"
         "\"gps_psti030_count\":%lu,"
+        "\"gps_psti032_count\":%lu,"
+        "\"gps_psti035_count\":%lu,"
+        "\"gps_ths_count\":%lu,"
         "\"gps_rtk_age_s\":%.2f,"
         "\"gps_rtk_ratio\":%.2f,"
+        "\"gps_baseline_valid\":%s,"
+        "\"gps_baseline_source\":%u,"
+        "\"gps_baseline_status\":\"%c\","
+        "\"gps_baseline_mode\":\"%c\","
+        "\"gps_baseline_east_m\":%.3f,"
+        "\"gps_baseline_north_m\":%.3f,"
+        "\"gps_baseline_up_m\":%.3f,"
+        "\"gps_baseline_length_m\":%.3f,"
+        "\"gps_baseline_course_deg\":%.2f,"
+        "\"gps_true_heading_valid\":%s,"
+        "\"gps_true_heading_deg\":%.2f,"
+        "\"gps_true_heading_mode\":\"%c\","
+        "\"gps_moving_base_role\":\"%s\","
+        "\"gps_moving_base_active\":%s,"
+        "\"gps_moving_base_correction_uart_ready\":%s,"
+        "\"gps_moving_base_receiver_config_sent\":%s,"
+        "\"gps_moving_base_receiver_ack_count\":%lu,"
+        "\"gps_moving_base_receiver_nack_count\":%lu,"
+        "\"gps_moving_base_receiver_last_ack_id\":%u,"
+        "\"gps_moving_base_receiver_last_nack_id\":%u,"
+        "\"gps_moving_base_uplink_packets\":%lu,"
+        "\"gps_moving_base_uplink_bytes\":%lu,"
+        "\"gps_moving_base_uplink_errors\":%lu,"
+        "\"gps_moving_base_downlink_packets\":%lu,"
+        "\"gps_moving_base_downlink_bytes\":%lu,"
+        "\"gps_moving_base_downlink_errors\":%lu,"
+        "\"gps_moving_base_downlink_gaps\":%lu,"
+        "\"gps_moving_base_last_uplink_age_ms\":%lu,"
+        "\"gps_moving_base_last_downlink_age_ms\":%lu,"
+        "\"gps_moving_base_last_downlink_source_id\":%u,"
+        "\"gps_moving_base_skytraq_frames\":%lu,"
+        "\"gps_moving_base_software_version_valid\":%s,"
+        "\"gps_moving_base_software_type\":%u,"
+        "\"gps_moving_base_software_kernel_version\":\"%08lx\","
+        "\"gps_moving_base_software_odm_version\":\"%08lx\","
+        "\"gps_moving_base_software_revision\":\"%08lx\","
+        "\"gps_moving_base_binary_output_status_valid\":%s,"
+        "\"gps_moving_base_binary_output_rate_code\":%u,"
+        "\"gps_moving_base_binary_meas_time_enabled\":%s,"
+        "\"gps_moving_base_binary_raw_meas_enabled\":%s,"
+        "\"gps_moving_base_binary_meas_time_count\":%lu,"
+        "\"gps_moving_base_binary_raw_meas_count\":%lu,"
+        "\"gps_moving_base_rtcm_preambles\":%lu,"
         "\"gps_checksum_errors\":%lu,"
         "\"gps_parse_errors\":%lu,"
         "\"charger_monitor_enabled\":%s,"
@@ -1928,8 +1974,54 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)gps_snapshot.gsa_count,
         (unsigned long)gps_snapshot.gsv_count,
         (unsigned long)gps_snapshot.psti030_count,
+        (unsigned long)gps_snapshot.psti032_count,
+        (unsigned long)gps_snapshot.psti035_count,
+        (unsigned long)gps_snapshot.ths_count,
         gps_snapshot.rtk_age_s,
         gps_snapshot.rtk_ratio,
+        gps_snapshot.baseline_valid ? "true" : "false",
+        (unsigned)gps_snapshot.baseline_source,
+        gps_snapshot.baseline_status != '\0' ? gps_snapshot.baseline_status : '-',
+        gps_snapshot.baseline_mode != '\0' ? gps_snapshot.baseline_mode : '-',
+        gps_snapshot.baseline_east_m,
+        gps_snapshot.baseline_north_m,
+        gps_snapshot.baseline_up_m,
+        gps_snapshot.baseline_length_m,
+        gps_snapshot.baseline_course_deg,
+        gps_snapshot.true_heading_valid ? "true" : "false",
+        gps_snapshot.true_heading_deg,
+        gps_snapshot.true_heading_mode != '\0' ? gps_snapshot.true_heading_mode : '-',
+        gps_snapshot.moving_base_role,
+        gps_snapshot.moving_base_active ? "true" : "false",
+        gps_snapshot.moving_base_correction_uart_ready ? "true" : "false",
+        gps_snapshot.moving_base_receiver_config_sent ? "true" : "false",
+        (unsigned long)gps_snapshot.moving_base_receiver_ack_count,
+        (unsigned long)gps_snapshot.moving_base_receiver_nack_count,
+        (unsigned)gps_snapshot.moving_base_receiver_last_ack_id,
+        (unsigned)gps_snapshot.moving_base_receiver_last_nack_id,
+        (unsigned long)gps_snapshot.moving_base_uplink_packet_count,
+        (unsigned long)gps_snapshot.moving_base_uplink_byte_count,
+        (unsigned long)gps_snapshot.moving_base_uplink_error_count,
+        (unsigned long)gps_snapshot.moving_base_downlink_packet_count,
+        (unsigned long)gps_snapshot.moving_base_downlink_byte_count,
+        (unsigned long)gps_snapshot.moving_base_downlink_error_count,
+        (unsigned long)gps_snapshot.moving_base_downlink_gap_count,
+        (unsigned long)gps_snapshot.moving_base_last_uplink_age_ms,
+        (unsigned long)gps_snapshot.moving_base_last_downlink_age_ms,
+        (unsigned)gps_snapshot.moving_base_last_downlink_source_id,
+        (unsigned long)gps_snapshot.moving_base_skytraq_frame_count,
+        gps_snapshot.moving_base_software_version_valid ? "true" : "false",
+        (unsigned)gps_snapshot.moving_base_software_type,
+        (unsigned long)gps_snapshot.moving_base_software_kernel_version,
+        (unsigned long)gps_snapshot.moving_base_software_odm_version,
+        (unsigned long)gps_snapshot.moving_base_software_revision,
+        gps_snapshot.moving_base_binary_output_status_valid ? "true" : "false",
+        (unsigned)gps_snapshot.moving_base_binary_output_rate_code,
+        gps_snapshot.moving_base_binary_meas_time_enabled ? "true" : "false",
+        gps_snapshot.moving_base_binary_raw_meas_enabled ? "true" : "false",
+        (unsigned long)gps_snapshot.moving_base_binary_meas_time_count,
+        (unsigned long)gps_snapshot.moving_base_binary_raw_meas_count,
+        (unsigned long)gps_snapshot.moving_base_rtcm_preamble_count,
         (unsigned long)gps_snapshot.checksum_error_count,
         (unsigned long)gps_snapshot.parse_error_count,
         charger_snapshot.monitor_enabled ? "true" : "false",

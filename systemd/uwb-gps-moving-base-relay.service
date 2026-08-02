@@ -1,0 +1,15 @@
+[Unit]
+Description=UWB local GPS moving-base UDP relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/Documents/UWB
+ExecStart=/usr/bin/python3 -u /home/pi/Documents/UWB/tools/gps_moving_base_relay.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

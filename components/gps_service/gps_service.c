@@ -8,7 +8,9 @@
 #include <string.h>
 
 #include "app_runtime_config.h"
+#include "app_identity.h"
 #include "board_config.h"
+#include "gps_moving_base.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_check.h"
@@ -23,12 +25,12 @@ static const char *TAG = "gps_service";
 
 enum {
     GPS_UART_NUM = UART_NUM_1,
-    GPS_TASK_STACK_BYTES = 4096,
+    GPS_TASK_STACK_BYTES = 6144,
     GPS_TASK_PRIORITY = 4,
     GPS_UART_RX_BUFFER_SIZE = 4096,
-    GPS_UART_TX_BUFFER_SIZE = 0,
+    GPS_UART_TX_BUFFER_SIZE = 512,
     GPS_UART_READ_BUFFER_SIZE = 256,
-    GPS_UART_READ_TIMEOUT_MS = 200,
+    GPS_UART_READ_TIMEOUT_MS = 20,
     GPS_POWER_SETTLE_MS = 250,
     GPS_STOP_TIMEOUT_MS = 1000,
     GPS_STOP_POLL_MS = 20,
@@ -650,6 +652,68 @@ static void parse_psti030(char *fields[], size_t count)
     }
 }
 
+static void parse_psti_baseline(char *fields[], size_t count,
+                                uint8_t source)
+{
+    if (count < 11 || (source != 32 && source != 35)) {
+        gps_note_parse_error();
+        return;
+    }
+
+    double east = 0.0;
+    double north = 0.0;
+    double up = 0.0;
+    double length = 0.0;
+    double course = 0.0;
+    const bool values_valid =
+        parse_double_field(fields[6], &east) &&
+        parse_double_field(fields[7], &north) &&
+        parse_double_field(fields[8], &up) &&
+        parse_double_field(fields[9], &length) &&
+        parse_double_field(fields[10], &course);
+
+    if (gps_lock(pdMS_TO_TICKS(20))) {
+        if (source == 32) {
+            s_snapshot.psti032_count++;
+        } else {
+            s_snapshot.psti035_count++;
+        }
+        s_snapshot.baseline_source = source;
+        s_snapshot.baseline_status = fields[4][0];
+        s_snapshot.baseline_mode = fields[5][0];
+        s_snapshot.baseline_valid = values_valid && fields[4][0] == 'A' &&
+                                    fields[5][0] != 'V';
+        if (values_valid) {
+            s_snapshot.baseline_east_m = east;
+            s_snapshot.baseline_north_m = north;
+            s_snapshot.baseline_up_m = up;
+            s_snapshot.baseline_length_m = length;
+            s_snapshot.baseline_course_deg = course;
+        }
+        gps_unlock();
+    }
+}
+
+static void parse_ths(char *fields[], size_t count)
+{
+    if (count < 3) {
+        gps_note_parse_error();
+        return;
+    }
+
+    double heading = 0.0;
+    const bool have_heading = parse_double_field(fields[1], &heading);
+    if (gps_lock(pdMS_TO_TICKS(20))) {
+        s_snapshot.ths_count++;
+        s_snapshot.true_heading_mode = fields[2][0];
+        s_snapshot.true_heading_valid = have_heading && fields[2][0] != 'V';
+        if (have_heading) {
+            s_snapshot.true_heading_deg = heading;
+        }
+        gps_unlock();
+    }
+}
+
 static void gps_handle_nmea_line(const char *line)
 {
     const uint32_t now_ms = ticks_to_ms();
@@ -694,8 +758,16 @@ static void gps_handle_nmea_line(const char *line)
         parse_gsa(fields, count);
     } else if (sentence_type_is(fields[0], "GSV")) {
         parse_gsv(fields, count, now_ms);
+    } else if (sentence_type_is(fields[0], "THS")) {
+        parse_ths(fields, count);
     } else if (strcmp(fields[0], "$PSTI") == 0) {
-        parse_psti030(fields, count);
+        if (count > 1 && strcmp(fields[1], "030") == 0) {
+            parse_psti030(fields, count);
+        } else if (count > 1 && strcmp(fields[1], "032") == 0) {
+            parse_psti_baseline(fields, count, 32);
+        } else if (count > 1 && strcmp(fields[1], "035") == 0) {
+            parse_psti_baseline(fields, count, 35);
+        }
     }
 }
 
@@ -713,6 +785,68 @@ static void gps_copy_snapshot(gps_service_snapshot_t *snapshot)
         snapshot->last_fix_age_ms =
             elapsed_since(now_ms, s_last_fix_timestamp_ms);
         gps_unlock();
+        gps_moving_base_snapshot_t moving_base = {0};
+        gps_moving_base_get_snapshot(&moving_base);
+        snapshot->moving_base_active = moving_base.active;
+        snapshot->moving_base_correction_uart_ready =
+            moving_base.correction_uart_ready;
+        snapshot->moving_base_receiver_config_sent =
+            moving_base.receiver_config_sent;
+        snapshot->moving_base_receiver_ack_count =
+            moving_base.receiver_ack_count;
+        snapshot->moving_base_receiver_nack_count =
+            moving_base.receiver_nack_count;
+        snapshot->moving_base_receiver_last_ack_id =
+            moving_base.receiver_last_ack_id;
+        snapshot->moving_base_receiver_last_nack_id =
+            moving_base.receiver_last_nack_id;
+        snapshot->moving_base_uplink_packet_count =
+            moving_base.uplink_packet_count;
+        snapshot->moving_base_uplink_byte_count = moving_base.uplink_byte_count;
+        snapshot->moving_base_uplink_error_count =
+            moving_base.uplink_error_count;
+        snapshot->moving_base_downlink_packet_count =
+            moving_base.downlink_packet_count;
+        snapshot->moving_base_downlink_byte_count =
+            moving_base.downlink_byte_count;
+        snapshot->moving_base_downlink_error_count =
+            moving_base.downlink_error_count;
+        snapshot->moving_base_downlink_gap_count =
+            moving_base.downlink_gap_count;
+        snapshot->moving_base_last_uplink_age_ms =
+            moving_base.last_uplink_age_ms;
+        snapshot->moving_base_last_downlink_age_ms =
+            moving_base.last_downlink_age_ms;
+        snapshot->moving_base_skytraq_frame_count =
+            moving_base.skytraq_binary_frame_count;
+        snapshot->moving_base_software_version_valid =
+            moving_base.software_version_valid;
+        snapshot->moving_base_software_type = moving_base.software_type;
+        snapshot->moving_base_software_kernel_version =
+            moving_base.software_kernel_version;
+        snapshot->moving_base_software_odm_version =
+            moving_base.software_odm_version;
+        snapshot->moving_base_software_revision =
+            moving_base.software_revision;
+        snapshot->moving_base_binary_output_status_valid =
+            moving_base.binary_output_status_valid;
+        snapshot->moving_base_binary_output_rate_code =
+            moving_base.binary_output_rate_code;
+        snapshot->moving_base_binary_meas_time_enabled =
+            moving_base.binary_meas_time_enabled;
+        snapshot->moving_base_binary_raw_meas_enabled =
+            moving_base.binary_raw_meas_enabled;
+        snapshot->moving_base_binary_meas_time_count =
+            moving_base.binary_meas_time_count;
+        snapshot->moving_base_binary_raw_meas_count =
+            moving_base.binary_raw_meas_count;
+        snapshot->moving_base_rtcm_preamble_count =
+            moving_base.rtcm_preamble_count;
+        snapshot->moving_base_last_downlink_source_id =
+            moving_base.last_downlink_source_id;
+        snprintf(snapshot->moving_base_role,
+                 sizeof(snapshot->moving_base_role), "%s",
+                 gps_moving_base_role_to_string(moving_base.role));
     } else {
         memset(snapshot, 0, sizeof(*snapshot));
     }
@@ -857,6 +991,13 @@ static void gps_task(void *arg)
         goto done;
     }
 
+    const esp_err_t moving_base_err = gps_moving_base_start(
+        (uart_port_t)GPS_UART_NUM, app_identity_get_module_id());
+    if (moving_base_err != ESP_OK) {
+        ESP_LOGW(TAG, "Local moving-base transport unavailable: %s",
+                 esp_err_to_name(moving_base_err));
+    }
+
     uint8_t read_buffer[GPS_UART_READ_BUFFER_SIZE] = {0};
     char line[GPS_NMEA_LINE_MAX] = {0};
     size_t line_len = 0;
@@ -868,6 +1009,7 @@ static void gps_task(void *arg)
         if (len > 0) {
             gps_note_bytes((size_t)len);
             gps_set_last_rx_timestamp(ticks_to_ms());
+            gps_moving_base_process_primary_bytes(read_buffer, (size_t)len);
             for (int i = 0; i < len; ++i) {
                 const char c = (char)read_buffer[i];
                 if (c == '$') {
@@ -895,10 +1037,13 @@ static void gps_task(void *arg)
             }
         }
 
+        gps_moving_base_poll();
+
         gps_log_summary_if_needed();
     }
 
 done:
+    gps_moving_base_stop();
     gps_uart_deinit();
     if (!app_runtime_config_get()->gps_enabled || err != ESP_OK) {
         (void)gps_configure_disabled_gpios();

@@ -3666,7 +3666,7 @@ tr.status-stale td { color: #4f3b1d; }
             <label for="positionAnchorCount">Anchors used</label>
             <select id="positionAnchorCount"><option value="4">4 anchors</option><option value="3">3 anchors</option></select>
             <label for="positionSolver">Ranging method</label>
-            <select id="positionSolver"><option value="flextdoa" selected>FlexTDOA</option><option value="passive_ds">Passive DS-TWR</option><option value="ranging">Native DS-TWR</option><option value="hybrid">Legacy hybrid logs</option></select>
+            <select id="positionSolver"><option value="flextdoa" selected>FlexTDOA</option><option value="passive_ds">Passive DS-TWR</option><option value="ranging">Native DS-TWR</option></select>
             <label for="positionAnchors">Anchor IDs</label>
             <input id="positionAnchors" value="2,3,4,5">
             <label for="positionTags">Tag IDs</label>
@@ -4517,10 +4517,6 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div id="flexProfileToast" class="toast"></div>
         </div>
-        <div id="legacyHybridRangingPanel" class="section ranging-protocol-panel hidden" data-ranging-protocol="hybrid">
-          <h2>Legacy Hybrid Log Playback</h2>
-          <p class="ranging-protocol-empty">This solver interprets captures produced by the former dual-leg hybrid protocol. It has no active radio timing controls; use it only for comparisons with previously recorded data.</p>
-        </div>
         <div id="passiveDsProfilesSection" class="section hidden">
           <h2>Passive DS-TWR Frame Profiles</h2>
           <div class="form-grid">
@@ -5213,7 +5209,6 @@ const rangingProtocolProfileFields = {
     "dsPositionMaxAgeSec", "slotMs", "roundGapMs", "dsRxSliceMs", "timeoutMs",
     "respDelayMs", "finalDelayMs", "autoRxDelayUus",
   ]),
-  hybrid: new Set(),
 };
 const rangingProfileDefaultsVersion = "2026-07-31-native-ds-clean-v2";
 const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
@@ -5715,15 +5710,14 @@ function parseCoordinateList(text, expected) {
 }
 
 function normalizePositionSolver(value) {
-  if (value === "hybrid") return "hybrid";
   if (value === "passive_ds" || value === "passive_ds_twr") return "passive_ds";
+  if (value === "ranging") return "ranging";
   if (value === "tdoa") return "flextdoa";
-  if (value === "flextdoa") return "flextdoa";
-  return "ranging";
+  return "flextdoa";
 }
 
 function positionProtocolUsesTdoa(solver) {
-  return solver === "flextdoa" || solver === "passive_ds" || solver === "hybrid";
+  return solver === "flextdoa" || solver === "passive_ds";
 }
 
 function positionRuntimeModeForSolver(solver) {
@@ -5734,9 +5728,14 @@ function positionRuntimeModeForSolver(solver) {
 const positionAnchorRangeHistoryMaxAgeSec = 30;
 
 function positionGeometryMaxAge(settings) {
-  // Geometry is refreshed on a slower cadence than tag observations.
-  const minimumAgeSec = Math.max(3, Number(settings.maxAge) || 0);
-  return minimumAgeSec;
+  // Geometry maintenance is deliberately much slower than tag observations.
+  // Retain the last live UWB geometry while waiting for its next maintenance
+  // update; tag/range freshness remains governed by the strict per-protocol
+  // Position Setup value.  This is not a fixed or GPS-derived geometry.
+  return Math.max(
+    positionAnchorRangeHistoryMaxAgeSec,
+    Number(settings.maxAge) || 0
+  );
 }
 
 function positionGeometryProtocol(solver) {
@@ -5746,7 +5745,6 @@ function positionGeometryProtocol(solver) {
 }
 
 function positionSolverLabel(solver) {
-  if (solver === "hybrid") return "Legacy hybrid logs";
   if (solver === "passive_ds") return "Passive DS-TWR";
   if (solver === "flextdoa") return "FlexTDOA";
   return "Native DS-TWR";
@@ -5756,7 +5754,6 @@ const positionProtocolDefaults = {
   flextdoa: {maxAgeSec: 0.5},
   passive_ds: {maxAgeSec: 0.2},
   ranging: {maxAgeSec: 0.5},
-  hybrid: {maxAgeSec: 3},
 };
 
 function positionProtocolMaxAgeKey(solver) {
@@ -5804,17 +5801,14 @@ function switchPositionProtocolSettings() {
     element.classList.toggle("hidden", solver !== "ranging");
   });
   document.querySelectorAll(".dynamic-geometry-option").forEach(element => {
-    element.classList.toggle(
-      "hidden", solver === "ranging" || solver === "hybrid");
+    element.classList.toggle("hidden", solver === "ranging");
   });
   const restartGeometry =
     document.getElementById("positionRestartAnchorSelfLocalization");
   if (restartGeometry) {
-    const available = solver !== "hybrid";
-    restartGeometry.disabled = !available;
-    restartGeometry.title = available
-      ? "Clear any legacy fixed geometry and restart the live anchor estimate."
-      : "Legacy replay does not control a live geometry estimator.";
+    restartGeometry.disabled = false;
+    restartGeometry.title =
+      "Clear any fixed geometry and restart the live anchor estimate.";
   }
 }
 
@@ -7248,15 +7242,55 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
     geometryUpdated = true;
   }
 
-  const targetAnchors = paperAnchorCoordinatesFromState(
+  let targetAnchors = paperAnchorCoordinatesFromState(
     batch.ids, session.ekf.variables, session.ekf.state);
-  const anchors = cloneAnchorCoordinates(
+  let anchors = cloneAnchorCoordinates(
     smoothPublishedAnchorCoordinates(
       session.ekf, targetAnchors, geometryUpdated));
   const acceptedItems = acceptedGeometryItems(session.ekf, now);
-  const residuals = anchorGeometryResiduals(anchors, acceptedItems);
-  const fitQuality = anchorGeometryFitQuality(anchorIds, residuals);
+  let residuals = anchorGeometryResiduals(anchors, acceptedItems);
+  let fitQuality = anchorGeometryFitQuality(anchorIds, residuals);
   const expectedPairCount = selectedAnchorPairs(anchorIds).length;
+
+  // All live protocols measure the same six physical anchor edges. A browser
+  // that stayed open while anchors moved can retain a published EKF shape that
+  // no longer matches those edges, even though the radio measurements are
+  // already correct. Rebuild only when a fresh, complete distance graph gives
+  // a substantially better deterministic fit. This changes neither the UWB
+  // measurements nor the tag solver and never consults GPS.
+  if (Object.keys(acceptedItems).length === expectedPairCount &&
+      Number.isFinite(fitQuality.rmsM) && fitQuality.rmsM > 0.25) {
+    const rebuildBatch = {
+      ...batch,
+      distanceItems: acceptedItems,
+      missingPairs: [],
+      coherent: true,
+      updateToken: `${batch.protocol}:consistency:${now}`,
+    };
+    const rebuilt = createPaperAnchorEkf(
+      rebuildBatch,
+      {...session.ekf, publishedAnchors: null}
+    );
+    if (rebuilt) {
+      const rebuiltAnchors = paperAnchorCoordinatesFromState(
+        batch.ids, rebuilt.variables, rebuilt.state);
+      const rebuiltResiduals = anchorGeometryResiduals(
+        rebuiltAnchors, acceptedItems);
+      const rebuiltFit = anchorGeometryFitQuality(
+        anchorIds, rebuiltResiduals);
+      if (Number.isFinite(rebuiltFit.rmsM) &&
+          rebuiltFit.rmsM + 0.10 < fitQuality.rmsM) {
+        session.ekf = rebuilt;
+        targetAnchors = rebuiltAnchors;
+        anchors = cloneAnchorCoordinates(rebuiltAnchors);
+        residuals = rebuiltResiduals;
+        fitQuality = rebuiltFit;
+        state.positionSeeds = {};
+        resetPositionTagTrails();
+        state.positionAnchorTrail = {};
+      }
+    }
+  }
   const requiredPairCount = protocol === "passive_ds"
     ? expectedPairCount
     : minimumObservableAnchorEdges(anchorIds);
@@ -7326,15 +7360,10 @@ function freshTdoaObservations(tagId, anchorIds, maxAge) {
       Number(a.responder_id) - Number(b.responder_id));
 }
 
-function normalizeTdoaObservation(item, protocol) {
-  const legacyDiff = Number(item.primary_diff_m);
-  const diff = protocol === "hybrid" && Number.isFinite(legacyDiff)
-    ? legacyDiff
-    : Number(item.diff_m);
+function normalizeTdoaObservation(item) {
   return {
     ...item,
-    diff_m: diff,
-    tdoa_protocol: protocol === "hybrid" ? "legacy" : protocol,
+    diff_m: Number(item.diff_m),
     used_in_fit: true,
     reject_reason: "",
   };
@@ -7346,15 +7375,14 @@ function coherentTdoaBatch(tagId, anchorIds, maxAge, protocol = "flextdoa") {
     ? state.tdoa.recent_observations
     : freshTdoaObservations(tagId, anchorIds, maxAge);
   const groups = new Map();
-  const expectedProtocol = protocol === "hybrid" ? "legacy" : protocol;
   for (const rawItem of recent) {
     if (Number(rawItem.tag_id) !== Number(tagId) ||
         !selected.has(Number(rawItem.initiator_id)) ||
         !selected.has(Number(rawItem.responder_id)) ||
         Number(rawItem.age_sec) > maxAge) continue;
     const rawProtocol = String(rawItem.tdoa_protocol || "flextdoa");
-    if (protocol !== "hybrid" && rawProtocol !== expectedProtocol) continue;
-    const item = normalizeTdoaObservation(rawItem, protocol);
+    if (rawProtocol !== protocol) continue;
+    const item = normalizeTdoaObservation(rawItem);
     if (!Number.isFinite(Number(item.diff_m))) continue;
     const slotValue = Number(item.slot_id);
     const frameSlotCount = protocol === "passive_ds"
@@ -7365,7 +7393,7 @@ function coherentTdoaBatch(tagId, anchorIds, maxAge, protocol = "flextdoa") {
       : null;
     const slotKey = Number.isInteger(groupSlotValue)
       ? `${protocol === "passive_ds" ? "frame" : "slot"}:${groupSlotValue}`
-      : `legacy:${Number(item.seq)}:${Number(item.initiator_id)}`;
+      : `sample:${Number(item.seq)}:${Number(item.initiator_id)}`;
     const group = groups.get(slotKey) || {
       key: slotKey,
       slotId: Number.isInteger(slotValue) ? slotValue : null,
@@ -8801,7 +8829,7 @@ function renderPositionReadout(model) {
         const blendText = Number.isFinite(blend) ? ` · blend ${(blend * 100).toFixed(0)}%` : "";
         const protocolText = item.tdoa_protocol === "passive_ds"
           ? "Passive DS-TWR"
-          : (item.tdoa_protocol === "flextdoa" ? "FlexTDOA" : "legacy");
+          : (item.tdoa_protocol === "flextdoa" ? "FlexTDOA" : "unknown");
         const cfoPpm = Number(item.clock_offset_ppm);
         const cfoCorrectionM = Number(item.cfo_correction_m);
         const passiveDiag = item.tdoa_protocol === "passive_ds"
@@ -9638,6 +9666,13 @@ function renderGpsCell(item) {
   const location = item.gps_fix_valid
     ? `${fmtMaybeCoord(item.gps_latitude_deg)}<br>${fmtMaybeCoord(item.gps_longitude_deg)}`
     : `<span class="muted">no fix</span>`;
+  const movingRole = String(item.gps_moving_base_role || "none");
+  const movingBase = movingRole !== "none"
+    ? `<br><span class="${item.gps_moving_base_active ? "ok" : "bad"}">${esc(movingRole.replaceAll("_", " "))}</span>`
+    : "";
+  const linkAge = movingRole === "local_base"
+    ? `up ${fmtAgeMs(item.gps_moving_base_last_uplink_age_ms)}`
+    : `down ${fmtAgeMs(item.gps_moving_base_last_downlink_age_ms)} · gaps ${esc(item.gps_moving_base_downlink_gaps ?? 0)}`;
   return `
     <span class="${enabled ? "ok" : "muted"}">${esc(statusText)}</span><br>
     <span class="gps-fix-message ${fixState.className}">${esc(fixState.label)}</span><br>
@@ -9645,7 +9680,8 @@ function renderGpsCell(item) {
     <span class="gps-fix-explanation ${fixState.className}">${esc(fixState.explanation)}</span><br>
     sats ${esc(satsUsed)}/${esc(satsView)} · hdop ${fmtMaybeNumber(item.gps_hdop, 2)}<br>
 	    ${location}<br>
-	    <span class="muted">rx ${fmtAgeMs(item.gps_last_rx_age_ms)} · sent ${esc(sentences)} · err ${esc(item.gps_checksum_errors ?? "-")}/${esc(item.gps_parse_errors ?? "-")}</span>`;
+	    <span class="muted">rx ${fmtAgeMs(item.gps_last_rx_age_ms)} · sent ${esc(sentences)} · err ${esc(item.gps_checksum_errors ?? "-")}/${esc(item.gps_parse_errors ?? "-")}</span>${movingBase}<br>
+        <span class="muted">${esc(linkAge)}</span>`;
 }
 
 function gpsRxIsFresh(item) {
@@ -10215,6 +10251,22 @@ function renderGps(statuses) {
     const rtkText = (Number.isFinite(rtkAge) && rtkAge > 0) || (Number.isFinite(rtkRatio) && rtkRatio > 0)
       ? `RTK age ${fmtMaybeNumber(rtkAge, 1)} s · ratio ${fmtMaybeNumber(rtkRatio, 2)}`
       : "RTK corrections unavailable";
+    const movingRole = String(item.gps_moving_base_role || "none");
+    const movingRoleText = movingRole.replaceAll("_", " ");
+    const downlinkRole = movingRole === "precise_base" || movingRole === "moving_rover";
+    const movingLink = movingRole === "none"
+      ? `<span class="muted">local moving-base role not assigned</span>`
+      : `<span class="${item.gps_moving_base_active ? "ok" : "bad"}">${esc(movingRoleText)}</span><br>
+         config ${item.gps_moving_base_receiver_config_sent ? "sent" : "pending"} · ACK/NACK ${esc(item.gps_moving_base_receiver_ack_count ?? 0)}/${esc(item.gps_moving_base_receiver_nack_count ?? 0)}<br>
+         uplink ${esc(item.gps_moving_base_uplink_packets ?? 0)} pkt / ${fmtBytes(item.gps_moving_base_uplink_bytes)} · age ${fmtAgeMs(item.gps_moving_base_last_uplink_age_ms)}<br>
+         ${downlinkRole ? `downlink ${esc(item.gps_moving_base_downlink_packets ?? 0)} pkt / ${fmtBytes(item.gps_moving_base_downlink_bytes)} · age ${fmtAgeMs(item.gps_moving_base_last_downlink_age_ms)}<br>source M${esc(item.gps_moving_base_last_downlink_source_id ?? 0)} · gaps/errors ${esc(item.gps_moving_base_downlink_gaps ?? 0)}/${esc(item.gps_moving_base_downlink_errors ?? 0)}` : "RTCM source stream"}`;
+    const baselineText = item.gps_baseline_valid
+      ? `<span class="ok">PSTI${String(item.gps_baseline_source || "").padStart(3, "0")} ${fmtMaybeNumber(item.gps_baseline_length_m, 3)} m</span><br>
+         course ${fmtMaybeNumber(item.gps_baseline_course_deg, 2)}° · E/N/U ${fmtMaybeNumber(item.gps_baseline_east_m, 3)} / ${fmtMaybeNumber(item.gps_baseline_north_m, 3)} / ${fmtMaybeNumber(item.gps_baseline_up_m, 3)} m`
+      : `<span class="muted">waiting for PSTI032/PSTI035 baseline</span>`;
+    const headingText = item.gps_true_heading_valid
+      ? `<br><span class="ok">THS ${fmtMaybeNumber(item.gps_true_heading_deg, 2)}° (${esc(item.gps_true_heading_mode || "-")})</span>`
+      : "";
 
     return `<tr class="${statusIsFresh(item) ? "" : "status-stale"}">
       <td>${renderModuleCell(item)}</td>
@@ -10230,11 +10282,11 @@ function renderGps(statuses) {
         <div class="gps-detail">${esc(item.gps_satellites_in_view ?? "-")} in view<br>HDOP ${fmtMaybeNumber(item.gps_hdop, 2)}</div></td>
       <td>${position}</td>
       <td><div>speed ${fmtMaybeNumber(item.gps_speed_mps, 2)} m/s<br>course ${fmtMaybeNumber(item.gps_course_deg, 1)} deg</div>
-        <div class="gps-detail">UTC ${formatGpsUtcTime(item.gps_utc_time)}<br>date ${formatGpsUtcDate(item.gps_utc_date)}<br>${rtkText}</div></td>
+        <div class="gps-detail">UTC ${formatGpsUtcTime(item.gps_utc_time)}<br>date ${formatGpsUtcDate(item.gps_utc_date)}<br>${rtkText}<br>${baselineText}${headingText}<br>${movingLink}</div></td>
       <td><div class="gps-primary-value">${esc(item.gps_sentence_count ?? 0)} sentences</div>
         <div class="gps-detail">${fmtBytes(item.gps_byte_count)} · RX age ${fmtAgeMs(item.gps_last_rx_age_ms)}<br>
         GGA ${esc(item.gps_gga_count ?? 0)} · RMC ${esc(item.gps_rmc_count ?? 0)} · GSA ${esc(item.gps_gsa_count ?? 0)}<br>
-        GSV ${esc(item.gps_gsv_count ?? 0)} · PSTI ${esc(item.gps_psti030_count ?? 0)}<br>
+        GSV ${esc(item.gps_gsv_count ?? 0)} · PSTI030/032/035 ${esc(item.gps_psti030_count ?? 0)}/${esc(item.gps_psti032_count ?? 0)}/${esc(item.gps_psti035_count ?? 0)} · THS ${esc(item.gps_ths_count ?? 0)}<br>
         checksum / parse errors ${esc(item.gps_checksum_errors ?? 0)} / ${esc(item.gps_parse_errors ?? 0)}<br>
         last sentence ${esc(item.gps_last_sentence || "-")}</div></td>
     </tr>`;
@@ -12238,12 +12290,6 @@ function updateRangingSettingsProtocol() {
       hint: "Selected in Position Setup. Anchors exchange native three-packet DS-TWR while every non-anchor tag only receives.",
       note: "Fast Star uses one rotating maintenance frame in four to keep the full anchor geometry observable. Robust Rotating changes reference every frame. Their timing remains separate from native DS-TWR and FlexTDOA.",
     },
-    hybrid: {
-      title: "Legacy Hybrid Settings",
-      label: "Legacy hybrid logs",
-      hint: "Selected in Position Setup. This compatibility solver reads older captures and does not configure a current radio protocol.",
-      note: "",
-    },
   }[solver];
 
   document.getElementById("rangingProtocolTitle").textContent = protocol.title;
@@ -13286,7 +13332,7 @@ async function applyPassiveDsProfile(key) {
       passive_ds_solve_mode: String(
         key === "multi" ? values.solveMode : 0
       ),
-      hot_switch: "1",
+      reboot: "1",
     },
   }, "passiveDsProfileToast");
   if (apiResponseOk(data)) {
@@ -13436,7 +13482,7 @@ async function applyPassiveDsExperimentMode() {
       passive_ds_solve_mode:
         document.getElementById("passiveDsSolveMode").value,
       passive_ds_rolling_max_hz: String(rollingMaxHz),
-      hot_switch: "1",
+      reboot: "1",
     },
   }, "passiveDsExperimentToast");
   if (apiResponseOk(data)) {
@@ -14022,7 +14068,7 @@ async function enablePositionRanging() {
     tag: String(tagId),
     anchors,
     uwb: "1",
-    hot_switch: "1",
+    reboot: "1",
   };
   const runtimeMode = document.getElementById("runtimeMode");
   const runtimeTag = document.getElementById("runtimeTag");
@@ -14033,7 +14079,7 @@ async function enablePositionRanging() {
   if (runtimeTag) runtimeTag.value = String(tagId);
   if (runtimeAnchors) runtimeAnchors.value = anchors;
   if (runtimeUwb) runtimeUwb.checked = true;
-  if (runtimeReboot) runtimeReboot.value = "0";
+  if (runtimeReboot) runtimeReboot.value = "1";
   const result = await postConfig(
     {target_modules: "all", params},
     "positionToast"
@@ -14059,16 +14105,8 @@ function runPositionOverlayAction(event) {
 
 async function restartAnchorSelfLocalization() {
     const settings = positionSettings();
-    if (settings.solver === "hybrid") {
-      setToast(
-        "positionToast",
-        "Select a live protocol before resetting dynamic anchor geometry.",
-        "bad"
-      );
-      return;
-    }
     if (!window.confirm(
-      "Clear any legacy fixed geometry from every module and reset the live " +
+      "Clear any fixed geometry from every module and reset the live " +
       "anchor estimate? Positioning resumes automatically after fresh ranges arrive."
     )) {
       return;
@@ -14083,7 +14121,7 @@ async function restartAnchorSelfLocalization() {
     resetPositionTagTrails();
     setToast(
       "positionToast",
-      "Legacy fixed geometry cleared; live anchor tracking restarted",
+      "Fixed geometry cleared; live anchor tracking restarted",
       "good"
     );
     renderPosition();
@@ -14838,6 +14876,15 @@ class DashboardHttpServer(ThreadingHTTPServer):
             raise RuntimeError("APP_OTA_PASSWORD missing in secrets.h")
         if not params:
             raise RuntimeError("No runtime config parameters provided")
+        # Older dashboard tabs requested an in-place DW3000 hot switch.  That
+        # leaves the Passive DS-TWR frame state out of phase across modules and
+        # can produce fresh anchor ranges without a tag position.  Treat every
+        # dashboard hot-switch request as a coordinated parallel reboot.  The
+        # direct module endpoint remains available for firmware diagnostics.
+        if str(params.get("hot_switch") or "") == "1":
+            params = dict(params)
+            params.pop("hot_switch", None)
+            params["reboot"] = "1"
         targets = self.resolve_targets(target_modules)
         with ThreadPoolExecutor(max_workers=min(5, len(targets))) as executor:
             return list(
@@ -15737,9 +15784,15 @@ class DashboardHttpServer(ThreadingHTTPServer):
             }
 
         if not module_ids:
-            targets = list(dict.fromkeys(by_module.values()))
+            # "all" must always mean the complete configured module set.  A
+            # freshly restarted dashboard may have polled only a subset of the
+            # modules; deriving the fan-out from that transient subset can
+            # leave the UWB network split across two protocols.
+            targets = list(dict.fromkeys(self.targets))
             if not targets:
-                raise RuntimeError("No HTTP-live targets known")
+                targets = list(dict.fromkeys(by_module.values()))
+            if not targets:
+                raise RuntimeError("No configured UWB targets known")
             return targets
 
         targets: list[str] = []
