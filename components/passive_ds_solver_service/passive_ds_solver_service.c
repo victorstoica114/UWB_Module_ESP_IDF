@@ -4,8 +4,10 @@
 #include <string.h>
 
 #include "app_runtime_config.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "passive_ds_position_solver.h"
@@ -18,7 +20,7 @@ static const char *TAG = "passive_ds_solver";
 enum {
     /* Absorb short Wi-Fi/telemetry bursts without dropping radio events. */
     PASSIVE_DS_SOLVER_QUEUE_LEN = 512,
-    PASSIVE_DS_SOLVER_TASK_STACK_BYTES = 32768,
+    PASSIVE_DS_SOLVER_TASK_STACK_BYTES = 40960,
     /* Wi-Fi stays above us (6); log/telemetry delivery stays below us (4). */
     PASSIVE_DS_SOLVER_TASK_PRIORITY = 5,
     PASSIVE_DS_SOLVER_FRAME_BUCKETS = 32,
@@ -140,12 +142,13 @@ struct passive_ds_solver_state {
                              [APP_RUNTIME_CONFIG_MAX_ANCHORS];
     uint32_t range_batch_slot_id[APP_RUNTIME_CONFIG_MAX_ANCHORS]
                                 [APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    TickType_t range_batch_updated_tick[APP_RUNTIME_CONFIG_MAX_ANCHORS]
+                                           [APP_RUNTIME_CONFIG_MAX_ANCHORS];
     struct passive_ds_position_anchor
         anchors[APP_RUNTIME_CONFIG_MAX_ANCHORS];
     struct passive_ds_solver_frame
         frames[PASSIVE_DS_SOLVER_FRAME_BUCKETS];
     uint32_t range_update_mask;
-    TickType_t range_batch_started_tick;
     uint32_t geometry_version;
     double geometry_fit_rms_m;
     bool geometry_ready;
@@ -489,26 +492,35 @@ static void reset_range_batch(struct passive_ds_solver_state *state)
            sizeof(state->range_batch_count));
     memset(state->range_batch_slot_id, 0,
            sizeof(state->range_batch_slot_id));
+    memset(state->range_batch_updated_tick, 0,
+           sizeof(state->range_batch_updated_tick));
     state->range_update_mask = 0U;
-    state->range_batch_started_tick = 0U;
 }
 
 static void stage_coherent_range(
     struct passive_ds_solver_state *state, size_t first, size_t second,
     double value_m, uint32_t slot_id, TickType_t now)
 {
-    const TickType_t max_batch_age =
-        pdMS_TO_TICKS(PASSIVE_DS_SOLVER_FRAME_MAX_AGE_MS);
-    if (state->range_batch_started_tick == 0U ||
-        now - state->range_batch_started_tick > max_batch_age) {
-        reset_range_batch(state);
-        state->range_batch_started_tick = now;
+    uint8_t *count = &state->range_batch_count[first][second];
+    TickType_t *updated_tick =
+        &state->range_batch_updated_tick[first][second];
+    const TickType_t max_pair_age =
+        pdMS_TO_TICKS(PASSIVE_DS_SOLVER_RANGE_MAX_AGE_MS);
+    if (*count > 0U && now - *updated_tick > max_pair_age) {
+        state->range_batch_sum_m[first][second] = 0.0;
+        state->range_batch_slot_id[first][second] = 0U;
+        *count = 0U;
+        const size_t index = pair_index(
+            first, second, state->anchor_count);
+        if (index < 32U) {
+            state->range_update_mask &= ~(uint32_t)(1UL << index);
+        }
     }
 
-    uint8_t *count = &state->range_batch_count[first][second];
     if (*count < PASSIVE_DS_SOLVER_GEOMETRY_SAMPLES_PER_PAIR) {
         state->range_batch_sum_m[first][second] += value_m;
         state->range_batch_slot_id[first][second] = slot_id;
+        *updated_tick = now;
         (*count)++;
     }
     if (*count == PASSIVE_DS_SOLVER_GEOMETRY_SAMPLES_PER_PAIR) {
@@ -534,7 +546,7 @@ static void stage_coherent_range(
                 .value_m = state->range_batch_sum_m[a][b] /
                            (double)pair_count,
                 .slot_id = state->range_batch_slot_id[a][b],
-                .updated_tick = now,
+                .updated_tick = state->range_batch_updated_tick[a][b],
             };
             state->ranges[a][b] = range;
             state->ranges[b][a] = range;
@@ -943,7 +955,7 @@ static void submit_summary(struct passive_ds_solver_state *state)
     (void)wireless_log_service_submit(
         'I', TAG,
         "raw pos=%lu/s reject=%lu frame_reject=%lu geom=%lu/%lu "
-        "ready=%u version=%lu fit=%ldmm queue_drop=%lu",
+        "ready=%u version=%lu fit=%ldmm queue_drop=%lu stack_free=%luB",
         (unsigned long)(state->position_accepted -
                         state->previous_position_accepted),
         (unsigned long)(state->position_rejected -
@@ -957,7 +969,8 @@ static void submit_summary(struct passive_ds_solver_state *state)
         state->geometry_ready ? 1U : 0U,
         (unsigned long)state->geometry_version,
         (long)lround(state->geometry_fit_rms_m * 1000.0),
-        (unsigned long)s_dropped);
+        (unsigned long)s_dropped,
+        (unsigned long)uxTaskGetStackHighWaterMark(NULL));
     state->previous_position_accepted = state->position_accepted;
     state->previous_position_rejected = state->position_rejected;
     state->previous_frame_rejected = state->frame_rejected;
@@ -1097,10 +1110,17 @@ esp_err_t passive_ds_solver_service_start(void)
     if (s_queue == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    const BaseType_t created = xTaskCreatePinnedToCore(
+    /*
+     * The timing-covariance solve intentionally keeps a roughly 25 KiB
+     * matrix on this task's stack.  Keep that isolated workspace in PSRAM so
+     * Wi-Fi, GPS and the UWB radio retain scarce internal RAM.  This task does
+     * not call peripherals or cache-disabled code.
+     */
+    const BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
         passive_ds_solver_task, "passive_ds_solver",
         PASSIVE_DS_SOLVER_TASK_STACK_BYTES, NULL,
-        PASSIVE_DS_SOLVER_TASK_PRIORITY, NULL, 0);
+        PASSIVE_DS_SOLVER_TASK_PRIORITY, NULL, 0,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         vQueueDelete(s_queue);
         s_queue = NULL;

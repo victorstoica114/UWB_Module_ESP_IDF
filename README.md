@@ -2156,15 +2156,23 @@ periodically refreshes that GGA, and writes the received RTCM3 stream to the
 receiver's RXD2 input through UART2/GPIO1. Connection, HTTP, RTCM frame/byte,
 reconnect, error, and freshness counters are exported in `/status` and shown in
 the GPS dashboard. The caster configuration is supplied by `NTRIP_*`
-definitions in `secrets.h`; no credential is emitted to logs.
+definitions in `secrets.h`; no credential is emitted to logs. When NTRIP is
+enabled, all five receivers run as independent normal RTK rovers. Module 1 owns
+the only caster session, injects the stream into its local RXD2, and sends the
+same ordered RTCM bytes to the Raspberry Pi relay. The relay fans those bytes
+out over UWB-Lab to modules 2 through 5, which inject them into their own RXD2
+inputs. Coordinates are still calculated independently by each PX1105R; only
+the correction stream is shared.
 
 The UWB-Lab hotspot forwards client internet traffic through the non-VPN Wi-Fi
 uplink using the version-controlled `tools/uwb-hotspot` service script. Its
 policy route matches packets arriving on the AP interface, rather than every
 packet sourced from `192.168.50.0/24`, so local dnsmasq replies still return to
-the ESP32 clients. Module 1 is the precisely-kinematic base and module 2 is the
-moving-base rover. When NTRIP is enabled, module 3's temporary local-base role
-is disabled so two independent correction sources cannot reach module 1.
+the ESP32 clients. The Advanced Moving Base chain (M3 local base -> M1
+precisely-kinematic base -> M2 moving rover) remains available when NTRIP is
+disabled. Enabling NTRIP selects the independent multi-rover topology instead,
+preventing RTCM and raw moving-base observations from being interleaved on the
+same GNSS RXD2 input.
 
 The BQ25792 Li-Po charger monitor runs on the shared I2C bus
 (`GPIO9/GPIO10`, address `0x6B`) at 1 MHz. A complete register-window dump

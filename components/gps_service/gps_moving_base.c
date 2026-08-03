@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "secrets.h"
 #include "app_config.h"
 #include "board_config.h"
 #include "esp_log.h"
@@ -28,6 +29,7 @@ enum {
     GPS_MB_VERSION = 1,
     GPS_MB_KIND_HEARTBEAT = 1,
     GPS_MB_KIND_STREAM = 2,
+    GPS_MB_KIND_RTCM = 3,
     GPS_MB_HEARTBEAT_INTERVAL_MS = 1000,
     GPS_MB_CONFIG_START_DELAY_MS = 800,
     /* RTK role/rate changes are acknowledged before the Phoenix engine has
@@ -55,6 +57,9 @@ static uint32_t s_uplink_sequence;
 static uint32_t s_last_downlink_sequence;
 static uint8_t s_config_step;
 static skytraq_stream_parser_t s_binary_parser;
+
+static esp_err_t send_datagram(uint8_t kind, const uint8_t *payload,
+                               size_t payload_length);
 
 static uint32_t ticks_to_ms(void)
 {
@@ -121,6 +126,8 @@ const char *gps_moving_base_role_to_string(gps_moving_base_role_t role)
         return "moving_rover";
     case GPS_MB_ROLE_LOCAL_BASE:
         return "local_base";
+    case GPS_MB_ROLE_RTK_ROVER:
+        return "rtk_rover";
     case GPS_MB_ROLE_NONE:
     default:
         return "none";
@@ -129,6 +136,15 @@ const char *gps_moving_base_role_to_string(gps_moving_base_role_t role)
 
 static gps_moving_base_role_t role_for_module(uint8_t module_id)
 {
+    /* With an external NTRIP source every receiver is an independent RTK
+     * rover. M1 owns the single caster connection and relays the same RTCM
+     * stream over the local Wi-Fi network to M2..M5. This deliberately
+     * suspends the Advanced Moving Base chain so RXD2 never receives two
+     * interleaved correction/observation streams. */
+    if (gps_ntrip_client_is_enabled()) {
+        return GPS_MB_ROLE_RTK_ROVER;
+    }
+
     switch (module_id) {
     case 1:
         return GPS_MB_ROLE_PRECISE_BASE;
@@ -154,7 +170,8 @@ static bool role_forwards_primary(gps_moving_base_role_t role)
 static bool role_receives_corrections(gps_moving_base_role_t role)
 {
     return role == GPS_MB_ROLE_PRECISE_BASE ||
-           role == GPS_MB_ROLE_MOVING_ROVER;
+           role == GPS_MB_ROLE_MOVING_ROVER ||
+           role == GPS_MB_ROLE_RTK_ROVER;
 }
 
 static esp_err_t send_skytraq_payload(const uint8_t *payload, size_t length)
@@ -212,6 +229,10 @@ static esp_err_t configure_rtk_role(void)
         payload[2] = 0; /* rover */
         payload[3] = 2; /* moving base */
         put_be_float(&payload[32], 1.0f); /* measured T1-A2 baseline */
+        break;
+    case GPS_MB_ROLE_RTK_ROVER:
+        payload[2] = 0; /* rover */
+        payload[3] = 0; /* normal RTK positioning */
         break;
     case GPS_MB_ROLE_NONE:
     default:
@@ -351,7 +372,26 @@ static int ntrip_write_corrections(const uint8_t *data, size_t length,
     if (!s_snapshot.correction_uart_ready || data == NULL || length == 0) {
         return -1;
     }
-    return uart_write_bytes(GPS_MB_CORRECTION_UART, data, length);
+    const int written = uart_write_bytes(GPS_MB_CORRECTION_UART, data, length);
+    if (written != (int)length) {
+        return written;
+    }
+
+    /* Preserve the byte order delivered by the caster. UDP datagrams may
+     * split an RTCM frame, but only this one source feeds the rover UARTs, so
+     * the receiver sees the same continuous byte stream after reassembly. */
+    size_t offset = 0;
+    while (offset < length) {
+        size_t chunk = length - offset;
+        if (chunk > GPS_MB_MAX_PAYLOAD) {
+            chunk = GPS_MB_MAX_PAYLOAD;
+        }
+        if (send_datagram(GPS_MB_KIND_RTCM, data + offset, chunk) != ESP_OK) {
+            return -1;
+        }
+        offset += chunk;
+    }
+    return written;
 }
 
 static esp_err_t socket_init(void)
@@ -403,9 +443,10 @@ static esp_err_t send_datagram(uint8_t kind, const uint8_t *payload,
     datagram[5] = kind;
     datagram[6] = s_module_id;
     datagram[7] = 0;
-    const uint32_t sequence = kind == GPS_MB_KIND_STREAM
-                                  ? ++s_uplink_sequence
-                                  : 0;
+    const uint32_t sequence =
+        (kind == GPS_MB_KIND_STREAM || kind == GPS_MB_KIND_RTCM)
+            ? ++s_uplink_sequence
+            : 0;
     put_be32(&datagram[8], sequence);
     put_be16(&datagram[12], (uint16_t)payload_length);
     if (payload_length > 0 && payload != NULL) {
@@ -426,8 +467,13 @@ static esp_err_t send_datagram(uint8_t kind, const uint8_t *payload,
     return ESP_OK;
 }
 
-static bool downlink_source_allowed(uint8_t source_id)
+static bool downlink_source_allowed(uint8_t kind, uint8_t source_id)
 {
+    if (kind == GPS_MB_KIND_RTCM) {
+        return s_snapshot.role == GPS_MB_ROLE_RTK_ROVER &&
+               s_module_id != NTRIP_MODULE_ID &&
+               source_id == NTRIP_MODULE_ID;
+    }
     return (s_snapshot.role == GPS_MB_ROLE_PRECISE_BASE &&
             !gps_ntrip_client_is_enabled_for_module(s_module_id) &&
             source_id == 3) ||
@@ -451,11 +497,12 @@ static void receive_datagrams(void)
             }
             break;
         }
+        const uint8_t kind = received >= GPS_MB_HEADER_SIZE ? datagram[5] : 0;
         if (received < GPS_MB_HEADER_SIZE ||
             get_be32(&datagram[0]) != GPS_MB_MAGIC ||
             datagram[4] != GPS_MB_VERSION ||
-            datagram[5] != GPS_MB_KIND_STREAM ||
-            !downlink_source_allowed(datagram[6])) {
+            (kind != GPS_MB_KIND_STREAM && kind != GPS_MB_KIND_RTCM) ||
+            !downlink_source_allowed(kind, datagram[6])) {
             s_snapshot.downlink_error_count++;
             continue;
         }
@@ -729,6 +776,16 @@ static void configure_receiver_if_due(uint32_t now_ms)
         }
         break;
     case GPS_MB_ROLE_MOVING_ROVER:
+        if (s_config_step == 0) {
+            err = query_software_version();
+        } else if (s_config_step == 1) {
+            err = configure_rtk_role();
+        } else {
+            err = query_rtk_role();
+            final_step = true;
+        }
+        break;
+    case GPS_MB_ROLE_RTK_ROVER:
         if (s_config_step == 0) {
             err = query_software_version();
         } else if (s_config_step == 1) {

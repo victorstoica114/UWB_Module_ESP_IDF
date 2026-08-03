@@ -17,6 +17,7 @@ typedef enum {
     GPS_MB_ROLE_PRECISE_BASE = 1,
     GPS_MB_ROLE_MOVING_ROVER = 2,
     GPS_MB_ROLE_LOCAL_BASE = 3,
+    GPS_MB_ROLE_RTK_ROVER = 4,
 } gps_moving_base_role_t;
 
 typedef struct {

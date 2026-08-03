@@ -473,7 +473,7 @@ esp_err_t gps_ntrip_client_start(uint8_t module_id,
     }
     memset(&s_snapshot, 0, sizeof(s_snapshot));
     memset(&s_rtcm_counter, 0, sizeof(s_rtcm_counter));
-    s_snapshot.configured = gps_ntrip_client_is_enabled();
+    s_snapshot.configured = gps_ntrip_client_is_enabled_for_module(module_id);
     snprintf(s_snapshot.state, sizeof(s_snapshot.state), "disabled");
     s_module_id = module_id;
     s_write_fn = write_fn;

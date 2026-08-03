@@ -10256,7 +10256,7 @@ function renderGps(statuses) {
       : "RTK corrections unavailable";
     const movingRole = String(item.gps_moving_base_role || "none");
     const movingRoleText = movingRole.replaceAll("_", " ");
-    const downlinkRole = movingRole === "precise_base" || movingRole === "moving_rover";
+    const downlinkRole = movingRole === "precise_base" || movingRole === "moving_rover" || movingRole === "rtk_rover";
     const movingLink = movingRole === "none"
       ? `<span class="muted">local moving-base role not assigned</span>`
       : `<span class="${item.gps_moving_base_active ? "ok" : "bad"}">${esc(movingRoleText)}</span><br>

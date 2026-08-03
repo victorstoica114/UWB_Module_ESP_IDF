@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Byte-transparent local relay for the three-receiver GPS moving-base chain.
+"""Byte-transparent local relay for GNSS moving-base and RTK corrections.
 
-The ESP32 modules announce themselves to this UDP endpoint. Stream packets are
-routed A3/module 3 -> T1/module 1 -> A2/module 2 without decoding or modifying
-the RTCM/SkyTraq payload.
+The ESP32 modules announce themselves to this UDP endpoint. Legacy moving-base
+stream packets retain their point-to-point routes. RTCM packets from module 1's
+single NTRIP client are copied to modules 2..5 without decoding or modifying
+the correction stream.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ MAGIC = b"GMB1"
 VERSION = 1
 KIND_HEARTBEAT = 1
 KIND_STREAM = 2
+KIND_RTCM = 3
 HEADER = struct.Struct("!4sBBBBIH")
 ROUTES = {3: 1, 1: 2}
 
@@ -53,6 +55,7 @@ def main() -> int:
     rx_bytes = 0
     forwarded_packets = 0
     forwarded_bytes = 0
+    rtcm_fanout_packets = 0
     invalid_packets = 0
     no_route_packets = 0
     last_stats = time.monotonic()
@@ -86,18 +89,32 @@ def main() -> int:
                     invalid_packets += 1
                 else:
                     modules[source] = (sender[0], args.module_port)
-                    destination_id = ROUTES.get(source) if kind == KIND_STREAM else None
-                    destination = modules.get(destination_id) if destination_id else None
-                    if destination is not None:
-                        try:
-                            sock.sendto(datagram, destination)
-                            forwarded_packets += 1
-                            forwarded_bytes += length
-                        except OSError:
+                    if kind == KIND_RTCM and source == 1:
+                        for destination_id in range(2, 6):
+                            destination = modules.get(destination_id)
+                            if destination is None:
+                                no_route_packets += 1
+                                continue
+                            try:
+                                sock.sendto(datagram, destination)
+                                forwarded_packets += 1
+                                forwarded_bytes += length
+                                rtcm_fanout_packets += 1
+                            except OSError:
+                                no_route_packets += 1
+                    elif kind == KIND_STREAM:
+                        destination_id = ROUTES.get(source)
+                        destination = modules.get(destination_id) if destination_id else None
+                        if destination is not None:
+                            try:
+                                sock.sendto(datagram, destination)
+                                forwarded_packets += 1
+                                forwarded_bytes += length
+                            except OSError:
+                                no_route_packets += 1
+                        elif destination_id is not None:
                             no_route_packets += 1
-                    elif kind == KIND_STREAM and destination_id is not None:
-                        no_route_packets += 1
-                    elif kind not in (KIND_HEARTBEAT, KIND_STREAM):
+                    elif kind not in (KIND_HEARTBEAT, KIND_RTCM):
                         invalid_packets += 1
 
         now = time.monotonic()
@@ -106,6 +123,7 @@ def main() -> int:
             print(
                 f"modules[{learned}] rx={rx_packets}/{rx_bytes}B "
                 f"forwarded={forwarded_packets}/{forwarded_bytes}B "
+                f"rtcm_fanout={rtcm_fanout_packets} "
                 f"no_route={no_route_packets} invalid={invalid_packets}",
                 flush=True,
             )
