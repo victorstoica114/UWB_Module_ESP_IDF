@@ -10,6 +10,7 @@ on the second half so the reported improvement is not an in-sample solver fit.
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import lzma
 import math
@@ -94,6 +95,93 @@ def derive_rtk_geometry(path: Path) -> tuple[dict[int, tuple[float, float]], tup
     }
     anchors = {module_id: centers[module_id][:2] for module_id in (2, 3, 4, 5)}
     return anchors, centers[1][:2]
+
+
+def time_matched_rtk_position_metrics(
+    capture_path: Path, rtk_path: Path
+) -> dict:
+    fixed: dict[int, list[tuple[float, float, float, float]]] = defaultdict(list)
+    with open_text(rtk_path) as handle:
+        for line in handle:
+            event = json.loads(line)
+            if (
+                event.get("kind") == "gps_fix"
+                and int(event.get("gps_fix_quality") or 0) == 4
+                and bool(event.get("gps_fix_valid"))
+            ):
+                timestamp = float(
+                    event.get("received_at") or event.get("captured_at") or 0.0
+                )
+                fixed[int(event["module_id"])].append(
+                    (
+                        timestamp,
+                        float(event["gps_latitude_deg"]),
+                        float(event["gps_longitude_deg"]),
+                        float(event["gps_altitude_m"]),
+                    )
+                )
+    if 1 not in fixed or 2 not in fixed:
+        return {"n": 0}
+
+    origin_latitude = statistics.median(row[1] for row in fixed[2])
+    origin_longitude = statistics.median(row[2] for row in fixed[2])
+    origin_altitude = statistics.median(row[3] for row in fixed[2])
+    origin = ecef(origin_latitude, origin_longitude, origin_altitude)
+    latitude = math.radians(origin_latitude)
+    longitude = math.radians(origin_longitude)
+
+    def to_enu(row: tuple[float, float, float, float]) -> tuple[float, float, float]:
+        point = ecef(row[1], row[2], row[3])
+        dx, dy, dz = (point[index] - origin[index] for index in range(3))
+        east = -math.sin(longitude) * dx + math.cos(longitude) * dy
+        north = (
+            -math.sin(latitude) * math.cos(longitude) * dx
+            - math.sin(latitude) * math.sin(longitude) * dy
+            + math.cos(latitude) * dz
+        )
+        return row[0], east, north
+
+    tag_fixes = sorted((to_enu(row) for row in fixed[1]), key=lambda row: row[0])
+    fix_times = [row[0] for row in tag_fixes]
+    errors: list[tuple[float, float]] = []
+    time_offsets: list[float] = []
+    with open_text(capture_path) as handle:
+        for line in handle:
+            event = json.loads(line)
+            if event.get("kind") != "local_position" or int(
+                event.get("module_id") or event.get("tag_id") or 0
+            ) != 1:
+                continue
+            timestamp = float(
+                event.get("received_at") or event.get("captured_at") or 0.0
+            )
+            index = bisect.bisect_left(fix_times, timestamp)
+            candidates = [
+                candidate
+                for candidate in (index - 1, index)
+                if 0 <= candidate < len(tag_fixes)
+            ]
+            if not candidates:
+                continue
+            nearest = min(
+                candidates,
+                key=lambda candidate: abs(fix_times[candidate] - timestamp),
+            )
+            fix_time, truth_x, truth_y = tag_fixes[nearest]
+            errors.append(
+                (
+                    float(event["x_m"]) - truth_x,
+                    float(event["y_m"]) - truth_y,
+                )
+            )
+            time_offsets.append(abs(fix_time - timestamp))
+
+    result = metrics(errors, (0.0, 0.0))
+    if time_offsets:
+        result["rtk_match_median_ms"] = statistics.median(time_offsets) * 1000.0
+        result["rtk_match_p95_ms"] = percentile(time_offsets, 95.0) * 1000.0
+        result["rtk_match_max_ms"] = max(time_offsets) * 1000.0
+    return result
 
 
 def percentile(values: list[float], q: float) -> float:
@@ -575,6 +663,10 @@ def main() -> int:
             if initiator != responder
         },
     }
+    if args.rtk_capture:
+        output["position_metrics_time_matched_rtk"] = (
+            time_matched_rtk_position_metrics(args.capture, args.rtk_capture)
+        )
 
     corrections = {
         "raw_test_half": lambda item: 0.0,

@@ -1542,6 +1542,15 @@ class DashboardState:
             "anchor_distance_m": anchor_distance_m,
             "cfo_correction_m": item.get("cfo_correction_m"),
             "clock_offset_ppm": item.get("clock_offset_ppm"),
+            "cfo_raw_ppm": item.get("cfo_raw_ppm"),
+            "cfo_estimated_ppm": item.get("cfo_estimated_ppm"),
+            "cfo_applied_ppm": item.get("cfo_applied_ppm"),
+            "processing_dtu": item.get("processing_dtu"),
+            "cfo_sample_count": item.get("cfo_sample_count"),
+            "cfo_ready": item.get("cfo_ready"),
+            "cfo_estimate_applied": item.get("cfo_estimate_applied"),
+            "cfo_reset": item.get("cfo_reset"),
+            "cfo_flags": item.get("cfo_flags"),
             "reply_delay_us": item.get("reply_delay_us"),
             "range_source": item.get("range_source"),
             "range_age_slots": item.get("range_age_slots"),
@@ -1611,6 +1620,15 @@ class DashboardState:
             "anchor_distance_m": anchor_distance_m,
             "cfo_correction_m": item.get("cfo_correction_m"),
             "clock_offset_ppm": item.get("clock_offset_ppm"),
+            "cfo_raw_ppm": item.get("cfo_raw_ppm"),
+            "cfo_estimated_ppm": item.get("cfo_estimated_ppm"),
+            "cfo_applied_ppm": item.get("cfo_applied_ppm"),
+            "processing_dtu": item.get("processing_dtu"),
+            "cfo_sample_count": item.get("cfo_sample_count"),
+            "cfo_ready": item.get("cfo_ready"),
+            "cfo_estimate_applied": item.get("cfo_estimate_applied"),
+            "cfo_reset": item.get("cfo_reset"),
+            "cfo_flags": item.get("cfo_flags"),
             "reply_delay_us": item.get("reply_delay_us"),
             "range_source": item.get("range_source"),
             "range_age_slots": item.get("range_age_slots"),
@@ -1878,6 +1896,15 @@ class DashboardState:
                 "anchor_distance_m": float(item["anchor_distance_m"]),
                 "cfo_correction_m": item.get("cfo_correction_m"),
                 "clock_offset_ppm": item.get("clock_offset_ppm"),
+                "cfo_raw_ppm": item.get("cfo_raw_ppm"),
+                "cfo_estimated_ppm": item.get("cfo_estimated_ppm"),
+                "cfo_applied_ppm": item.get("cfo_applied_ppm"),
+                "processing_dtu": item.get("processing_dtu"),
+                "cfo_sample_count": item.get("cfo_sample_count"),
+                "cfo_ready": item.get("cfo_ready"),
+                "cfo_estimate_applied": item.get("cfo_estimate_applied"),
+                "cfo_reset": item.get("cfo_reset"),
+                "cfo_flags": item.get("cfo_flags"),
                 "reply_delay_us": item.get("reply_delay_us"),
                 "range_source": item.get("range_source"),
                 "range_age_slots": item.get("range_age_slots"),
@@ -1921,6 +1948,23 @@ class DashboardState:
                         "clock_offset_ppm": sample.get(
                             "clock_offset_ppm"
                         ),
+                        "cfo_raw_ppm": sample.get("cfo_raw_ppm"),
+                        "cfo_estimated_ppm": sample.get(
+                            "cfo_estimated_ppm"
+                        ),
+                        "cfo_applied_ppm": sample.get(
+                            "cfo_applied_ppm"
+                        ),
+                        "processing_dtu": sample.get("processing_dtu"),
+                        "cfo_sample_count": sample.get(
+                            "cfo_sample_count"
+                        ),
+                        "cfo_ready": sample.get("cfo_ready"),
+                        "cfo_estimate_applied": sample.get(
+                            "cfo_estimate_applied"
+                        ),
+                        "cfo_reset": sample.get("cfo_reset"),
+                        "cfo_flags": sample.get("cfo_flags"),
                         "reply_delay_us": sample.get("reply_delay_us"),
                         "range_source": sample.get("range_source"),
                         "range_age_slots": sample.get(
