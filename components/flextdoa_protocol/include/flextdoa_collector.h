@@ -40,5 +40,7 @@ enum flextdoa_collect_result flextdoa_collector_ingest(
     bool cfo_valid, double cfo_fraction);
 bool flextdoa_collector_complete(
     const struct flextdoa_slot_collection *collection);
+uint16_t flextdoa_collector_missing_mask(
+    const struct flextdoa_slot_collection *collection);
 
 #endif

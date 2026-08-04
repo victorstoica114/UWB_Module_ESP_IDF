@@ -1050,6 +1050,7 @@ static bool s_flex_tdoa_anchor_request_buffer_pending;
 static uint32_t s_rx_double_buffer_resync_count;
 static uint32_t s_rx_double_buffer_cia_not_ready_count;
 static uint32_t s_rx_double_buffer_release_max_us;
+static uint32_t s_rx_double_buffer_good_to_rearm_max_us;
 static bool s_flex_tdoa_rx_timestamp_reference_valid;
 static uint64_t s_flex_tdoa_rx_timestamp_reference;
 static int64_t s_flex_tdoa_rx_timestamp_reference_host_us;
@@ -1103,6 +1104,8 @@ static uint32_t s_flex_tdoa_observation_invalid_cfo_since_summary;
 static uint32_t s_flex_tdoa_observation_invalid_order_since_summary;
 static uint32_t s_flex_tdoa_complete_slots_since_summary;
 static uint32_t s_flex_tdoa_incomplete_slots_since_summary;
+static uint32_t s_flex_tdoa_missing_mask_since_summary[
+    1U << (UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U)];
 static uint32_t s_flex_tdoa_observation_invalid_age_index_since_summary[
     UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
 static TickType_t s_flex_tdoa_observation_summary_tick;
@@ -2610,6 +2613,7 @@ static esp_err_t uwb_dw3000_configure_high_rate_rx_double_buffer(void)
     s_rx_double_buffer_resync_count = 0;
     s_rx_double_buffer_cia_not_ready_count = 0;
     s_rx_double_buffer_release_max_us = 0;
+    s_rx_double_buffer_good_to_rearm_max_us = 0;
     s_rx_double_buffer_enabled = true;
     ESP_LOGI(TAG,
              "DW3000 high-rate RX double buffer enabled with manual early re-arm mode=%u",
@@ -3953,6 +3957,7 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             frame->rx_buffer_index = s_rx_double_buffer_index;
             frame->rx_buffer_status = rdb_status;
             bool spi_bus_acquired = false;
+            bool double_buffer_early_rearmed = false;
             if (s_rx_double_buffer_enabled) {
                 const esp_err_t acquire_err =
                     spi_device_acquire_bus(s_spi, portMAX_DELAY);
@@ -3961,11 +3966,30 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                 }
                 spi_bus_acquired = true;
 
-                // DW3000 does not support RXAUTR in double-buffer mode. The
-                // completed reception left the radio idle, so reflect that in
-                // software before deciding whether this frame needs immediate
-                // continuous reception.
+                // DW3000 does not support RXAUTR in double-buffer mode. In
+                // FlexTDOA, restart RX before copying the occupied buffer so
+                // the radio can receive into the other buffer concurrently.
+                // CMD_DB_TOGGLE still releases this buffer only after its
+                // metadata and payload have been copied completely.
                 s_rx_armed = false;
+                if (s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
+                    const esp_err_t rearm_err =
+                        uwb_dw3000_fast_command(DW3000_CMD_RX);
+                    if (rearm_err != ESP_OK) {
+                        spi_device_release_bus(s_spi);
+                        s_rx_error_count++;
+                        return rearm_err;
+                    }
+                    s_rx_armed = true;
+                    double_buffer_early_rearmed = true;
+                    const uint32_t good_to_rearm_us = (uint32_t)(
+                        esp_timer_get_time() - double_buffer_start_us);
+                    if (good_to_rearm_us >
+                        s_rx_double_buffer_good_to_rearm_max_us) {
+                        s_rx_double_buffer_good_to_rearm_max_us =
+                            good_to_rearm_us;
+                    }
+                }
             }
             // RX_FINFO, RX_TIME and the payload are valid as soon as the
             // double buffer reports a good frame. FlexTDOA requests do not
@@ -4063,10 +4087,10 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                 uwb_dw3000_payload_is_flextdoa_localization(
                     frame->payload, frame->payload_len,
                     FLEXTDOA_MESSAGE_REQUEST);
-            if (buffered_fast_path && !flex_anchor_request) {
-                // Tags and anchors consuming RESP frames must keep listening
-                // while the occupied buffer is copied and released. An anchor
-                // receiving REQ remains idle because it will transmit next.
+            if (buffered_fast_path && !flex_anchor_request &&
+                !double_buffer_early_rearmed) {
+                // Non-Flex high-rate users retain the historical late re-arm.
+                // FlexTDOA already restarted RX before reading this buffer.
                 const esp_err_t rearm_err =
                     uwb_dw3000_fast_command(DW3000_CMD_RX);
                 if (rearm_err != ESP_OK) {
@@ -6122,10 +6146,24 @@ static void uwb_flex_tdoa_log_paper_observation(
                  (unsigned long)s_flex_tdoa_rx_error_status_since_summary,
                  (unsigned long)s_rx_double_buffer_release_max_us,
                  (unsigned long)s_rx_double_buffer_cia_not_ready_count);
+        (void)wireless_log_service_submit(
+                 'I', TAG,
+                 "FLEX_TDOA RX metric good_to_rearm_us=%lu "
+                 "missing_mask[1..7]=%lu/%lu/%lu/%lu/%lu/%lu/%lu",
+                 (unsigned long)s_rx_double_buffer_good_to_rearm_max_us,
+                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[1],
+                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[2],
+                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[3],
+                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[4],
+                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[5],
+                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[6],
+                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[7]);
         s_flex_tdoa_observations_since_summary = 0;
         s_flex_tdoa_observation_drops_since_summary = 0;
         s_flex_tdoa_complete_slots_since_summary = 0;
         s_flex_tdoa_incomplete_slots_since_summary = 0;
+        memset(s_flex_tdoa_missing_mask_since_summary, 0,
+               sizeof(s_flex_tdoa_missing_mask_since_summary));
         s_flex_tdoa_observation_invalid_since_summary = 0;
         s_flex_tdoa_observation_invalid_age_since_summary = 0;
         s_flex_tdoa_observation_invalid_cfo_since_summary = 0;
@@ -6139,6 +6177,7 @@ static void uwb_flex_tdoa_log_paper_observation(
         s_flex_tdoa_rx_errors_since_summary = 0;
         s_flex_tdoa_rx_error_status_since_summary = 0;
         s_rx_double_buffer_release_max_us = 0;
+        s_rx_double_buffer_good_to_rearm_max_us = 0;
         s_rx_double_buffer_cia_not_ready_count = 0;
         s_flex_tdoa_observation_summary_tick = now;
     }
@@ -6173,6 +6212,13 @@ static void uwb_flex_tdoa_tag_process_frame(
         s_flex_tdoa_tag_collection.active &&
         !flextdoa_collector_complete(&s_flex_tdoa_tag_collection)) {
         s_flex_tdoa_incomplete_slots_since_summary++;
+        const uint16_t missing_mask = flextdoa_collector_missing_mask(
+            &s_flex_tdoa_tag_collection);
+        if (missing_mask <
+            (sizeof(s_flex_tdoa_missing_mask_since_summary) /
+             sizeof(s_flex_tdoa_missing_mask_since_summary[0]))) {
+            s_flex_tdoa_missing_mask_since_summary[missing_mask]++;
+        }
     }
     double protocol_cfo_fraction = 0.0;
     if (frame->clock_offset_valid) {
@@ -6722,6 +6768,10 @@ static void uwb_flex_tdoa_log_anchor_result(
                  (unsigned long)s_flex_tdoa_req_to_dtx_max_us[2],
                  (unsigned long)s_flex_tdoa_dtx_arm_max_us,
                  (unsigned long)s_flex_tdoa_request_arm_max_us);
+        (void)wireless_log_service_submit(
+                 'I', TAG,
+                 "FLEX_TDOA RX metric good_to_rearm_us=%lu",
+                 (unsigned long)s_rx_double_buffer_good_to_rearm_max_us);
         s_flex_tdoa_anchor_results_since_summary = 0;
         s_flex_tdoa_anchor_drops_since_summary = 0;
         s_flex_tdoa_anchor_incoherent_since_summary = 0;
@@ -6732,6 +6782,7 @@ static void uwb_flex_tdoa_log_anchor_result(
         s_flex_tdoa_rx_errors_since_summary = 0;
         s_flex_tdoa_rx_error_status_since_summary = 0;
         s_rx_double_buffer_release_max_us = 0;
+        s_rx_double_buffer_good_to_rearm_max_us = 0;
         s_rx_double_buffer_cia_not_ready_count = 0;
         memset(s_flex_tdoa_req_to_dtx_count, 0,
                sizeof(s_flex_tdoa_req_to_dtx_count));

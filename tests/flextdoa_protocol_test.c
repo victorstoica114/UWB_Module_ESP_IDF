@@ -63,6 +63,7 @@ static void test_slot_collector(void)
                &collection, &request, 1000U, false, 0.0) ==
            FLEXTDOA_COLLECT_REQUEST);
     assert(!flextdoa_collector_complete(&collection));
+    assert(flextdoa_collector_missing_mask(&collection) == 0x07U);
 
     for (uint8_t index = 0U; index < 3U; ++index) {
         const struct flextdoa_packet response = {
@@ -75,10 +76,13 @@ static void test_slot_collector(void)
             flextdoa_collector_ingest(
                 &collection, &response, 1200U + index, true, 10.0e-6);
         assert(result == (index == 2U ? FLEXTDOA_COLLECT_COMPLETE
-                                     : FLEXTDOA_COLLECT_RESPONSE));
+                                      : FLEXTDOA_COLLECT_RESPONSE));
+        assert(flextdoa_collector_missing_mask(&collection) ==
+               (uint16_t)(0x07U & ~((1U << (index + 1U)) - 1U)));
     }
     assert(flextdoa_collector_complete(&collection));
     assert(collection.received_mask == 0x07U);
+    assert(flextdoa_collector_missing_mask(&collection) == 0U);
 
     const struct flextdoa_packet stale_response = {
         .type = FLEXTDOA_MESSAGE_RESPONSE,
@@ -89,6 +93,25 @@ static void test_slot_collector(void)
     assert(flextdoa_collector_ingest(
                &collection, &stale_response, 1300U, true, 0.0) ==
            FLEXTDOA_COLLECT_REJECTED);
+
+    flextdoa_collector_reset(&collection);
+    assert(flextdoa_collector_ingest(
+               &collection, &request, 2000U, false, 0.0) ==
+           FLEXTDOA_COLLECT_REQUEST);
+    struct flextdoa_packet response = {
+        .type = FLEXTDOA_MESSAGE_RESPONSE,
+        .slot_id = 42U,
+        .source_id = 3U,
+        .processing_time_dtu = 100U,
+    };
+    assert(flextdoa_collector_ingest(
+               &collection, &response, 2200U, true, 0.0) ==
+           FLEXTDOA_COLLECT_RESPONSE);
+    response.source_id = 5U;
+    assert(flextdoa_collector_ingest(
+               &collection, &response, 2400U, true, 0.0) ==
+           FLEXTDOA_COLLECT_RESPONSE);
+    assert(flextdoa_collector_missing_mask(&collection) == 0x02U);
 }
 
 static void test_packet_codec(void)
