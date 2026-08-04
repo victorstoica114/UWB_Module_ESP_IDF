@@ -3700,7 +3700,8 @@ tr.status-stale td { color: #4f3b1d; }
             <input id="positionMaxAgeSec" value="3" type="number" min="0.2" step="0.1">
             <label for="positionReferenceMode">Known reference</label>
             <select id="positionReferenceMode">
-              <option value="centroid" selected>anchor centroid</option>
+              <option value="gps_rtk" selected>GPS RTK tag (time aligned)</option>
+              <option value="centroid">anchor centroid</option>
               <option value="manual">manual coordinates</option>
               <option value="none">disabled</option>
             </select>
@@ -3721,8 +3722,8 @@ tr.status-stale td { color: #4f3b1d; }
             <div><b>Ranging method</b><span>FlexTDOA and Passive DS-TWR use receive-only tags. Native DS-TWR ranges each active tag to every anchor. Each protocol keeps independent timing profiles.</span></div>
             <div class="native-ds-position-option"><b>Native calculation</b><span>The ESP32 tag solves each complete coherent frame. The Raspberry only receives and displays positions and diagnostics.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In both passive protocols every non-anchor module only listens on UWB, so additional tags consume no radio slots.</span></div>
-            <div><b>Geometry</b><span>Every live protocol reconstructs anchor geometry from native anchor-to-anchor ranges. Moving an anchor physically updates both the displayed layout and the position solver.</span></div>
-            <div><b>Known reference</b><span>Use the anchor centroid while the tag is physically centered. Manual coordinates support other surveyed test points.</span></div>
+            <div><b>Geometry</b><span>FlexTDOA uses fixed GPS RTK ENU anchor geometry. Passive and Native DS-TWR retain their protocol-specific range geometry.</span></div>
+            <div><b>Known reference</b><span>GPS RTK compares each UWB point with the nearest RTK-fixed tag sample in the same ENU frame. Centroid and manual coordinates remain available for static tests.</span></div>
           </div>
           <div id="positionToast" class="toast"></div>
           <div class="section" style="margin-top:12px;">
@@ -3860,6 +3861,16 @@ tr.status-stale td { color: #4f3b1d; }
             <h3>GPS pair distances</h3>
             <div class="gps-map-distance-note">Direct horizontal distance from fresh GPS coordinates. 3D also includes the reported altitude difference.</div>
             <div id="gpsMapDistanceList" class="muted">Waiting for at least two fresh fixes...</div>
+          </div>
+          <div class="gps-map-distance-section">
+            <h3>FlexTDOA RTK geometry</h3>
+            <div class="gps-map-distance-note">Collects only RTK-fixed (quality 4) samples. Robust median anchor coordinates are converted to one ENU frame with M2 as origin. Tag GPS is shown only as ground truth.</div>
+            <div id="gpsRtkGeometryStatus" class="muted">Waiting for RTK-fixed anchor samples...</div>
+            <div class="form-actions" style="margin-top:8px">
+              <button class="primary" id="gpsApplyFlexGeometry" disabled>Apply RTK geometry to all modules</button>
+              <button id="gpsClearRtkGeometrySamples">Clear RTK samples</button>
+            </div>
+            <div id="gpsRtkGeometryToast" class="toast"></div>
           </div>
           <div id="gpsMapModuleList" class="gps-map-module-list"></div>
         </aside>
@@ -4380,30 +4391,30 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <p class="muted profile-note">Each card is a complete on-air CI-CR timing profile. Applying it writes the timing to ESP NVS and reboots the selected modules.</p>
           <div class="profile-grid">
-            <div class="profile-card flex-profile-card" data-flex-profile="frame19200">
-              <h3>19.20 ms Frame</h3>
-              <p class="muted">Hardware-validated baseline for four anchors and three responders.</p>
-              <div class="profile-validation good">validated conservative baseline</div>
+            <div class="profile-card flex-profile-card" data-flex-profile="paper20200">
+              <h3>20.20 ms Paper Reference</h3>
+              <p class="muted">Equation (20) timing from the FlexTDOA paper for four anchors and K=3.</p>
+              <div class="profile-validation good">reference default · paper-faithful timing</div>
               <div class="form-grid compact">
-                <label for="flexProfile19200GuardUs">Guard us</label>
-                <input id="flexProfile19200GuardUs" value="500" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile19200ReqUs">REQ us</label>
-                <input id="flexProfile19200ReqUs" value="250" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile19200ReqProcessUs">Process REQ us</label>
-                <input id="flexProfile19200ReqProcessUs" value="1500" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile19200RespUs">RESP subslot us</label>
-                <input id="flexProfile19200RespUs" value="250" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile19200RespProcessUs">Process RESP us / response</label>
-                <input id="flexProfile19200RespProcessUs" value="600" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile19200RxSliceMs">RX host slice ms</label>
-                <input id="flexProfile19200RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
-                <label for="flexProfile19200FreshAgeSec">Observation freshness s</label>
-                <input id="flexProfile19200FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+                <label for="flexProfile20200GuardUs">Guard us</label>
+                <input id="flexProfile20200GuardUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile20200ReqUs">REQ us</label>
+                <input id="flexProfile20200ReqUs" value="2000" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile20200ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile20200ReqProcessUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile20200RespUs">RESP subslot us</label>
+                <input id="flexProfile20200RespUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile20200RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile20200RespProcessUs" value="600" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile20200RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile20200RxSliceMs" value="6" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile20200FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile20200FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
               </div>
-              <div class="profile-summary" id="flexProfile19200Summary"></div>
+              <div class="profile-summary" id="flexProfile20200Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-flex-profile" data-flex-profile="frame19200">Apply 19.20 ms</button>
-                <button class="reset-flex-profile" data-flex-profile="frame19200">Reset Defaults</button>
+                <button class="primary apply-flex-profile" data-flex-profile="paper20200">Apply Paper Reference</button>
+                <button class="reset-flex-profile" data-flex-profile="paper20200">Reset Defaults</button>
               </div>
             </div>
             <div class="profile-card flex-profile-card" data-flex-profile="frame14800">
@@ -5003,6 +5014,8 @@ const state = {
   gpsMapLastTrailToken: "",
   gpsMapHasFit: false,
   gpsMapTileErrors: 0,
+  gpsRtkSamples: new Map(),
+  gpsRtkLastTokens: new Map(),
 };
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
@@ -5150,15 +5163,15 @@ const flexProfileFields = [
   {key: "positionMaxAgeSec", suffix: "FreshAgeSec"},
 ];
 const flexProfileDefaults = {
-  frame19200: {
-    prefix: "flexProfile19200",
-    label: "19.20 ms Frame",
-    guardUs: 500,
-    requestUs: 250,
-    requestProcessUs: 1500,
+  paper20200: {
+    prefix: "flexProfile20200",
+    label: "20.20 ms Paper Reference",
+    guardUs: 250,
+    requestUs: 2000,
+    requestProcessUs: 250,
     responseUs: 250,
     responseProcessUs: 600,
-    rxSliceMs: 5,
+    rxSliceMs: 6,
     positionMaxAgeSec: 0.5,
   },
   frame14800: {
@@ -5226,7 +5239,7 @@ const rangingProtocolProfileFields = {
   ]),
 };
 const rangingProfileDefaultsVersion = "2026-07-31-native-ds-clean-v2";
-const flexProfileDefaultsVersion = "2026-07-22-flex-frame-timing-v2";
+const flexProfileDefaultsVersion = "2026-08-04-flextdoa-paper-reference-v3";
 const passiveDsProfileDefaultsVersion = "2026-08-01-passive-ds-single-star-v2";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
@@ -5853,14 +5866,14 @@ function switchPositionProtocolSettings() {
     element.classList.toggle("hidden", solver !== "ranging");
   });
   document.querySelectorAll(".dynamic-geometry-option").forEach(element => {
-    element.classList.toggle("hidden", solver === "ranging");
+    element.classList.toggle("hidden", solver !== "passive_ds");
   });
   const restartGeometry =
     document.getElementById("positionRestartAnchorSelfLocalization");
   if (restartGeometry) {
     restartGeometry.disabled = false;
     restartGeometry.title =
-      "Clear any fixed geometry and restart the live anchor estimate.";
+      "Restart the Passive DS-TWR live anchor estimate.";
   }
 }
 
@@ -5956,6 +5969,20 @@ function synchronizePositionAnchorsFromRuntime(statuses) {
 }
 
 function positionKnownReference(settings, anchors) {
+  if (settings.referenceMode === "gps_rtk") {
+    const tagId = Number(settings.tagIds?.[0] || 1);
+    const track = gpsRtkTagTrack(tagId);
+    const latest = track[track.length - 1];
+    if (!latest) return null;
+    return {
+      x: latest.x,
+      y: latest.y,
+      label: `GPS RTK tag M${tagId}`,
+      dynamicGps: true,
+      tagId,
+      capturedAt: latest.t,
+    };
+  }
   if (settings.referenceMode === "centroid") {
     const points = settings.anchorIds.map(id => anchors[id]).filter(Boolean);
     if (points.length !== settings.anchorIds.length || !points.length) return null;
@@ -5984,6 +6011,10 @@ function percentile(values, fraction) {
 
 function positionReferenceErrorStats(tagId, position, reference, windowSec) {
   if (!position || !reference) return null;
+  if (reference.dynamicGps) {
+    return positionGpsReferenceErrorStats(
+      tagId, position, reference, windowSec);
+  }
   const now = Date.now() / 1000;
   const samples = (state.positionTrail[String(tagId)] || []).filter(point =>
     Number.isFinite(Number(point.x)) &&
@@ -8275,25 +8306,33 @@ function renderPositionReadout(model) {
   const missingCoords = model.settings.anchorIds.filter(id => !model.anchors[id]);
   if (missingCoords.length) {
     overlay.classList.add("active");
-    overlay.querySelector("h2").textContent = "Waiting for live anchor geometry";
-    overlay.querySelector("p").textContent =
-      `Waiting for fresh ${solverName} anchor-to-anchor ranges involving: ` +
-      `${missingCoords.join(", ")}. Positioning starts automatically when ` +
-      "the dynamic geometry is complete.";
+    const fixedFlex = model.settings.solver === "flextdoa";
+    overlay.querySelector("h2").textContent = fixedFlex
+      ? "Waiting for fixed GPS RTK geometry"
+      : "Waiting for live anchor geometry";
+    overlay.querySelector("p").textContent = fixedFlex
+      ? `Apply RTK-fixed ENU geometry for anchors ${missingCoords.join(", ")} from the GPS map panel.`
+      : `Waiting for fresh ${solverName} anchor-to-anchor ranges involving: ${missingCoords.join(", ")}. Positioning starts automatically when the dynamic geometry is complete.`;
     if (overlayButton) {
-      overlayButton.textContent = "Waiting for Anchor Ranges";
+      overlayButton.textContent = fixedFlex
+        ? "Waiting for RTK Geometry"
+        : "Waiting for Anchor Ranges";
       overlayButton.disabled = true;
       overlayButton.dataset.action = "wait";
     }
   } else if (!model.geometry?.positionReady) {
     overlay.classList.add("active");
-    overlay.querySelector("h2").textContent =
-      "Dynamic anchor self-localization in progress";
-    overlay.querySelector("p").textContent =
-      "No geometry has to be fixed. The TWR-EKF starts positioning " +
-      "automatically after a complete live anchor-range set.";
+    const fixedFlex = model.settings.solver === "flextdoa";
+    overlay.querySelector("h2").textContent = fixedFlex
+      ? "Fixed FlexTDOA geometry is not active"
+      : "Dynamic anchor self-localization in progress";
+    overlay.querySelector("p").textContent = fixedFlex
+      ? "Collect RTK-fixed GPS samples and apply the ENU geometry from the GPS map panel."
+      : "No geometry has to be fixed. The TWR-EKF starts positioning automatically after a complete live anchor-range set.";
     if (overlayButton) {
-      overlayButton.textContent = "Waiting for Dynamic Geometry";
+      overlayButton.textContent = fixedFlex
+        ? "Waiting for RTK Geometry"
+        : "Waiting for Dynamic Geometry";
       overlayButton.disabled = true;
       overlayButton.dataset.action = "wait";
     }
@@ -8338,7 +8377,7 @@ function renderPositionReadout(model) {
     return `<div class="position-tag-card"><b id="positionTagSummary${esc(tag.tagId)}">Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span id="positionTagMeta${esc(tag.tagId)}">${countText}${accuracyText}${referenceText}</span></div>`;
   });
   const emptyTagCard = !model.geometry?.positionReady
-    ? `<div class="position-tag-card"><b>waiting for live geometry</b><span>Positioning starts automatically after fresh anchor-to-anchor ranges initialize the EKF.</span></div>`
+    ? `<div class="position-tag-card"><b>waiting for geometry</b><span>${model.settings.solver === "flextdoa" ? "Apply fixed RTK ENU anchor coordinates from the GPS map." : "Positioning starts automatically after fresh anchor-to-anchor ranges initialize the geometry."}</span></div>`
     : `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
   readout.innerHTML = `${renderPositionSolverStatus(model)}${tagCards.join("") || emptyTagCard}`;
   const accuracyTableRows = Object.values(model.tags).map(tag => {
@@ -9311,6 +9350,243 @@ function gpsMapHasValidCoordinates(item) {
   );
 }
 
+const gpsRtkAnchorIds = [2, 3, 4, 5];
+const gpsRtkMinimumSamples = 5;
+const gpsRtkMaximumSamples = 120;
+
+function medianFinite(values) {
+  const sorted = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return NaN;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function recordGpsRtkSamples(statuses) {
+  for (const item of statuses || []) {
+    const moduleId = Number(item?.module_id);
+    const latitude = Number(item?.gps_latitude_deg);
+    const longitude = Number(item?.gps_longitude_deg);
+    const altitude = Number(item?.gps_altitude_m);
+    if (!Number.isInteger(moduleId) || moduleId < 1 || moduleId > 5 ||
+        Number(item?.gps_fix_quality) !== 4 || !item?.gps_fix_valid ||
+        !gpsRxIsFresh(item) || !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude) || !Number.isFinite(altitude)) continue;
+    const token = [
+      item.gps_utc_date || "",
+      item.gps_utc_time || "",
+      latitude.toFixed(9), longitude.toFixed(9), altitude.toFixed(4),
+    ].join(":");
+    if (state.gpsRtkLastTokens.get(moduleId) === token) continue;
+    state.gpsRtkLastTokens.set(moduleId, token);
+    const samples = state.gpsRtkSamples.get(moduleId) || [];
+    samples.push({latitude, longitude, altitude, capturedAt: Date.now()});
+    if (samples.length > gpsRtkMaximumSamples) {
+      samples.splice(0, samples.length - gpsRtkMaximumSamples);
+    }
+    state.gpsRtkSamples.set(moduleId, samples);
+  }
+}
+
+function gpsRtkEcef(latitudeDeg, longitudeDeg, altitudeM) {
+  const a = 6378137.0;
+  const flattening = 1 / 298.257223563;
+  const eccentricitySquared = flattening * (2 - flattening);
+  const latitude = latitudeDeg * Math.PI / 180;
+  const longitude = longitudeDeg * Math.PI / 180;
+  const sinLatitude = Math.sin(latitude);
+  const cosLatitude = Math.cos(latitude);
+  const normal = a / Math.sqrt(1 - eccentricitySquared * sinLatitude * sinLatitude);
+  return [
+    (normal + altitudeM) * cosLatitude * Math.cos(longitude),
+    (normal + altitudeM) * cosLatitude * Math.sin(longitude),
+    (normal * (1 - eccentricitySquared) + altitudeM) * sinLatitude,
+  ];
+}
+
+function gpsRtkEcefToEnu(point, origin, latitudeDeg, longitudeDeg) {
+  const latitude = latitudeDeg * Math.PI / 180;
+  const longitude = longitudeDeg * Math.PI / 180;
+  const dx = point[0] - origin[0];
+  const dy = point[1] - origin[1];
+  const dz = point[2] - origin[2];
+  return {
+    east: -Math.sin(longitude) * dx + Math.cos(longitude) * dy,
+    north: -Math.sin(latitude) * Math.cos(longitude) * dx -
+      Math.sin(latitude) * Math.sin(longitude) * dy + Math.cos(latitude) * dz,
+    up: Math.cos(latitude) * Math.cos(longitude) * dx +
+      Math.cos(latitude) * Math.sin(longitude) * dy + Math.sin(latitude) * dz,
+  };
+}
+
+function gpsRtkGeometryModel() {
+  const originSamples = state.gpsRtkSamples.get(2) || [];
+  if (originSamples.length < gpsRtkMinimumSamples) return null;
+  for (const anchorId of gpsRtkAnchorIds) {
+    if ((state.gpsRtkSamples.get(anchorId) || []).length < gpsRtkMinimumSamples) {
+      return null;
+    }
+  }
+  const originLatitude = medianFinite(originSamples.map(sample => sample.latitude));
+  const originLongitude = medianFinite(originSamples.map(sample => sample.longitude));
+  const originAltitude = medianFinite(originSamples.map(sample => sample.altitude));
+  const originEcef = gpsRtkEcef(originLatitude, originLongitude, originAltitude);
+  const points = new Map();
+  for (const moduleId of [1, ...gpsRtkAnchorIds]) {
+    const samples = state.gpsRtkSamples.get(moduleId) || [];
+    if (!samples.length) continue;
+    const enuSamples = samples.map(sample => gpsRtkEcefToEnu(
+      gpsRtkEcef(sample.latitude, sample.longitude, sample.altitude),
+      originEcef, originLatitude, originLongitude
+    ));
+    points.set(moduleId, moduleId === 2
+      ? {east: 0, north: 0, up: 0}
+      : {
+          east: medianFinite(enuSamples.map(point => point.east)),
+          north: medianFinite(enuSamples.map(point => point.north)),
+          up: medianFinite(enuSamples.map(point => point.up)),
+        });
+  }
+  const anchorUps = gpsRtkAnchorIds.map(id => points.get(id)?.up).filter(Number.isFinite);
+  return {
+    originLatitude,
+    originLongitude,
+    originAltitude,
+    points,
+    verticalSpreadM: anchorUps.length
+      ? Math.max(...anchorUps) - Math.min(...anchorUps)
+      : NaN,
+  };
+}
+
+function gpsRtkTagTrack(moduleId = 1) {
+  const geometry = gpsRtkGeometryModel();
+  const samples = state.gpsRtkSamples.get(Number(moduleId)) || [];
+  if (!geometry || !samples.length) return [];
+  const originEcef = gpsRtkEcef(
+    geometry.originLatitude, geometry.originLongitude,
+    geometry.originAltitude
+  );
+  return samples.map(sample => {
+    const point = gpsRtkEcefToEnu(
+      gpsRtkEcef(sample.latitude, sample.longitude, sample.altitude),
+      originEcef, geometry.originLatitude, geometry.originLongitude
+    );
+    return {
+      x: point.east,
+      y: point.north,
+      z: point.up,
+      t: sample.capturedAt / 1000,
+    };
+  });
+}
+
+function positionGpsReferenceErrorStats(tagId, position, reference, windowSec) {
+  const track = gpsRtkTagTrack(reference.tagId || tagId);
+  if (!track.length) return null;
+  const now = Date.now() / 1000;
+  const uwbSamples = (state.positionTrail[String(tagId)] || []).filter(point =>
+    Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y)) &&
+    now - Number(point.t) <= windowSec
+  );
+  const gpsSamples = track.filter(point => now - point.t <= windowSec + 2);
+  const aligned = [];
+  for (const uwb of uwbSamples) {
+    let nearest = null;
+    let nearestAge = Infinity;
+    for (const gps of gpsSamples) {
+      const age = Math.abs(Number(uwb.t) - gps.t);
+      if (age < nearestAge) {
+        nearest = gps;
+        nearestAge = age;
+      }
+    }
+    if (nearest && nearestAge <= 2.0) {
+      const dx = Number(uwb.x) - nearest.x;
+      const dy = Number(uwb.y) - nearest.y;
+      aligned.push({t: Number(uwb.t), dx, dy, error: Math.hypot(dx, dy)});
+    }
+  }
+  const latestGps = track[track.length - 1];
+  const currentErrorM = Math.hypot(
+    Number(position.x) - latestGps.x,
+    Number(position.y) - latestGps.y
+  );
+  if (!aligned.length) {
+    return {
+      count: 1, spanSec: 0, currentErrorM, biasM: currentErrorM,
+      rmseM: currentErrorM, p95M: currentErrorM, maxM: currentErrorM,
+    };
+  }
+  const meanDx = aligned.reduce((sum, item) => sum + item.dx, 0) / aligned.length;
+  const meanDy = aligned.reduce((sum, item) => sum + item.dy, 0) / aligned.length;
+  const errors = aligned.map(item => item.error);
+  return {
+    count: aligned.length,
+    spanSec: Math.max(0, aligned[aligned.length - 1].t - aligned[0].t),
+    currentErrorM,
+    biasM: Math.hypot(meanDx, meanDy),
+    rmseM: Math.sqrt(errors.reduce((sum, value) => sum + value * value, 0) / errors.length),
+    p95M: percentile(errors, 0.95),
+    maxM: Math.max(...errors),
+  };
+}
+
+function renderGpsRtkGeometryStatus() {
+  const status = document.getElementById("gpsRtkGeometryStatus");
+  const applyButton = document.getElementById("gpsApplyFlexGeometry");
+  if (!status || !applyButton) return;
+  const counts = gpsRtkAnchorIds.map(
+    id => `M${id}: ${(state.gpsRtkSamples.get(id) || []).length}`
+  );
+  const geometry = gpsRtkGeometryModel();
+  applyButton.disabled = !geometry;
+  if (!geometry) {
+    status.innerHTML = `${counts.map(esc).join(" · ")}<br>` +
+      `<span class="warn">Need at least ${gpsRtkMinimumSamples} RTK-fixed samples from every anchor.</span>`;
+    return;
+  }
+  const rows = gpsRtkAnchorIds.map(id => {
+    const point = geometry.points.get(id);
+    return `<tr><td>M${id}</td><td>${point.east.toFixed(3)}</td>` +
+      `<td>${point.north.toFixed(3)}</td><td>${point.up.toFixed(3)}</td></tr>`;
+  }).join("");
+  const tag = geometry.points.get(1);
+  const tagText = tag
+    ? `<br>Tag GPS ground truth now: E ${tag.east.toFixed(3)} m, N ${tag.north.toFixed(3)} m, U ${tag.up.toFixed(3)} m.`
+    : `<br><span class="muted">No RTK-fixed tag sample in the current buffer.</span>`;
+  status.innerHTML = `${counts.map(esc).join(" · ")}<br>` +
+    `<table class="gps-map-distance-table"><thead><tr><th>Anchor</th><th>E m</th><th>N m</th><th>U m</th></tr></thead>` +
+    `<tbody>${rows}</tbody></table>` +
+    `Anchor vertical spread ${geometry.verticalSpreadM.toFixed(3)} m.${tagText}`;
+}
+
+async function applyGpsRtkFlexGeometry() {
+  const geometry = gpsRtkGeometryModel();
+  if (!geometry) {
+    setToast("gpsRtkGeometryToast", "Not enough RTK-fixed anchor samples", "bad");
+    return;
+  }
+  const encoded = gpsRtkAnchorIds.map(id => {
+    const point = geometry.points.get(id);
+    return `${id}:${Math.round(point.east * 1000)}:${Math.round(point.north * 1000)}`;
+  }).join(",");
+  setToast("gpsRtkGeometryToast", "writing fixed ENU geometry...", "", null, false);
+  const data = await postConfig({
+    target_modules: "all",
+    params: {flex_geometry: encoded, reboot: "1"},
+  }, "gpsRtkGeometryToast");
+  if (apiResponseOk(data)) setTimeout(fetchSnapshot, 1800);
+}
+
+function clearGpsRtkGeometrySamples() {
+  state.gpsRtkSamples.clear();
+  state.gpsRtkLastTokens.clear();
+  renderGpsRtkGeometryStatus();
+  setToast("gpsRtkGeometryToast", "RTK sample buffer cleared", "");
+}
+
 function setGpsMapBanner(message = "") {
   const banner = document.getElementById("gpsMapBanner");
   if (!banner) return;
@@ -9530,10 +9806,14 @@ function wireGpsMapControls() {
   document.getElementById("gpsMapFitAll")?.addEventListener("click", fitGpsMapToModules);
   document.getElementById("gpsMapCenterTag")?.addEventListener("click", centerGpsMapOnTag);
   document.getElementById("gpsMapClearTrail")?.addEventListener("click", clearGpsMapTrail);
+  document.getElementById("gpsApplyFlexGeometry")?.addEventListener("click", applyGpsRtkFlexGeometry);
+  document.getElementById("gpsClearRtkGeometrySamples")?.addEventListener("click", clearGpsRtkGeometrySamples);
 }
 
 function renderGpsMap(statuses) {
   const sorted = [...(statuses || [])].sort((a, b) => Number(a.module_id || 0) - Number(b.module_id || 0));
+  recordGpsRtkSamples(sorted);
+  renderGpsRtkGeometryStatus();
   const currentValid = new Map();
   for (const item of sorted) {
     if (!gpsMapHasValidCoordinates(item)) continue;

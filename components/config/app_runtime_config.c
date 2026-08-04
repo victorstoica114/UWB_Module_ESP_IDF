@@ -232,8 +232,7 @@ static bool flex_tdoa_geometry_valid(const app_runtime_config_t *config)
     if (config->flex_tdoa_geometry_generation == 0U ||
         config->anchor_count < 3U ||
         config->flex_tdoa_anchor_x_mm[0] != 0 ||
-        config->flex_tdoa_anchor_y_mm[0] != 0 ||
-        config->flex_tdoa_anchor_x_mm[1] != 0) {
+        config->flex_tdoa_anchor_y_mm[0] != 0) {
         return false;
     }
     for (size_t i = 0; i < config->anchor_count; ++i) {
