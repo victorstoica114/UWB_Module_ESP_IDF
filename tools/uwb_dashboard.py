@@ -908,6 +908,10 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                 if position_protocol == "flextdoa"
                 else f"uwb.{position_protocol}.position"
             )
+            direct_esp_solve = position_protocol in (
+                "flextdoa",
+                "native_ds",
+            )
             samples.append(
                 {
                     **common,
@@ -923,6 +927,20 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "observation_count": int(observation_count),
                     "tag_id": int(tag_id),
                     "anchor_count": int(anchor_count),
+                    # FlexTDOA and Native DS-TWR publish the direct solution
+                    # of one complete ESP32 frame.  Make that explicit in the
+                    # API instead of letting the dashboard's legacy Passive
+                    # DS fallback describe these samples as EKF output.
+                    "position_filter": (
+                        "none" if direct_esp_solve else "ekf_cv"
+                    ),
+                    "solver_location": (
+                        "esp32_tag" if direct_esp_solve else "legacy_shared"
+                    ),
+                    "solution_kind": (
+                        "independent_frame" if direct_esp_solve else "rolling"
+                    ),
+                    "independent_frame": direct_esp_solve,
                 }
             )
         elif stream_type in (
@@ -3835,20 +3853,21 @@ tr.status-stale td { color: #4f3b1d; }
           <div class="section" style="margin-top:12px;">
             <h2>Anchor Geometry</h2>
             <div id="positionGeometryStatus" class="muted" style="margin-bottom:8px;">Waiting for live anchor ranges.</div>
+            <div id="positionGeometryTableNote" class="position-metric-note" style="margin-bottom:8px;"></div>
             <table>
-              <thead><tr><th>Pair</th><th>raw / stable</th><th>robust σ</th><th>age</th><th>fit</th></tr></thead>
+              <thead id="positionGeometryHead"><tr><th>Pair</th><th>live range / stable</th><th>range robust σ</th><th>age</th><th>fit</th></tr></thead>
               <tbody id="positionGeometryRows"></tbody>
             </table>
           </div>
           <div class="section">
             <h2>Live Position</h2>
-            <div class="position-legend"><span style="color:#d7352a">live marker (all updates)</span><span style="color:#7b8798">raw current</span><span style="color:#2b64d8">EKF independent trail</span><span style="color:#7b8798">raw independent trail</span><span style="color:#6d4c9f">known reference</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
+            <div class="position-legend"><span style="color:#d7352a">live marker (all updates)</span><span style="color:#7b8798">pre-filter current (when available)</span><span style="color:#2b64d8">displayed independent trail</span><span style="color:#7b8798">pre-filter independent trail</span><span style="color:#6d4c9f">known reference</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
             <div id="positionReadout" class="position-readout"></div>
             <table>
-              <thead><tr><th>Tag</th><th>solver σaxis</th><th>TDOA RMS</th><th>TDOA max</th></tr></thead>
+              <thead><tr><th>Tag</th><th>axis σ</th><th>equation RMS</th><th>max residual</th></tr></thead>
               <tbody id="positionAccuracyRows"></tbody>
             </table>
-            <p class="position-metric-note">Solver diagnostics come from equation residuals. They are not measured position error.</p>
+            <p class="position-metric-note">Solver diagnostics come from equation residuals; they are not measured position error. FlexTDOA currently reports equation RMS, not coordinate-axis uncertainty.</p>
             <div id="positionReferenceStatus" class="muted" style="margin:12px 0 5px;">Known position reference disabled.</div>
             <table class="position-error-table">
               <thead><tr><th>Tag</th><th>now</th><th>bias</th><th>RMSE</th><th>P95</th><th>max</th></tr></thead>
@@ -7342,7 +7361,7 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
       complete: true,
       positionReady: true,
       canFix: false,
-      status: "esp_dynamic",
+      status: protocol === "flextdoa" ? "esp_fixed_rtk" : "esp_dynamic",
       protocol,
       updates: Number(espGeometry.geometry_version || 0),
       frameId: Number(espGeometry.geometry_version || 0),
@@ -8164,11 +8183,31 @@ function drawPosition(model) {
 function renderPositionGeometryPanel(model) {
   const rows = document.getElementById("positionGeometryRows");
   const status = document.getElementById("positionGeometryStatus");
+  const note = document.getElementById("positionGeometryTableNote");
+  const head = document.getElementById("positionGeometryHead");
   if (!rows) return;
 
   const geometry = model.geometry || {};
+  const fixedRtk = geometry.status === "esp_fixed_rtk";
+  if (head) {
+    head.innerHTML = fixedRtk
+      ? `<tr><th>Pair</th><th>live TWR</th><th>TWR robust σ (10 s)</th><th>age</th><th>Δ vs RTK</th></tr>`
+      : `<tr><th>Pair</th><th>live range / stable</th><th>range robust σ</th><th>age</th><th>fit</th></tr>`;
+  }
+  if (note) {
+    note.textContent = fixedRtk
+      ? "Diagnostic only: FlexTDOA uses the fixed GPS RTK geometry, not the live inter-anchor TWR ranges shown below. Δ = live TWR − RTK distance."
+      : "Live inter-anchor ranges used to maintain the protocol-specific geometry.";
+  }
   if (status) {
-    if (geometry.status === "esp_dynamic") {
+    if (fixedRtk) {
+      status.textContent =
+        `Fixed FlexTDOA geometry · GPS RTK ENU · ` +
+        `ESP32 tag M${geometry.sourceTagId || "?"} · ` +
+        `generation ${geometry.updates || 0} · ` +
+        `latest ${fmtFixed(geometry.lastUpdateAgeSec, 1)} s · fit N/A`;
+      status.className = "muted fresh";
+    } else if (geometry.status === "esp_dynamic") {
       const fitText = Number.isFinite(Number(geometry.fitQuality?.rmsM))
         ? ` · fit RMS ${fmtPositionCm(geometry.fitQuality.rmsM, 1)}`
         : "";
@@ -8253,12 +8292,29 @@ function renderPositionGeometryPanel(model) {
       stats.robust_sigma_m === undefined
       ? NaN
       : Number(stats.robust_sigma_m);
+    const anchorA = geometry.anchors?.[a];
+    const anchorB = geometry.anchors?.[b];
+    const rtkDistance = anchorA && anchorB
+      ? Math.hypot(
+          Number(anchorA.x) - Number(anchorB.x),
+          Number(anchorA.y) - Number(anchorB.y))
+      : NaN;
+    const rtkDelta = fixedRtk && item && Number.isFinite(rtkDistance)
+      ? Number(item.distance_m) - rtkDistance
+      : NaN;
+    const fitCell = fixedRtk
+      ? Number.isFinite(rtkDelta)
+        ? `${rtkDelta >= 0 ? "+" : ""}${fmtFixed(rtkDelta * 100, 1)} cm`
+        : "-"
+      : residual === undefined
+        ? "-"
+        : `${fmtFixed(residual * 100, 1)} cm`;
     return `<tr>
       <td>A${esc(a)}-A${esc(b)}<br><span class="muted">${direction}</span>${gateHtml}</td>
       <td>${item ? fmtFixed(item.distance_m, 3) : "-"}<br><span class="muted">${Number.isFinite(accepted) ? "stable " + fmtFixed(accepted, 3) : ""}</span></td>
       <td>${Number.isFinite(robustSigma) ? fmtCmFromM(robustSigma, 1) + " cm" : "-"}</td>
       <td class="${item && Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${item ? fmtFixed(item.age_sec, 1) + "s" : "-"}</td>
-      <td>${residual === undefined ? "-" : fmtFixed(residual * 100, 1) + " cm"}</td>
+      <td>${fitCell}</td>
     </tr>`;
   });
   rows.innerHTML = pairRows.join("");
@@ -8306,6 +8362,9 @@ function renderPositionSolverStatus(model) {
   const liveItem = firstTag
     ? state.tdoa?.local_positions?.[String(firstTag.tagId)]
     : null;
+  if (positionIsDirectEspSolve(liveItem)) {
+    pills.push(`<span class="position-pill good">raw position · no filter</span>`);
+  }
   if (liveItem?.tdoa_protocol === "passive_ds" &&
       liveItem.coherent_batch_telemetry) {
     const rejectText = passiveDsRejectionReasonText(
@@ -8342,7 +8401,16 @@ function renderPositionSolverStatus(model) {
       `<span class="position-pill warn">setup ${esc(requested)} · radio ${esc(observed)}</span>`
     );
   }
-  pills.push(`<span class="position-pill ${model.geometry?.status === "dynamic" ? "good" : "warn"}">geometry ${esc(model.geometry?.status || "waiting")}</span>`);
+  const geometryStatus = String(model.geometry?.status || "waiting");
+  const geometryReady = [
+    "dynamic", "esp_dynamic", "esp_fixed_rtk", "known", "persisted",
+  ].includes(geometryStatus);
+  const geometryLabel = geometryStatus === "esp_fixed_rtk"
+    ? "fixed RTK"
+    : geometryStatus === "esp_dynamic"
+      ? "ESP32 dynamic"
+      : geometryStatus;
+  pills.push(`<span class="position-pill ${geometryReady ? "good" : "warn"}">geometry ${esc(geometryLabel)}</span>`);
 
   return `<div class="position-filter-card">
     <b>Position Solver</b>
@@ -8463,7 +8531,13 @@ function renderPositionReadout(model) {
       return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}</b><span>${freshCount}/${total} fresh ${usesTdoa ? "TDOA observations" : "distances"}</span></div>`;
     }
     const sigma = tag.accuracy?.sigma_major_m;
-    const accuracyText = Number.isFinite(Number(sigma)) ? ` · solver σaxis ${fmtPositionSigma(sigma, 1)}` : "";
+    const accuracyText = model.settings.solver === "flextdoa"
+      ? Number.isFinite(Number(tag.accuracy?.rms_m))
+        ? ` · equation RMS ${fmtPositionCm(tag.accuracy.rms_m, 1)}`
+        : ""
+      : Number.isFinite(Number(sigma))
+        ? ` · solver σaxis ${fmtPositionSigma(sigma, 1)}`
+        : "";
     const referenceStats = positionReferenceErrorStats(
       tag.tagId,
       tag.metricPosition || tag.position,
@@ -8493,7 +8567,7 @@ function renderPositionReadout(model) {
     }
     return `<tr id="positionAccuracyRow${esc(tag.tagId)}">
       <td>T${esc(tag.tagId)}<br><span class="muted">${esc(accuracy.count)} raw obs · GDOP ${esc(fmtFixed(accuracy.gdop, 2))}</span></td>
-      <td id="positionSolverSigma${esc(tag.tagId)}">${fmtPositionSigma(accuracy.sigma_major_m, 1)}</td>
+      <td id="positionSolverSigma${esc(tag.tagId)}">${model.settings.solver === "flextdoa" ? "-" : fmtPositionSigma(accuracy.sigma_major_m, 1)}</td>
       <td id="positionTdoaRms${esc(tag.tagId)}">${fmtPositionCm(accuracy.rms_m, 1)}</td>
       <td id="positionTdoaMax${esc(tag.tagId)}">${fmtPositionCm(accuracy.max_abs_m, 1)}</td>
     </tr>`;
@@ -8642,6 +8716,14 @@ function positionTrailSummary() {
   };
 }
 
+function positionIsDirectEspSolve(item) {
+  if (!item) return false;
+  const protocol = String(item.tdoa_protocol || "flextdoa");
+  return protocol === "flextdoa" ||
+    protocol === "native_ds" ||
+    (item.position_filter === "none" && item.solver_location === "esp32_tag");
+}
+
 function updatePositionStreamMetrics() {
   const nowMs = performance.now();
   const rxRate = trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
@@ -8677,10 +8759,16 @@ function updatePositionStreamMetrics() {
   ).find(item => item?.tdoa_protocol === "passive_ds");
   const passiveUnfiltered = passiveDs &&
     passivePosition?.position_filter === "none";
+  const displayedPosition = Object.values(
+    state.tdoa?.local_positions || {}
+  ).find(item => positionTdoaProtocolMatches(
+    item, positionSettings().solver));
+  const directEspSolve = positionIsDirectEspSolve(displayedPosition);
   const overlappingRate = Math.max(0, rxRate - independentRate);
-  element.textContent = passiveUnfiltered
+  element.textContent = directEspSolve
     ? `${rxRate} raw solves/s · ${independentRate} independent/s · ` +
-      `${overlappingRate} overlapping/s · ${renderRate} fps · ` +
+      `${passiveUnfiltered ? `${overlappingRate} overlapping/s · ` : ""}` +
+      `${renderRate} fps · ` +
       `${fmtFixed(updatesPerRender, 1)} updates/render`
     : passiveDs
     ? `${rxRate} solver/s · ${independentRate} frames/s · ` +
@@ -8703,8 +8791,8 @@ function updatePositionStreamMetrics() {
       : "";
     const usesTdoa = positionProtocolUsesTdoa(positionSettings().solver);
     const nativeMode = positionSettings().nativeDsUpdateMode;
-    trailElement.textContent = passiveUnfiltered
-      ? `independent raw trail: ${trail.rawCount || trail.ekfCount} points · ` +
+    trailElement.textContent = directEspSolve
+      ? `independent raw trail: ${passiveUnfiltered ? trail.rawCount || trail.ekfCount : trail.ekfCount} points · ` +
         `${fmtFixed(trail.spanSec, 1)} s${latencyText}`
       : usesTdoa
       ? `independent trail: EKF ${trail.ekfCount} · raw ${trail.rawCount} · ` +
@@ -8770,8 +8858,7 @@ function updatePositionLiveMetrics(model) {
             tag.rawPosition.y - tag.position.y
           )
         : NaN;
-      const unfilteredEsp = item.position_filter === "none" &&
-        item.solver_location === "esp32_tag";
+      const unfilteredEsp = positionIsDirectEspSolve(item);
       summary.textContent = unfilteredEsp
         ? `Tag ${tag.tagId}: x=${fmtFixed(tag.position.x, 3)} m, ` +
           `y=${fmtFixed(tag.position.y, 3)} m`
@@ -8783,13 +8870,21 @@ function updatePositionLiveMetrics(model) {
             : "");
     }
     if (meta) {
-      const sigmaText = Number.isFinite(sigma)
-        ? ` · solver σaxis ${fmtPositionSigma(sigma, 1)}`
-        : "";
+      const sigmaText = item.tdoa_protocol === "flextdoa"
+        ? Number.isFinite(Number(item.rms_m))
+          ? ` · equation RMS ${fmtPositionCm(item.rms_m, 1)}`
+          : ""
+        : Number.isFinite(sigma)
+          ? ` · solver σaxis ${fmtPositionSigma(sigma, 1)}`
+          : "";
       const referenceText = referenceStats
         ? ` · actual ${fmtPositionCm(referenceStats.currentErrorM, 1)}`
         : "";
-      const filterText = item.tdoa_protocol === "passive_ds"
+      const filterText = item.tdoa_protocol === "flextdoa"
+        ? " · raw ESP32 solve · independent frame"
+        : item.tdoa_protocol === "native_ds"
+        ? " · raw ESP32 solve · coherent frame"
+        : item.tdoa_protocol === "passive_ds"
         ? item.position_filter === "none"
           ? " · raw ESP32 solve" +
             (item.independent_frame
@@ -8821,7 +8916,9 @@ function updatePositionLiveMetrics(model) {
     const solverSigma = document.getElementById(`positionSolverSigma${tag.tagId}`);
     const tdoaRms = document.getElementById(`positionTdoaRms${tag.tagId}`);
     const tdoaMax = document.getElementById(`positionTdoaMax${tag.tagId}`);
-    if (solverSigma) solverSigma.textContent = fmtPositionSigma(item.sigma_m, 1);
+    if (solverSigma) solverSigma.textContent = item.tdoa_protocol === "flextdoa"
+      ? "-"
+      : fmtPositionSigma(item.sigma_m, 1);
     if (tdoaRms) tdoaRms.textContent = fmtPositionCm(item.rms_m, 1);
     if (tdoaMax) tdoaMax.textContent = "-";
     if (referenceStats) {
