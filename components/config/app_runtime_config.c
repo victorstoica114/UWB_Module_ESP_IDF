@@ -36,6 +36,7 @@ static const char *TAG = "app_runtime_config";
 #define KEY_FLEX_GGEN "flex_ggen"
 #define KEY_FLEX_GX "flex_gx"
 #define KEY_FLEX_GY "flex_gy"
+#define KEY_FLEX_CORR "flex_corr"
 #define KEY_COORD "coord"
 #define KEY_AS_RX "as_rx"
 #define KEY_AS_CMD "as_cmd"
@@ -240,6 +241,20 @@ static bool flex_tdoa_geometry_valid(const app_runtime_config_t *config)
             config->flex_tdoa_anchor_x_mm[i] > 100000000 ||
             config->flex_tdoa_anchor_y_mm[i] < -100000000 ||
             config->flex_tdoa_anchor_y_mm[i] > 100000000) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool flex_tdoa_correction_valid(const app_runtime_config_t *config)
+{
+    if (config->flex_tdoa_anchor_correction_mm[0] != 0) {
+        return false;
+    }
+    for (size_t i = 0; i < config->anchor_count; ++i) {
+        if (config->flex_tdoa_anchor_correction_mm[i] < -5000 ||
+            config->flex_tdoa_anchor_correction_mm[i] > 5000) {
             return false;
         }
     }
@@ -531,6 +546,8 @@ void app_runtime_config_reset_flex_tdoa(app_runtime_config_t *config)
            sizeof(config->flex_tdoa_anchor_x_mm));
     memset(config->flex_tdoa_anchor_y_mm, 0,
            sizeof(config->flex_tdoa_anchor_y_mm));
+    memset(config->flex_tdoa_anchor_correction_mm, 0,
+           sizeof(config->flex_tdoa_anchor_correction_mm));
     config->flex_tdoa_geometry_generation =
         config->flex_tdoa_geometry_generation == UINT32_MAX
             ? 1U
@@ -561,6 +578,7 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         !id_valid(config->tag_id) || !anchor_ids_valid(config) ||
         !flex_tdoa_config_valid(config) ||
         !flex_tdoa_geometry_valid(config) ||
+        !flex_tdoa_correction_valid(config) ||
         !id_valid(config->anchor_survey_coordinator_id) ||
         !ms_valid(config->anchor_survey_rx_slice_ms) ||
         !ms_valid(config->anchor_survey_command_delay_ms) ||
@@ -728,6 +746,32 @@ static bool read_passive_ds_anchor_bias(
            read_size == compact_size;
 }
 
+static bool read_flex_tdoa_anchor_correction(
+    nvs_handle_t handle, app_runtime_config_t *config)
+{
+    size_t size = 0;
+    if (config->anchor_count > APP_RUNTIME_CONFIG_MAX_ANCHORS ||
+        nvs_get_blob(handle, KEY_FLEX_CORR, NULL, &size) != ESP_OK) {
+        return false;
+    }
+    if (size == sizeof(config->flex_tdoa_anchor_correction_mm)) {
+        return read_blob_exact(
+            handle, KEY_FLEX_CORR,
+            config->flex_tdoa_anchor_correction_mm, size);
+    }
+    const size_t compact_size =
+        (size_t)config->anchor_count * sizeof(int32_t);
+    if (size != compact_size) {
+        return false;
+    }
+    size_t read_size = compact_size;
+    return nvs_get_blob(
+               handle, KEY_FLEX_CORR,
+               config->flex_tdoa_anchor_correction_mm,
+               &read_size) == ESP_OK &&
+           read_size == compact_size;
+}
+
 static bool read_passive_ds_range_bias(
     nvs_handle_t handle, app_runtime_config_t *config)
 {
@@ -823,6 +867,7 @@ static void read_config_from_nvs(app_runtime_config_t *config)
     found |= read_blob_exact(handle, KEY_FLEX_GY,
                              config->flex_tdoa_anchor_y_mm,
                              sizeof(config->flex_tdoa_anchor_y_mm));
+    found |= read_flex_tdoa_anchor_correction(handle, config);
     found |= read_u8(handle, KEY_COORD, &config->anchor_survey_coordinator_id);
     found |= read_u32(handle, KEY_AS_RX, &config->anchor_survey_rx_slice_ms);
     found |= read_u32(handle, KEY_AS_CMD,
@@ -1065,6 +1110,10 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
     WRITE_OR_GOTO(nvs_set_blob(handle, KEY_FLEX_GY,
                                config->flex_tdoa_anchor_y_mm,
                                sizeof(config->flex_tdoa_anchor_y_mm)));
+    WRITE_OR_GOTO(nvs_set_blob(
+        handle, KEY_FLEX_CORR,
+        config->flex_tdoa_anchor_correction_mm,
+        (size_t)config->anchor_count * sizeof(int32_t)));
     WRITE_OR_GOTO(write_u8(handle, KEY_COORD,
                            config->anchor_survey_coordinator_id));
     WRITE_OR_GOTO(write_u32(handle, KEY_AS_RX,

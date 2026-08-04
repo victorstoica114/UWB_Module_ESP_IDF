@@ -124,6 +124,7 @@ typedef struct {
     char runtime_flex_masks_json[72];
     char runtime_flex_anchor_x_json[128];
     char runtime_flex_anchor_y_json[128];
+    char runtime_flex_anchor_correction_json[128];
     char runtime_passive_ds_anchor_bias_json[128];
     char runtime_passive_ds_range_bias_json[512];
     struct uwb_passive_ds_pipeline_stats passive_ds_pipeline_stats;
@@ -1223,6 +1224,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #define runtime_flex_masks_json (ctx->runtime_flex_masks_json)
 #define runtime_flex_anchor_x_json (ctx->runtime_flex_anchor_x_json)
 #define runtime_flex_anchor_y_json (ctx->runtime_flex_anchor_y_json)
+#define runtime_flex_anchor_correction_json \
+    (ctx->runtime_flex_anchor_correction_json)
 #define runtime_passive_ds_anchor_bias_json \
     (ctx->runtime_passive_ds_anchor_bias_json)
 #define runtime_passive_ds_range_bias_json \
@@ -1283,6 +1286,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                           runtime_config->anchor_count,
                           runtime_flex_anchor_y_json,
                           sizeof(runtime_flex_anchor_y_json));
+    format_i32_array_json(runtime_config->flex_tdoa_anchor_correction_mm,
+                          runtime_config->anchor_count,
+                          runtime_flex_anchor_correction_json,
+                          sizeof(runtime_flex_anchor_correction_json));
     format_i32_array_json(runtime_config->passive_ds_anchor_bias_mm,
                           runtime_config->anchor_count,
                           runtime_passive_ds_anchor_bias_json,
@@ -1366,6 +1373,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_flex_tdoa_geometry_generation\":%lu,"
         "\"runtime_flex_tdoa_anchor_x_mm\":%s,"
         "\"runtime_flex_tdoa_anchor_y_mm\":%s,"
+        "\"runtime_flex_tdoa_anchor_correction_mm\":%s,"
         "\"runtime_anchor_survey_coordinator_id\":%u,"
         "\"runtime_anchor_survey_rx_slice_ms\":%lu,"
         "\"runtime_anchor_survey_command_delay_ms\":%lu,"
@@ -1936,6 +1944,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)runtime_config->flex_tdoa_geometry_generation,
         runtime_flex_anchor_x_json,
         runtime_flex_anchor_y_json,
+        runtime_flex_anchor_correction_json,
         (unsigned)runtime_config->anchor_survey_coordinator_id,
         (unsigned long)runtime_config->anchor_survey_rx_slice_ms,
         (unsigned long)runtime_config->anchor_survey_command_delay_ms,
@@ -2488,6 +2497,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #undef runtime_flex_masks_json
 #undef runtime_flex_anchor_x_json
 #undef runtime_flex_anchor_y_json
+#undef runtime_flex_anchor_correction_json
 #undef runtime_passive_ds_anchor_bias_json
 #undef runtime_passive_ds_range_bias_json
 #undef passive_ds_pipeline_stats
@@ -3874,6 +3884,35 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
                     ? 1U
                     : before_config.flex_tdoa_geometry_generation + 1U;
             changed = true;
+        }
+
+        char flex_anchor_correction_text[256] = {0};
+        query_err = httpd_query_key_value(
+            query, "flex_tdoa_anchor_correction_mm",
+            flex_anchor_correction_text,
+            sizeof(flex_anchor_correction_text));
+        if (query_err == ESP_OK) {
+            int32_t correction[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+            uint8_t correction_count = 0;
+            if (!ota_parse_i32_list(
+                    flex_anchor_correction_text, correction,
+                    APP_RUNTIME_CONFIG_MAX_ANCHORS,
+                    &correction_count) ||
+                correction_count != config.anchor_count ||
+                correction[0] != 0) {
+                return httpd_resp_send_err(
+                    req, HTTPD_400_BAD_REQUEST,
+                    "Invalid FlexTDOA anchor correction list");
+            }
+            memset(config.flex_tdoa_anchor_correction_mm, 0,
+                   sizeof(config.flex_tdoa_anchor_correction_mm));
+            memcpy(config.flex_tdoa_anchor_correction_mm, correction,
+                   (size_t)correction_count * sizeof(correction[0]));
+            changed = true;
+        } else if (query_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(
+                req, HTTPD_400_BAD_REQUEST,
+                "Invalid FlexTDOA anchor correction list");
         }
 
         const bool passive_ds_calibration_clear =

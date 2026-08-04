@@ -264,6 +264,8 @@ RUNTIME_PARAM_STATUS_FIELDS = {
     "flex_req_process_us": "runtime_flex_tdoa_request_process_us",
     "flex_resp_us": "runtime_flex_tdoa_response_subslot_us",
     "flex_resp_process_us": "runtime_flex_tdoa_response_process_us",
+    "flex_tdoa_anchor_correction_mm":
+        "runtime_flex_tdoa_anchor_correction_mm",
     "coordinator": "runtime_anchor_survey_coordinator_id",
     "coord": "runtime_anchor_survey_coordinator_id",
     "survey_rx_ms": "runtime_anchor_survey_rx_slice_ms",

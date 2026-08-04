@@ -58,6 +58,12 @@ typedef struct {
     uint32_t flex_tdoa_geometry_generation;
     int32_t flex_tdoa_anchor_x_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS];
     int32_t flex_tdoa_anchor_y_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    /*
+     * Additive directed-TDOA correction.  An i->j observation receives
+     * correction[j] - correction[i].  The first anchor is the zero reference.
+     */
+    int32_t flex_tdoa_anchor_correction_mm[
+        APP_RUNTIME_CONFIG_MAX_ANCHORS];
     uint8_t anchor_survey_coordinator_id;
     uint32_t anchor_survey_rx_slice_ms;
     uint32_t anchor_survey_command_delay_ms;
