@@ -2233,10 +2233,7 @@ static double uwb_dw3000_clock_offset_ratio(int32_t clock_offset_raw)
 
 static double uwb_dw3000_cia_clock_offset_ratio(int32_t clock_offset_raw)
 {
-    // Qorvo CIA_DIAG_0 reports (remote - local) clock offset in units of
-    // 2^-26. The rest of this driver applies the correction as (1 + ratio),
-    // hence the sign inversion here.
-    return -(double)clock_offset_raw / (double)(1UL << 26U);
+    return flextdoa_dw3000_cia_scale_delta((int16_t)clock_offset_raw);
 }
 
 static double uwb_dw3000_remote_interval_in_local_dtu(
@@ -3084,10 +3081,12 @@ static esp_err_t uwb_dw3000_read_flex_buffered_frame(
                               read_len),
         TAG, "FlexTDOA RX buffer read failed");
     frame->payload_len = read_len;
-    frame->clock_offset_valid =
-        uwb_dw3000_payload_is_flextdoa_localization(
-            frame->payload, frame->payload_len,
-            FLEXTDOA_MESSAGE_RESPONSE);
+    /*
+     * RX-good does not imply CIADONE. The caller validates RDB_STATUS after
+     * identifying a response and re-reads CIA_DIAG_0 if CIA completed while
+     * the metadata and payload were being copied.
+     */
+    frame->clock_offset_valid = false;
     return ESP_OK;
 }
 
@@ -4048,6 +4047,34 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                 uwb_dw3000_payload_is_distance_frame(
                     frame->payload, frame->payload_len) &&
                 frame->payload[5] != UWB_DISTANCE_FRAME_FLEX_TDOA_REQ;
+            if (buffered_fast_path && clean_flex_response) {
+                const uint8_t cia_done_mask =
+                    uwb_dw3000_current_rdb_cia_done_mask();
+                bool cia_ready =
+                    (frame->rx_buffer_status & cia_done_mask) != 0U;
+                if (!cia_ready) {
+                    uint8_t updated_rdb_status = 0U;
+                    clock_err =
+                        uwb_dw3000_read_rdb_status(&updated_rdb_status);
+                    frame->rx_buffer_status |= updated_rdb_status;
+                    cia_ready = clock_err == ESP_OK &&
+                                (updated_rdb_status & cia_done_mask) != 0U;
+                    if (cia_ready) {
+                        /* The metadata copy preceded CIADONE and may be stale. */
+                        clock_err = uwb_dw3000_read_clock_offset_raw(
+                            &frame->clock_offset_raw,
+                            &frame->clock_offset_from_cia);
+                    }
+                }
+                frame->clock_offset_valid =
+                    cia_ready && clock_err == ESP_OK;
+                if (!frame->clock_offset_valid) {
+                    s_rx_double_buffer_cia_not_ready_count++;
+                    if (clock_err == ESP_OK) {
+                        clock_err = ESP_ERR_NOT_FINISHED;
+                    }
+                }
+            }
             if (!buffered_fast_path && !passive_multi_fast_rearm &&
                 (common_frame_needs_cfo || clean_flex_response)) {
                 bool cia_ready = true;

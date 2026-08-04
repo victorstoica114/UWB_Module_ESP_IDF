@@ -190,6 +190,44 @@ static void test_observation_math_and_wrap(void)
         1.0e-9);
 }
 
+static void test_dw3000_cia_sign_into_equation_12(void)
+{
+    const uint32_t processing_dtu =
+        (uint32_t)llround(0.0025 / TEST_DTU_SECONDS);
+    const uint64_t request_rx_dtu = 1000U;
+    const uint64_t anchor_tof_dtu = 10000U;
+    const uint64_t response_rx_dtu =
+        request_rx_dtu + processing_dtu + anchor_tof_dtu;
+
+    for (int16_t raw = -67; raw <= 67; raw += 134) {
+        const double driver_scale_delta =
+            flextdoa_dw3000_cia_scale_delta(raw);
+        const struct flextdoa_observation_input input = {
+            .request_rx_tag_dtu = request_rx_dtu,
+            .response_rx_tag_dtu = response_rx_dtu,
+            .responder_processing_dtu = processing_dtu,
+            /* The driver uses 1 + scale_delta; Eq. (12) uses 1 - epsilon. */
+            .responder_to_tag_cfo_fraction = -driver_scale_delta,
+            .initiator_responder_tof_dtu = (double)anchor_tof_dtu,
+            .dtu_seconds = TEST_DTU_SECONDS,
+            .speed_of_light_mps = TEST_C_MPS,
+        };
+        double range_difference_m = 0.0;
+        assert(flextdoa_compute_range_difference_m(
+            &input, &range_difference_m));
+
+        const double epsilon = (double)raw / (double)(1UL << 26U);
+        const double expected_m =
+            epsilon * (double)processing_dtu * TEST_DTU_SECONDS *
+            TEST_C_MPS;
+        assert_near(range_difference_m, expected_m, 1.0e-9);
+        assert((raw > 0 && range_difference_m > 0.7480 &&
+                range_difference_m < 0.7481) ||
+               (raw < 0 && range_difference_m < -0.7480 &&
+                range_difference_m > -0.7481));
+    }
+}
+
 int main(void)
 {
     test_paper_timing();
@@ -197,6 +235,7 @@ int main(void)
     test_packet_codec();
     test_slot_collector();
     test_observation_math_and_wrap();
+    test_dw3000_cia_sign_into_equation_12();
     puts("flextdoa_protocol_test: PASS");
     return 0;
 }

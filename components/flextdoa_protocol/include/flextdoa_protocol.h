@@ -80,6 +80,12 @@ bool flextdoa_decode_packet(
     struct flextdoa_packet *packet);
 
 uint64_t flextdoa_timestamp_delta(uint64_t later, uint64_t earlier);
+/*
+ * Convert DW3000 CIA_DIAG_0 COE_PPM into k_local / k_remote - 1.
+ * Qorvo encodes epsilon as raw / 2^26 and Eq. (12) uses
+ * k_local / k_remote = 1 - epsilon.
+ */
+double flextdoa_dw3000_cia_scale_delta(int16_t clock_offset_raw);
 bool flextdoa_compute_range_difference_m(
     const struct flextdoa_observation_input *input,
     double *range_difference_m);
