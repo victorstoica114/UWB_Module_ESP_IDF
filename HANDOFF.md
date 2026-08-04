@@ -262,8 +262,9 @@ reinitializes only the DW3000, and starts the new loop. Wi-Fi, HTTP, wireless
 logs, and binary telemetry remain online throughout the transition.
 
 The radio reset must use the DW3000 boot SPI rate: switch from the operational
-40 MHz rate back to 4 MHz, reset/configure the radio, then restore 40 MHz.
-Keeping the bus at 40 MHz across reset causes an apparently successful switch
+rate back to 4 MHz, reset/configure the radio, then restore the operational
+rate. Keeping the bus at the operational rate across reset causes an apparently
+successful switch
 followed by RX timeouts. FlexTDOA also restores its double-buffer configuration
 when it becomes active. A radio reinitialization failure falls back to a full
 ESP32 restart.

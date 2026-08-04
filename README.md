@@ -63,7 +63,9 @@ The DWM3000 data sheet specifies a maximum SPI clock of `38 MHz` in mode 0
 after OTP boot has completed. ESP32-S3 SPI2 is sourced from the `80 MHz` APB
 clock. With the stock ESP-IDF divider, the fastest realizable clock below the
 radio limit is `80 / 3 = 26.666 MHz`; the next divider is `40 MHz`, which would
-exceed the DWM3000 specification.
+exceed the DWM3000 specification. Requesting `38 MHz` also selects that nearer
+`40 MHz` divider, so the driver requests `32 MHz` and validates the reported
+effective clock against the `38 MHz` limit.
 
 The driver therefore uses two phases:
 
@@ -274,7 +276,8 @@ DS-TWR through `/config/runtime?...&hot_switch=1`. A successful hot switch:
 - keeps Wi-Fi, HTTP, wireless logs, and binary telemetry running.
 
 The supervisor restores the 4 MHz DW3000 boot SPI rate for the radio reset and
-returns to the verified 40 MHz operational rate after initialization. If radio
+returns to the verified datasheet-compliant operational rate after
+initialization. If radio
 initialization fails, the firmware falls back to a full ESP32 restart.
 
 Hot switching is deliberately limited to a mode-only transition among these
@@ -818,11 +821,11 @@ firmware was restored to the original task-dispatched timer and fixed
 #### FlexTDOA Speed Notes
 
 The runtime is limited by worst-case host/radio turnaround rather than the
-`6.8 Mbps` UWB PHY. DW3000 SPI runs at the verified `40 MHz` ESP32-S3 divider,
-slightly above the data-sheet nominal limit of `38 MHz`. The hot path uses
-polling SPI, compact payload/metadata reads, targeted RX status clears plus
-`DB_TOGGLE`, cached `TX_FCTRL`, early request-buffer release, and DW3000 delayed
-TX.
+`6.8 Mbps` UWB PHY. DW3000 SPI requests `32 MHz` and runs at the verified
+`26.666 MHz` ESP32-S3 divider, below the data-sheet limit of `38 MHz`. The hot
+path uses polling SPI, compact payload/metadata reads, targeted RX status
+clears plus `DB_TOGGLE`, cached `TX_FCTRL`, early request-buffer release, and
+DW3000 delayed TX.
 
 ```text
 validated ESP32-S3 slot, K=3 = 4.80 ms

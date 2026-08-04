@@ -50,13 +50,13 @@ enum {
     // work; the task sleeps on the DW3000 interrupt between radio events.
     UWB_DW3000_TASK_PRIORITY = 20,
     UWB_DW3000_SPI_BOOT_CLOCK_HZ = 4 * 1000 * 1000,
-    // The compact FlexTDOA responder path needs the next APB divider above
-    // 26.666 MHz. ESP32-S3 generates 40 MHz exactly; this is 5.3% above the
-    // DW3000 nominal 38 MHz rating and is validated at startup by repeated
-    // device-ID reads before the radio runtime is allowed to start.
-    UWB_DW3000_SPI_OPERATION_REQUEST_HZ = 40 * 1000 * 1000,
+    // ESP32-S3 GPSPI uses the 80 MHz APB source with integer dividers. It
+    // cannot generate 38 MHz: requesting 38 MHz selects the nearer 40 MHz
+    // divider and violates the DW3000 limit. A 32 MHz request selects 80/3,
+    // or 26.666 MHz, the fastest realizable datasheet-compliant clock.
+    UWB_DW3000_SPI_OPERATION_REQUEST_HZ = 32 * 1000 * 1000,
     UWB_DW3000_SPI_DATASHEET_MAX_HZ = 38 * 1000 * 1000,
-    UWB_DW3000_SPI_VALIDATED_MAX_HZ = 40 * 1000 * 1000,
+    UWB_DW3000_SPI_VALIDATED_MAX_HZ = 38 * 1000 * 1000,
     UWB_DW3000_SPI_VERIFY_READS = 8,
     UWB_DW3000_SPI_MAX_TRANSFER_BYTES = 96,
     UWB_DW3000_RESET_SETTLE_MS = 5,
@@ -71,6 +71,13 @@ enum {
     UWB_DW3000_TX_POLL_MS = 2,
     UWB_DW3000_PAYLOAD_LEN = 64,
 };
+
+_Static_assert(UWB_DW3000_SPI_OPERATION_REQUEST_HZ <=
+                   UWB_DW3000_SPI_DATASHEET_MAX_HZ,
+               "DW3000 operational SPI request exceeds datasheet maximum");
+_Static_assert(UWB_DW3000_SPI_VALIDATED_MAX_HZ <=
+                   UWB_DW3000_SPI_DATASHEET_MAX_HZ,
+               "DW3000 validated SPI maximum exceeds datasheet maximum");
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
 #define UWB_DW3000_TASK_CORE 1
@@ -1858,6 +1865,12 @@ static esp_err_t uwb_dw3000_add_spi_device(uint32_t requested_clock_hz)
     }
 
     s_spi_clock_hz = (uint32_t)actual_clock_khz * 1000U;
+    if (s_spi_clock_hz > UWB_DW3000_SPI_DATASHEET_MAX_HZ) {
+        ESP_LOGW(TAG,
+                 "DW3000 SPI actual clock %lu Hz exceeds datasheet maximum %u Hz",
+                 (unsigned long)s_spi_clock_hz,
+                 (unsigned)UWB_DW3000_SPI_DATASHEET_MAX_HZ);
+    }
     if (s_spi_clock_hz > UWB_DW3000_SPI_VALIDATED_MAX_HZ) {
         ESP_LOGE(TAG,
                  "DW3000 SPI actual clock %lu Hz exceeds validated maximum %u Hz",
@@ -1867,12 +1880,6 @@ static esp_err_t uwb_dw3000_add_spi_device(uint32_t requested_clock_hz)
         s_spi = NULL;
         s_spi_clock_hz = 0;
         return ESP_ERR_INVALID_ARG;
-    }
-    if (s_spi_clock_hz > UWB_DW3000_SPI_DATASHEET_MAX_HZ) {
-        ESP_LOGW(TAG,
-                 "DW3000 SPI actual clock %lu Hz exceeds nominal datasheet maximum %u Hz",
-                 (unsigned long)s_spi_clock_hz,
-                 (unsigned)UWB_DW3000_SPI_DATASHEET_MAX_HZ);
     }
 
     ESP_LOGI(TAG, "DW3000 SPI clock: requested=%lu Hz actual=%lu Hz",
