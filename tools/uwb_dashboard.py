@@ -272,8 +272,6 @@ RUNTIME_PARAM_STATUS_FIELDS = {
     "flex_req_process_us": "runtime_flex_tdoa_request_process_us",
     "flex_resp_us": "runtime_flex_tdoa_response_subslot_us",
     "flex_resp_process_us": "runtime_flex_tdoa_response_process_us",
-    "flex_tdoa_anchor_correction_mm":
-        "runtime_flex_tdoa_anchor_correction_mm",
     "coordinator": "runtime_anchor_survey_coordinator_id",
     "coord": "runtime_anchor_survey_coordinator_id",
     "survey_rx_ms": "runtime_anchor_survey_rx_slice_ms",
@@ -336,6 +334,8 @@ def runtime_config_matches_status(
         checked += 1
 
     for key, field in (
+        ("flex_tdoa_anchor_correction_mm",
+         "runtime_flex_tdoa_anchor_correction_mm"),
         ("passive_ds_anchor_bias_mm",
          "runtime_passive_ds_anchor_bias_mm"),
         ("passive_ds_range_bias_mm",
