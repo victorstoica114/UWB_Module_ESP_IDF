@@ -100,8 +100,10 @@ TELEMETRY_STREAM_PASSIVE_DS_GEOMETRY = 14
 TELEMETRY_STREAM_NATIVE_DS_POSITION = 15
 TELEMETRY_STREAM_NATIVE_DS_GEOMETRY = 16
 TELEMETRY_STREAM_FLEX_GEOMETRY = 17
+TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2 = 18
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
+TELEMETRY_FLEX_OBSERVATION_V2_SAMPLE_LEN = 49
 TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
 TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32
 TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN = 41
@@ -111,6 +113,9 @@ TELEMETRY_PASSIVE_DS_POSITION_V4_SAMPLE_LEN = 63
 TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN = 24
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
 TELEMETRY_FLEX_OBSERVATION_STRUCT = struct.Struct("<IIiiiHBBBB")
+TELEMETRY_FLEX_OBSERVATION_V2_STRUCT = struct.Struct(
+    "<IIiiiiiiiIHBBBBHB"
+)
 TELEMETRY_FLEX_ANCHOR_RANGE_STRUCT = struct.Struct("<IIiiHBB")
 TELEMETRY_FLEX_POSITION_STRUCT = struct.Struct("<IIiiiiIHBB")
 TELEMETRY_PASSIVE_DS_OBSERVATION_V2_STRUCT = struct.Struct(
@@ -131,6 +136,8 @@ TELEMETRY_STREAM_SAMPLE_SIZES = {
     TELEMETRY_STREAM_BNO085_ACCEL: TELEMETRY_ACCEL_SAMPLE_LEN,
     TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION:
         TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN,
+    TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2:
+        TELEMETRY_FLEX_OBSERVATION_V2_SAMPLE_LEN,
     TELEMETRY_STREAM_FLEX_ANCHOR_RANGE:
         TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN,
     TELEMETRY_STREAM_FLEX_POSITION: TELEMETRY_FLEX_POSITION_SAMPLE_LEN,
@@ -162,6 +169,7 @@ TELEMETRY_STREAM_SAMPLE_SIZES = {
         TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN,
 }
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
+UWB_DTU_SECONDS = 15.650040064102564e-12
 
 
 class CalibrationCancelled(RuntimeError):
@@ -648,6 +656,58 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "z": z / 1000.0,
                     "accuracy": int(accuracy),
                     "reports": int(reports),
+                }
+            )
+        elif stream_type == TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2:
+            (
+                uptime_ms,
+                slot_id,
+                diff_mm,
+                raw_diff_mm,
+                anchor_distance_mm,
+                cfo_correction_mm,
+                raw_cfo_ppb,
+                estimated_cfo_ppb,
+                applied_cfo_ppb,
+                processing_dtu,
+                sequence,
+                tag_id,
+                initiator_id,
+                responder_id,
+                responder_index,
+                cfo_sample_count,
+                cfo_flags,
+            ) = TELEMETRY_FLEX_OBSERVATION_V2_STRUCT.unpack_from(
+                frame, offset
+            )
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "topic": "uwb.flex_tdoa.observation",
+                    "tdoa_protocol": "flextdoa",
+                    "slot_id": int(slot_id),
+                    "diff_m": diff_mm / 1000.0,
+                    "raw_diff_m": raw_diff_mm / 1000.0,
+                    "anchor_distance_m": anchor_distance_mm / 1000.0,
+                    "cfo_correction_m": cfo_correction_mm / 1000.0,
+                    "cfo_raw_ppm": raw_cfo_ppb / 1000.0,
+                    "cfo_estimated_ppm": estimated_cfo_ppb / 1000.0,
+                    "cfo_applied_ppm": applied_cfo_ppb / 1000.0,
+                    "processing_dtu": int(processing_dtu),
+                    "reply_delay_us": int(
+                        round(processing_dtu * UWB_DTU_SECONDS * 1e6)
+                    ),
+                    "cfo_sample_count": int(cfo_sample_count),
+                    "cfo_ready": bool(cfo_flags & 0x01),
+                    "cfo_estimate_applied": bool(cfo_flags & 0x02),
+                    "cfo_reset": bool(cfo_flags & 0x04),
+                    "cfo_flags": int(cfo_flags),
+                    "seq": int(sequence),
+                    "tag_id": int(tag_id),
+                    "initiator_id": int(initiator_id),
+                    "responder_id": int(responder_id),
+                    "responder_index": int(responder_index),
                 }
             )
         elif stream_type == TELEMETRY_STREAM_PASSIVE_DS_OBSERVATION_V2:

@@ -25,6 +25,7 @@
 #include "app_config.h"
 #include "app_identity.h"
 #include "app_runtime_config.h"
+#include "flextdoa_cfo_estimator.h"
 #include "flextdoa_collector.h"
 #include "flextdoa_protocol.h"
 #include "uwb_config.h"
@@ -1098,6 +1099,7 @@ static volatile TaskHandle_t s_calibration_timer_wait_task;
 // the entire 8 KiB real-time stack on entry to the tag/anchor loops.
 static struct uwb_flex_tdoa_observation
     s_flex_tdoa_tag_observations[UWB_FLEX_TDOA_MAX_OBSERVATIONS];
+static struct flextdoa_cfo_estimator s_flex_tdoa_cfo_estimator;
 static struct flextdoa_slot_collection s_flex_tdoa_tag_collection;
 static struct uwb_flex_tdoa_local_request s_flex_tdoa_local_request;
 static esp_timer_handle_t s_flex_tdoa_schedule_timer;
@@ -6111,11 +6113,27 @@ static void uwb_flex_tdoa_log_paper_observation(
     const double raw_diff_dtu =
         (double)rx_delta_tag_raw - reply_dtu - anchor_tof_dtu;
 
-    const double clock_offset_ratio =
-        observation->resp_clock_offset_ratio;
+    const double raw_cfo_fraction =
+        -observation->resp_clock_offset_ratio;
+    const app_runtime_config_t *config = app_runtime_config_get();
+    if (config != NULL) {
+        flextdoa_cfo_estimator_configure(
+            &s_flex_tdoa_cfo_estimator,
+            config->flex_tdoa_config_generation);
+    }
+    flextdoa_cfo_estimator_note_slot(
+        &s_flex_tdoa_cfo_estimator, observation->slot_id);
+    struct flextdoa_cfo_result cfo_result = {0};
+    if (!flextdoa_cfo_estimator_update(
+            &s_flex_tdoa_cfo_estimator, observation->responder_id,
+            raw_cfo_fraction, &cfo_result)) {
+        s_flex_tdoa_observation_invalid_since_summary++;
+        s_flex_tdoa_observation_invalid_cfo_since_summary++;
+        memset(observation, 0, sizeof(*observation));
+        return;
+    }
     const double reply_corrected_dtu =
-        uwb_dw3000_remote_interval_in_local_dtu(reply_dtu,
-                                                clock_offset_ratio);
+        reply_dtu * (1.0 - cfo_result.applied_fraction);
     const struct flextdoa_observation_input protocol_input = {
         .request_rx_tag_dtu = observation->request_rx_tag_ts,
         .response_rx_tag_dtu = observation->response_rx_tag_ts,
@@ -6123,7 +6141,7 @@ static void uwb_flex_tdoa_log_paper_observation(
             (uint32_t)observation->responder_reply_dtu,
         /* The driver ratio is applied as (1 + ratio); Eq. (12) names the
          * same DW3000 correction epsilon and applies (1 - epsilon). */
-        .responder_to_tag_cfo_fraction = -clock_offset_ratio,
+        .responder_to_tag_cfo_fraction = cfo_result.applied_fraction,
         .initiator_responder_tof_dtu = anchor_tof_dtu,
         .dtu_seconds = UWB_DW3000_TIME_UNIT_SECONDS,
         .speed_of_light_mps = UWB_DW3000_SPEED_OF_LIGHT_MPS,
@@ -6135,13 +6153,24 @@ static void uwb_flex_tdoa_log_paper_observation(
         return;
     }
     const double raw_diff_m = uwb_distance_tof_to_meters(raw_diff_dtu);
+    const int32_t cfo_correction_mm =
+        uwb_distance_meters_to_mm(diff_m - raw_diff_m);
+    const int32_t raw_cfo_ppb =
+        (int32_t)lround(cfo_result.raw_fraction * 1000000000.0);
+    const int32_t estimated_cfo_ppb =
+        (int32_t)lround(cfo_result.estimated_fraction * 1000000000.0);
+    const int32_t applied_cfo_ppb =
+        (int32_t)lround(cfo_result.applied_fraction * 1000000000.0);
     const bool queued =
         wireless_telemetry_service_submit_flex_tdoa_observation(
             tag_id, observation->initiator_id, observation->responder_id,
             observation->responder_index, observation->sequence,
             observation->slot_id, uwb_distance_meters_to_mm(diff_m),
             uwb_distance_meters_to_mm(raw_diff_m),
-            observation->anchor_distance_mm);
+            observation->anchor_distance_mm, cfo_correction_mm,
+            raw_cfo_ppb, estimated_cfo_ppb, applied_cfo_ppb,
+            (uint32_t)observation->responder_reply_dtu,
+            cfo_result.sample_count, cfo_result.flags);
     (void)uwb_flex_tdoa_runtime_submit_anchor_range(
         observation->initiator_id, observation->responder_id,
         observation->anchor_distance_slot_id,
@@ -6556,6 +6585,12 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
            sizeof(s_flex_tdoa_tag_observations));
     flextdoa_collector_reset(&s_flex_tdoa_tag_collection);
     const app_runtime_config_t *config = app_runtime_config_get();
+    flextdoa_cfo_estimator_reset(&s_flex_tdoa_cfo_estimator);
+    if (config != NULL) {
+        flextdoa_cfo_estimator_configure(
+            &s_flex_tdoa_cfo_estimator,
+            config->flex_tdoa_config_generation);
+    }
     const uint8_t tag_id = s_source_id;
     const esp_err_t solver_err = uwb_flex_tdoa_runtime_start_solver();
     if (solver_err != ESP_OK) {

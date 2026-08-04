@@ -39,6 +39,7 @@ enum {
     WIRELESS_TELEMETRY_FRAME_HEADER_LEN = 12,
     WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN = 21,
     WIRELESS_TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26,
+    WIRELESS_TELEMETRY_FLEX_OBSERVATION_V2_SAMPLE_LEN = 49,
     WIRELESS_TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN = 41,
     WIRELESS_TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20,
     WIRELESS_TELEMETRY_FLEX_POSITION_SAMPLE_LEN = 32,
@@ -64,6 +65,7 @@ enum {
     WIRELESS_TELEMETRY_STREAM_NATIVE_DS_POSITION = 15,
     WIRELESS_TELEMETRY_STREAM_NATIVE_DS_GEOMETRY = 16,
     WIRELESS_TELEMETRY_STREAM_FLEX_GEOMETRY = 17,
+    WIRELESS_TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2 = 18,
     WIRELESS_TELEMETRY_RECONNECT_MS = 2000,
     WIRELESS_TELEMETRY_WIFI_WAIT_MS = 500,
     WIRELESS_TELEMETRY_QUEUE_WAIT_MS = 20,
@@ -108,14 +110,20 @@ typedef struct {
     int32_t anchor_distance_mm;
     int32_t cfo_correction_mm;
     int32_t clock_offset_ppb;
+    int32_t raw_cfo_ppb;
+    int32_t estimated_cfo_ppb;
+    int32_t applied_cfo_ppb;
     uint32_t reply_delay_us;
+    uint32_t processing_dtu;
     uint16_t range_age_slots;
+    uint16_t cfo_sample_count;
     uint16_t sequence;
     uint8_t tag_id;
     uint8_t initiator_id;
     uint8_t responder_id;
     uint8_t responder_index;
     uint8_t range_source;
+    uint8_t cfo_flags;
 } wireless_telemetry_flex_observation_t;
 
 typedef struct {
@@ -538,8 +546,9 @@ static bool wireless_telemetry_binary_item_info(
         *sample_len = WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN;
         return true;
     case WIRELESS_TELEMETRY_ITEM_FLEX_TDOA_OBSERVATION:
-        *stream_type = WIRELESS_TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION;
-        *sample_len = WIRELESS_TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN;
+        *stream_type =
+            WIRELESS_TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2;
+        *sample_len = WIRELESS_TELEMETRY_FLEX_OBSERVATION_V2_SAMPLE_LEN;
         return true;
     case WIRELESS_TELEMETRY_ITEM_FLEX_ANCHOR_RANGE:
         *stream_type = WIRELESS_TELEMETRY_STREAM_FLEX_ANCHOR_RANGE;
@@ -676,12 +685,25 @@ static bool wireless_telemetry_append_binary_sample(
             &sample[12], item->data.flex_observation.raw_diff_mm);
         wireless_telemetry_write_i32_le(
             &sample[16], item->data.flex_observation.anchor_distance_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[20], item->data.flex_observation.cfo_correction_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[24], item->data.flex_observation.raw_cfo_ppb);
+        wireless_telemetry_write_i32_le(
+            &sample[28], item->data.flex_observation.estimated_cfo_ppb);
+        wireless_telemetry_write_i32_le(
+            &sample[32], item->data.flex_observation.applied_cfo_ppb);
+        wireless_telemetry_write_u32_le(
+            &sample[36], item->data.flex_observation.processing_dtu);
         wireless_telemetry_write_u16_le(
-            &sample[20], item->data.flex_observation.sequence);
-        sample[22] = item->data.flex_observation.tag_id;
-        sample[23] = item->data.flex_observation.initiator_id;
-        sample[24] = item->data.flex_observation.responder_id;
-        sample[25] = item->data.flex_observation.responder_index;
+            &sample[40], item->data.flex_observation.sequence);
+        sample[42] = item->data.flex_observation.tag_id;
+        sample[43] = item->data.flex_observation.initiator_id;
+        sample[44] = item->data.flex_observation.responder_id;
+        sample[45] = item->data.flex_observation.responder_index;
+        wireless_telemetry_write_u16_le(
+            &sample[46], item->data.flex_observation.cfo_sample_count);
+        sample[48] = item->data.flex_observation.cfo_flags;
         break;
     case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_OBSERVATION:
         wireless_telemetry_write_u32_le(
@@ -1283,7 +1305,11 @@ bool wireless_telemetry_service_submit_bno085_accel(
 bool wireless_telemetry_service_submit_flex_tdoa_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
     uint8_t responder_index, uint16_t sequence, uint32_t slot_id,
-    int32_t diff_mm, int32_t raw_diff_mm, int32_t anchor_distance_mm)
+    int32_t diff_mm, int32_t raw_diff_mm, int32_t anchor_distance_mm,
+    int32_t cfo_correction_mm, int32_t raw_cfo_ppb,
+    int32_t estimated_cfo_ppb, int32_t applied_cfo_ppb,
+    uint32_t processing_dtu, uint16_t cfo_sample_count,
+    uint8_t cfo_flags)
 {
     if (!s_connected) {
         return false;
@@ -1300,6 +1326,13 @@ bool wireless_telemetry_service_submit_flex_tdoa_observation(
                 .diff_mm = diff_mm,
                 .raw_diff_mm = raw_diff_mm,
                 .anchor_distance_mm = anchor_distance_mm,
+                .cfo_correction_mm = cfo_correction_mm,
+                .raw_cfo_ppb = raw_cfo_ppb,
+                .estimated_cfo_ppb = estimated_cfo_ppb,
+                .applied_cfo_ppb = applied_cfo_ppb,
+                .processing_dtu = processing_dtu,
+                .cfo_sample_count = cfo_sample_count,
+                .cfo_flags = cfo_flags,
                 .sequence = sequence,
                 .tag_id = tag_id,
                 .initiator_id = initiator_id,
