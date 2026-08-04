@@ -2523,27 +2523,21 @@ static uint8_t uwb_dw3000_current_rdb_clear_mask(void)
                : DW3000_RDB_BUFFER_1_CLEAR_MASK;
 }
 
-static esp_err_t uwb_dw3000_clear_rx_good_status(void)
+static esp_err_t uwb_dw3000_release_rx_double_buffer(void)
 {
-    return uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW,
-                                    DW3000_SYS_STATUS_SUB,
-                                    DW3000_STATUS_RX_GOOD_CLEAR_MASK, 4);
-}
-
-static esp_err_t uwb_dw3000_release_rx_double_buffer(
-    bool rx_good_status_already_cleared)
-{
-    // The processed RDB status belongs to the host-selected buffer. Clear it
-    // before CMD_DB_TOGGLE transfers host ownership to the other buffer.
+    // Qorvo's double-buffer sequence is read data, clear the processed RDB
+    // status and the corresponding RX-good events, then toggle the host
+    // buffer pointer. A global CMD_CLR_IRQS here can erase unrelated TX state.
     ESP_RETURN_ON_ERROR(
         uwb_dw3000_write_u32_len(DW3000_REG_RDB_STATUS,
                                  DW3000_RDB_STATUS_SUB,
                                  uwb_dw3000_current_rdb_clear_mask(), 1),
         TAG, "double-buffer RDB_STATUS clear failed");
-    if (!rx_good_status_already_cleared) {
-        ESP_RETURN_ON_ERROR(uwb_dw3000_clear_rx_good_status(), TAG,
-                            "double-buffer RX-good status clear failed");
-    }
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW,
+                                 DW3000_SYS_STATUS_SUB,
+                                 DW3000_STATUS_RX_GOOD_CLEAR_MASK, 4),
+        TAG, "double-buffer RX-good status clear failed");
     ESP_RETURN_ON_ERROR(uwb_dw3000_fast_command(DW3000_CMD_DB_TOGGLE), TAG,
                         "double-buffer release failed");
     s_rx_double_buffer_index ^= 1U;
@@ -2555,9 +2549,7 @@ static esp_err_t uwb_dw3000_release_pending_flex_request(void)
     if (!s_flex_tdoa_anchor_request_buffer_pending) {
         return ESP_OK;
     }
-    // FlexTDOA clears RX-good before the early CMD_RX. The deferred request
-    // release must not clear it again after the receiver has been restarted.
-    const esp_err_t err = uwb_dw3000_release_rx_double_buffer(true);
+    const esp_err_t err = uwb_dw3000_release_rx_double_buffer();
     if (err == ESP_OK) {
         s_flex_tdoa_anchor_request_buffer_pending = false;
     }
@@ -3983,18 +3975,14 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                 spi_bus_acquired = true;
 
                 // DW3000 does not support RXAUTR in double-buffer mode. In
-                // FlexTDOA, clear the completed RX event before CMD_RX, as in
-                // Qorvo's ISR: this both deasserts IRQ and permits re-enable
-                // from the RX callback. Restart RX before copying the occupied
-                // buffer so the radio can receive into the other buffer
-                // concurrently. CMD_DB_TOGGLE still releases this buffer only
-                // after its metadata and payload have been copied completely.
+                // FlexTDOA, restart RX before copying the occupied buffer so
+                // the radio can receive into the other buffer concurrently.
+                // CMD_DB_TOGGLE still releases this buffer only after its
+                // metadata and payload have been copied completely.
                 s_rx_armed = false;
                 if (s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
-                    esp_err_t rearm_err = uwb_dw3000_clear_rx_good_status();
-                    if (rearm_err == ESP_OK) {
-                        rearm_err = uwb_dw3000_fast_command(DW3000_CMD_RX);
-                    }
+                    const esp_err_t rearm_err =
+                        uwb_dw3000_fast_command(DW3000_CMD_RX);
                     if (rearm_err != ESP_OK) {
                         spi_device_release_bus(s_spi);
                         s_rx_error_count++;
@@ -4167,8 +4155,7 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                 const esp_err_t release_err =
                     flex_anchor_request
                         ? ESP_OK
-                        : uwb_dw3000_release_rx_double_buffer(
-                              double_buffer_early_rearmed);
+                        : uwb_dw3000_release_rx_double_buffer();
                 if (spi_bus_acquired) {
                     spi_device_release_bus(s_spi);
                     spi_bus_acquired = false;
