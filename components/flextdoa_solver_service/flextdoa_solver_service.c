@@ -6,6 +6,7 @@
 #include "app_runtime_config.h"
 #include "esp_log.h"
 #include "flextdoa_algmin.h"
+#include "flextdoa_frame_aggregator.h"
 #include "flextdoa_protocol.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -19,6 +20,9 @@ enum {
     FLEX_SOLVER_QUEUE_LEN = 128,
     FLEX_SOLVER_TASK_STACK_BYTES = 6144,
     FLEX_SOLVER_TASK_PRIORITY = 3,
+    FLEX_SOLVER_FRAME_CAPACITY =
+        APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS *
+        (APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U),
 };
 
 enum flex_solver_item_type {
@@ -36,39 +40,34 @@ struct flex_solver_item {
     int32_t difference_mm;
 };
 
-struct flex_solver_slot {
-    bool active;
-    uint8_t tag_id;
-    uint32_t slot_id;
-    uint16_t initiator_id;
-    uint8_t expected_count;
-    uint16_t received_mask;
-    struct flextdoa_range_difference
-        observations[FLEXTDOA_MAX_RESPONDERS];
-};
-
 struct flex_solver_state {
     bool geometry_ready;
     uint8_t anchor_count;
     uint32_t geometry_generation;
     struct flextdoa_anchor_position anchors[FLEXTDOA_MAX_ANCHORS];
     struct flextdoa_algmin_seed previous_position;
-    struct flex_solver_slot slot;
-    bool last_completed_slot_valid;
-    uint32_t last_completed_slot;
+    uint32_t frame_slot_ids[FLEX_SOLVER_FRAME_CAPACITY];
+    struct flextdoa_range_difference
+        frame_observations[FLEX_SOLVER_FRAME_CAPACITY];
+    struct flextdoa_range_difference
+        frame_solver_observations[FLEX_SOLVER_FRAME_CAPACITY];
+    struct flextdoa_frame_aggregator frame;
+    uint8_t frame_tag_id;
+    bool last_closed_frame_valid;
+    uint32_t last_closed_frame;
     uint32_t last_published_geometry_generation;
     TickType_t last_geometry_publish_tick;
     TickType_t summary_tick;
     uint32_t observations_accepted;
     uint32_t observations_rejected;
-    uint32_t slots_complete;
-    uint32_t slots_incomplete;
+    uint32_t frames_complete;
+    uint32_t frames_incomplete;
     uint32_t positions_published;
     uint32_t solver_rejected;
     uint32_t previous_observations_accepted;
     uint32_t previous_observations_rejected;
-    uint32_t previous_slots_complete;
-    uint32_t previous_slots_incomplete;
+    uint32_t previous_frames_complete;
+    uint32_t previous_frames_incomplete;
     uint32_t previous_positions_published;
     uint32_t previous_solver_rejected;
 };
@@ -76,13 +75,6 @@ struct flex_solver_state {
 static QueueHandle_t s_queue;
 static bool s_started;
 static volatile uint32_t s_dropped;
-
-static void flex_solver_clear_slot(struct flex_solver_slot *slot)
-{
-    if (slot != NULL) {
-        memset(slot, 0, sizeof(*slot));
-    }
-}
 
 static void flex_solver_load_geometry(struct flex_solver_state *state)
 {
@@ -102,10 +94,13 @@ static void flex_solver_load_geometry(struct flex_solver_state *state)
             config->flex_tdoa_anchor_y_mm[index] / 1000.0;
     }
     state->previous_position.valid = false;
-    state->last_completed_slot_valid = false;
+    state->frame_tag_id = 0U;
+    state->last_closed_frame_valid = false;
     state->last_published_geometry_generation = 0U;
     state->last_geometry_publish_tick = 0U;
-    flex_solver_clear_slot(&state->slot);
+    flextdoa_frame_aggregator_init(
+        &state->frame, state->frame_slot_ids,
+        state->frame_observations, FLEX_SOLVER_FRAME_CAPACITY);
     if (state->geometry_ready) {
         ESP_LOGI(TAG,
                  "paper AlgMin geometry loaded generation=%lu anchors=%u",
@@ -185,19 +180,54 @@ static bool flex_solver_publish_geometry(
     return submitted;
 }
 
-static void flex_solver_finish_slot(struct flex_solver_state *state)
+static void flex_solver_close_frame(struct flex_solver_state *state)
 {
-    struct flex_solver_slot *slot = &state->slot;
+    struct flextdoa_frame_aggregator *frame = &state->frame;
+    if (!frame->active) {
+        return;
+    }
+    const uint32_t closed_frame = frame->frame_id;
+    const uint32_t closing_slot = frame->last_slot_id;
+    const uint8_t tag_id = state->frame_tag_id;
+    const uint16_t observation_count =
+        (uint16_t)frame->observation_count;
+    const bool complete = flextdoa_frame_aggregator_complete(frame);
+    if (complete) {
+        state->frames_complete++;
+    } else {
+        state->frames_incomplete++;
+    }
+    state->last_closed_frame = closed_frame;
+    state->last_closed_frame_valid = true;
+
+    if (!flextdoa_frame_aggregator_solvable(frame)) {
+        state->solver_rejected++;
+        state->frame_tag_id = 0U;
+        flextdoa_frame_aggregator_reset(frame);
+        return;
+    }
+
+    const size_t solver_observation_count =
+        flextdoa_frame_aggregator_copy_corrected(
+            frame, NULL, 0U, state->frame_solver_observations,
+            FLEX_SOLVER_FRAME_CAPACITY);
+    if (solver_observation_count != frame->observation_count) {
+        state->solver_rejected++;
+        state->frame_tag_id = 0U;
+        flextdoa_frame_aggregator_reset(frame);
+        return;
+    }
+
     struct flextdoa_algmin_result result = {0};
     if (!flextdoa_algmin_solve_2d(
-            state->anchors, state->anchor_count, slot->observations,
-            slot->expected_count, &state->previous_position, &result) ||
+            state->anchors, state->anchor_count,
+            state->frame_solver_observations,
+            solver_observation_count, &state->previous_position, &result) ||
         !result.valid || fabs(result.x_m) > 100000.0 ||
         fabs(result.y_m) > 100000.0) {
         state->solver_rejected++;
-        state->last_completed_slot = slot->slot_id;
-        state->last_completed_slot_valid = true;
-        flex_solver_clear_slot(slot);
+        state->frame_tag_id = 0U;
+        flextdoa_frame_aggregator_reset(frame);
         return;
     }
 
@@ -208,7 +238,7 @@ static void flex_solver_finish_slot(struct flex_solver_state *state)
     if (state->last_published_geometry_generation !=
             state->geometry_generation ||
         now - state->last_geometry_publish_tick >= pdMS_TO_TICKS(1000U)) {
-        if (flex_solver_publish_geometry(state, slot->tag_id)) {
+        if (flex_solver_publish_geometry(state, tag_id)) {
             state->last_published_geometry_generation =
                 state->geometry_generation;
             state->last_geometry_publish_tick = now;
@@ -217,17 +247,15 @@ static void flex_solver_finish_slot(struct flex_solver_state *state)
     const int32_t rms_mm =
         (int32_t)lround(result.residual_rms_m * 1000.0);
     if (wireless_telemetry_service_submit_flex_position(
-            slot->tag_id, slot->slot_id,
+            tag_id, closing_slot,
             (int32_t)lround(result.x_m * 1000.0),
             (int32_t)lround(result.y_m * 1000.0), rms_mm, rms_mm,
-            slot->expected_count, state->anchor_count,
+            observation_count, state->anchor_count,
             state->geometry_generation)) {
         state->positions_published++;
     }
-    state->slots_complete++;
-    state->last_completed_slot = slot->slot_id;
-    state->last_completed_slot_valid = true;
-    flex_solver_clear_slot(slot);
+    state->frame_tag_id = 0U;
+    flextdoa_frame_aggregator_reset(frame);
 }
 
 static void flex_solver_accept_observation(
@@ -252,54 +280,61 @@ static void flex_solver_accept_observation(
         return;
     }
 
-    if (!state->slot.active) {
-        if (state->last_completed_slot_valid &&
-            (int32_t)(item->slot_id - state->last_completed_slot) <= 0) {
-            state->observations_rejected++;
-            return;
-        }
-        state->slot.active = true;
-        state->slot.tag_id = item->tag_id;
-        state->slot.slot_id = item->slot_id;
-        state->slot.initiator_id = item->initiator_id;
-        state->slot.expected_count = plan.responder_count;
-        for (uint8_t index = 0U; index < plan.responder_count; ++index) {
-            state->slot.observations[index].initiator_id =
-                item->initiator_id;
-            state->slot.observations[index].responder_id =
-                plan.responder_ids[index];
-        }
-    } else if (state->slot.slot_id != item->slot_id) {
-        state->slots_incomplete++;
-        flex_solver_clear_slot(&state->slot);
-        flex_solver_accept_observation(state, item);
-        return;
-    } else if (state->slot.tag_id != item->tag_id ||
-               state->slot.initiator_id != item->initiator_id ||
-               state->slot.expected_count != plan.responder_count) {
-        state->observations_rejected++;
-        return;
-    }
-
-    const uint16_t bit = (uint16_t)(1U << responder_index);
     const double difference_m = item->difference_mm / 1000.0;
-    if ((state->slot.received_mask & bit) != 0U ||
-        !flex_solver_observation_is_physical(
+    if (!flex_solver_observation_is_physical(
             state, item->initiator_id, item->responder_id,
             difference_m)) {
         state->observations_rejected++;
         return;
     }
-    state->slot.observations[responder_index].range_difference_m =
-        difference_m;
-    state->slot.received_mask |= bit;
-    state->observations_accepted++;
 
-    const uint16_t expected_mask =
-        (uint16_t)((1U << state->slot.expected_count) - 1U);
-    if (state->slot.received_mask == expected_mask) {
-        flex_solver_finish_slot(state);
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint32_t frame_id =
+        item->slot_id / config->flex_tdoa_slot_count;
+    if (state->last_closed_frame_valid &&
+        (int32_t)(frame_id - state->last_closed_frame) <= 0) {
+        state->observations_rejected++;
+        return;
     }
+    if (state->frame.active && state->frame_tag_id != item->tag_id) {
+        state->observations_rejected++;
+        return;
+    }
+
+    const struct flextdoa_range_difference observation = {
+        .initiator_id = item->initiator_id,
+        .responder_id = item->responder_id,
+        .range_difference_m = difference_m,
+    };
+    const uint16_t complete_frame_observations =
+        (uint16_t)((uint16_t)config->flex_tdoa_slot_count *
+                   config->flex_tdoa_responder_count);
+    for (uint8_t attempt = 0U; attempt < 2U; ++attempt) {
+        const enum flextdoa_frame_ingest_result ingest =
+            flextdoa_frame_aggregator_ingest(
+                &state->frame, item->slot_id,
+                config->flex_tdoa_slot_count,
+                config->flex_tdoa_responder_count,
+                complete_frame_observations, &observation);
+        if (ingest == FLEXTDOA_FRAME_BOUNDARY) {
+            flex_solver_close_frame(state);
+            continue;
+        }
+        if (ingest == FLEXTDOA_FRAME_ACCEPTED ||
+            ingest == FLEXTDOA_FRAME_COMPLETE) {
+            if (state->frame.observation_count == 1U) {
+                state->frame_tag_id = item->tag_id;
+            }
+            state->observations_accepted++;
+            if (ingest == FLEXTDOA_FRAME_COMPLETE) {
+                flex_solver_close_frame(state);
+            }
+            return;
+        }
+        state->observations_rejected++;
+        return;
+    }
+    state->observations_rejected++;
 }
 
 static void flex_solver_log_summary(struct flex_solver_state *state,
@@ -314,16 +349,16 @@ static void flex_solver_log_summary(struct flex_solver_state *state,
     }
     (void)wireless_log_service_submit(
         'I', TAG,
-        "FLEX_TDOA paper AlgMin geometry=%u obs=%lu/%lu slots=%lu/%lu pos=%lu reject=%lu queue_drop=%lu",
+        "FLEX_TDOA raw frame AlgMin geometry=%u obs=%lu/%lu frames=%lu/%lu pos=%lu reject=%lu queue_drop=%lu",
         state->geometry_ready ? 1U : 0U,
         (unsigned long)(state->observations_accepted -
                         state->previous_observations_accepted),
         (unsigned long)(state->observations_rejected -
                         state->previous_observations_rejected),
-        (unsigned long)(state->slots_complete -
-                        state->previous_slots_complete),
-        (unsigned long)(state->slots_incomplete -
-                        state->previous_slots_incomplete),
+        (unsigned long)(state->frames_complete -
+                        state->previous_frames_complete),
+        (unsigned long)(state->frames_incomplete -
+                        state->previous_frames_incomplete),
         (unsigned long)(state->positions_published -
                         state->previous_positions_published),
         (unsigned long)(state->solver_rejected -
@@ -331,8 +366,8 @@ static void flex_solver_log_summary(struct flex_solver_state *state,
         (unsigned long)s_dropped);
     state->previous_observations_accepted = state->observations_accepted;
     state->previous_observations_rejected = state->observations_rejected;
-    state->previous_slots_complete = state->slots_complete;
-    state->previous_slots_incomplete = state->slots_incomplete;
+    state->previous_frames_complete = state->frames_complete;
+    state->previous_frames_incomplete = state->frames_incomplete;
     state->previous_positions_published = state->positions_published;
     state->previous_solver_rejected = state->solver_rejected;
     state->summary_tick = now;
@@ -344,7 +379,7 @@ static void flex_solver_task(void *arg)
     static struct flex_solver_state state;
     memset(&state, 0, sizeof(state));
     flex_solver_load_geometry(&state);
-    ESP_LOGI(TAG, "paper-faithful slot-local AlgMin active on core=%d",
+    ESP_LOGI(TAG, "raw frame-local AlgMin active on core=%d",
              xPortGetCoreID());
 
     while (true) {
