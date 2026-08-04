@@ -60,6 +60,27 @@ uint32_t flextdoa_slot_duration_us(
     return duration <= UINT32_MAX ? (uint32_t)duration : 0U;
 }
 
+uint32_t flextdoa_response_collection_us(
+    const struct flextdoa_timing *timing, uint8_t responder_count)
+{
+    if (timing == NULL || responder_count > FLEXTDOA_MAX_RESPONDERS) {
+        return 0U;
+    }
+
+    /*
+     * Measured from reception of the request to the end of the final
+     * response subslot. The paper defines response_subslot_us as the whole
+     * response subslot, including the packet, so no trailing grace belongs
+     * here. The rest of the slot is deliberately left for response
+     * processing and the next slot's guard interval.
+     */
+    const uint64_t duration =
+        (uint64_t)timing->request_subslot_us +
+        timing->request_process_us +
+        (uint64_t)responder_count * timing->response_subslot_us;
+    return duration <= UINT32_MAX ? (uint32_t)duration : 0U;
+}
+
 uint32_t flextdoa_frame_duration_us(
     const struct flextdoa_timing *timing, uint8_t responder_count,
     uint8_t slot_count)

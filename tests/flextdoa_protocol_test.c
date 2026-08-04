@@ -16,10 +16,18 @@ static void assert_near(double actual, double expected, double tolerance)
 
 static void test_paper_timing(void)
 {
+    assert(flextdoa_response_collection_us(&FLEXTDOA_PAPER_TIMING, 3U) ==
+           3000U);
     assert(flextdoa_slot_duration_us(&FLEXTDOA_PAPER_TIMING, 3U) ==
            5050U);
     assert(flextdoa_frame_duration_us(&FLEXTDOA_PAPER_TIMING, 3U, 4U) ==
            20200U);
+
+    /* K * response_process plus the next slot's guard remain after RX. */
+    assert(flextdoa_slot_duration_us(&FLEXTDOA_PAPER_TIMING, 3U) -
+               flextdoa_response_collection_us(
+                   &FLEXTDOA_PAPER_TIMING, 3U) ==
+           2050U);
 }
 
 static void test_ci_cr_schedule(void)

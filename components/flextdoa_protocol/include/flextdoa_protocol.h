@@ -58,6 +58,8 @@ struct flextdoa_observation_input {
 
 uint32_t flextdoa_slot_duration_us(
     const struct flextdoa_timing *timing, uint8_t responder_count);
+uint32_t flextdoa_response_collection_us(
+    const struct flextdoa_timing *timing, uint8_t responder_count);
 uint32_t flextdoa_frame_duration_us(
     const struct flextdoa_timing *timing, uint8_t responder_count,
     uint8_t slot_count);

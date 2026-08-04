@@ -6423,12 +6423,27 @@ static size_t uwb_flex_tdoa_tag_collect_response_burst(
         request->rx_host_time_us > 0
             ? request->rx_host_time_us
             : esp_timer_get_time();
-    const int64_t train_us =
-        (int64_t)config->flex_tdoa_request_subslot_us +
-        (int64_t)config->flex_tdoa_request_process_us +
-        (int64_t)responder_count *
-            (int64_t)config->flex_tdoa_response_subslot_us;
-    const int64_t deadline_us = request_host_us + train_us + 1000LL;
+    const struct flextdoa_timing timing = {
+        .guard_us = config->flex_tdoa_guard_us,
+        .request_subslot_us = config->flex_tdoa_request_subslot_us,
+        .request_process_us = config->flex_tdoa_request_process_us,
+        .response_subslot_us = config->flex_tdoa_response_subslot_us,
+        .response_process_us = config->flex_tdoa_response_process_us,
+    };
+    const uint32_t collection_us = flextdoa_response_collection_us(
+        &timing, responder_count);
+    if (collection_us == 0U) {
+        return 0U;
+    }
+    /*
+     * Stop at the end of the response train. receive_next() already rounds
+     * a positive sub-millisecond remainder up to one millisecond, which is
+     * sufficient to catch the IRQ for an on-time final response. Adding a
+     * second 1 ms grace here made a missing response consume the paper's
+     * response-processing interval and caused the following request to be
+     * missed almost deterministically.
+     */
+    const int64_t deadline_us = request_host_us + (int64_t)collection_us;
     size_t collected = 0U;
     while (collected < responder_count &&
            !uwb_dw3000_runtime_switch_pending()) {
