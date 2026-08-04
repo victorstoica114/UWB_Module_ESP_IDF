@@ -210,16 +210,32 @@ static void test_observation_math_and_wrap(void)
         1.0e-9);
 }
 
-static void test_dw3000_cia_sign_into_equation_12(void)
+static void test_dw3000_cia_sign_with_physical_clock_model(void)
 {
-    const uint32_t processing_dtu =
-        (uint32_t)llround(0.0025 / TEST_DTU_SECONDS);
-    const uint64_t request_rx_dtu = 1000U;
+    const uint64_t timestamp_mask = (1ULL << 40U) - 1ULL;
+    const uint32_t processing_dtu = 1UL << 27U;
+    const uint64_t request_rx_dtu = timestamp_mask - 5000U;
     const uint64_t anchor_tof_dtu = 10000U;
-    const uint64_t response_rx_dtu =
-        request_rx_dtu + processing_dtu + anchor_tof_dtu;
+    const uint64_t expected_tdoa_dtu = 400U;
 
     for (int16_t raw = -67; raw <= 67; raw += 134) {
+        /*
+         * DW3000 raw > 0 means that the tag's local RX clock is slower
+         * than the responder's TX clock. Equations (9), (11), and (12)
+         * therefore make the responder interval appear at the tag as
+         * processing * (1 - epsilon), where epsilon = raw / 2^26.
+         * processing_dtu is a multiple of 2^26 so this synthetic interval
+         * is exactly representable by an integer DW3000 timestamp.
+         */
+        const double epsilon =
+            (double)raw / (double)(1UL << 26U);
+        const uint64_t corrected_processing_dtu =
+            processing_dtu - (int64_t)raw * 2;
+        const uint64_t tag_interval_dtu = corrected_processing_dtu +
+                                          anchor_tof_dtu +
+                                          expected_tdoa_dtu;
+        const uint64_t response_rx_dtu =
+            (request_rx_dtu + tag_interval_dtu) & timestamp_mask;
         const double driver_scale_delta =
             flextdoa_dw3000_cia_scale_delta(raw);
         const struct flextdoa_observation_input input = {
@@ -236,15 +252,14 @@ static void test_dw3000_cia_sign_into_equation_12(void)
         assert(flextdoa_compute_range_difference_m(
             &input, &range_difference_m));
 
-        const double epsilon = (double)raw / (double)(1UL << 26U);
         const double expected_m =
-            epsilon * (double)processing_dtu * TEST_DTU_SECONDS *
+            (double)expected_tdoa_dtu * TEST_DTU_SECONDS *
             TEST_C_MPS;
         assert_near(range_difference_m, expected_m, 1.0e-9);
-        assert((raw > 0 && range_difference_m > 0.7480 &&
-                range_difference_m < 0.7481) ||
-               (raw < 0 && range_difference_m < -0.7480 &&
-                range_difference_m > -0.7481));
+        assert(response_rx_dtu < request_rx_dtu);
+        assert_near(
+            (double)corrected_processing_dtu,
+            (double)processing_dtu * (1.0 - epsilon), 0.0);
     }
 }
 
@@ -255,7 +270,7 @@ int main(void)
     test_packet_codec();
     test_slot_collector();
     test_observation_math_and_wrap();
-    test_dw3000_cia_sign_into_equation_12();
+    test_dw3000_cia_sign_with_physical_clock_model();
     puts("flextdoa_protocol_test: PASS");
     return 0;
 }
