@@ -11,10 +11,19 @@ static const char *TAG = "native_ds_twr";
 #define NATIVE_DS_MAGIC_1 'D'
 #define NATIVE_DS_MAGIC_2 'S'
 #define NATIVE_DS_MAGIC_3 '2'
-#define NATIVE_DS_VERSION 2U
+#define NATIVE_DS_VERSION 3U
 #define NATIVE_DS_HEADER_LEN 10U
 #define NATIVE_DS_POLL_LEN NATIVE_DS_HEADER_LEN
-#define NATIVE_DS_RESPONSE_LEN NATIVE_DS_HEADER_LEN
+#define NATIVE_DS_RESPONSE_FLAGS_OFFSET NATIVE_DS_HEADER_LEN
+#define NATIVE_DS_RESPONSE_TAG_FRAME_OFFSET 11U
+#define NATIVE_DS_RESPONSE_TAG_DISTANCE_OFFSET 13U
+#define NATIVE_DS_RESPONSE_SURVEY_INITIATOR_OFFSET 17U
+#define NATIVE_DS_RESPONSE_SURVEY_RESPONDER_OFFSET 18U
+#define NATIVE_DS_RESPONSE_SURVEY_FRAME_OFFSET 19U
+#define NATIVE_DS_RESPONSE_SURVEY_DISTANCE_OFFSET 21U
+#define NATIVE_DS_RESPONSE_LEN 25U
+#define NATIVE_DS_RESPONSE_HAS_TAG_RANGE (1U << 0U)
+#define NATIVE_DS_RESPONSE_HAS_SURVEY_RANGE (1U << 1U)
 #define NATIVE_DS_FINAL_POLL_TX_OFFSET NATIVE_DS_HEADER_LEN
 #define NATIVE_DS_FINAL_RESPONSE_RX_OFFSET 15U
 #define NATIVE_DS_FINAL_FINAL_TX_OFFSET 20U
@@ -43,6 +52,19 @@ struct native_ds_frame {
     uint16_t payload_len;
 };
 
+struct native_ds_completed_report {
+    bool valid;
+    uint8_t initiator_id;
+    uint8_t responder_id;
+    uint16_t frame_id;
+    uint32_t distance_mm;
+};
+
+struct native_ds_anchor_reports {
+    struct native_ds_completed_report tag;
+    struct native_ds_completed_report survey;
+};
+
 static struct uwb_native_ds_pipeline_stats s_stats;
 
 static void put_u16(uint8_t *payload, size_t offset, uint16_t value)
@@ -55,6 +77,22 @@ static uint16_t get_u16(const uint8_t *payload, size_t offset)
 {
     return (uint16_t)((uint16_t)payload[offset] |
                       ((uint16_t)payload[offset + 1U] << 8U));
+}
+
+static void put_u32(uint8_t *payload, size_t offset, uint32_t value)
+{
+    payload[offset] = (uint8_t)(value & 0xffU);
+    payload[offset + 1U] = (uint8_t)((value >> 8U) & 0xffU);
+    payload[offset + 2U] = (uint8_t)((value >> 16U) & 0xffU);
+    payload[offset + 3U] = (uint8_t)((value >> 24U) & 0xffU);
+}
+
+static uint32_t get_u32(const uint8_t *payload, size_t offset)
+{
+    return (uint32_t)payload[offset] |
+           ((uint32_t)payload[offset + 1U] << 8U) |
+           ((uint32_t)payload[offset + 2U] << 16U) |
+           ((uint32_t)payload[offset + 3U] << 24U);
 }
 
 static void put_ts40(uint8_t *payload, size_t offset, uint64_t timestamp)
@@ -204,6 +242,64 @@ static bool calculate_distance(
     return true;
 }
 
+static void encode_reports(uint8_t *payload,
+                           const struct native_ds_anchor_reports *reports)
+{
+    uint8_t flags = 0U;
+    if (reports != NULL && reports->tag.valid) {
+        flags |= NATIVE_DS_RESPONSE_HAS_TAG_RANGE;
+        put_u16(payload, NATIVE_DS_RESPONSE_TAG_FRAME_OFFSET,
+                reports->tag.frame_id);
+        put_u32(payload, NATIVE_DS_RESPONSE_TAG_DISTANCE_OFFSET,
+                reports->tag.distance_mm);
+    }
+    if (reports != NULL && reports->survey.valid) {
+        flags |= NATIVE_DS_RESPONSE_HAS_SURVEY_RANGE;
+        payload[NATIVE_DS_RESPONSE_SURVEY_INITIATOR_OFFSET] =
+            reports->survey.initiator_id;
+        payload[NATIVE_DS_RESPONSE_SURVEY_RESPONDER_OFFSET] =
+            reports->survey.responder_id;
+        put_u16(payload, NATIVE_DS_RESPONSE_SURVEY_FRAME_OFFSET,
+                reports->survey.frame_id);
+        put_u32(payload, NATIVE_DS_RESPONSE_SURVEY_DISTANCE_OFFSET,
+                reports->survey.distance_mm);
+    }
+    payload[NATIVE_DS_RESPONSE_FLAGS_OFFSET] = flags;
+}
+
+static void consume_reports(const struct uwb_native_ds_config *config,
+                            const struct uwb_native_ds_radio_ops *radio,
+                            const struct native_ds_frame *response,
+                            uint8_t anchor_id)
+{
+    if (config->source_id != config->tag_id ||
+        response->payload_len < NATIVE_DS_RESPONSE_LEN) {
+        return;
+    }
+    const uint8_t flags =
+        response->payload[NATIVE_DS_RESPONSE_FLAGS_OFFSET];
+    if ((flags & NATIVE_DS_RESPONSE_HAS_TAG_RANGE) != 0U) {
+        radio->consume_report(
+            radio->context, true, config->tag_id, anchor_id,
+            get_u16(response->payload,
+                    NATIVE_DS_RESPONSE_TAG_FRAME_OFFSET),
+            (double)get_u32(response->payload,
+                            NATIVE_DS_RESPONSE_TAG_DISTANCE_OFFSET) /
+                1000.0);
+    }
+    if ((flags & NATIVE_DS_RESPONSE_HAS_SURVEY_RANGE) != 0U) {
+        radio->consume_report(
+            radio->context, false,
+            response->payload[NATIVE_DS_RESPONSE_SURVEY_INITIATOR_OFFSET],
+            response->payload[NATIVE_DS_RESPONSE_SURVEY_RESPONDER_OFFSET],
+            get_u16(response->payload,
+                    NATIVE_DS_RESPONSE_SURVEY_FRAME_OFFSET),
+            (double)get_u32(response->payload,
+                            NATIVE_DS_RESPONSE_SURVEY_DISTANCE_OFFSET) /
+                1000.0);
+    }
+}
+
 static esp_err_t initiator_exchange(
     const struct uwb_native_ds_config *config,
     const struct uwb_native_ds_radio_ops *radio, uint8_t anchor_id,
@@ -227,6 +323,7 @@ static esp_err_t initiator_exchange(
         return err;
     }
     s_stats.response_rx_count++;
+    consume_reports(config, radio, &response, anchor_id);
 
     const uint64_t final_due = radio->add_delay_ms(
         radio->context, response.rx_timestamp, config->final_delay_ms);
@@ -350,13 +447,15 @@ static void run_tag(const struct uwb_native_ds_config *config,
 static esp_err_t anchor_exchange(
     const struct uwb_native_ds_config *config,
     const struct uwb_native_ds_radio_ops *radio,
-    const struct native_ds_frame *poll, uint8_t *survey_peer_id)
+    const struct native_ds_frame *poll,
+    struct native_ds_anchor_reports *reports, uint8_t *survey_peer_id)
 {
     uint8_t payload[UWB_NATIVE_DS_MAX_FRAME_LEN] = {0};
     const uint64_t response_due = radio->add_delay_ms(
         radio->context, poll->rx_timestamp, config->response_delay_ms);
     build_frame(config, NATIVE_DS_RESPONSE, poll->source_id,
                 poll->frame_id, payload);
+    encode_reports(payload, reports);
     uint64_t response_tx = 0;
     uint64_t response_actual = 0;
     esp_err_t err = radio->send_delayed_expect_rx(
@@ -427,6 +526,13 @@ static esp_err_t anchor_exchange(
     s_stats.last_distance_mm = (int32_t)(distance_m * 1000.0 + 0.5);
     radio->publish_range(radio->context, poll->source_id, config->source_id,
                          poll->frame_id, distance_m);
+    struct native_ds_completed_report *completed =
+        poll->source_id == config->tag_id ? &reports->tag : &reports->survey;
+    completed->valid = true;
+    completed->initiator_id = poll->source_id;
+    completed->responder_id = config->source_id;
+    completed->frame_id = poll->frame_id;
+    completed->distance_mm = (uint32_t)(distance_m * 1000.0 + 0.5);
     if (survey_peer_id != NULL) {
         *survey_peer_id = poll->source_id == config->tag_id
             ? final.payload[NATIVE_DS_FINAL_SURVEY_PEER_OFFSET]
@@ -449,6 +555,7 @@ static bool configured_anchor(
 static void run_anchor(const struct uwb_native_ds_config *config,
                        const struct uwb_native_ds_radio_ops *radio)
 {
+    struct native_ds_anchor_reports reports = {0};
     radio->set_ready(radio->context);
     ESP_LOGI(TAG, "anchor active id=%u tag=%u", (unsigned)config->source_id,
              (unsigned)config->tag_id);
@@ -482,7 +589,7 @@ static void run_anchor(const struct uwb_native_ds_config *config,
         s_stats.poll_rx_count++;
         uint8_t survey_peer_id = 0;
         const esp_err_t err = anchor_exchange(
-            config, radio, &poll, &survey_peer_id);
+            config, radio, &poll, &reports, &survey_peer_id);
         if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
             ESP_LOGW(TAG, "anchor exchange frame=%u failed: %s",
                      (unsigned)poll.frame_id, esp_err_to_name(err));
@@ -523,6 +630,9 @@ static bool config_valid(const struct uwb_native_ds_config *config,
         radio->programmed_tx_timestamp == NULL || radio->now_us == NULL ||
         radio->delay_ms == NULL || radio->stop_requested == NULL ||
         radio->set_ready == NULL || radio->publish_range == NULL) {
+        return false;
+    }
+    if (radio->consume_report == NULL) {
         return false;
     }
     for (size_t index = 0; index < config->anchor_count; ++index) {

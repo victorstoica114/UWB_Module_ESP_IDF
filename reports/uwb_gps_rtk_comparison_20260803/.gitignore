@@ -1,0 +1,12 @@
+# Keep the canonical field captures in Git as lossless XZ archives.
+data/*.jsonl
+
+# Reproducible LaTeX build by-products. The dated PDF is canonical.
+report.aux
+report.fdb_latexmk
+report.fls
+report.log
+report.out
+report.pdf
+report.pdf.sha256
+report.toc

@@ -29,6 +29,7 @@
 #include "app_runtime_config.h"
 #include "uwb_config.h"
 #include "uwb_native_ds_twr.h"
+#include "uwb_native_ds_position_solver.h"
 #include "uwb_passive_ds_tdoa.h"
 #include "uwb_passive_ds_multi.h"
 #include "wireless_log_service.h"
@@ -1313,23 +1314,53 @@ static uint8_t uwb_dw3000_runtime_radio_rf_channel_bit(void)
 static uint8_t uwb_dw3000_runtime_radio_phy_mode(void)
 {
     const app_runtime_config_t *config = app_runtime_config_get();
-    return config->radio_phy_mode == APP_UWB_RADIO_PHY_LONG_RANGE
-               ? APP_UWB_RADIO_PHY_LONG_RANGE
-               : APP_UWB_RADIO_PHY_FAST;
+    switch (config->radio_phy_mode) {
+    case APP_UWB_RADIO_PHY_LONG_RANGE:
+    case APP_UWB_RADIO_PHY_FAST_PLEN256:
+    case APP_UWB_RADIO_PHY_FAST_PLEN512:
+    case APP_UWB_RADIO_PHY_850K_PLEN512:
+    case APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD:
+        return config->radio_phy_mode;
+    default:
+        return APP_UWB_RADIO_PHY_FAST;
+    }
 }
 
-static bool uwb_dw3000_runtime_radio_is_long_range(void)
+static bool uwb_dw3000_runtime_radio_is_850k(void)
 {
-    return uwb_dw3000_runtime_radio_phy_mode() ==
-           APP_UWB_RADIO_PHY_LONG_RANGE;
+    const uint8_t mode = uwb_dw3000_runtime_radio_phy_mode();
+    return mode == APP_UWB_RADIO_PHY_LONG_RANGE ||
+           mode == APP_UWB_RADIO_PHY_850K_PLEN512 ||
+           mode == APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD;
 }
 
 static uint8_t uwb_dw3000_runtime_radio_profile(void)
 {
-    if (uwb_dw3000_runtime_radio_is_long_range()) {
+    const uint8_t mode = uwb_dw3000_runtime_radio_phy_mode();
+    if (mode == APP_UWB_RADIO_PHY_LONG_RANGE) {
         return uwb_dw3000_runtime_radio_channel() == 9U
                    ? APP_UWB_RADIO_PROFILE_LONG_RANGE_CH9_850K_PLEN1024
                    : APP_UWB_RADIO_PROFILE_LONG_RANGE_CH5_850K_PLEN1024;
+    }
+    if (mode == APP_UWB_RADIO_PHY_FAST_PLEN256) {
+        return uwb_dw3000_runtime_radio_channel() == 9U
+                   ? APP_UWB_RADIO_PROFILE_CH9_6M8_PLEN256
+                   : APP_UWB_RADIO_PROFILE_CH5_6M8_PLEN256;
+    }
+    if (mode == APP_UWB_RADIO_PHY_FAST_PLEN512) {
+        return uwb_dw3000_runtime_radio_channel() == 9U
+                   ? APP_UWB_RADIO_PROFILE_CH9_6M8_PLEN512
+                   : APP_UWB_RADIO_PROFILE_CH5_6M8_PLEN512;
+    }
+    if (mode == APP_UWB_RADIO_PHY_850K_PLEN512) {
+        return uwb_dw3000_runtime_radio_channel() == 9U
+                   ? APP_UWB_RADIO_PROFILE_CH9_850K_PLEN512
+                   : APP_UWB_RADIO_PROFILE_CH5_850K_PLEN512;
+    }
+    if (mode == APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD) {
+        return uwb_dw3000_runtime_radio_channel() == 9U
+                   ? APP_UWB_RADIO_PROFILE_CH9_850K_PLEN512_STD_SFD
+                   : APP_UWB_RADIO_PROFILE_CH5_850K_PLEN512_STD_SFD;
     }
     return uwb_dw3000_runtime_radio_channel() == 9U
                ? APP_UWB_RADIO_PROFILE_LEGACY_CH9_6M8_PLEN128
@@ -1338,33 +1369,53 @@ static uint8_t uwb_dw3000_runtime_radio_profile(void)
 
 static uint8_t uwb_dw3000_runtime_radio_preamble_len_code(void)
 {
-    return uwb_dw3000_runtime_radio_is_long_range()
-               ? APP_UWB_RADIO_PLEN_1024
-               : APP_UWB_RADIO_PREAMBLE_LEN_CODE;
+    switch (uwb_dw3000_runtime_radio_phy_mode()) {
+    case APP_UWB_RADIO_PHY_LONG_RANGE:
+        return APP_UWB_RADIO_PLEN_1024;
+    case APP_UWB_RADIO_PHY_FAST_PLEN256:
+        return APP_UWB_RADIO_PLEN_256;
+    case APP_UWB_RADIO_PHY_FAST_PLEN512:
+    case APP_UWB_RADIO_PHY_850K_PLEN512:
+    case APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD:
+        return APP_UWB_RADIO_PLEN_512;
+    default:
+        return APP_UWB_RADIO_PREAMBLE_LEN_CODE;
+    }
 }
 
 static uint8_t uwb_dw3000_runtime_radio_preamble_code(void)
 {
-    return APP_UWB_RADIO_PREAMBLE_CODE;
+    return uwb_dw3000_runtime_radio_phy_mode() ==
+                   APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD
+               ? 9U
+               : APP_UWB_RADIO_PREAMBLE_CODE;
 }
 
 static uint8_t uwb_dw3000_runtime_radio_pac(void)
 {
-    /* DWT_PAC32 is recommended for preambles of 512 symbols or longer. */
-    return uwb_dw3000_runtime_radio_is_long_range() ? 2U
-                                                     : APP_UWB_RADIO_PAC;
+    const uint8_t mode = uwb_dw3000_runtime_radio_phy_mode();
+    if (mode == APP_UWB_RADIO_PHY_FAST_PLEN256) {
+        return 1U; /* DWT_PAC16 */
+    }
+    if (mode == APP_UWB_RADIO_PHY_LONG_RANGE ||
+        mode == APP_UWB_RADIO_PHY_FAST_PLEN512 ||
+        mode == APP_UWB_RADIO_PHY_850K_PLEN512 ||
+        mode == APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD) {
+        return 2U; /* DWT_PAC32 */
+    }
+    return APP_UWB_RADIO_PAC;
 }
 
 static uint8_t uwb_dw3000_runtime_radio_data_rate(void)
 {
-    return uwb_dw3000_runtime_radio_is_long_range()
+    return uwb_dw3000_runtime_radio_is_850k()
                ? APP_UWB_RADIO_BR_850K
                : APP_UWB_RADIO_DATA_RATE;
 }
 
 static uint8_t uwb_dw3000_runtime_radio_phr_rate(void)
 {
-    return uwb_dw3000_runtime_radio_is_long_range()
+    return uwb_dw3000_runtime_radio_is_850k()
                ? 0U
                : APP_UWB_RADIO_PHR_RATE;
 }
@@ -1372,7 +1423,26 @@ static uint8_t uwb_dw3000_runtime_radio_phr_rate(void)
 static uint16_t uwb_dw3000_runtime_radio_sfd_timeout(void)
 {
     /* plen + 1 + 8-symbol Qorvo SFD - PAC. */
-    return uwb_dw3000_runtime_radio_is_long_range() ? 1001U : 129U;
+    switch (uwb_dw3000_runtime_radio_phy_mode()) {
+    case APP_UWB_RADIO_PHY_LONG_RANGE:
+        return 1001U;
+    case APP_UWB_RADIO_PHY_FAST_PLEN256:
+        return 249U;
+    case APP_UWB_RADIO_PHY_FAST_PLEN512:
+    case APP_UWB_RADIO_PHY_850K_PLEN512:
+    case APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD:
+        return 489U;
+    default:
+        return 129U;
+    }
+}
+
+static uint8_t uwb_dw3000_runtime_radio_sfd_type(void)
+{
+    return uwb_dw3000_runtime_radio_phy_mode() ==
+                   APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD
+               ? 0U
+               : APP_UWB_RADIO_SFD_TYPE;
 }
 
 static uint32_t uwb_dw3000_runtime_rf_tx_ctrl_2(void)
@@ -3234,7 +3304,7 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
     const uint8_t datarate = uwb_dw3000_runtime_radio_data_rate();
     const uint8_t phr_mode = APP_UWB_RADIO_PHR_MODE;
     const uint8_t phr_rate = uwb_dw3000_runtime_radio_phr_rate();
-    const uint8_t sfd_type = APP_UWB_RADIO_SFD_TYPE;
+    const uint8_t sfd_type = uwb_dw3000_runtime_radio_sfd_type();
     const uint16_t sfd_timeout =
         uwb_dw3000_runtime_radio_sfd_timeout();
 
@@ -9675,6 +9745,69 @@ static void native_ds_publish_range(
         distance_mm, distance_mm);
 }
 
+struct native_ds_runtime_context {
+    struct uwb_native_ds_position_solver solver;
+    bool solver_ready;
+};
+
+static int32_t native_ds_meters_to_mm(float value_m)
+{
+    const float value_mm = value_m * 1000.0f;
+    return (int32_t)(value_mm >= 0.0f ? value_mm + 0.5f
+                                     : value_mm - 0.5f);
+}
+
+static void native_ds_consume_report(
+    void *context, bool tag_range, uint8_t initiator_id,
+    uint8_t responder_id, uint16_t frame_id, double distance_m)
+{
+    struct native_ds_runtime_context *runtime = context;
+    if (runtime == NULL || !runtime->solver_ready) {
+        return;
+    }
+    struct uwb_native_ds_position_output output = {0};
+    const bool accepted = tag_range
+        ? uwb_native_ds_position_solver_submit_tag_range(
+              &runtime->solver, initiator_id, responder_id, frame_id,
+              (float)distance_m, &output)
+        : uwb_native_ds_position_solver_submit_anchor_range(
+              &runtime->solver, initiator_id, responder_id, frame_id,
+              (float)distance_m, &output);
+    if (!accepted) {
+        return;
+    }
+    const int32_t distance_mm = uwb_distance_meters_to_mm(distance_m);
+    if (tag_range) {
+        (void)wireless_telemetry_service_submit_native_ds_tag_range(
+            initiator_id, responder_id, frame_id, (uint32_t)frame_id,
+            distance_mm, distance_mm);
+    } else {
+        (void)wireless_telemetry_service_submit_native_ds_anchor_range(
+            initiator_id, responder_id, frame_id, (uint32_t)frame_id,
+            distance_mm, distance_mm);
+    }
+    if (output.geometry_updated) {
+        for (size_t index = 0U; index < output.anchor_count; ++index) {
+            (void)wireless_telemetry_service_submit_native_ds_geometry(
+                runtime->solver.anchor_ids[index], output.anchor_count,
+                output.geometry_version,
+                native_ds_meters_to_mm(output.anchor_x_m[index]),
+                native_ds_meters_to_mm(output.anchor_y_m[index]),
+                native_ds_meters_to_mm(output.geometry_fit_rms_m));
+        }
+    }
+    if (output.position_valid) {
+        (void)wireless_telemetry_service_submit_native_ds_position(
+            output.tag_id, output.frame_id,
+            native_ds_meters_to_mm(output.x_m),
+            native_ds_meters_to_mm(output.y_m),
+            native_ds_meters_to_mm(output.sigma_m),
+            native_ds_meters_to_mm(output.rms_m),
+            output.observation_count, output.anchor_count,
+            output.geometry_version);
+    }
+}
+
 static void uwb_dw3000_ranging_loop(void)
 {
     uint8_t anchor_ids[UWB_NATIVE_DS_MAX_ANCHORS] = {0};
@@ -9701,6 +9834,17 @@ static void uwb_dw3000_ranging_loop(void)
     };
     memcpy(config.anchor_ids, anchor_ids, anchor_count);
 
+    struct native_ds_runtime_context context = {0};
+    if (s_source_id == config.tag_id) {
+        context.solver_ready = uwb_native_ds_position_solver_init(
+            &context.solver, config.tag_id, anchor_ids, anchor_count);
+        if (!context.solver_ready) {
+            s_status = UWB_DW3000_STATUS_FAILED;
+            ESP_LOGE(TAG, "Native DS-TWR position solver init failed");
+            return;
+        }
+    }
+
     const struct uwb_native_ds_radio_ops radio = {
         .send_immediate_expect_rx = native_ds_send_immediate_expect_rx,
         .send_delayed = native_ds_send_delayed,
@@ -9713,6 +9857,8 @@ static void uwb_dw3000_ranging_loop(void)
         .stop_requested = native_ds_stop_requested,
         .set_ready = native_ds_set_ready,
         .publish_range = native_ds_publish_range,
+        .consume_report = native_ds_consume_report,
+        .context = &context,
     };
 
     ESP_LOGI(TAG,

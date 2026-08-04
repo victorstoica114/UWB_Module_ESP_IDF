@@ -305,7 +305,7 @@ static bool solve_from_seed(
         const double h00 = cost.h00 + damping;
         const double h11 = cost.h11 + damping;
         const double determinant = h00 * h11 - cost.h01 * cost.h01;
-        if (cost.count < 3U || !isfinite(cost.sse) ||
+        if (cost.count < 2U || !isfinite(cost.sse) ||
             fabs(determinant) < 1e-12) {
             return false;
         }
@@ -356,7 +356,7 @@ static bool solve_from_seed(
     const double determinant =
         final_cost.h00 * final_cost.h11 - final_cost.h01 * final_cost.h01;
     const double margin_m = 2.0 * geometry_span_m;
-    if (final_cost.count < 3U || !isfinite(x_m) || !isfinite(y_m) ||
+    if (final_cost.count < 2U || !isfinite(x_m) || !isfinite(y_m) ||
         !isfinite(final_cost.sse) || determinant <= 1e-12 ||
         x_m < min_x_m - margin_m || x_m > max_x_m + margin_m ||
         y_m < min_y_m - margin_m || y_m > max_y_m + margin_m) {
@@ -398,9 +398,9 @@ static bool passive_ds_position_solve_internal(
     struct passive_ds_position_result *result)
 {
     if (anchors == NULL || observations == NULL || result == NULL ||
-        anchor_count < 4U ||
+        anchor_count < 3U ||
         anchor_count > PASSIVE_DS_POSITION_MAX_ANCHORS ||
-        observation_count < 3U) {
+        observation_count < 2U) {
         return false;
     }
 

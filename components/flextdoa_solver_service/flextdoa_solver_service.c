@@ -26,7 +26,10 @@ enum {
     FLEX_SOLVER_MAX_ITEMS_PER_BATCH = 64,
     FLEX_SOLVER_RANGE_HISTORY_LEN = 9,
     FLEX_SOLVER_RANGE_BOOTSTRAP_COUNT = 5,
-    FLEX_SOLVER_RANGE_MOVE_CONFIRMATIONS = 3,
+    // A real anchor move persists. Short two-path fades must not reopen the
+    // geometry and move every subsequent tag solution.
+    FLEX_SOLVER_RANGE_MOVE_CONFIRMATIONS = 20,
+    FLEX_SOLVER_RANGE_MOVE_MAX_SKEW_MS = 500,
     FLEX_SOLVER_MAX_VARIABLES = 2 * APP_RUNTIME_CONFIG_MAX_ANCHORS - 3,
     FLEX_SOLVER_MAX_POSITION_OBSERVATIONS =
         APP_RUNTIME_CONFIG_MAX_ANCHORS *
@@ -58,6 +61,12 @@ enum flex_solver_rejection_reason {
     FLEX_SOLVER_REJECT_OUT_OF_ORDER,
     FLEX_SOLVER_REJECT_PREDICTION_STALE,
     FLEX_SOLVER_REJECT_COUNT,
+};
+
+enum flex_solver_range_result {
+    FLEX_SOLVER_RANGE_NONE = 0,
+    FLEX_SOLVER_RANGE_STABLE,
+    FLEX_SOLVER_RANGE_RELOCATION,
 };
 
 struct flex_solver_item {
@@ -123,13 +132,19 @@ struct flex_solver_state {
     bool geometry_fixed;
     uint32_t geometry_generation;
     uint32_t geometry_version;
+    double geometry_fit_rms;
     TickType_t last_geometry_tick;
+    bool geometry_relocation_pending;
+    uint32_t last_published_geometry_version;
+    TickType_t last_geometry_publish_tick;
     bool position_valid;
     double position_x;
     double position_y;
     bool position_pending;
     uint8_t pending_tag_id;
     uint32_t pending_position_slot_id;
+    bool last_flex_frame_solved_valid;
+    uint32_t last_flex_frame_solved;
     struct flex_solver_coherent_frame
         coherent_frames[FLEX_SOLVER_COHERENT_FRAME_BUCKETS];
     uint32_t range_accepted;
@@ -191,6 +206,7 @@ struct flex_solver_position_batch {
     uint16_t span_ms;
     uint16_t max_age_ms;
     uint16_t observation_mask;
+    bool robust_loss;
 };
 
 static QueueHandle_t s_queue;
@@ -285,7 +301,7 @@ static void flex_solver_promote_range_candidate(
 }
 
 static bool flex_solver_try_promote_anchor_move(
-    struct flex_solver_state *state)
+    struct flex_solver_state *state, TickType_t now)
 {
     bool promoted = false;
     for (size_t anchor = 0; anchor < state->anchor_count; ++anchor) {
@@ -300,7 +316,9 @@ static bool flex_solver_try_promote_anchor_move(
                 &state->range_filters[first][second];
             if (filter->candidate_valid &&
                 filter->candidate_count >=
-                    FLEX_SOLVER_RANGE_MOVE_CONFIRMATIONS) {
+                    FLEX_SOLVER_RANGE_MOVE_CONFIRMATIONS &&
+                now - filter->candidate_tick <= pdMS_TO_TICKS(
+                    FLEX_SOLVER_RANGE_MOVE_MAX_SKEW_MS)) {
                 confirmed_edges++;
             }
         }
@@ -319,7 +337,9 @@ static bool flex_solver_try_promote_anchor_move(
                 &state->range_filters[first][second];
             if (filter->candidate_valid &&
                 filter->candidate_count >=
-                    FLEX_SOLVER_RANGE_MOVE_CONFIRMATIONS) {
+                    FLEX_SOLVER_RANGE_MOVE_CONFIRMATIONS &&
+                now - filter->candidate_tick <= pdMS_TO_TICKS(
+                    FLEX_SOLVER_RANGE_MOVE_MAX_SKEW_MS)) {
                 flex_solver_promote_range_candidate(
                     state, first, second);
                 state->range_relocations++;
@@ -330,7 +350,7 @@ static bool flex_solver_try_promote_anchor_move(
     return promoted;
 }
 
-static bool flex_solver_accept_range(
+static enum flex_solver_range_result flex_solver_accept_range(
     struct flex_solver_state *state, size_t first, size_t second,
     float value_m, uint32_t slot_id, TickType_t now)
 {
@@ -361,14 +381,14 @@ static bool flex_solver_accept_range(
         state->range_accepted++;
         if (filter->accepted_count <
             FLEX_SOLVER_RANGE_BOOTSTRAP_COUNT) {
-            return false;
+            return FLEX_SOLVER_RANGE_NONE;
         }
         const float stable_m =
             flex_solver_median(filter->accepted,
                                filter->accepted_count);
         flex_solver_store_range(
             state, first, second, stable_m, slot_id, now);
-        return true;
+        return FLEX_SOLVER_RANGE_STABLE;
     }
 
     state->range_rejected++;
@@ -388,7 +408,9 @@ static bool flex_solver_accept_range(
     }
     filter->candidate_slot_id = slot_id;
     filter->candidate_tick = now;
-    return flex_solver_try_promote_anchor_move(state);
+    return flex_solver_try_promote_anchor_move(state, now)
+               ? FLEX_SOLVER_RANGE_RELOCATION
+               : FLEX_SOLVER_RANGE_NONE;
 }
 
 static uint32_t flex_solver_slots_per_position_frame(
@@ -413,6 +435,8 @@ static void flex_solver_apply_runtime_geometry(struct flex_solver_state *state)
     state->geometry_ready = state->geometry_fixed;
     state->position_valid = false;
     state->position_pending = false;
+    state->geometry_relocation_pending = false;
+    state->last_flex_frame_solved_valid = false;
     memset(state->coherent_frames, 0, sizeof(state->coherent_frames));
     state->position_filter_valid = false;
     state->last_raw_position_valid = false;
@@ -552,7 +576,8 @@ static bool flex_solver_initialize_geometry(struct flex_solver_state *state)
     return true;
 }
 
-static bool flex_solver_update_geometry(struct flex_solver_state *state)
+static bool flex_solver_update_geometry(
+    struct flex_solver_state *state, bool relocation_rebuild)
 {
     const bool was_ready = state->geometry_ready;
     if (!was_ready && !flex_solver_initialize_geometry(state)) {
@@ -645,14 +670,16 @@ static bool flex_solver_update_geometry(struct flex_solver_state *state)
             fit_count++;
         }
     }
+    const double fit_rms = fit_count > 0U
+        ? sqrt(fit_sse / fit_count)
+        : INFINITY;
     if (fit_count < variable_count ||
-        sqrt(fit_sse / fit_count) >
-            FLEX_SOLVER_GEOMETRY_MAX_FIT_RMS_M) {
+        fit_rms > FLEX_SOLVER_GEOMETRY_MAX_FIT_RMS_M) {
         return false;
     }
 
     double step_scale = 1.0;
-    if (was_ready) {
+    if (was_ready && !relocation_rebuild) {
         double max_displacement = 0.0;
         for (size_t anchor = 1U; anchor < state->anchor_count; ++anchor) {
             max_displacement = fmax(
@@ -672,8 +699,29 @@ static bool flex_solver_update_geometry(struct flex_solver_state *state)
             step_scale * (solved_y[anchor] - state->anchor_y[anchor]);
     }
     state->geometry_ready = true;
+    state->geometry_fit_rms = fit_rms;
     state->geometry_version++;
     return true;
+}
+
+static bool flex_solver_publish_geometry(
+    struct flex_solver_state *state, uint8_t tag_id)
+{
+    if (state == NULL || !state->geometry_ready || tag_id == 0U) {
+        return false;
+    }
+    bool submitted = true;
+    const int32_t fit_rms_mm =
+        (int32_t)lround(state->geometry_fit_rms * 1000.0);
+    for (size_t index = 0U; index < state->anchor_count; ++index) {
+        submitted = wireless_telemetry_service_submit_flex_geometry(
+            tag_id, state->anchor_ids[index], state->anchor_count,
+            state->geometry_version,
+            (int32_t)lround(state->anchor_x[index] * 1000.0),
+            (int32_t)lround(state->anchor_y[index] * 1000.0),
+            fit_rms_mm) && submitted;
+    }
+    return submitted;
 }
 
 static uint16_t flex_solver_saturating_u16(uint32_t value)
@@ -723,6 +771,21 @@ static uint16_t flex_solver_slot_span_ms(
     const uint32_t slots_per_frame =
         flex_solver_slots_per_position_frame(config);
     const uint32_t slot_delta = last_slot - first_slot;
+    if (config->runtime_mode == APP_RUNTIME_MODE_UWB_FLEX_TDOA) {
+        const uint64_t slot_us =
+            (uint64_t)config->flex_tdoa_guard_us +
+            config->flex_tdoa_request_subslot_us +
+            config->flex_tdoa_request_process_us +
+            (uint64_t)config->flex_tdoa_responder_count *
+                (config->flex_tdoa_response_subslot_us +
+                 config->flex_tdoa_response_process_us);
+        const uint64_t span_us = (uint64_t)slot_delta * slot_us;
+        const uint64_t rounded_span_ms = (span_us + 999U) / 1000U;
+        return flex_solver_saturating_u16(
+            rounded_span_ms > UINT32_MAX
+                ? UINT32_MAX
+                : (uint32_t)rounded_span_ms);
+    }
     const uint32_t first_frame = first_slot / slots_per_frame;
     const uint32_t last_frame = last_slot / slots_per_frame;
     const uint32_t boundary_count = last_frame - first_frame;
@@ -738,6 +801,7 @@ static void flex_solver_build_rolling_position_batch(
     bool motion_compensated, struct flex_solver_position_batch *batch)
 {
     memset(batch, 0, sizeof(*batch));
+    batch->robust_loss = true;
     const app_runtime_config_t *config = app_runtime_config_get();
     const uint32_t max_age_ms =
         config->runtime_mode == APP_RUNTIME_MODE_UWB_PASSIVE_DS_TWR
@@ -808,12 +872,147 @@ static void flex_solver_build_rolling_position_batch(
     }
 }
 
+static int flex_solver_config_anchor_index(
+    const app_runtime_config_t *config, uint8_t anchor_id)
+{
+    if (config == NULL) {
+        return -1;
+    }
+    for (size_t index = 0U; index < config->anchor_count; ++index) {
+        if (config->anchor_ids[index] == anchor_id) {
+            return (int)index;
+        }
+    }
+    return -1;
+}
+
+static size_t flex_solver_expected_flex_slot(
+    const struct flex_solver_state *state,
+    const app_runtime_config_t *config, uint32_t slot_id,
+    uint16_t *expected_mask)
+{
+    if (expected_mask != NULL) {
+        *expected_mask = 0U;
+    }
+    if (state == NULL || config == NULL ||
+        config->flex_tdoa_slot_count == 0U ||
+        config->flex_tdoa_responder_count == 0U) {
+        return 0U;
+    }
+
+    const size_t slot_index = slot_id % config->flex_tdoa_slot_count;
+    const int initiator = flex_solver_config_anchor_index(
+        config, config->flex_tdoa_slot_initiator_ids[slot_index]);
+    if (initiator < 0 || (size_t)initiator >= state->anchor_count) {
+        return 0U;
+    }
+
+    size_t responders[APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U] = {0};
+    size_t responder_count = 0U;
+    const uint16_t allowed_mask =
+        config->flex_tdoa_slot_responder_masks[slot_index];
+    for (size_t anchor = 0U; anchor < state->anchor_count; ++anchor) {
+        if (anchor != (size_t)initiator &&
+            (allowed_mask & (uint16_t)(1U << anchor)) != 0U) {
+            responders[responder_count++] = anchor;
+        }
+    }
+    if (responder_count < config->flex_tdoa_responder_count) {
+        return 0U;
+    }
+
+    const size_t rotation = slot_id % responder_count;
+    for (size_t selected = 0U;
+         selected < config->flex_tdoa_responder_count; ++selected) {
+        const size_t responder =
+            responders[(selected + rotation) % responder_count];
+        if (expected_mask != NULL) {
+            *expected_mask |= flex_solver_path_mask(
+                state, (size_t)initiator, responder);
+        }
+    }
+    return config->flex_tdoa_responder_count;
+}
+
+static bool flex_solver_build_flex_frame_position_batch(
+    const struct flex_solver_state *state, uint32_t frame_id,
+    TickType_t now, struct flex_solver_position_batch *batch)
+{
+    memset(batch, 0, sizeof(*batch));
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint32_t slots_per_frame =
+        flex_solver_slots_per_position_frame(config);
+    const size_t maximum_count =
+        (size_t)slots_per_frame * config->flex_tdoa_responder_count;
+    const size_t minimum_count =
+        state->anchor_count > 3U ? state->anchor_count : 3U;
+    if (maximum_count < minimum_count ||
+        maximum_count > FLEX_SOLVER_MAX_POSITION_OBSERVATIONS) {
+        return false;
+    }
+
+    TickType_t oldest_tick = now;
+    uint32_t first_slot = UINT32_MAX;
+    uint32_t last_slot = 0U;
+    for (size_t initiator = 0U; initiator < state->anchor_count;
+         ++initiator) {
+        for (size_t responder = 0U; responder < state->anchor_count;
+             ++responder) {
+            const struct flex_solver_measurement *measurement =
+                &state->observations[initiator][responder];
+            if (initiator == responder || !measurement->valid ||
+                measurement->slot_id / slots_per_frame != frame_id ||
+                batch->count >= FLEX_SOLVER_MAX_POSITION_OBSERVATIONS) {
+                continue;
+            }
+            uint16_t expected_slot_mask = 0U;
+            if (flex_solver_expected_flex_slot(
+                    state, config, measurement->slot_id,
+                    &expected_slot_mask) == 0U ||
+                (expected_slot_mask & flex_solver_path_mask(
+                    state, initiator, responder)) == 0U) {
+                continue;
+            }
+            batch->items[batch->count++] =
+                (struct flex_solver_position_observation){
+                    .value_m = (float)measurement->value_m,
+                    .slot_id = measurement->slot_id,
+                    .initiator_x = (float)state->anchor_x[initiator],
+                    .initiator_y = (float)state->anchor_y[initiator],
+                    .responder_x = (float)state->anchor_x[responder],
+                    .responder_y = (float)state->anchor_y[responder],
+                };
+            batch->observation_mask |=
+                flex_solver_path_mask(state, initiator, responder);
+            if (measurement->updated_tick < oldest_tick) {
+                oldest_tick = measurement->updated_tick;
+            }
+            if (measurement->slot_id < first_slot) {
+                first_slot = measurement->slot_id;
+            }
+            if (measurement->slot_id > last_slot) {
+                last_slot = measurement->slot_id;
+            }
+        }
+    }
+    if (batch->count < minimum_count) {
+        return false;
+    }
+    batch->span_ms =
+        flex_solver_slot_span_ms(config, first_slot, last_slot);
+    batch->max_age_ms = flex_solver_saturating_u16(
+        (uint32_t)((now - oldest_tick) * portTICK_PERIOD_MS));
+    batch->robust_loss = false;
+    return true;
+}
+
 static bool flex_solver_build_coherent_position_batch(
     struct flex_solver_state *state,
     const struct flex_solver_coherent_frame *frame, TickType_t now,
     struct flex_solver_position_batch *batch)
 {
     memset(batch, 0, sizeof(*batch));
+    batch->robust_loss = true;
     const app_runtime_config_t *config = app_runtime_config_get();
     const uint32_t slots_per_frame =
         flex_solver_slots_per_position_frame(config);
@@ -932,7 +1131,7 @@ static float flex_solver_position_cost(
         const float absolute_residual = fabsf(residual);
         const float huber_delta = 0.10f;
         const float weight =
-            absolute_residual <= huber_delta
+            !batch->robust_loss || absolute_residual <= huber_delta
                 ? 1.0f
                 : huber_delta / absolute_residual;
         local_h00 += weight * jx * jx;
@@ -940,7 +1139,7 @@ static float flex_solver_position_cost(
         local_h11 += weight * jy * jy;
         local_g0 += weight * jx * residual;
         local_g1 += weight * jy * residual;
-        sse += absolute_residual <= huber_delta
+        sse += !batch->robust_loss || absolute_residual <= huber_delta
                    ? residual * residual
                    : 2.0f * huber_delta * absolute_residual -
                          huber_delta * huber_delta;
@@ -1275,8 +1474,10 @@ static bool flex_solver_update_position(
     if (!state->geometry_ready || batch == NULL) {
         return false;
     }
+    const size_t min_observation_count =
+        state->anchor_count > 1U ? state->anchor_count - 1U : 2U;
     const TickType_t now = xTaskGetTickCount();
-    if (batch->count < 3U) {
+    if (batch->count < min_observation_count) {
         flex_solver_record_rejection(
             state, FLEX_SOLVER_REJECT_TOO_FEW);
         return false;
@@ -1321,18 +1522,16 @@ static bool flex_solver_update_position(
     const float center_sse = flex_solver_position_cost(
         batch, center_x, center_y, NULL, NULL, NULL, NULL, NULL,
         &center_count);
-    const bool coherent_frame_batch =
-        independent_frame &&
-        batch->count == state->anchor_count - 1U;
-    if (center_count >= 3U &&
-        (initial_count < 3U ||
+    const bool coherent_frame_batch = independent_frame;
+    if (center_count >= min_observation_count &&
+        (initial_count < min_observation_count ||
          (!coherent_frame_batch && center_sse < current_sse))) {
         x = center_x;
         y = center_y;
         current_sse = center_sse;
         initial_count = center_count;
     }
-    if (initial_count < 3U) {
+    if (initial_count < min_observation_count) {
         flex_solver_record_rejection(
             state, FLEX_SOLVER_REJECT_TOO_FEW);
         return false;
@@ -1348,7 +1547,7 @@ static bool flex_solver_update_position(
         const float damped_h00 = h00 + damping;
         const float damped_h11 = h11 + damping;
         const float determinant = damped_h00 * damped_h11 - h01 * h01;
-        if (count < 3U || fabsf(determinant) < 1e-9f) {
+        if (count < min_observation_count || fabsf(determinant) < 1e-9f) {
             flex_solver_record_rejection(
                 state, FLEX_SOLVER_REJECT_SINGULAR);
             return false;
@@ -1402,7 +1601,8 @@ static bool flex_solver_update_position(
         flex_solver_position_raw_sse(batch, x, y, &used_count);
     const float determinant =
         final_h00 * final_h11 - final_h01 * final_h01;
-    if (!isfinite(x) || !isfinite(y) || used_count < 3U ||
+    if (!isfinite(x) || !isfinite(y) ||
+        used_count < min_observation_count ||
         determinant <= 1e-9 || x < min_x - bound_margin ||
         x > max_x + bound_margin || y < min_y - bound_margin ||
         y > max_y + bound_margin) {
@@ -1477,6 +1677,16 @@ static bool flex_solver_update_position(
             state->rejected_since_submit = 0U;
         }
     } else {
+        if (state->last_published_geometry_version !=
+                state->geometry_version ||
+            now - state->last_geometry_publish_tick >=
+                pdMS_TO_TICKS(1000U)) {
+            if (flex_solver_publish_geometry(state, tag_id)) {
+                state->last_published_geometry_version =
+                    state->geometry_version;
+                state->last_geometry_publish_tick = now;
+            }
+        }
         (void)wireless_telemetry_service_submit_flex_position(
             tag_id, slot_id, (int32_t)lroundf(x * 1000.0f),
             (int32_t)lroundf(y * 1000.0f),
@@ -1670,15 +1880,39 @@ static void flex_solver_task(void *arg)
         }
         const TickType_t now = xTaskGetTickCount();
         if (item.type == FLEX_SOLVER_ITEM_RANGE && item.value_mm > 0) {
-            const bool range_changed = flex_solver_accept_range(
+            const enum flex_solver_range_result range_result =
+                flex_solver_accept_range(
                 &state, (size_t)first, (size_t)second,
                 item.value_mm / 1000.0f, item.slot_id, now);
-            if (range_changed && !state.geometry_fixed &&
+            if (range_result == FLEX_SOLVER_RANGE_RELOCATION) {
+                state.geometry_relocation_pending = true;
+            }
+            bool geometry_update_requested =
+                range_result != FLEX_SOLVER_RANGE_NONE;
+            if (config->runtime_mode == APP_RUNTIME_MODE_UWB_FLEX_TDOA) {
+                geometry_update_requested =
+                    (!state.geometry_ready &&
+                     range_result == FLEX_SOLVER_RANGE_STABLE) ||
+                    state.geometry_relocation_pending;
+            }
+            if (geometry_update_requested && !state.geometry_fixed &&
                 (state.last_geometry_tick == 0 ||
                 now - state.last_geometry_tick >=
                     pdMS_TO_TICKS(FLEX_SOLVER_GEOMETRY_MIN_PERIOD_MS))) {
-                (void)flex_solver_update_geometry(&state);
+                const bool relocation_rebuild =
+                    config->runtime_mode ==
+                        APP_RUNTIME_MODE_UWB_FLEX_TDOA &&
+                    state.geometry_ready &&
+                    state.geometry_relocation_pending;
+                const bool geometry_updated =
+                    flex_solver_update_geometry(
+                        &state, relocation_rebuild);
                 state.last_geometry_tick = now;
+                if (geometry_updated &&
+                    config->runtime_mode ==
+                        APP_RUNTIME_MODE_UWB_FLEX_TDOA) {
+                    state.geometry_relocation_pending = false;
+                }
             }
         } else if (item.type == FLEX_SOLVER_ITEM_OBSERVATION) {
             const double value_m = item.value_mm / 1000.0;
@@ -1703,7 +1937,34 @@ static void flex_solver_task(void *arg)
                 passive_mode &&
                 flex_solver_legacy_rolling_solve(
                     config->passive_ds_solve_mode);
-            if (!passive_mode || legacy_passive_mode) {
+            if (!passive_mode) {
+                const uint32_t pending_frame =
+                    state.pending_position_slot_id /
+                    slots_per_frame;
+                if (state.position_pending &&
+                    item_frame != pending_frame) {
+                    struct flex_solver_position_batch batch;
+                    const bool built =
+                        flex_solver_build_flex_frame_position_batch(
+                            &state, pending_frame, now, &batch);
+                    if (built &&
+                        (!state.last_flex_frame_solved_valid ||
+                         state.last_flex_frame_solved != pending_frame)) {
+                        if (flex_solver_update_position(
+                                &state, state.pending_tag_id,
+                                state.pending_position_slot_id, true,
+                                true, &batch)) {
+                            state.last_flex_frame_solved_valid = true;
+                            state.last_flex_frame_solved = pending_frame;
+                        }
+                    } else if (!built) {
+                        flex_solver_record_rejection(
+                            &state,
+                            FLEX_SOLVER_REJECT_FRAME_INCOMPLETE);
+                    }
+                    state.position_pending = false;
+                }
+            } else if (legacy_passive_mode) {
                 const uint32_t pending_frame =
                     state.pending_position_slot_id /
                     slots_per_frame;

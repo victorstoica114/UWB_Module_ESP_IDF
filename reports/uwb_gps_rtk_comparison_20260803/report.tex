@@ -1,0 +1,501 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[a4paper,margin=20mm,headheight=15pt]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xurl}
+
+\graphicspath{{figures/}}
+\definecolor{nativeblue}{HTML}{2563EB}
+\definecolor{flexorange}{HTML}{EA580C}
+\definecolor{passivepurple}{HTML}{7C3AED}
+\definecolor{rtkgreen}{HTML}{16A34A}
+\definecolor{slate}{HTML}{334155}
+\definecolor{lightgray}{HTML}{F1F5F9}
+\definecolor{warning}{HTML}{B45309}
+
+\newcommand{\native}{\textcolor{nativeblue}{Native DS-TWR}}
+\newcommand{\passive}{\textcolor{passivepurple}{Passive DS-TWR}}
+\newcommand{\flex}{\textcolor{flexorange}{FlexTDOA}}
+\newcommand{\rtk}{\textcolor{rtkgreen}{GPS RTK}}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small Four-method field comparison}
+\rhead{\small August 3, 2026}
+\cfoot{\thepage}
+
+\hypersetup{
+  pdftitle={Field comparison of FlexTDOA, Native DS-TWR, Passive DS-TWR and GPS RTK},
+  pdfauthor={UWB ESP-IDF technical report},
+  pdfsubject={Static outdoor field comparison using a common RTK-derived reference frame},
+  pdfkeywords={UWB, DW3000, FlexTDOA, DS-TWR, Passive DS-TWR, GNSS, GPS, RTK}
+}
+
+\begin{document}
+\pagenumbering{gobble}
+
+\begin{titlepage}
+  \centering
+  \vspace*{14mm}
+  {\Huge\bfseries Field comparison of four positioning methods\par}
+  \vspace{4mm}
+  {\Large \flex{}, \native{}, \passive{} and \rtk{}\par}
+  \vspace{7mm}
+  {\large Static outdoor data, common RTK-derived ENU frame, no UWB filtering\par}
+  \vspace{15mm}
+
+  \begin{tabular}{rl}
+    Test date: & August 3, 2026, 16:58--17:14 EEST\\
+    Platform: & 5 ESP32-S3 + DW3000 + PX1105R-01 modules, Raspberry Pi 5\\
+    Firmware: & \texttt{8fce48f-dirty}; repository HEAD \texttt{0c922dd}\\
+    Configuration: & T1 tag; A2, A3, A4, A5 anchors\\
+    Acquisition: & three consecutive 300 s protocol blocks; GNSS configured at 1 Hz\\
+    Environment: & outdoor, static geometry, no temporal filtering\\
+  \end{tabular}
+
+  \vfill
+  \colorbox{lightgray}{%
+    \begin{minipage}{0.89\textwidth}
+      \vspace{3mm}
+      \textbf{Preliminary result.}
+      Under this single static field geometry, \native{} produced the tightest
+      unfiltered position cloud: \textbf{1.39 cm CEP50} and
+      \textbf{2.99 cm P95}. \passive{} delivered
+      \textbf{26.12 complete positions/s}, approximately 11.4 times the Native
+      rate, with \textbf{6.57 cm CEP50} and \textbf{10.06 cm P95}.
+      The embedded \flex{} path published \textbf{54.68 positions/s}, while
+      the common complete-slot reconstruction yielded 16.97 positions/s.
+      Relative to the selected RTK reference, the three UWB RMSE values were
+      13.88 cm, 11.52 cm, and 10.15 cm, respectively.
+      \vspace{3mm}
+    \end{minipage}}
+
+  \vfill
+  \colorbox{warning!10}{%
+    \begin{minipage}{0.89\textwidth}
+      \vspace{2mm}
+      \textbf{RTK integrity warning.}
+      A3 reported RTK fixed throughout most of the campaign but changed by
+      \textbf{2.62 m} between protocol blocks. The report therefore uses the
+      only RTK block whose complete six-pair anchor geometry agrees with the
+      static UWB anchor-range consensus. RTK is a valuable common reference
+      here, but not an independently surveyed ground truth.
+      \vspace{2mm}
+    \end{minipage}}
+  \vspace{10mm}
+  {\large Reproducible preliminary technical report\par}
+\end{titlepage}
+
+\pagenumbering{roman}
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\section{Executive summary}
+
+This campaign is the first common data set containing all three implemented
+UWB protocols and GPS RTK. Each UWB protocol ran for five minutes in the same
+static outdoor layout. GNSS remained active on all modules, nominally at
+1 Hz. The comparison deliberately separates two questions:
+
+\begin{enumerate}[leftmargin=7mm]
+  \item \textbf{Accuracy against the RTK reference}: horizontal distance
+  between a UWB solution and the robust RTK-fixed T1 position.
+  \item \textbf{Precision}: radial dispersion about each method's own robust
+  median, which does not reward or penalize a constant offset.
+\end{enumerate}
+
+All three UWB raw streams were reconstructed with the same unweighted,
+unfiltered two-dimensional offline solver and the same anchor coordinates.
+This avoids comparing different dashboard filters or embedded solver policies.
+The ESP32-published streams are listed separately as end-to-end results.
+
+\begin{table}[H]
+  \centering
+  \caption{Primary common-solver results. Accuracy is relative to the selected
+  RTK reference; precision is dispersion about each method's own median.}
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{lrrrrrr}
+    \toprule
+    Method & $N$ & Hz & Accuracy RMSE & Accuracy P95 & Precision CEP50 & Precision P95\\
+    \midrule
+    \flex{} & 5,093 & 16.97 & 13.88 cm & 23.15 cm & 9.23 cm & 19.64 cm\\
+    \native{} & 688 & 2.29 & 11.52 cm & 13.50 cm & 1.39 cm & 2.99 cm\\
+    \passive{} & 7,838 & 26.12 & 10.15 cm & 14.97 cm & 6.57 cm & 10.06 cm\\
+    \rtk{} & 544 & 0.60 observed & reference & reference & 0.50 cm & 1.10 cm\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The result is nuanced. Native DS-TWR is clearly the most repeatable UWB method
+in this static trial. Passive DS-TWR happens to have the lowest RMSE against
+the chosen RTK position, but its wider cloud shows that this is partly a
+favorable cancellation of systematic bias; it is not more precise than Native
+DS-TWR. FlexTDOA remains the fastest end-to-end implementation, while Passive
+DS-TWR is the fastest source of complete frames reconstructed by the common
+solver in this particular capture.
+
+\section{System and tested protocol settings}
+
+\subsection{Hardware and radio configuration}
+
+The system contains one receive-capable tag (T1) and four anchors (A2--A5).
+Every node combines an ESP32-S3, a Qorvo DW3000 UWB transceiver, and a SkyTraq
+PX1105R-01 GNSS receiver. All UWB methods used channel 9. GNSS RTK corrections
+were distributed through Wi-Fi. The tag and anchors were not moved between the
+three acquisition blocks.
+
+\begin{table}[H]
+  \centering
+  \caption{Runtime parameters captured in the metadata.}
+  \small
+  \begin{tabularx}{\textwidth}{p{34mm}p{31mm}Y}
+    \toprule
+    Method & Frame/slot & Relevant settings\\
+    \midrule
+    \flex{} & 3 ms slot, 12 ms four-anchor frame
+      & 250 $\mu$s request subslot; 1,000 $\mu$s request processing;
+        250 $\mu$s response subslot and processing; 250 $\mu$s guard time\\
+    \native{} & 100 ms per anchor; 410 ms nominal four-anchor frame
+      & 10 ms frame gap; 90 ms RX timeout; 20 ms response delay;
+        20 ms final delay; native POLL--RESP--FINAL exchange\\
+    \passive{} & 5 ms exchange slot; 1 ms gap
+      & Robust Rotating schedule; 4 ms RX timeout; 1,000 $\mu$s response;
+        1,000 $\mu$s final delay; receive-only tag\\
+    \rtk{} & configured 1 Hz
+      & PX1105R-01, NTRIP corrections through Wi-Fi; fixed solutions retained\\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Position observables}
+
+Native DS-TWR measures four absolute tag-to-anchor distances. The position is
+obtained by unweighted 2-D trilateration. FlexTDOA and Passive DS-TWR produce
+range-difference observations of the form
+
+\begin{equation}
+ z_{ij} \simeq \lVert\mathbf p-\mathbf a_j\rVert
+             -\lVert\mathbf p-\mathbf a_i\rVert,
+\end{equation}
+
+and the common solver minimizes
+
+\begin{equation}
+ \min_{\mathbf p}\sum_{(i,j)}
+ \left(\lVert\mathbf p-\mathbf a_j\rVert
+ -\lVert\mathbf p-\mathbf a_i\rVert-z_{ij}\right)^2.
+\end{equation}
+
+No median filter, moving average, Kalman filter, or trajectory smoothing was
+applied to any UWB position in the primary comparison. Physical corrections
+inside the radio measurements are not treated as temporal filtering.
+
+\section{Acquisition and common analysis method}
+
+\subsection{Data blocks}
+
+The sequence was FlexTDOA, Native DS-TWR, then Passive DS-TWR. Each acquisition
+lasted 300 s after a 15 s warm-up. The collector polled module status at 50 Hz
+and requested GNSS at 1 Hz. Data were deduplicated by their native protocol
+keys before analysis.
+
+\begin{table}[H]
+  \centering
+  \caption{Captured data volume after key-based deduplication.}
+  \small
+  \begin{tabular}{lrrrr}
+    \toprule
+    Block & UWB observations & Anchor ranges & ESP32 positions & GNSS events\\
+    \midrule
+    FlexTDOA & 192,787 & 203,581 & 16,408 & 924\\
+    Native DS-TWR & 2,887 ranges & 176 & 0 & 937\\
+    Passive DS-TWR & 37,320 & 44,728 & 7,839 & 932\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The absence of Native embedded positions is intentional: during this capture
+the Native position solver was running on the Raspberry Pi. Its raw ranges are
+therefore reconstructed offline by the common solver.
+
+\subsection{Common ENU frame and accuracy reference}
+
+RTK-fixed WGS84 latitude, longitude, and altitude were converted to ECEF and
+then to a local East--North--Up frame whose origin is the robust A2 position.
+The robust T1 median across all blocks is the horizontal accuracy reference.
+The tag changed by only 1.5 cm between block centers, so pooling its fixed
+samples is appropriate for this static test.
+
+The anchor geometry could not be pooled blindly: A3 entered mutually
+inconsistent RTK-fixed solutions. Section~\ref{sec:rtk-integrity} documents the
+selection of the coherent geometry. The resulting geometry is shown below.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.76\textwidth]{01_rtk_geometry.pdf}
+  \caption{Common analysis geometry derived from the coherent RTK block. The
+  T1 marker is the robust RTK-fixed reference position.}
+\end{figure}
+
+\subsection{Frame assembly}
+
+Native DS-TWR uses a complete set only when all four ranges carry the same
+reconstructed cycle. FlexTDOA uses three responder observations belonging to
+one native slot. Passive DS-TWR emits the three responder exchanges in three
+consecutive slots; the common frame identifier is recovered from the ESP32
+slot identifier and responder index. No Raspberry Pi wall-clock synchronization
+is used to number UWB frames.
+
+\section{RTK integrity audit}\label{sec:rtk-integrity}
+
+The GNSS receiver reported RTK fixed for more than 96\% of the retained samples
+on every node. Nevertheless, solution status alone was insufficient: the A3
+block center moved by 2.62 m while A2, A4, A5, and T1 each remained within
+1.8 cm across the campaign.
+
+\begin{table}[H]
+  \centering
+  \caption{Maximum three-dimensional displacement between consecutive RTK
+  block centers.}
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Module & T1 & A2 & A3 & A4 & A5\\
+    \midrule
+    Maximum span & 1.47 cm & 1.21 cm & \textbf{2.62 m} & 1.70 cm & 1.48 cm\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Because the physical anchor layout was static, the six robust anchor-to-anchor
+UWB medians provide a cross-sensor integrity check. For each RTK epoch, the
+six RTK 3-D separations were compared with the corresponding UWB consensus.
+
+\begin{table}[H]
+  \centering
+  \caption{RTK anchor-geometry integrity against the six-pair static UWB
+  consensus. The selected geometry is bold.}
+  \begin{tabular}{lrrr}
+    \toprule
+    RTK block & Complete pairs & Pair RMSE & Maximum residual\\
+    \midrule
+    FlexTDOA block & 6 & 1.068 m & 2.232 m\\
+    Native DS-TWR block & 6 & 0.848 m & 1.757 m\\
+    \textbf{Passive DS-TWR block} & \textbf{6} & \textbf{0.071 m} & \textbf{0.137 m}\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The Passive block is the only complete RTK geometry compatible with the radio
+distances and is used for all three UWB solvers. This procedure prevents a
+known false-fixed coordinate from generating metre-scale fictitious UWB
+errors. It also creates a limited dependence between the geometry reference
+and UWB, so this report must not be interpreted as a metrological calibration
+against independent survey equipment.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth]{08_rtk_quality.pdf}
+  \caption{RTK status availability and T1 reference-stream statistics. The
+  high fixed percentage does not reveal the A3 integrity failure.}
+\end{figure}
+
+\section{Position results}
+
+\subsection{Accuracy relative to RTK}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth]{02_position_clouds.pdf}
+  \caption{Unfiltered position clouds in the same RTK-derived coordinate
+  frame. The black cross is the RTK-fixed T1 median. Identical axes make the
+  different dispersions directly visible.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.88\textwidth]{03_error_cdf.pdf}
+  \caption{CDF of horizontal UWB error relative to T1 RTK. The green curve is
+  RTK self-dispersion, not an independent RTK accuracy measurement.}
+\end{figure}
+
+The Passive DS-TWR median lies closer to T1 RTK than the Native DS-TWR median,
+which explains its slightly lower RMSE. Native DS-TWR remains much tighter:
+its complete error distribution spans only 10.0 cm from the observed minimum
+to maximum, whereas Passive contains a 51.4 cm maximum error. Therefore the
+accuracy ranking at this one point must be read together with precision and
+range bias, not from RMSE alone.
+
+\subsection{Static precision}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.88\textwidth]{04_precision_boxplot.pdf}
+  \caption{Radial displacement from each method's own median. Plot outliers
+  are hidden for readability but retained in all tabulated metrics.}
+\end{figure}
+
+Native DS-TWR is the clear static-precision winner: 1.39 cm CEP50 and 2.99 cm
+P95. GPS RTK is approximately three times tighter at P95, while Passive DS-TWR
+and FlexTDOA are respectively 3.4 and 6.6 times wider than Native at P95.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\textwidth]{05_error_time.pdf}
+  \caption{Horizontal UWB error versus time. No temporal filtering or
+  ground-truth-based rejection was applied.}
+\end{figure}
+
+\section{Rate, delivery, and end-to-end output}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth]{06_rate_delivery.pdf}
+  \caption{Common-solver update rate and completeness. Candidate-unit
+  definitions are protocol-specific, so completeness should be interpreted
+  as a delivery diagnostic rather than a direct efficiency ranking.}
+\end{figure}
+
+\begin{table}[H]
+  \centering
+  \caption{Frame assembly and delivery diagnostics.}
+  \small
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Method & Candidates & Complete & Complete & Median interval & P95 interval\\
+    \midrule
+    \flex{} & 97,543 & 5,093 & 5.22\% & 48.3 ms & 193.9 ms\\
+    \native{} & 735 & 688 & 93.61\% & 410.3 ms & 811.2 ms\\
+    \passive{} & 16,013 & 7,838 & 48.95\% & 29.9 ms & 134.0 ms\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+FlexTDOA's primary common-solver row deliberately requires all three responses
+from one physical slot. The product's embedded solver publishes more often by
+using the current valid observation state. This produces the following
+end-to-end precision result, which is useful operationally but is not identical
+to the complete-frame comparison above.
+
+\begin{table}[H]
+  \centering
+  \caption{Positions published by the running ESP32 solver. Native used the
+  Raspberry solver during this capture and therefore has no embedded row.}
+  \begin{tabular}{lrrrr}
+    \toprule
+    Method & $N$ & Published Hz & Precision CEP50 & Precision P95\\
+    \midrule
+    \flex{} embedded & 16,408 & 54.68 & 3.44 cm & 7.51 cm\\
+    \passive{} embedded & 7,839 & 26.13 & 5.06 cm & 8.94 cm\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+This distinction resolves an apparent contradiction: FlexTDOA is the fastest
+live implementation, but Passive DS-TWR produced more fully coherent raw
+frames for the strict common solver in this capture.
+
+\section{Anchor-range consistency}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth]{07_anchor_range_bias.pdf}
+  \caption{Median UWB anchor range minus the coherent RTK 3-D separation.
+  These biases include both UWB hardware bias and residual RTK-geometry error.}
+\end{figure}
+
+All three protocols show the same sign pattern on most pairs, suggesting that
+a substantial component is hardware/path dependent rather than solver noise.
+The largest common discrepancy is A4--A5, approximately $-13.4$ to $-16.4$ cm.
+Native DS-TWR has the smallest range dispersion on most pairs, generally
+1.3--3.1 cm standard deviation; Passive DS-TWR is similar on five pairs, while
+FlexTDOA anchor-range telemetry is wider at about 4.6--5.8 cm.
+
+This pair structure is a clear calibration opportunity. A future independent
+survey should estimate antenna-delay and pair biases without using RTK epochs
+that fail the geometry integrity check.
+
+\section{Conclusions}
+
+\begin{enumerate}[leftmargin=7mm]
+  \item \textbf{Native DS-TWR is the strongest static precision reference.}
+  It achieves 2.99 cm P95 with no temporal filtering, but only 2.29 complete
+  positions/s under the conservative 410 ms four-anchor profile.
+
+  \item \textbf{Passive DS-TWR is the best complete-frame speed/precision
+  compromise in this capture.} It reaches 26.12 positions/s, 6.57 cm CEP50,
+  and 10.06 cm P95 while the tag remains receive-only.
+
+  \item \textbf{FlexTDOA remains the fastest live output.} The ESP32 publishes
+  54.68 positions/s with 7.51 cm P95 self-dispersion. Its strict, complete-slot
+  common reconstruction is slower and noisier because only 5.22\% of candidate
+  slots contain every required observation in the captured stream.
+
+  \item \textbf{Accuracy and precision lead to different rankings.} Passive
+  DS-TWR has the lowest RMSE against this RTK reference, but Native DS-TWR has
+  by far the smallest cloud. A single favorable bias cancellation must not be
+  mistaken for general accuracy superiority.
+
+  \item \textbf{RTK fixed is not an integrity guarantee.} A3 produced a
+  2.62 m false-fixed displacement. Cross-checking static inter-anchor geometry
+  is mandatory before RTK is used as an accuracy reference.
+\end{enumerate}
+
+\paragraph{Recommended next experiment.}
+Repeat randomized five-minute blocks at several tag positions and include a
+dynamic trajectory. Survey anchor coordinates independently or use a verified
+local reference, and randomize protocol order to separate protocol behavior
+from time-varying RF and GNSS conditions. Retain both common complete-frame and
+actual end-to-end results.
+
+\section{Limitations}
+
+This report describes one static geometry and three sequential five-minute
+blocks. It does not test edge geometry, NLOS, antenna orientation, speed, or
+multi-tag scaling. The protocol order was not randomized. GNSS was configured
+at 1 Hz, but the distinct retained T1 fixed stream was observed at 0.60 Hz over
+the full 900 s campaign. Most importantly, RTK is part of the tested system and
+the coherent anchor epoch was selected using static UWB pair consistency; the
+reported UWB ``accuracy'' is therefore a practical cross-method comparison,
+not traceable absolute accuracy.
+
+\section{Reproducibility}
+
+The report directory contains:
+
+\begin{itemize}[leftmargin=7mm]
+  \item raw JSONL captures and per-block metadata under \code{data/};
+  \item \path{analysis_summary.json}, \path{position_metrics.csv},
+    \path{anchor_pair_metrics.csv}, and \path{rtk_geometry_integrity.csv};
+  \item all common-solver positions in \path{common_solver_positions.csv};
+  \item vector and raster figures under \code{figures/};
+  \item checksums in \code{SHA256SUMS}.
+\end{itemize}
+
+The deterministic analysis command is:
+
+\begin{quote}
+\small\ttfamily
+python3 tools/uwb\_gps\_rtk\_report.py \textbackslash\\
+\hspace*{2em}reports/uwb\_gps\_rtk\_comparison\_20260803
+\end{quote}
+
+\end{document}

@@ -59,6 +59,10 @@ bool wireless_telemetry_service_submit_flex_position(
     uint8_t tag_id, uint32_t slot_id, int32_t x_mm, int32_t y_mm,
     int32_t sigma_mm, int32_t rms_mm, uint16_t observation_count,
     uint8_t anchor_count, uint32_t geometry_version);
+bool wireless_telemetry_service_submit_flex_geometry(
+    uint8_t tag_id, uint8_t anchor_id, uint8_t anchor_count,
+    uint32_t geometry_version, int32_t x_mm, int32_t y_mm,
+    int32_t fit_rms_mm);
 bool wireless_telemetry_service_submit_passive_ds_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
     uint8_t responder_index, uint16_t sequence, uint32_t slot_id,
@@ -75,6 +79,13 @@ bool wireless_telemetry_service_submit_native_ds_anchor_range(
 bool wireless_telemetry_service_submit_native_ds_tag_range(
     uint8_t tag_id, uint8_t anchor_id, uint16_t sequence,
     uint32_t slot_id, int32_t distance_mm, int32_t raw_distance_mm);
+bool wireless_telemetry_service_submit_native_ds_position(
+    uint8_t tag_id, uint32_t frame_id, int32_t x_mm, int32_t y_mm,
+    int32_t sigma_mm, int32_t rms_mm, uint16_t observation_count,
+    uint8_t anchor_count, uint32_t geometry_version);
+bool wireless_telemetry_service_submit_native_ds_geometry(
+    uint8_t anchor_id, uint8_t anchor_count, uint32_t geometry_version,
+    int32_t x_mm, int32_t y_mm, int32_t fit_rms_mm);
 bool wireless_telemetry_service_submit_passive_ds_position(
     uint8_t tag_id, uint32_t slot_id, int32_t filtered_x_mm,
     int32_t filtered_y_mm, int32_t raw_x_mm, int32_t raw_y_mm,

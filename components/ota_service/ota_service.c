@@ -1030,23 +1030,56 @@ static uint8_t runtime_radio_rf_channel_bit(const app_runtime_config_t *config)
 
 static uint8_t runtime_radio_phy_mode(const app_runtime_config_t *config)
 {
-    return config != NULL &&
-                   config->radio_phy_mode == APP_UWB_RADIO_PHY_LONG_RANGE
-               ? APP_UWB_RADIO_PHY_LONG_RANGE
-               : APP_UWB_RADIO_PHY_FAST;
+    if (config != NULL) {
+        switch (config->radio_phy_mode) {
+        case APP_UWB_RADIO_PHY_LONG_RANGE:
+        case APP_UWB_RADIO_PHY_FAST_PLEN256:
+        case APP_UWB_RADIO_PHY_FAST_PLEN512:
+        case APP_UWB_RADIO_PHY_850K_PLEN512:
+        case APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD:
+            return config->radio_phy_mode;
+        default:
+            break;
+        }
+    }
+    return APP_UWB_RADIO_PHY_FAST;
 }
 
-static bool runtime_radio_is_long_range(const app_runtime_config_t *config)
+static bool runtime_radio_is_850k(const app_runtime_config_t *config)
 {
-    return runtime_radio_phy_mode(config) == APP_UWB_RADIO_PHY_LONG_RANGE;
+    const uint8_t mode = runtime_radio_phy_mode(config);
+    return mode == APP_UWB_RADIO_PHY_LONG_RANGE ||
+           mode == APP_UWB_RADIO_PHY_850K_PLEN512 ||
+           mode == APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD;
 }
 
 static uint8_t runtime_radio_profile(const app_runtime_config_t *config)
 {
-    if (runtime_radio_is_long_range(config)) {
+    const uint8_t mode = runtime_radio_phy_mode(config);
+    if (mode == APP_UWB_RADIO_PHY_LONG_RANGE) {
         return runtime_radio_channel(config) == 9U
                    ? APP_UWB_RADIO_PROFILE_LONG_RANGE_CH9_850K_PLEN1024
                    : APP_UWB_RADIO_PROFILE_LONG_RANGE_CH5_850K_PLEN1024;
+    }
+    if (mode == APP_UWB_RADIO_PHY_FAST_PLEN256) {
+        return runtime_radio_channel(config) == 9U
+                   ? APP_UWB_RADIO_PROFILE_CH9_6M8_PLEN256
+                   : APP_UWB_RADIO_PROFILE_CH5_6M8_PLEN256;
+    }
+    if (mode == APP_UWB_RADIO_PHY_FAST_PLEN512) {
+        return runtime_radio_channel(config) == 9U
+                   ? APP_UWB_RADIO_PROFILE_CH9_6M8_PLEN512
+                   : APP_UWB_RADIO_PROFILE_CH5_6M8_PLEN512;
+    }
+    if (mode == APP_UWB_RADIO_PHY_850K_PLEN512) {
+        return runtime_radio_channel(config) == 9U
+                   ? APP_UWB_RADIO_PROFILE_CH9_850K_PLEN512
+                   : APP_UWB_RADIO_PROFILE_CH5_850K_PLEN512;
+    }
+    if (mode == APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD) {
+        return runtime_radio_channel(config) == 9U
+                   ? APP_UWB_RADIO_PROFILE_CH9_850K_PLEN512_STD_SFD
+                   : APP_UWB_RADIO_PROFILE_CH5_850K_PLEN512_STD_SFD;
     }
     return runtime_radio_channel(config) == 9U
                ? APP_UWB_RADIO_PROFILE_LEGACY_CH9_6M8_PLEN128
@@ -1056,33 +1089,74 @@ static uint8_t runtime_radio_profile(const app_runtime_config_t *config)
 static uint8_t runtime_radio_preamble_len_code(
     const app_runtime_config_t *config)
 {
-    return runtime_radio_is_long_range(config)
-               ? APP_UWB_RADIO_PLEN_1024
-               : APP_UWB_RADIO_PREAMBLE_LEN_CODE;
+    switch (runtime_radio_phy_mode(config)) {
+    case APP_UWB_RADIO_PHY_LONG_RANGE:
+        return APP_UWB_RADIO_PLEN_1024;
+    case APP_UWB_RADIO_PHY_FAST_PLEN256:
+        return APP_UWB_RADIO_PLEN_256;
+    case APP_UWB_RADIO_PHY_FAST_PLEN512:
+    case APP_UWB_RADIO_PHY_850K_PLEN512:
+    case APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD:
+        return APP_UWB_RADIO_PLEN_512;
+    default:
+        return APP_UWB_RADIO_PREAMBLE_LEN_CODE;
+    }
 }
 
 static uint8_t runtime_radio_pac(const app_runtime_config_t *config)
 {
-    return runtime_radio_is_long_range(config) ? 2U : APP_UWB_RADIO_PAC;
+    const uint8_t mode = runtime_radio_phy_mode(config);
+    if (mode == APP_UWB_RADIO_PHY_FAST_PLEN256) {
+        return 1U;
+    }
+    return mode == APP_UWB_RADIO_PHY_FAST ? APP_UWB_RADIO_PAC : 2U;
 }
 
 static uint8_t runtime_radio_data_rate(const app_runtime_config_t *config)
 {
-    return runtime_radio_is_long_range(config)
+    return runtime_radio_is_850k(config)
                ? APP_UWB_RADIO_BR_850K
                : APP_UWB_RADIO_DATA_RATE;
 }
 
 static uint8_t runtime_radio_phr_rate(const app_runtime_config_t *config)
 {
-    return runtime_radio_is_long_range(config) ? 0U
+    return runtime_radio_is_850k(config) ? 0U
                                                 : APP_UWB_RADIO_PHR_RATE;
 }
 
 static uint16_t runtime_radio_sfd_timeout(
     const app_runtime_config_t *config)
 {
-    return runtime_radio_is_long_range(config) ? 1001U : 129U;
+    switch (runtime_radio_phy_mode(config)) {
+    case APP_UWB_RADIO_PHY_LONG_RANGE:
+        return 1001U;
+    case APP_UWB_RADIO_PHY_FAST_PLEN256:
+        return 249U;
+    case APP_UWB_RADIO_PHY_FAST_PLEN512:
+    case APP_UWB_RADIO_PHY_850K_PLEN512:
+    case APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD:
+        return 489U;
+    default:
+        return 129U;
+    }
+}
+
+static uint8_t runtime_radio_preamble_code(
+    const app_runtime_config_t *config)
+{
+    return runtime_radio_phy_mode(config) ==
+                   APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD
+               ? 9U
+               : APP_UWB_RADIO_PREAMBLE_CODE;
+}
+
+static uint8_t runtime_radio_sfd_type(const app_runtime_config_t *config)
+{
+    return runtime_radio_phy_mode(config) ==
+                   APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD
+               ? 0U
+               : APP_UWB_RADIO_SFD_TYPE;
 }
 
 static uint32_t runtime_radio_rf_tx_ctrl_2(const app_runtime_config_t *config)
@@ -2328,12 +2402,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned)runtime_radio_channel(runtime_config),
         (unsigned)runtime_radio_rf_channel_bit(runtime_config),
         (unsigned)runtime_radio_preamble_len_code(runtime_config),
-        (unsigned)APP_UWB_RADIO_PREAMBLE_CODE,
+        (unsigned)runtime_radio_preamble_code(runtime_config),
         (unsigned)runtime_radio_pac(runtime_config),
         (unsigned)runtime_radio_data_rate(runtime_config),
         (unsigned)APP_UWB_RADIO_PHR_MODE,
         (unsigned)runtime_radio_phr_rate(runtime_config),
-        (unsigned)APP_UWB_RADIO_SFD_TYPE,
+        (unsigned)runtime_radio_sfd_type(runtime_config),
         (unsigned)runtime_radio_sfd_timeout(runtime_config),
         (unsigned)APP_UWB_RADIO_TX_PG_DELAY,
         (unsigned long)APP_UWB_RADIO_TX_POWER,

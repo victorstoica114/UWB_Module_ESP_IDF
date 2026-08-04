@@ -61,6 +61,9 @@ enum {
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_POSITION_V4 = 12,
     WIRELESS_TELEMETRY_STREAM_NATIVE_DS_TAG_RANGE = 13,
     WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_GEOMETRY = 14,
+    WIRELESS_TELEMETRY_STREAM_NATIVE_DS_POSITION = 15,
+    WIRELESS_TELEMETRY_STREAM_NATIVE_DS_GEOMETRY = 16,
+    WIRELESS_TELEMETRY_STREAM_FLEX_GEOMETRY = 17,
     WIRELESS_TELEMETRY_RECONNECT_MS = 2000,
     WIRELESS_TELEMETRY_WIFI_WAIT_MS = 500,
     WIRELESS_TELEMETRY_QUEUE_WAIT_MS = 20,
@@ -85,6 +88,9 @@ typedef enum {
     WIRELESS_TELEMETRY_ITEM_NATIVE_DS_ANCHOR_RANGE,
     WIRELESS_TELEMETRY_ITEM_NATIVE_DS_TAG_RANGE,
     WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_GEOMETRY,
+    WIRELESS_TELEMETRY_ITEM_NATIVE_DS_POSITION,
+    WIRELESS_TELEMETRY_ITEM_NATIVE_DS_GEOMETRY,
+    WIRELESS_TELEMETRY_ITEM_FLEX_GEOMETRY,
 } wireless_telemetry_item_type_t;
 
 typedef struct {
@@ -571,6 +577,18 @@ static bool wireless_telemetry_binary_item_info(
         *stream_type = WIRELESS_TELEMETRY_STREAM_PASSIVE_DS_GEOMETRY;
         *sample_len = WIRELESS_TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN;
         return true;
+    case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_POSITION:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_NATIVE_DS_POSITION;
+        *sample_len = WIRELESS_TELEMETRY_FLEX_POSITION_SAMPLE_LEN;
+        return true;
+    case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_GEOMETRY:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_NATIVE_DS_GEOMETRY;
+        *sample_len = WIRELESS_TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN;
+        return true;
+    case WIRELESS_TELEMETRY_ITEM_FLEX_GEOMETRY:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_FLEX_GEOMETRY;
+        *sample_len = WIRELESS_TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN;
+        return true;
     default:
         return false;
     }
@@ -709,6 +727,7 @@ static bool wireless_telemetry_append_binary_sample(
         sample[19] = item->data.flex_anchor_range.responder_id;
         break;
     case WIRELESS_TELEMETRY_ITEM_FLEX_POSITION:
+    case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_POSITION:
         wireless_telemetry_write_u32_le(
             &sample[4], item->data.flex_position.slot_id);
         wireless_telemetry_write_i32_le(
@@ -767,6 +786,8 @@ static bool wireless_telemetry_append_binary_sample(
             &sample[59], item->data.flex_position.position_rejected_count);
         break;
     case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_GEOMETRY:
+    case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_GEOMETRY:
+    case WIRELESS_TELEMETRY_ITEM_FLEX_GEOMETRY:
         wireless_telemetry_write_u32_le(
             &sample[4], item->data.passive_ds_geometry.geometry_version);
         wireless_telemetry_write_i32_le(
@@ -1348,6 +1369,35 @@ bool wireless_telemetry_service_submit_flex_position(
     return wireless_telemetry_enqueue(&item);
 }
 
+bool wireless_telemetry_service_submit_flex_geometry(
+    uint8_t tag_id, uint8_t anchor_id, uint8_t anchor_count,
+    uint32_t geometry_version, int32_t x_mm, int32_t y_mm,
+    int32_t fit_rms_mm)
+{
+    if (!s_connected || tag_id == 0U || anchor_id == 0U ||
+        anchor_count < 3U) {
+        return false;
+    }
+    const wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_FLEX_GEOMETRY,
+        .uptime_ms =
+            (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
+        .data = {
+            .passive_ds_geometry = {
+                .geometry_version = geometry_version,
+                .x_mm = x_mm,
+                .y_mm = y_mm,
+                .fit_rms_mm = fit_rms_mm,
+                .anchor_id = anchor_id,
+                .anchor_count = anchor_count,
+                .tag_id = tag_id,
+                .flags = 1U,
+            },
+        },
+    };
+    return wireless_telemetry_enqueue(&item);
+}
+
 bool wireless_telemetry_service_submit_passive_ds_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
     uint8_t responder_index, uint16_t sequence, uint32_t slot_id,
@@ -1458,6 +1508,62 @@ bool wireless_telemetry_service_submit_native_ds_tag_range(
                 .sequence = sequence,
                 .initiator_id = tag_id,
                 .responder_id = anchor_id,
+            },
+        },
+    };
+    return wireless_telemetry_enqueue(&item);
+}
+
+bool wireless_telemetry_service_submit_native_ds_position(
+    uint8_t tag_id, uint32_t frame_id, int32_t x_mm, int32_t y_mm,
+    int32_t sigma_mm, int32_t rms_mm, uint16_t observation_count,
+    uint8_t anchor_count, uint32_t geometry_version)
+{
+    if (!s_connected) {
+        return false;
+    }
+    const wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_NATIVE_DS_POSITION,
+        .uptime_ms =
+            (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
+        .data = {
+            .flex_position = {
+                .slot_id = frame_id,
+                .geometry_version = geometry_version,
+                .x_mm = x_mm,
+                .y_mm = y_mm,
+                .sigma_mm = sigma_mm,
+                .rms_mm = rms_mm,
+                .observation_count = observation_count,
+                .tag_id = tag_id,
+                .anchor_count = anchor_count,
+            },
+        },
+    };
+    return wireless_telemetry_enqueue(&item);
+}
+
+bool wireless_telemetry_service_submit_native_ds_geometry(
+    uint8_t anchor_id, uint8_t anchor_count, uint32_t geometry_version,
+    int32_t x_mm, int32_t y_mm, int32_t fit_rms_mm)
+{
+    if (!s_connected || anchor_id == 0U || anchor_count < 3U) {
+        return false;
+    }
+    const wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_NATIVE_DS_GEOMETRY,
+        .uptime_ms =
+            (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
+        .data = {
+            .passive_ds_geometry = {
+                .geometry_version = geometry_version,
+                .x_mm = x_mm,
+                .y_mm = y_mm,
+                .fit_rms_mm = fit_rms_mm,
+                .anchor_id = anchor_id,
+                .anchor_count = anchor_count,
+                .tag_id = app_identity_get_module_id(),
+                .flags = 1U,
             },
         },
     };

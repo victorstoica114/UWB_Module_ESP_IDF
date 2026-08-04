@@ -134,7 +134,11 @@ static bool radio_channel_valid(uint8_t channel)
 static bool radio_phy_mode_valid(uint8_t mode)
 {
     return mode == APP_UWB_RADIO_PHY_FAST ||
-           mode == APP_UWB_RADIO_PHY_LONG_RANGE;
+           mode == APP_UWB_RADIO_PHY_LONG_RANGE ||
+           mode == APP_UWB_RADIO_PHY_FAST_PLEN256 ||
+           mode == APP_UWB_RADIO_PHY_FAST_PLEN512 ||
+           mode == APP_UWB_RADIO_PHY_850K_PLEN512 ||
+           mode == APP_UWB_RADIO_PHY_850K_PLEN512_STD_SFD;
 }
 
 static bool tcp_port_valid(uint32_t port)

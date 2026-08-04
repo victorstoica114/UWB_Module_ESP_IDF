@@ -80,6 +80,79 @@ STATUS_KEYS = (
     "resource_temperature_c",
     "boot_guard_boot_count",
     "boot_guard_validated",
+    "gps_powered",
+    "gps_task_running",
+    "gps_uart_ready",
+    "gps_fix_valid",
+    "gps_fix_quality",
+    "gps_fix_quality_text",
+    "gps_fix_type",
+    "gps_satellites",
+    "gps_satellites_in_view",
+    "gps_hdop",
+    "gps_latitude_deg",
+    "gps_longitude_deg",
+    "gps_altitude_m",
+    "gps_utc_time",
+    "gps_utc_date",
+    "gps_last_fix_age_ms",
+    "gps_rtk_age_s",
+    "gps_rtk_ratio",
+    "gps_ntrip_stream_active",
+    "gps_ntrip_last_data_age_ms",
+    "gps_ntrip_state",
+)
+
+GPS_FIX_KEYS = (
+    "module_id",
+    "hostname",
+    "gps_fix_valid",
+    "gps_fix_quality",
+    "gps_fix_quality_text",
+    "gps_fix_type",
+    "gps_satellites",
+    "gps_satellites_in_view",
+    "gps_hdop",
+    "gps_latitude_deg",
+    "gps_longitude_deg",
+    "gps_altitude_m",
+    "gps_speed_mps",
+    "gps_course_deg",
+    "gps_rmc_status",
+    "gps_rmc_mode",
+    "gps_utc_time",
+    "gps_utc_date",
+    "gps_last_sentence",
+    "gps_last_rx_age_ms",
+    "gps_last_fix_age_ms",
+    "gps_gga_count",
+    "gps_rmc_count",
+    "gps_rtk_age_s",
+    "gps_rtk_ratio",
+    "gps_baseline_valid",
+    "gps_baseline_source",
+    "gps_baseline_status",
+    "gps_baseline_mode",
+    "gps_baseline_east_m",
+    "gps_baseline_north_m",
+    "gps_baseline_up_m",
+    "gps_baseline_length_m",
+    "gps_baseline_course_deg",
+    "gps_true_heading_valid",
+    "gps_true_heading_deg",
+    "gps_true_heading_mode",
+    "gps_moving_base_role",
+    "gps_ntrip_configured",
+    "gps_ntrip_running",
+    "gps_ntrip_tls_connected",
+    "gps_ntrip_stream_active",
+    "gps_ntrip_http_status",
+    "gps_ntrip_rtcm_frames",
+    "gps_ntrip_rtcm_bytes",
+    "gps_ntrip_last_data_age_ms",
+    "gps_ntrip_state",
+    "gps_checksum_errors",
+    "gps_parse_errors",
 )
 
 
@@ -194,6 +267,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration-sec", type=float, default=120.0)
     parser.add_argument("--warmup-sec", type=float, default=15.0)
     parser.add_argument("--poll-hz", type=float, default=50.0)
+    parser.add_argument(
+        "--gps-hz",
+        type=float,
+        default=1.0,
+        help="Maximum GNSS solution sampling rate (default: 1 Hz).",
+    )
     parser.add_argument("--expected-modules", type=int, default=5)
     parser.add_argument("--ready-timeout-sec", type=float, default=90.0)
     parser.add_argument(
@@ -231,6 +310,14 @@ def parse_args() -> argparse.Namespace:
         default=0.002,
         help="Reference-coordinate tolerance stored in capture metadata.",
     )
+    parser.add_argument(
+        "--no-ground-truth",
+        action="store_true",
+        help=(
+            "Record a precision/repeatability capture without claiming that "
+            "the anchor or tag coordinates are independently surveyed."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -256,11 +343,22 @@ def relevant_timing_log(item: dict[str, Any]) -> bool:
         or "PASSIVE_DS solver pos=" in message
         or "PASSIVE_DS runtime source=" in message
         or "PASSIVE_DS receive-only tag active" in message
+        or "FLEX_TDOA solver pos=" in message
+        or "FLEX_TDOA anchor n=" in message
+        or "FLEX_TDOA tag n=" in message
         or (
             "PASSIVE_DS" in message
             and (
                 "failed" in message
                 or "timeout" in message
+            )
+        )
+        or (
+            "FLEX_TDOA" in message
+            and (
+                "failed" in message
+                or "timeout" in message
+                or "mismatch" in message
             )
         )
     )
@@ -374,11 +472,14 @@ def capture_timing_logs(
 
 def main() -> int:
     args = parse_args()
-    try:
-        ground_truth = reference_geometry(args)
-    except ValueError as exc:
-        print(f"invalid reference geometry: {exc}", file=sys.stderr)
-        return 2
+    if args.no_ground_truth:
+        ground_truth = None
+    else:
+        try:
+            ground_truth = reference_geometry(args)
+        except ValueError as exc:
+            print(f"invalid reference geometry: {exc}", file=sys.stderr)
+            return 2
     output_dir = pathlib.Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     events_path = output_dir / f"{args.block}.jsonl"
@@ -434,15 +535,18 @@ def main() -> int:
     next_status = started_monotonic
     next_log_capture = started_monotonic
     next_position_capture = started_monotonic
+    next_gps_capture = started_monotonic
     seen_ds: set[tuple[int, int, int, int, int]] = set()
     seen_tdoa: set[tuple[int, int, int, int, int]] = set()
     seen_anchor: set[tuple[int, int, int, int]] = set()
     seen_position: set[tuple[int, int]] = set()
+    seen_gps: set[tuple[int, int]] = set()
     counters = {
         "ds_range": 0,
         "tdoa_observation": 0,
         "anchor_range": 0,
         "local_position": 0,
+        "gps_fix": 0,
         "status": 0,
         "poll_error": 0,
         "timing_log": 0,
@@ -476,6 +580,46 @@ def main() -> int:
                 if counters["poll_error"] <= 5:
                     print(f"{args.block}: snapshot error: {exc}", file=sys.stderr)
                 continue
+
+            if time.monotonic() >= next_gps_capture:
+                # gps_gga_count is generated on the ESP32 and therefore gives
+                # every sampled solution an unambiguous per-module identity
+                # without synchronizing Raspberry Pi clocks.
+                for item in snapshot.get("statuses", []):
+                    module_id = int(item.get("module_id") or 0)
+                    gga_count = int(item.get("gps_gga_count") or 0)
+                    latitude = finite_float(item.get("gps_latitude_deg"))
+                    longitude = finite_float(item.get("gps_longitude_deg"))
+                    if (
+                        module_id <= 0
+                        or gga_count <= 0
+                        or latitude is None
+                        or longitude is None
+                    ):
+                        continue
+                    key = (module_id, gga_count)
+                    if key in seen_gps:
+                        continue
+                    fix_age_ms = finite_float(item.get("gps_last_fix_age_ms"))
+                    event_time = captured_at - max(0.0, fix_age_ms or 0.0) / 1000.0
+                    if event_time + 0.05 < started_at:
+                        continue
+                    seen_gps.add(key)
+                    write_event(
+                        handle,
+                        kind="gps_fix",
+                        protocol=args.protocol,
+                        block=args.block,
+                        captured_at=captured_at,
+                        event_received_at=event_time,
+                        payload={
+                            key: item.get(key)
+                            for key in GPS_FIX_KEYS
+                            if key in item and item.get(key) is not None
+                        },
+                    )
+                    counters["gps_fix"] += 1
+                next_gps_capture += 1.0 / max(0.1, args.gps_hz)
 
             if log_path is not None and time.monotonic() >= next_log_capture:
                 try:
@@ -725,7 +869,8 @@ def main() -> int:
                         f"{args.block}: {elapsed:5.1f}/{args.duration_sec:.1f}s "
                         f"ds={counters['ds_range']} "
                         f"tdoa={counters['tdoa_observation']} "
-                        f"pos={counters['local_position']}",
+                        f"pos={counters['local_position']} "
+                        f"gps={counters['gps_fix']}",
                         flush=True,
                     )
 
@@ -773,7 +918,7 @@ def main() -> int:
     ended_at = time.time()
     counters.pop("_last_marker", None)
     metadata = {
-        "schema_version": 1,
+        "schema_version": 2,
         "block": args.block,
         "protocol": args.protocol,
         "runtime_mode": runtime_mode,
@@ -782,11 +927,17 @@ def main() -> int:
         "duration_sec": ended_at - started_at,
         "warmup_sec": args.warmup_sec,
         "poll_hz": args.poll_hz,
+        "gps_hz": args.gps_hz,
         "expected_modules": args.expected_modules,
         "events_file": events_path.name,
         "timing_log_file": log_path.name if log_path is not None else None,
         "event_counts": counters,
         "ground_truth": ground_truth,
+        "reference_note": (
+            args.reference_note if ground_truth is not None else
+            "No independent ground truth; use for precision, availability, "
+            "rate, and cross-method agreement only."
+        ),
         "initial_status": status_summary(initial),
         "final_status": status_summary(last_snapshot),
     }

@@ -97,6 +97,9 @@ TELEMETRY_STREAM_PASSIVE_DS_POSITION_V3 = 11
 TELEMETRY_STREAM_PASSIVE_DS_POSITION_V4 = 12
 TELEMETRY_STREAM_NATIVE_DS_TAG_RANGE = 13
 TELEMETRY_STREAM_PASSIVE_DS_GEOMETRY = 14
+TELEMETRY_STREAM_NATIVE_DS_POSITION = 15
+TELEMETRY_STREAM_NATIVE_DS_GEOMETRY = 16
+TELEMETRY_STREAM_FLEX_GEOMETRY = 17
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
 TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
@@ -150,6 +153,12 @@ TELEMETRY_STREAM_SAMPLE_SIZES = {
     TELEMETRY_STREAM_NATIVE_DS_TAG_RANGE:
         TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN,
     TELEMETRY_STREAM_PASSIVE_DS_GEOMETRY:
+        TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN,
+    TELEMETRY_STREAM_NATIVE_DS_POSITION:
+        TELEMETRY_FLEX_POSITION_SAMPLE_LEN,
+    TELEMETRY_STREAM_NATIVE_DS_GEOMETRY:
+        TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN,
+    TELEMETRY_STREAM_FLEX_GEOMETRY:
         TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN,
 }
 UWB_METERS_PER_DTU = 15.650040064102564e-12 * 299702547.0
@@ -773,7 +782,11 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "responder_id": int(responder_id),
                 }
             )
-        elif stream_type == TELEMETRY_STREAM_PASSIVE_DS_GEOMETRY:
+        elif stream_type in (
+            TELEMETRY_STREAM_PASSIVE_DS_GEOMETRY,
+            TELEMETRY_STREAM_NATIVE_DS_GEOMETRY,
+            TELEMETRY_STREAM_FLEX_GEOMETRY,
+        ):
             (
                 uptime_ms,
                 geometry_version,
@@ -787,12 +800,16 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
             ) = TELEMETRY_PASSIVE_DS_GEOMETRY_STRUCT.unpack_from(
                 frame, offset
             )
+            geometry_protocol = {
+                TELEMETRY_STREAM_NATIVE_DS_GEOMETRY: "native_ds",
+                TELEMETRY_STREAM_FLEX_GEOMETRY: "flextdoa",
+            }.get(stream_type, "passive_ds")
             samples.append(
                 {
                     **common,
                     "uptime_ms": int(uptime_ms),
-                    "topic": "uwb.passive_ds.geometry",
-                    "tdoa_protocol": "passive_ds",
+                    "topic": f"uwb.{geometry_protocol}.geometry",
+                    "tdoa_protocol": geometry_protocol,
                     "geometry_version": int(geometry_version),
                     "x_m": x_mm / 1000.0,
                     "y_m": y_mm / 1000.0,
@@ -806,6 +823,7 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
         elif stream_type in (
             TELEMETRY_STREAM_FLEX_POSITION,
             TELEMETRY_STREAM_PASSIVE_DS_POSITION,
+            TELEMETRY_STREAM_NATIVE_DS_POSITION,
         ):
             (
                 uptime_ms,
@@ -819,20 +837,21 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                 tag_id,
                 anchor_count,
             ) = TELEMETRY_FLEX_POSITION_STRUCT.unpack_from(frame, offset)
+            position_protocol = {
+                TELEMETRY_STREAM_PASSIVE_DS_POSITION: "passive_ds",
+                TELEMETRY_STREAM_NATIVE_DS_POSITION: "native_ds",
+            }.get(stream_type, "flextdoa")
+            position_topic = (
+                "uwb.flex_tdoa.position"
+                if position_protocol == "flextdoa"
+                else f"uwb.{position_protocol}.position"
+            )
             samples.append(
                 {
                     **common,
                     "uptime_ms": int(uptime_ms),
-                    "topic": (
-                        "uwb.passive_ds.position"
-                        if stream_type == TELEMETRY_STREAM_PASSIVE_DS_POSITION
-                        else "uwb.flex_tdoa.position"
-                    ),
-                    "tdoa_protocol": (
-                        "passive_ds"
-                        if stream_type == TELEMETRY_STREAM_PASSIVE_DS_POSITION
-                        else "flextdoa"
-                    ),
+                    "topic": position_topic,
+                    "tdoa_protocol": position_protocol,
                     "slot_id": int(slot_id),
                     "x_m": x_mm / 1000.0,
                     "y_m": y_mm / 1000.0,
@@ -1013,7 +1032,7 @@ class DashboardState:
         self.tdoa_anchor_distances: dict[tuple[int, int], dict[str, Any]] = {}
         self.tdoa_anchor_history: dict[tuple[int, int], deque[dict[str, Any]]] = {}
         self.tdoa_local_positions: dict[int, dict[str, Any]] = {}
-        self.tdoa_local_geometries: dict[int, dict[str, Any]] = {}
+        self.tdoa_local_geometries: dict[str, dict[str, Any]] = {}
         self.tdoa_position_events: deque[dict[str, Any]] = deque(maxlen=4096)
         self.next_position_event_id = 1
         self.next_position_stream_event_id = 1
@@ -1087,9 +1106,14 @@ class DashboardState:
                 elif topic in (
                     "uwb.flex_tdoa.position",
                     "uwb.passive_ds.position",
+                    "uwb.native_ds.position",
                 ):
                     self.record_tdoa_position_sample_locked(sample)
-                elif topic == "uwb.passive_ds.geometry":
+                elif topic in (
+                    "uwb.flextdoa.geometry",
+                    "uwb.passive_ds.geometry",
+                    "uwb.native_ds.geometry",
+                ):
                     self.record_passive_ds_geometry_sample_locked(sample)
 
     def record_passive_ds_geometry_sample_locked(
@@ -1113,10 +1137,13 @@ class DashboardState:
         ):
             return
         received_at = float(item.get("received_at") or time.time())
-        geometry = self.tdoa_local_geometries.get(tag_id)
+        protocol = str(item.get("tdoa_protocol") or "passive_ds")
+        geometry_key = f"{protocol}:{tag_id}"
+        geometry = self.tdoa_local_geometries.get(geometry_key)
         if geometry is None or int(geometry.get("geometry_version", -1)) != version:
             geometry = {
                 "tag_id": tag_id,
+                "tdoa_protocol": protocol,
                 "geometry_version": version,
                 "anchor_count": anchor_count,
                 "fit_rms_m": fit_rms_m,
@@ -1124,7 +1151,7 @@ class DashboardState:
                 "anchors": {},
                 "received_at": received_at,
             }
-            self.tdoa_local_geometries[tag_id] = geometry
+            self.tdoa_local_geometries[geometry_key] = geometry
         geometry["anchors"][str(anchor_id)] = {
             "id": anchor_id,
             "x": x_m,
@@ -1153,9 +1180,10 @@ class DashboardState:
             "position_event_id": self.next_position_event_id,
             "tdoa_protocol": str(item.get("tdoa_protocol") or "flextdoa"),
             "position_stream_type": (
-                "passive_ds_position"
-                if item.get("tdoa_protocol") == "passive_ds"
-                else "flextdoa_position"
+                {
+                    "passive_ds": "passive_ds_position",
+                    "native_ds": "native_ds_position",
+                }.get(item.get("tdoa_protocol"), "flextdoa_position")
             ),
             "position_stream_event_id": self.next_position_stream_event_id,
         }
@@ -1387,14 +1415,10 @@ class DashboardState:
         self.ranging_history.setdefault(
             key, deque(maxlen=self.max_ranging_samples)
         ).append(sample)
-        stream_sample = {
-            **sample,
-            "position_stream_type": "ds_twr_range",
-            "position_stream_event_id": self.next_position_stream_event_id,
-        }
-        self.next_position_stream_event_id += 1
-        self.tdoa_position_events.append(stream_sample)
-        self.position_condition.notify_all()
+        # Native DS-TWR ranges remain available to the diagnostic tables and
+        # history endpoint. Position-stream events contain only positions
+        # solved by the ESP32 tag, so the browser never assembles or solves
+        # native ranging frames itself.
 
     def record_tdoa_locked(self, item: dict[str, Any]) -> None:
         raw_message = str(item.get("message") or item.get("raw") or "")
@@ -2358,6 +2382,7 @@ INDEX_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UWB Dashboard</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
 <script src="/vendor/leaflet/leaflet.min.js"></script>
 <style>
@@ -3655,8 +3680,8 @@ tr.status-stale td { color: #4f3b1d; }
           <div id="positionOverlay" class="position-overlay">
             <div class="position-overlay-panel">
               <h2>Position mode is not active</h2>
-              <p>Enable the selected position runtime to compute a new live position from fresh measurements.</p>
-              <button class="primary" id="positionEnableRanging">Enable Position Runtime</button>
+              <p>Apply the selected position runtime to compute a new live position from fresh measurements.</p>
+              <button class="primary" id="positionEnableRanging">Apply</button>
             </div>
           </div>
         </div>
@@ -3686,18 +3711,18 @@ tr.status-stale td { color: #4f3b1d; }
             <label for="positionErrorWindowSec">Error window s</label>
             <input id="positionErrorWindowSec" value="30" type="number" min="1" max="120" step="1">
           </div>
-          <div class="param-legend">
-            <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
-            <div><b>Ranging method</b><span>FlexTDOA and Passive DS-TWR use receive-only tags. Native DS-TWR ranges each active tag to every anchor. Each protocol keeps independent timing profiles.</span></div>
-            <div class="native-ds-position-option"><b>Native calculation</b><span>The Raspberry uses every fresh tag range for the live marker. Accuracy metrics and the trail use complete 4/4 frames.</span></div>
-            <div><b>Tags</b><span>Comma separated tag IDs. In both passive protocols every non-anchor module only listens on UWB, so additional tags consume no radio slots.</span></div>
-            <div><b>Geometry</b><span>Every live protocol reconstructs anchor geometry from native anchor-to-anchor ranges. Moving an anchor physically updates both the displayed layout and the position solver.</span></div>
-            <div><b>Known reference</b><span>Use the anchor centroid while the tag is physically centered. Manual coordinates support other surveyed test points.</span></div>
-          </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
             <button class="dynamic-geometry-option" id="positionRestartAnchorSelfLocalization">Reset Live Geometry Estimate</button>
-            <button class="primary" id="positionEnableRangingSide">Enable Position Runtime</button>
+            <button class="primary" id="positionEnableRangingSide">Apply</button>
+          </div>
+          <div class="param-legend">
+            <div><b>Anchors</b><span>The first 3 or 4 IDs from the list are used for solving the position.</span></div>
+            <div><b>Ranging method</b><span>FlexTDOA and Passive DS-TWR use receive-only tags. Native DS-TWR ranges each active tag to every anchor. Each protocol keeps independent timing profiles.</span></div>
+            <div class="native-ds-position-option"><b>Native calculation</b><span>The ESP32 tag solves each complete coherent frame. The Raspberry only receives and displays positions and diagnostics.</span></div>
+            <div><b>Tags</b><span>Comma separated tag IDs. In both passive protocols every non-anchor module only listens on UWB, so additional tags consume no radio slots.</span></div>
+            <div><b>Geometry</b><span>Every live protocol reconstructs anchor geometry from native anchor-to-anchor ranges. Moving an anchor physically updates both the displayed layout and the position solver.</span></div>
+            <div><b>Known reference</b><span>Use the anchor centroid while the tag is physically centered. Manual coordinates support other surveyed test points.</span></div>
           </div>
           <div id="positionToast" class="toast"></div>
           <div class="section" style="margin-top:12px;">
@@ -4935,6 +4960,8 @@ const state = {
   chartsReady: false,
   accelRenderPending: false,
   accelFetchPending: false,
+  logFetchPending: false,
+  snapshotFetchPending: false,
   latestAccelRenderMs: 0,
   hydratedSettings: false,
   calibrationResult: null,
@@ -4960,21 +4987,9 @@ const state = {
   positionStreamRenderLatencies: [],
   positionStreamLatestEvent: null,
   positionStreamLastRenderedEventToken: "",
-  dsPositionFrameBuckets: new Map(),
-  nativeDsCoherentFrames: {},
-  nativeDsLastSolutions: {},
-  nativeDsFrameDiagnostics: {
-    completedCount: 0,
-    publishedCount: 0,
-    publishedTimes: [],
-    expiredCount: 0,
-    expiredTimes: [],
-    lateCompleteRejected: 0,
-    lateCompleteTimes: [],
-    lastSpanMs: NaN,
-    lastFrameKey: null,
-  },
   positionSettingsSolver: null,
+  positionSetupDirty: false,
+  positionApplyInFlight: false,
   flexTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.flexTimingSlotSelect") || 0),
   dsTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.dsTimingSlotSelect") || 0),
   gpsMap: null,
@@ -5722,7 +5737,8 @@ function positionProtocolUsesTdoa(solver) {
 
 function positionRuntimeModeForSolver(solver) {
   if (solver === "passive_ds") return "passive_ds_twr";
-  return positionProtocolUsesTdoa(solver) ? "flex_tdoa" : "ranging";
+  if (solver === "flextdoa") return "flex_tdoa";
+  return "ranging";
 }
 
 const positionAnchorRangeHistoryMaxAgeSec = 30;
@@ -5742,6 +5758,36 @@ function positionGeometryProtocol(solver) {
   if (solver === "passive_ds") return "passive_ds";
   if (solver === "ranging") return "native_ds";
   return "flextdoa";
+}
+
+function nativeDsFramePeriodSec(settings) {
+  if (settings?.solver !== "ranging") return 0;
+  const status = state.statuses.find(item =>
+    statusIsFresh(item) && item.runtime_mode_name === "uwb_ranging"
+  ) || state.statuses.find(item =>
+    Number.isFinite(Number(item.runtime_ranging_slot_ms))
+  );
+  const slotMs = Number(status?.runtime_ranging_slot_ms);
+  const gapMs = Number(status?.runtime_ranging_round_gap_ms || 0);
+  if (!Number.isFinite(slotMs) || slotMs <= 0) return 0;
+  const anchorCount = Math.max(1, Number(settings.anchorIds?.length || settings.anchorCount || 1));
+  return (anchorCount * slotMs + Math.max(0, gapMs)) / 1000;
+}
+
+function positionDisplayMaxAge(settings) {
+  // A short browser/network scheduling pause must not erase an otherwise
+  // valid marker between high-rate samples. This is a display retention floor;
+  // ESP32 solving and the protocol's own coherence/freshness checks are not
+  // changed by it.
+  const configured = Math.max(0.5, Number(settings?.maxAge) || 0.5);
+  const framePeriodSec = nativeDsFramePeriodSec(settings);
+  if (!(framePeriodSec > 0)) return configured;
+  // Native DS-TWR publishes one coherent position only after it has ranged all
+  // selected anchors. In field captures an otherwise healthy four-anchor
+  // runtime occasionally skips two publication opportunities (for example
+  // while an HTTP/status request shares the ESP32).  Hold the last valid marker
+  // across that gap. This changes presentation only, never ranging or solving.
+  return Math.max(configured, framePeriodSec * 3.5);
 }
 
 function positionSolverLabel(solver) {
@@ -5785,7 +5831,13 @@ function switchPositionProtocolSettings() {
     state.positionStreamSuperframeTimes = [];
     state.positionStreamCorrectionTimes = [];
     state.positionStreamRenderTimes = [];
-    resetNativeDsFrameAssembler();
+    // A tag ID is shared by every protocol. Never let a late sample from the
+    // previous runtime become the current protocol's display state.
+    if (state.tdoa?.local_positions) {
+      state.tdoa.local_positions = {};
+    }
+    state.positionStreamLatestEvent = null;
+    state.positionStreamLastRenderedEventToken = "";
   }
   const maxAge = document.getElementById("positionMaxAgeSec");
   const saved = Number(localStorage.getItem(positionProtocolMaxAgeKey(solver)));
@@ -5877,7 +5929,16 @@ function synchronizePositionAnchorsFromRuntime(statuses) {
   const selectionIsActive = configuredIds.length === configuredCount &&
     configuredCount === runtimeIds.length &&
     runtimeIds.every(id => configuredIds.includes(id));
-  if (selectionIsActive) return false;
+  if (selectionIsActive) {
+    // An Apply has reached the modules. Runtime synchronization can resume,
+    // but it no longer needs to change the form.
+    state.positionSetupDirty = false;
+    return false;
+  }
+  // While the operator is preparing a new setup, the 250 ms status refresh
+  // must not restore the configuration that is still running on the radios.
+  // Apply is the explicit boundary between editable form state and runtime.
+  if (state.positionSetupDirty) return false;
 
   const nextCount = Math.max(3, Math.min(4, runtimeIds.length));
   const nextIds = runtimeIds.slice(0, nextCount);
@@ -5886,7 +5947,6 @@ function synchronizePositionAnchorsFromRuntime(statuses) {
   localStorage.setItem(settingKey("positionAnchorCount"), String(nextCount));
   localStorage.setItem(settingKey("positionAnchors"), nextIds.join(","));
   resetPositionTagTrails();
-  resetNativeDsFrameAssembler();
   state.positionSeeds = {};
   state.positionStreamRxTimes = [];
   state.positionStreamIndependentTimes = [];
@@ -7099,11 +7159,12 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
   }
 
   const batch = currentAnchorDistanceBatch(anchorIds, maxAge, solver);
-  if (protocol === "passive_ds") {
+  if (["flextdoa", "passive_ds", "native_ds"].includes(protocol)) {
     const expectedIds = anchorIds.map(Number);
     const candidates = Object.values(state.tdoa?.local_geometries || {})
       .filter(item => {
         if (!item?.complete || Number(item.age_sec) > maxAge) return false;
+        if (String(item?.tdoa_protocol || "passive_ds") !== protocol) return false;
         const ids = Object.keys(item.anchors || {}).map(Number);
         return ids.length === expectedIds.length &&
           expectedIds.every(id => ids.includes(id));
@@ -7440,213 +7501,6 @@ function coherentTdoaBatch(tagId, anchorIds, maxAge, protocol = "flextdoa") {
   };
 }
 
-function solveTdoa(anchors, observations, initialPosition = null) {
-  const usable = observations
-    .map(item => ({
-      item,
-      initiator: anchors[Number(item.initiator_id)],
-      responder: anchors[Number(item.responder_id)],
-      diff: Number(item.diff_m),
-    }))
-    .filter(entry => entry.initiator && entry.responder && Number.isFinite(entry.diff));
-  if (usable.length < 2) return null;
-
-  const anchorValues = Object.values(anchors);
-  let x = Number(initialPosition?.x);
-  let y = Number(initialPosition?.y);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) {
-    x = anchorValues.reduce((sum, anchor) => sum + anchor.x, 0) / anchorValues.length;
-    y = anchorValues.reduce((sum, anchor) => sum + anchor.y, 0) / anchorValues.length;
-  }
-
-  for (let iter = 0; iter < 24; iter++) {
-    let nxx = 1e-6;
-    let nxy = 0;
-    let nyy = 1e-6;
-    let rhsX = 0;
-    let rhsY = 0;
-    let used = 0;
-    for (const entry of usable) {
-      const ai = entry.initiator;
-      const ar = entry.responder;
-      const di = Math.max(1e-6, Math.hypot(x - ai.x, y - ai.y));
-      const dr = Math.max(1e-6, Math.hypot(x - ar.x, y - ar.y));
-      const residual = (dr - di) - entry.diff;
-      const gx = (x - ar.x) / dr - (x - ai.x) / di;
-      const gy = (y - ar.y) / dr - (y - ai.y) / di;
-      const weight = 1;
-      nxx += weight * gx * gx;
-      nxy += weight * gx * gy;
-      nyy += weight * gy * gy;
-      rhsX += -weight * gx * residual;
-      rhsY += -weight * gy * residual;
-      used++;
-    }
-    if (used < 2) return null;
-    const step = solve2x2(nxx, nxy, nxy, nyy, rhsX, rhsY);
-    if (!step || !Number.isFinite(step.x) || !Number.isFinite(step.y)) return null;
-    const limit = 0.5;
-    const dx = Math.max(-limit, Math.min(limit, step.x));
-    const dy = Math.max(-limit, Math.min(limit, step.y));
-    x += dx;
-    y += dy;
-    if (Math.hypot(dx, dy) < 0.0005) break;
-  }
-
-  return {x, y};
-}
-
-function tdoaResiduals(position, anchors, observations) {
-  const residuals = {};
-  if (!position) return residuals;
-  for (const item of observations) {
-    const initiator = anchors[Number(item.initiator_id)];
-    const responder = anchors[Number(item.responder_id)];
-    if (!initiator || !responder) continue;
-    const key = `${item.initiator_id}-${item.responder_id}`;
-    residuals[key] =
-      Math.hypot(position.x - responder.x, position.y - responder.y) -
-      Math.hypot(position.x - initiator.x, position.y - initiator.y) -
-      Number(item.diff_m);
-  }
-  return residuals;
-}
-
-function tdoaObservationKey(item) {
-  return `${Number(item.initiator_id)}-${Number(item.responder_id)}`;
-}
-
-function minTdoaObservationCount(anchorIds) {
-  return Math.max(2, Math.min(3, Number(anchorIds?.length || 0) - 1));
-}
-
-function rawTdoaFit(anchorIds, anchors, observations, initialPosition = null) {
-  const all = (observations || []).filter(item =>
-    anchors[Number(item.initiator_id)] &&
-    anchors[Number(item.responder_id)] &&
-    Number.isFinite(Number(item.diff_m)));
-  const minCount = minTdoaObservationCount(anchorIds);
-  if (all.length < minCount) {
-    return {
-      position: null,
-      used: [],
-      annotated: all.map(item => ({...item, used_in_fit: false, reject_reason: "need more"})),
-    };
-  }
-
-  const used = all;
-  let position = solveTdoa(anchors, used, initialPosition);
-  if (!position) {
-    return {
-      position: null,
-      used: [],
-      annotated: all.map(item => ({...item, used_in_fit: false, reject_reason: "fit fail"})),
-    };
-  }
-
-  const usedKeys = new Set(used.map(tdoaObservationKey));
-  const annotated = all.map(item => {
-    const key = tdoaObservationKey(item);
-    return {...item, used_in_fit: usedKeys.has(key), reject_reason: ""};
-  });
-  return {position, used, annotated};
-}
-
-function positionAccuracyFromRows(rows) {
-  const usable = rows.filter(row =>
-    Number.isFinite(row.residual) &&
-    Number.isFinite(row.gx) &&
-    Number.isFinite(row.gy));
-  if (!usable.length) return null;
-
-  let sse = 0;
-  let maxAbs = 0;
-  let hxx = 0;
-  let hxy = 0;
-  let hyy = 0;
-  let weightSum = 0;
-  for (const row of usable) {
-    const residual = Number(row.residual);
-    const weight = Number.isFinite(Number(row.weight))
-      ? Math.max(0.05, Number(row.weight))
-      : 1;
-    sse += weight * residual * residual;
-    weightSum += weight;
-    maxAbs = Math.max(maxAbs, Math.abs(residual));
-    hxx += weight * row.gx * row.gx;
-    hxy += weight * row.gx * row.gy;
-    hyy += weight * row.gy * row.gy;
-  }
-
-  const count = usable.length;
-  const dof = Math.max(1, count - 2);
-  const rms = Math.sqrt(sse / Math.max(1e-6, weightSum));
-  const variance = sse / dof;
-  const inv = inverse2x2(hxx, hxy, hxy, hyy);
-  let sigmaX = NaN;
-  let sigmaY = NaN;
-  let sigmaMajor = NaN;
-  let gdop = NaN;
-  if (inv && Number.isFinite(variance)) {
-    const covXX = Math.max(0, variance * inv.a00);
-    const covXY = variance * inv.a01;
-    const covYY = Math.max(0, variance * inv.a11);
-    const eigTerm = Math.sqrt(Math.max(0, (covXX - covYY) * (covXX - covYY) + 4 * covXY * covXY));
-    sigmaX = Math.sqrt(covXX);
-    sigmaY = Math.sqrt(covYY);
-    sigmaMajor = Math.sqrt(Math.max(0, (covXX + covYY + eigTerm) / 2));
-    gdop = Math.sqrt(Math.max(0, inv.a00 + inv.a11));
-  }
-
-  return {
-    count,
-    dof,
-    rms_m: rms,
-    max_abs_m: maxAbs,
-    sigma_x_m: sigmaX,
-    sigma_y_m: sigmaY,
-    sigma_major_m: sigmaMajor,
-    gdop,
-  };
-}
-
-function tdoaPositionAccuracy(position, anchors, observations, residuals) {
-  if (!position) return null;
-  const rows = [];
-  for (const item of observations || []) {
-    const initiator = anchors[Number(item.initiator_id)];
-    const responder = anchors[Number(item.responder_id)];
-    if (!initiator || !responder) continue;
-    const di = Math.max(1e-6, Math.hypot(position.x - initiator.x, position.y - initiator.y));
-    const dr = Math.max(1e-6, Math.hypot(position.x - responder.x, position.y - responder.y));
-    const key = `${item.initiator_id}-${item.responder_id}`;
-    const residual = Number(residuals?.[key]);
-    rows.push({
-      residual,
-      gx: (position.x - responder.x) / dr - (position.x - initiator.x) / di,
-      gy: (position.y - responder.y) / dr - (position.y - initiator.y) / di,
-      weight: 1,
-    });
-  }
-  return positionAccuracyFromRows(rows);
-}
-
-function rangingPositionAccuracy(position, anchors, distances, residuals) {
-  if (!position) return null;
-  const rows = [];
-  for (const [anchorId, distance] of Object.entries(distances || {})) {
-    const anchor = anchors[Number(anchorId)];
-    if (!anchor || !Number.isFinite(Number(distance))) continue;
-    const d = Math.max(1e-6, Math.hypot(position.x - anchor.x, position.y - anchor.y));
-    rows.push({
-      residual: Number(residuals?.[anchorId]),
-      gx: (position.x - anchor.x) / d,
-      gy: (position.y - anchor.y) / d,
-    });
-  }
-  return positionAccuracyFromRows(rows);
-}
-
 function updatePositionAnchorTrail(anchors, now) {
   const activeIds = new Set(Object.keys(anchors).map(String));
   for (const key of Object.keys(state.positionAnchorTrail)) {
@@ -7704,110 +7558,9 @@ function resetPositionTagTrails() {
   state.positionTrail = {};
   state.positionRawTrail = {};
   state.positionTrailTokens = {};
-  state.nativeDsLastSolutions = {};
   state.positionStreamRenderLatencies = [];
   state.positionStreamLatestEvent = null;
   state.positionStreamLastRenderedEventToken = "";
-}
-
-function resetNativeDsFrameAssembler() {
-  state.dsPositionFrameBuckets.clear();
-  state.nativeDsCoherentFrames = {};
-  state.nativeDsLastSolutions = {};
-  state.nativeDsFrameDiagnostics = {
-    completedCount: 0,
-    publishedCount: 0,
-    publishedTimes: [],
-    expiredCount: 0,
-    expiredTimes: [],
-    lateCompleteRejected: 0,
-    lateCompleteTimes: [],
-    lastSpanMs: NaN,
-    lastFrameKey: null,
-  };
-}
-
-function nativeDsFrameAgeSec(frame, nowEpochSec = Date.now() / 1000) {
-  const completedAtMs = Number(frame?.completedAtMs);
-  if (Number.isFinite(completedAtMs)) {
-    return Math.max(0, (performance.now() - completedAtMs) / 1000);
-  }
-  const receivedAt = Number(frame?.receivedAt);
-  return Number.isFinite(receivedAt)
-    ? Math.max(0, nowEpochSec - receivedAt)
-    : Infinity;
-}
-
-function nativeDsExpectedFrameSec(settings) {
-  const status = state.statuses.find(item =>
-    statusIsFresh(item) &&
-    item.runtime_mode_name === "uwb_ranging" &&
-    Number(item.module_id) === Number(settings.tagIds?.[0]));
-  const slotMs = Number(status?.runtime_ranging_slot_ms);
-  const gapMs = Number(status?.runtime_ranging_round_gap_ms);
-  if (!Number.isFinite(slotMs) || slotMs <= 0 ||
-      !Number.isFinite(gapMs) || gapMs < 0) return NaN;
-  return (settings.anchorIds.length * slotMs + gapMs) / 1000;
-}
-
-function nativeDsEffectiveFreshAgeSec(settings) {
-  const configuredSec = Number(settings.maxAge) || 0;
-  const frameSec = nativeDsExpectedFrameSec(settings);
-  return Number.isFinite(frameSec)
-    ? Math.max(configuredSec, frameSec + 0.1)
-    : configuredSec;
-}
-
-function nativeDsDisplayHoldSec(settings) {
-  const frameSec = nativeDsExpectedFrameSec(settings);
-  const frameAwareHold = Number.isFinite(frameSec)
-    ? frameSec * 4 + 0.25
-    : 1.5;
-  return Math.max(
-    Number(settings.maxAge) || 0,
-    Math.min(3, Math.max(1.5, frameAwareHold))
-  );
-}
-
-function solveNativeDsPosition(
-  anchorIds,
-  solveAnchors,
-  sourceItems,
-  now
-) {
-  const distanceItems = {};
-  const distances = {};
-  for (const anchorId of anchorIds) {
-    const source = sourceItems?.[String(anchorId)] || null;
-    const measured = Number(source?.distance_m);
-    if (!source || !solveAnchors[anchorId] ||
-        !Number.isFinite(measured) || measured <= 0) continue;
-    const item = {
-      ...source,
-      age_sec: localPositionAge(source, now),
-    };
-    distanceItems[anchorId] = item;
-    distances[anchorId] = measured;
-  }
-  const position = Object.keys(distances).length === anchorIds.length
-    ? trilaterate(solveAnchors, distances)
-    : null;
-  const residuals = positionResiduals(position, solveAnchors, distances);
-  for (const [anchorId, item] of Object.entries(distanceItems)) {
-    distanceItems[anchorId] = {
-      ...item,
-      used_in_fit: Boolean(position),
-      reject_reason: position ? "" : "incomplete coherent frame",
-    };
-  }
-  return {
-    position,
-    distances,
-    distanceItems,
-    residuals,
-    accuracy: rangingPositionAccuracy(
-      position, solveAnchors, distances, residuals),
-  };
 }
 
 function positionTrailDrawSamples(trail) {
@@ -7833,15 +7586,15 @@ function localPositionAge(item, now = Date.now() / 1000) {
 }
 
 function observedFlexTagIds(settings, now = Date.now() / 1000) {
-  if (!positionProtocolUsesTdoa(settings.solver)) return [];
   const anchorIds = new Set(settings.anchorIds.map(Number));
+  const expectedProtocol = positionGeometryProtocol(settings.solver);
+  const displayMaxAge = positionDisplayMaxAge(settings);
   return Object.values(state.tdoa?.local_positions || {})
     .filter(item =>
       Number.isFinite(Number(item?.tag_id)) &&
       !anchorIds.has(Number(item.tag_id)) &&
-      String(item?.tdoa_protocol || "flextdoa") ===
-        (settings.solver === "passive_ds" ? "passive_ds" : "flextdoa") &&
-      localPositionAge(item, now) <= settings.maxAge)
+      String(item?.tdoa_protocol || "flextdoa") === expectedProtocol &&
+      localPositionAge(item, now) <= displayMaxAge)
     .map(item => Number(item.tag_id))
     .filter((value, index, values) => values.indexOf(value) === index)
     .sort((left, right) => left - right);
@@ -7849,6 +7602,7 @@ function observedFlexTagIds(settings, now = Date.now() / 1000) {
 
 function computePositionModel() {
   const settings = positionSettings();
+  const displayMaxAge = positionDisplayMaxAge(settings);
   const selectedIds = selectedPositionModuleIds(settings);
   const offlineModuleIds = selectedIds.filter(id => !moduleHttpOnline(statusForModule(id)));
   const switchingModuleIds = selectedIds.filter(id => {
@@ -7872,9 +7626,12 @@ function computePositionModel() {
   const now = Date.now() / 1000;
   const observedTagIds = observedFlexTagIds(settings, now);
   const configuredTagIds = settings.tagIds.filter(id => !settings.anchorIds.includes(id));
-  const effectiveTagIds = positionProtocolUsesTdoa(settings.solver)
-    ? [...new Set([...configuredTagIds, ...observedTagIds])]
-    : configuredTagIds;
+  // A receive-only protocol can be heard by every non-anchor module, but the
+  // Position Setup tag list is the display/analysis allow-list.  Do not turn
+  // every observed passive receiver into a plotted tag: with a three-anchor
+  // selection the fourth physical anchor is also able to publish a passive
+  // position, even when the operator requested only T1.
+  const effectiveTagIds = [...new Set(configuredTagIds)];
   const unexpectedTagIds = observedTagIds.filter(id => !settings.tagIds.includes(id));
   const missingTagIds = settings.tagIds.filter(id => !observedTagIds.includes(id));
   updatePositionAnchorTrail(anchors, now);
@@ -7882,196 +7639,65 @@ function computePositionModel() {
     for (const tagId of effectiveTagIds) {
       const distances = {};
       const distanceItems = {};
-      let observations = [];
-      let fitObservations = [];
+      const wantedProtocol = positionGeometryProtocol(settings.solver);
+      const observations = positionProtocolUsesTdoa(settings.solver)
+        ? freshTdoaObservations(tagId, settings.anchorIds, settings.maxAge)
+            .filter(item => String(item?.tdoa_protocol || "") === wantedProtocol)
+        : [];
+      const fitObservations = observations;
       let position = null;
-      let residuals = {};
+      const residuals = {};
       let accuracy = null;
-      let coherence = null;
-      let localPosition = null;
+      let localPosition = state.tdoa?.local_positions?.[String(tagId)] || null;
       let rawPosition = null;
-      let nativeFrame = null;
-      let metricPosition = null;
-      let trailPosition = null;
-      let trailAccuracy = null;
-      let positionEventTime = now;
-      let positionEventToken = `pc:${now}`;
-      let heldPosition = false;
-      let positionAgeSec = 0;
-      let positionHoldSec = 0;
-      if (positionProtocolUsesTdoa(settings.solver)) {
-        localPosition = state.tdoa?.local_positions?.[String(tagId)];
-        const wantedProtocol = settings.solver === "passive_ds"
-          ? "passive_ds"
-          : "flextdoa";
-        if (String(localPosition?.tdoa_protocol || "flextdoa") !== wantedProtocol) {
-          localPosition = null;
-        }
-        if (settings.solver === "passive_ds") {
-          observations = freshTdoaObservations(
-            tagId, settings.anchorIds, settings.maxAge)
-            .filter(item =>
-              String(item?.tdoa_protocol || "") === "passive_ds");
-          coherence = {
-            complete: Boolean(localPosition?.independent_frame),
-            items: observations,
-            frameId: Number(localPosition?.slot_id),
-            source: "esp32_tag",
-          };
-        } else {
-          coherence = coherentTdoaBatch(
-            tagId,
-            settings.anchorIds,
-            settings.maxAge,
-            settings.solver
-          );
-          observations = coherence.items
-            .filter(item => anchors[Number(item.initiator_id)] && anchors[Number(item.responder_id)]);
-          const seedKey = `${positionGeometryKey(settings.anchorIds)}:${tagId}`;
-          const fitInput = coherence.complete ? observations : [];
-          const fit = rawTdoaFit(
-            settings.anchorIds,
-            anchors,
-            fitInput,
-            state.positionSeeds[seedKey] || null
-          );
-          position = fit.position;
-          fitObservations = fit.used || [];
-          observations = fit.annotated || observations.map(item => ({...item, used_in_fit: true, reject_reason: ""}));
-          residuals = tdoaResiduals(position, anchors, observations);
-          accuracy = tdoaPositionAccuracy(
-            position,
-            anchors,
-            fitObservations.length ? fitObservations : observations,
-            tdoaResiduals(position, anchors, fitObservations.length ? fitObservations : observations)
-          );
-          if (position) state.positionSeeds[seedKey] = {x: position.x, y: position.y};
-        }
-        if (localPosition && localPositionAge(localPosition, now) <= settings.maxAge &&
-            Number.isFinite(Number(localPosition.x_m)) &&
-            Number.isFinite(Number(localPosition.y_m))) {
-          position = {
-            x: Number(localPosition.x_m),
-            y: Number(localPosition.y_m),
-          };
-          if (Number.isFinite(Number(localPosition.raw_x_m)) &&
-              Number.isFinite(Number(localPosition.raw_y_m))) {
-            rawPosition = {
-              x: Number(localPosition.raw_x_m),
-              y: Number(localPosition.raw_y_m),
-            };
-          }
-          accuracy = {
-            count: Number(localPosition.observation_count),
-            sigma_major_m: Number(localPosition.sigma_m),
-            rms_m: Number(localPosition.rms_m),
-            max_abs_m: NaN,
-            gdop: NaN,
-          };
-        }
-        metricPosition = position;
-        trailPosition = position;
-        trailAccuracy = accuracy;
-      } else {
-        const candidateFrame =
-          state.nativeDsCoherentFrames?.[String(tagId)] || null;
-        const frameAnchorIds = (candidateFrame?.anchorIds || []).map(Number);
-        const expectedAnchorIds = settings.anchorIds.map(Number);
-        const frameAnchorSetMatches =
-          frameAnchorIds.length === expectedAnchorIds.length &&
-          expectedAnchorIds.every(id => frameAnchorIds.includes(id));
-        const frameReceivedAt = Number(candidateFrame?.receivedAt);
-        const frameAgeSec = nativeDsFrameAgeSec(candidateFrame, now);
-        const freshAgeSec = nativeDsEffectiveFreshAgeSec(settings);
-        if (candidateFrame && frameAnchorSetMatches &&
-            Number.isFinite(frameReceivedAt) &&
-            frameAgeSec <= freshAgeSec) {
-          nativeFrame = candidateFrame;
-          const coherentSolution = solveNativeDsPosition(
-            expectedAnchorIds,
-            anchors,
-            candidateFrame.items,
-            now
-          );
-          position = coherentSolution.position;
-          metricPosition = position;
-          accuracy = coherentSolution.accuracy;
-          Object.assign(distances, coherentSolution.distances);
-          Object.assign(distanceItems, coherentSolution.distanceItems);
-          residuals = coherentSolution.residuals;
-          trailPosition = position;
-          trailAccuracy = accuracy;
-          positionEventTime = frameReceivedAt;
-          positionEventToken =
-            `native:${tagId}:frame:${candidateFrame.frameId}`;
-          if (position) {
-            state.nativeDsLastSolutions[String(tagId)] = {
-              position: {x: position.x, y: position.y},
-              accuracy,
-              residuals: {...residuals},
-              distances: {...distances},
-              distanceItems: Object.fromEntries(
-                Object.entries(distanceItems).map(
-                  ([anchorId, item]) => [anchorId, {...item}]
-                )
-              ),
-              nativeFrame,
-              positionEventTime,
-              positionEventToken,
-              solvedAtMs: performance.now(),
-            };
-          }
-        }
-        const rollingSourceItems = {};
-        const rollingFreshAgeSec = nativeDsEffectiveFreshAgeSec(settings);
-        for (const anchorId of expectedAnchorIds) {
+      if (String(localPosition?.tdoa_protocol || "flextdoa") !== wantedProtocol) {
+        localPosition = null;
+      }
+      if (!positionProtocolUsesTdoa(settings.solver)) {
+        for (const anchorId of settings.anchorIds) {
           const item = state.ranging?.distances?.[`${tagId}:${anchorId}`];
-          if (!item || localPositionAge(item, now) > rollingFreshAgeSec) continue;
-          rollingSourceItems[String(anchorId)] = item;
-        }
-        const rollingSolution = solveNativeDsPosition(
-          expectedAnchorIds,
-          anchors,
-          rollingSourceItems,
-          now
-        );
-        if (rollingSolution.position) {
-          position = rollingSolution.position;
-          accuracy = rollingSolution.accuracy;
-          residuals = rollingSolution.residuals;
-          for (const key of Object.keys(distances)) delete distances[key];
-          for (const key of Object.keys(distanceItems)) delete distanceItems[key];
-          Object.assign(distances, rollingSolution.distances);
-          Object.assign(distanceItems, rollingSolution.distanceItems);
-        }
-        if (!position) {
-          const lastSolution =
-            state.nativeDsLastSolutions?.[String(tagId)] || null;
-          const solvedAtMs = Number(lastSolution?.solvedAtMs);
-          const heldAgeSec = Number.isFinite(solvedAtMs)
-            ? Math.max(0, (performance.now() - solvedAtMs) / 1000)
-            : Infinity;
-          const holdSec = nativeDsDisplayHoldSec(settings);
-          if (lastSolution?.position && heldAgeSec <= holdSec) {
-            position = {
-              x: Number(lastSolution.position.x),
-              y: Number(lastSolution.position.y),
-            };
-            metricPosition = position;
-            accuracy = lastSolution.accuracy;
-            residuals = {...(lastSolution.residuals || {})};
-            Object.assign(distances, lastSolution.distances || {});
-            Object.assign(distanceItems, lastSolution.distanceItems || {});
-            nativeFrame = lastSolution.nativeFrame || candidateFrame;
-            positionEventTime = Number(lastSolution.positionEventTime) || now;
-            positionEventToken = String(
-              lastSolution.positionEventToken || `native-held:${tagId}`);
-            heldPosition = true;
-            positionAgeSec = heldAgeSec;
-            positionHoldSec = holdSec;
-          }
+          if (!item || localPositionAge(item, now) > displayMaxAge) continue;
+          distances[anchorId] = Number(item.distance_m);
+          distanceItems[anchorId] = item;
         }
       }
+      const positionIsFresh = Boolean(
+        localPosition &&
+        localPositionAge(localPosition, now) <= displayMaxAge &&
+        Number.isFinite(Number(localPosition.x_m)) &&
+        Number.isFinite(Number(localPosition.y_m))
+      );
+      if (positionIsFresh) {
+        position = {
+          x: Number(localPosition.x_m),
+          y: Number(localPosition.y_m),
+        };
+        if (Number.isFinite(Number(localPosition.raw_x_m)) &&
+            Number.isFinite(Number(localPosition.raw_y_m))) {
+          rawPosition = {
+            x: Number(localPosition.raw_x_m),
+            y: Number(localPosition.raw_y_m),
+          };
+        }
+        accuracy = {
+          count: Number(localPosition.observation_count),
+          sigma_major_m: Number(localPosition.sigma_m),
+          rms_m: Number(localPosition.rms_m),
+          max_abs_m: NaN,
+          gdop: NaN,
+        };
+      }
+      const coherence = {
+        complete: positionIsFresh,
+        items: observations,
+        expected: Number(localPosition?.observation_count) || observations.length,
+        slotId: Number.isFinite(Number(localPosition?.slot_id))
+          ? Number(localPosition.slot_id)
+          : null,
+        seq: Number(localPosition?.frame_id),
+        frameId: Number(localPosition?.frame_id ?? localPosition?.slot_id),
+        source: "esp32_tag",
+      };
       tags[tagId] = {
         tagId,
         distances,
@@ -8079,38 +7705,17 @@ function computePositionModel() {
         observations,
         fitObservations,
         position,
-        metricPosition: metricPosition || position,
+        metricPosition: position,
         residuals,
         accuracy,
         coherence,
         rawPosition,
-        nativeFrame,
-        heldPosition,
-        positionAgeSec,
-        positionHoldSec,
-        solverSource: localPosition &&
-          localPositionAge(localPosition, now) <= settings.maxAge
-            ? "ESP32 AlgMin"
-            : positionProtocolUsesTdoa(settings.solver)
-              ? "PC AlgMin"
-              : "Raspberry all-anchor",
+        nativeFrame: null,
+        heldPosition: false,
+        positionAgeSec: positionIsFresh ? localPositionAge(localPosition, now) : 0,
+        positionHoldSec: 0,
+        solverSource: positionIsFresh ? "ESP32 tag" : "waiting for ESP32 tag",
       };
-      const streamedPositionIsLive = Boolean(
-        localPosition &&
-        localPositionAge(localPosition, now) <= settings.maxAge &&
-        Number.isFinite(Number(localPosition.x_m)) &&
-        Number.isFinite(Number(localPosition.y_m))
-      );
-      if (trailPosition && !streamedPositionIsLive) {
-        recordPositionTrailPoint(
-          tagId,
-          trailPosition,
-          positionEventTime,
-          positionEventToken,
-          trailAccuracy || accuracy,
-          rawPosition
-        );
-      }
     }
   }
 
@@ -8549,60 +8154,10 @@ function passiveDsRejectionReasonText(mask) {
 
 function renderPositionSolverStatus(model) {
   const settings = model.settings || {};
-  if (!positionProtocolUsesTdoa(settings.solver)) {
-    const frameDiagnostics = state.nativeDsFrameDiagnostics;
-    const firstTag = Object.values(model.tags || {})[0];
-    const frame = firstTag?.nativeFrame;
-    const coherentPill = frame
-      ? `<span class="position-pill good">coherent 4/4 · frame ${esc(frame.frameId)} · span ${fmtFixed(frame.spanMs, 1)} ms</span>`
-      : `<span class="position-pill warn">waiting for coherent 4/4 frame</span>`;
-    const holdPill = firstTag?.heldPosition
-      ? `<span class="position-pill warn">holding last-good position · ${fmtFixed(firstTag.positionAgeSec, 2)} / ${fmtFixed(firstTag.positionHoldSec, 2)} s</span>`
-      : `<span class="position-pill good">live marker</span>`;
-    const diagnosticsNowMs = performance.now();
-    const recentPublishedTimes = (frameDiagnostics.publishedTimes || []).filter(
-      value => diagnosticsNowMs - Number(value) <= 60000);
-    const recentExpired = (frameDiagnostics.expiredTimes || []).filter(
-      value => diagnosticsNowMs - Number(value) <= 60000).length;
-    const recentLate = (frameDiagnostics.lateCompleteTimes || []).filter(
-      value => diagnosticsNowMs - Number(value) <= 60000).length;
-    const recentAttempts = recentPublishedTimes.length +
-      recentExpired + recentLate;
-    const recentDeliveryPct = recentAttempts > 0
-      ? 100 * recentPublishedTimes.length / recentAttempts
-      : NaN;
-    const publishedSpanSec = recentPublishedTimes.length > 1
-      ? (recentPublishedTimes[recentPublishedTimes.length - 1] -
-          recentPublishedTimes[0]) / 1000
-      : NaN;
-    const publishedHz = publishedSpanSec > 0
-      ? (recentPublishedTimes.length - 1) / publishedSpanSec
-      : NaN;
-    const assemblyHealthy = Number.isFinite(recentDeliveryPct) &&
-      recentDeliveryPct >= 90 && recentLate === 0;
-    const assemblyPill = recentAttempts > 0
-      ? `<span class="position-pill ${assemblyHealthy ? "good" : "warn"}" title="last 60 s: ${recentExpired} incomplete; session totals: ${esc(frameDiagnostics.expiredCount)} incomplete, ${esc(frameDiagnostics.lateCompleteRejected)} late">coherent delivery ${fmtFixed(recentDeliveryPct, 1)}% · ${fmtFixed(publishedHz, 1)} frames/s · ${recentLate} late/min</span>`
-      : `<span class="position-pill">frame delivery warming up</span>`;
-    return `<div class="position-filter-card">
-      <b>Position Calculation</b>
-      <div class="position-filter-row">
-        <span class="position-pill">DS-TWR ranges</span>
-        <span class="position-pill good">Raspberry solver</span>
-        <span class="position-pill good">rolling live marker</span>
-        <span class="position-pill good">coherent metrics + trail (4/4)</span>
-        <span class="position-pill good">unfiltered all-anchor fit</span>
-        ${coherentPill}
-        ${holdPill}
-        ${assemblyPill}
-        <span class="position-pill" id="positionStreamMetrics">position stream connecting</span>
-        <span class="position-pill" id="positionTrailMetrics">trail waiting</span>
-      </div>
-    </div>`;
-  }
-
   const pills = [
     `<span class="position-pill">Protocol: ${esc(positionSolverLabel(settings.solver))}</span>`,
-    `<span class="position-pill good">raw observations</span>`,
+    `<span class="position-pill good">ESP32 tag solver</span>`,
+    `<span class="position-pill good">dashboard display only</span>`,
     `<span class="position-pill">fresh ${fmtFixed(settings.maxAge, 1)} s</span>`,
     `<span class="position-pill" id="positionStreamMetrics">position stream connecting</span>`,
     `<span class="position-pill" id="positionTrailMetrics">trail waiting</span>`,
@@ -8631,7 +8186,10 @@ function renderPositionSolverStatus(model) {
   const coherence = firstTag?.coherence;
   if (coherence) {
     const slotText = coherence.slotId === null ? `seq ${coherence.seq ?? "-"}` : `slot ${coherence.slotId}`;
-    pills.push(`<span class="position-pill ${coherence.complete ? "good" : "warn"}">${esc(slotText)} · ${coherence.items?.length || 0}/${coherence.expected} coherent</span>`);
+    const observationCount = Number.isFinite(Number(firstTag?.accuracy?.count))
+      ? Number(firstTag.accuracy.count)
+      : coherence.items?.length || 0;
+    pills.push(`<span class="position-pill ${coherence.complete ? "good" : "warn"}">${esc(slotText)} · ${observationCount}/${coherence.expected} coherent</span>`);
     if (Number.isFinite(Number(coherence.frameId))) {
       pills.push(`<span class="position-pill">frame ${esc(coherence.frameId)} · span ${fmtFixed(coherence.spanMs, 1)} ms</span>`);
     }
@@ -8666,23 +8224,30 @@ function renderPositionReadout(model) {
   const overlay = document.getElementById("positionOverlay");
   if (!readout || !accuracyRows || !rows || !head || !title || !overlay) return;
   const solverName = positionSolverLabel(model.settings.solver);
-  const enableText = `Enable ${solverName}`;
+  const enableText = "Apply";
   const overlayButton = document.getElementById("positionEnableRanging");
   const sideButton = document.getElementById("positionEnableRangingSide");
-  if (sideButton) sideButton.textContent = enableText;
+  const applyInFlight = Boolean(state.positionApplyInFlight);
+  if (sideButton) {
+    sideButton.textContent = applyInFlight ? "Applying…" : enableText;
+    sideButton.disabled = applyInFlight;
+  }
   if (overlayButton) {
-    overlayButton.textContent = enableText;
-    overlayButton.disabled = false;
-    overlayButton.dataset.action = "enable";
+    overlayButton.textContent = applyInFlight ? "Applying…" : enableText;
+    overlayButton.disabled = applyInFlight;
+    overlayButton.dataset.action = applyInFlight ? "wait" : "enable";
   }
   renderPositionGeometryPanel(model);
 
   if (!model.active) {
     overlay.classList.add("active");
-    if ((model.switchingModuleIds || []).length) {
+    if (applyInFlight || (model.switchingModuleIds || []).length) {
       overlay.querySelector("h2").textContent = "Switching UWB protocol";
+      const transitionIds = (model.switchingModuleIds || []).length
+        ? model.switchingModuleIds
+        : selectedPositionModuleIds(model.settings);
       overlay.querySelector("p").textContent =
-        `DW3000 is changing runtime on modules ${model.switchingModuleIds.join(", ")}. ` +
+        `DW3000 is changing runtime on modules ${transitionIds.join(", ")}. ` +
         "Wi-Fi, HTTP and telemetry remain online.";
       if (overlayButton) {
         overlayButton.textContent = "Switching…";
@@ -8694,7 +8259,7 @@ function renderPositionReadout(model) {
       overlay.querySelector("p").textContent = `No live position is shown until these modules answer /status again: ${model.offlineModuleIds.join(", ")}.`;
     } else {
       overlay.querySelector("h2").textContent = `${solverName} is not active`;
-      overlay.querySelector("p").textContent = "Enable the selected position runtime to clear old measurements and compute a new live position.";
+      overlay.querySelector("p").textContent = "Apply the selected position runtime to clear old measurements and compute a new live position.";
     }
     readout.innerHTML = `${renderPositionSolverStatus(model)}<div class="position-tag-card"><b>${esc(solverName)} inactive</b><span>No stored position is shown while the selected modules are not in the selected runtime.</span></div>`;
     accuracyRows.innerHTML = "";
@@ -8735,7 +8300,7 @@ function renderPositionReadout(model) {
   } else {
     overlay.classList.remove("active");
     overlay.querySelector("h2").textContent = `${solverName} is not active`;
-    overlay.querySelector("p").textContent = "Enable the selected position runtime to clear old measurements and compute a new live position.";
+    overlay.querySelector("p").textContent = "Apply the selected position runtime to clear old measurements and compute a new live position.";
   }
 
   const tagCards = Object.values(model.tags).map(tag => {
@@ -8762,7 +8327,7 @@ function renderPositionReadout(model) {
     const referenceText = referenceStats
       ? ` · actual ${fmtPositionCm(referenceStats.currentErrorM, 1)}`
       : "";
-    const countText = tag.solverSource === "ESP32 AlgMin" &&
+    const countText = tag.solverSource === "ESP32 tag" &&
       Number.isFinite(Number(tag.accuracy?.count))
       ? `${tag.accuracy.count} raw obs`
       : usesTdoa
@@ -9008,18 +8573,19 @@ function updatePositionStreamMetrics() {
 
 function positionTdoaProtocolMatches(item, solver) {
   const actual = String(item?.tdoa_protocol || "flextdoa");
-  const expected = solver === "passive_ds" ? "passive_ds" : "flextdoa";
+  const expected = positionGeometryProtocol(solver);
   return actual === expected;
 }
 
 function applyStreamPositionToModel(model) {
   if (!model?.active || !model?.geometry?.positionReady) return;
   const now = Date.now() / 1000;
+  const displayMaxAge = positionDisplayMaxAge(model.settings);
   for (const tag of Object.values(model.tags || {})) {
     const item = state.tdoa?.local_positions?.[String(tag.tagId)];
     if (!item ||
         !positionTdoaProtocolMatches(item, model.settings.solver) ||
-        localPositionAge(item, now) > model.settings.maxAge) continue;
+        localPositionAge(item, now) > displayMaxAge) continue;
     const x = Number(item.x_m);
     const y = Number(item.y_m);
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
@@ -9030,7 +8596,7 @@ function applyStreamPositionToModel(model) {
       Number.isFinite(rawX) && Number.isFinite(rawY)
         ? {x: rawX, y: rawY}
         : null;
-    tag.solverSource = "ESP32 AlgMin";
+    tag.solverSource = "ESP32 tag";
     tag.accuracy = {
       count: Number(item.observation_count),
       sigma_major_m: Number(item.sigma_m),
@@ -9147,16 +8713,17 @@ function renderPositionStreamFrame() {
     return;
   }
   const now = Date.now() / 1000;
+  const displayMaxAge = positionDisplayMaxAge(state.positionModel.settings);
   const needsRecoveryRender = Object.values(state.positionModel.tags || {}).some(tag => {
     const item = state.tdoa?.local_positions?.[String(tag.tagId)];
     const livePosition = item &&
       positionTdoaProtocolMatches(item, state.positionModel.settings.solver) &&
-      localPositionAge(item, now) <= state.positionModel.settings.maxAge &&
+      localPositionAge(item, now) <= displayMaxAge &&
       Number.isFinite(Number(item.x_m)) &&
       Number.isFinite(Number(item.y_m));
     return livePosition && (
       !tag.position ||
-      tag.solverSource !== "ESP32 AlgMin" ||
+      tag.solverSource !== "ESP32 tag" ||
       !document.getElementById(`positionTagSummary${tag.tagId}`) ||
       !document.getElementById(`positionAccuracyRow${tag.tagId}`)
     );
@@ -9181,142 +8748,26 @@ function schedulePositionStreamRender() {
   requestAnimationFrame(renderPositionStreamFrame);
 }
 
-function frame16IsNewer(candidate, reference) {
-  const delta = (Number(candidate) - Number(reference) + 65536) % 65536;
-  return delta > 0 && delta < 32768;
-}
-
-function ingestDsTwrStreamSample(item) {
-  const tagId = Number(item?.tag_id);
-  const anchorId = Number(item?.anchor_id);
-  const frameId = Number(item?.frame_id ?? item?.seq);
-  if (!Number.isInteger(tagId) || tagId <= 0 ||
-      !Number.isInteger(anchorId) || anchorId <= 0 ||
-      !Number.isInteger(frameId)) return;
-
-  if (!state.ranging) state.ranging = {distances: {}, max_age_sec: 3};
-  if (!state.ranging.distances) state.ranging.distances = {};
-  const distanceKey = `${tagId}:${anchorId}`;
-  const previous = state.ranging.distances[distanceKey] || {};
-  state.ranging.distances[distanceKey] = {
-    ...previous,
-    ...item,
-    age_sec: 0,
-  };
-
-  const settings = positionSettings();
-  if (settings.solver !== "ranging" ||
-      !settings.tagIds.includes(tagId)) return;
-  if (!settings.anchorIds.includes(anchorId)) return;
-  const nowMs = performance.now();
-  state.positionStreamLatestEvent = {
-    token: `ds:${tagId}:${anchorId}:${frameId}:${item?.received_at ?? nowMs}`,
-    arrivalMs: nowMs,
-  };
-  state.positionStreamRxTimes.push(nowMs);
-  trimPositionRateWindow(state.positionStreamRxTimes, nowMs);
-  schedulePositionStreamRender();
-
-  const frameKey = `${tagId}:frame:${frameId}`;
-  let frame = state.dsPositionFrameBuckets.get(frameKey);
-  if (!frame) {
-    frame = {
-      anchorIds: [...settings.anchorIds],
-      items: {},
-      frameId,
-      createdAtMs: nowMs,
-      updatedAtMs: nowMs,
-    };
-    state.dsPositionFrameBuckets.set(frameKey, frame);
-  }
-  frame.items[String(anchorId)] = {...item};
-  frame.updatedAtMs = nowMs;
-
-  for (const [key, candidate] of state.dsPositionFrameBuckets) {
-    if (nowMs - candidate.updatedAtMs > 1500) {
-      state.dsPositionFrameBuckets.delete(key);
-      state.nativeDsFrameDiagnostics.expiredCount++;
-      state.nativeDsFrameDiagnostics.expiredTimes.push(nowMs);
-      state.nativeDsFrameDiagnostics.expiredTimes =
-        state.nativeDsFrameDiagnostics.expiredTimes.filter(
-          value => nowMs - Number(value) <= 60000);
-    }
-  }
-  const coherent = settings.anchorIds.every(id => {
-    const sample = frame.items[String(id)];
-    return sample && Number(sample.frame_id ?? sample.seq) === frameId;
-  });
-  if (!coherent) return;
-
-  state.dsPositionFrameBuckets.delete(frameKey);
-  state.nativeDsFrameDiagnostics.completedCount++;
-  const receivedTimes = settings.anchorIds
-    .map(id => Number(frame.items[String(id)]?.received_at))
-    .filter(Number.isFinite);
-  const receivedAt = receivedTimes.length
-    ? Math.max(...receivedTimes)
-    : Date.now() / 1000;
-  const spanMs = receivedTimes.length > 1
-    ? Math.max(0, (Math.max(...receivedTimes) - Math.min(...receivedTimes)) * 1000)
-    : 0;
-  const tagKey = String(tagId);
-  const previousFrame = state.nativeDsCoherentFrames[tagKey] || null;
-  const previousIsStale =
-    previousFrame &&
-    nowMs - Number(previousFrame.completedAtMs || 0) > 2000;
-  const frameIsNewer = previousFrame
-    ? frame16IsNewer(frameId, previousFrame.frameId)
-    : true;
-  if (previousFrame && !previousIsStale &&
-      !frameIsNewer) {
-    state.nativeDsFrameDiagnostics.lateCompleteRejected++;
-    state.nativeDsFrameDiagnostics.lateCompleteTimes.push(nowMs);
-    state.nativeDsFrameDiagnostics.lateCompleteTimes =
-      state.nativeDsFrameDiagnostics.lateCompleteTimes.filter(
-        value => nowMs - Number(value) <= 60000);
-    return;
-  }
-  const publishedFrame = {
-    tagId,
-    frameId,
-    anchorIds: [...settings.anchorIds],
-    items: Object.fromEntries(settings.anchorIds.map(
-      id => [String(id), {...frame.items[String(id)]}])),
-    receivedAt,
-    completedAtMs: nowMs,
-    spanMs,
-  };
-  state.nativeDsCoherentFrames[tagKey] = publishedFrame;
-  state.nativeDsFrameDiagnostics.publishedCount++;
-  state.nativeDsFrameDiagnostics.publishedTimes.push(nowMs);
-  state.nativeDsFrameDiagnostics.publishedTimes =
-    state.nativeDsFrameDiagnostics.publishedTimes.filter(
-      value => nowMs - Number(value) <= 60000);
-  state.nativeDsFrameDiagnostics.lastSpanMs = spanMs;
-  state.nativeDsFrameDiagnostics.lastFrameKey =
-    `frame:${frameId}`;
-  state.positionStreamIndependentTimes.push(nowMs);
-  trimPositionRateWindow(state.positionStreamIndependentTimes, nowMs);
-}
-
 function ingestPositionStreamSample(item) {
-  if (item?.position_stream_type === "ds_twr_range") {
-    ingestDsTwrStreamSample(item);
-    return;
-  }
   const tagId = Number(item?.tag_id);
   const eventId = Number(item?.position_event_id);
   if (!Number.isFinite(tagId) || tagId <= 0 || !Number.isFinite(eventId)) return;
+  const settings = positionSettings();
+  // EventSource may deliver the tail of the previous runtime after Apply. A
+  // protocol-mismatched sample must not replace the current tag entry, even
+  // briefly, because local_positions is keyed only by tag ID.
+  if (!positionTdoaProtocolMatches(item, settings.solver)) return;
   const key = String(tagId);
   const previous = state.tdoa?.local_positions?.[key];
-  if (Number(previous?.position_event_id || 0) >= eventId) return;
+  if (positionTdoaProtocolMatches(previous, settings.solver) &&
+      Number(previous?.position_event_id || 0) >= eventId) return;
   if (!state.tdoa.local_positions) state.tdoa.local_positions = {};
   item.age_sec = localPositionAge(item);
   state.tdoa.local_positions[key] = item;
   const nowMs = performance.now();
-  const settings = positionSettings();
-  if (positionProtocolUsesTdoa(settings.solver) &&
-      positionTdoaProtocolMatches(item, settings.solver)) {
+  const tagIsSelected = settings.tagIds.includes(tagId) &&
+    !settings.anchorIds.includes(tagId);
+  if (tagIsSelected) {
     state.positionStreamLatestEvent = {
       token: `position:${eventId}`,
       arrivalMs: nowMs,
@@ -9360,6 +8811,9 @@ function startPositionStream() {
   stream.onopen = () => {
     state.positionStreamConnected = true;
     updatePositionStreamMetrics();
+    // Catch up atomically after an EventSource reconnect; the stream endpoint
+    // intentionally returns only the newest event when it has no Last-Event-ID.
+    void fetchSnapshot();
   };
   stream.onmessage = event => {
     try {
@@ -9542,21 +8996,35 @@ function setActiveTab(id) {
 }
 
 async function fetchLogs() {
-  const res = await fetch(`/api/logs?after=${state.lastId}&limit=4000`, {cache: "no-store"});
-  const data = await res.json();
-  if (!data.logs.length && Number(data.next_id) <= state.lastId) {
-    state.lastId = 0;
-    return;
+  if (state.logFetchPending) return;
+  state.logFetchPending = true;
+  try {
+    const res = await fetch(
+      `/api/logs?after=${state.lastId}&limit=4000`, {cache: "no-store"});
+    if (!res.ok) throw new Error(`logs HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.logs.length && Number(data.next_id) <= state.lastId) {
+      state.lastId = 0;
+      return;
+    }
+    if (data.logs.length) {
+      state.logs.push(...data.logs);
+      if (state.logs.length > 8000) {
+        state.logs.splice(0, state.logs.length - 8000);
+      }
+      state.lastId = Math.max(state.lastId, ...data.logs.map(item => item.id));
+      ingestAccelLogs(data.logs);
+      renderVisibleTerminals();
+      scheduleAccelRender();
+    }
+    document.getElementById("clientPill").textContent =
+      `${data.client_count} log client${data.client_count === 1 ? "" : "s"}`;
+  } catch (_) {
+    // A dashboard restart or short network outage is expected to interrupt a
+    // poll. The next interval retries; no rejected promise escapes globally.
+  } finally {
+    state.logFetchPending = false;
   }
-  if (data.logs.length) {
-    state.logs.push(...data.logs);
-    if (state.logs.length > 8000) state.logs.splice(0, state.logs.length - 8000);
-    state.lastId = Math.max(state.lastId, ...data.logs.map(item => item.id));
-    ingestAccelLogs(data.logs);
-    renderVisibleTerminals();
-    scheduleAccelRender();
-  }
-  document.getElementById("clientPill").textContent = `${data.client_count} log client${data.client_count === 1 ? "" : "s"}`;
 }
 
 async function fetchAccel() {
@@ -10976,12 +10444,28 @@ function renderInfo(snapshot) {
   state.statuses = snapshot.statuses || [];
   synchronizePositionAnchorsFromRuntime(state.statuses);
   state.ranging = snapshot.ranging || {distances: {}, max_age_sec: 3};
+  const selectedSolver = positionSettings().solver;
+  const expectedPositionProtocol = positionGeometryProtocol(selectedSolver);
+  const displayMaxAge = positionDisplayMaxAge(positionSettings());
+  const now = Date.now() / 1000;
   const previousLocalPositions = state.tdoa?.local_positions || {};
   const nextTdoa = snapshot.tdoa || {observations: {}, anchor_distances: {}, local_positions: {}, local_geometries: {}, max_age_sec: 3};
   nextTdoa.local_positions = nextTdoa.local_positions || {};
   for (const [tagId, previous] of Object.entries(previousLocalPositions)) {
     const incoming = nextTdoa.local_positions[tagId];
-    if (Number(previous?.position_event_id || 0) > Number(incoming?.position_event_id || 0)) {
+    const previousProtocol = String(previous?.tdoa_protocol || "flextdoa");
+    const incomingProtocol = String(incoming?.tdoa_protocol || "flextdoa");
+    const previousIsUsable = previousProtocol === expectedPositionProtocol &&
+      localPositionAge(previous, now) <= displayMaxAge;
+    const incomingMatches = incoming && incomingProtocol === expectedPositionProtocol;
+    // Snapshot and EventSource are independent transports. Preserve a newer
+    // stream sample only within the selected protocol and only while it is
+    // display-fresh. Protocol changes and stale samples remain authoritative
+    // deletion boundaries instead of being resurrected indefinitely.
+    if (previousIsUsable &&
+        (!incomingMatches ||
+         Number(previous?.position_event_id || 0) >
+           Number(incoming?.position_event_id || 0))) {
       nextTdoa.local_positions[tagId] = previous;
     }
   }
@@ -14036,6 +13520,14 @@ function updatePdRawVisibility() {
 }
 
 async function enablePositionRanging() {
+  if (state.positionApplyInFlight) {
+    setToast(
+      "positionToast",
+      "A UWB protocol transition is already in progress.",
+      "warn"
+    );
+    return;
+  }
   const settings = positionSettings();
   const tagId = settings.tagIds[0];
   if (settings.anchorIds.length !== settings.anchorCount) {
@@ -14087,18 +13579,37 @@ async function enablePositionRanging() {
   if (runtimeAnchors) runtimeAnchors.value = anchors;
   if (runtimeUwb) runtimeUwb.checked = true;
   if (runtimeReboot) runtimeReboot.value = "1";
-  const result = await postConfig(
-    {target_modules: "all", params},
-    "positionToast"
-  );
-  if (!apiResponseOk(result)) return;
-  resetPositionTagTrails();
-  resetNativeDsFrameAssembler();
-  state.positionAnchorTrail = {};
-  state.positionSeeds = {};
-  fetchSnapshot();
-  setTimeout(fetchSnapshot, 250);
-  setTimeout(fetchSnapshot, 750);
+  state.positionApplyInFlight = true;
+  [
+    "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
+  ].forEach(id => {
+    const element = document.getElementById(id);
+    if (element) element.disabled = true;
+  });
+  renderPosition();
+  try {
+    const result = await postConfig(
+      {target_modules: "all", params},
+      "positionToast"
+    );
+    if (!apiResponseOk(result)) return;
+    resetPositionTagTrails();
+    state.positionAnchorTrail = {};
+    state.positionSeeds = {};
+    state.positionSetupDirty = false;
+    await fetchSnapshot();
+    setTimeout(fetchSnapshot, 250);
+    setTimeout(fetchSnapshot, 750);
+  } finally {
+    state.positionApplyInFlight = false;
+    [
+      "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
+    ].forEach(id => {
+      const element = document.getElementById(id);
+      if (element) element.disabled = false;
+    });
+    renderPosition();
+  }
 }
 
 function runPositionOverlayAction(event) {
@@ -14188,11 +13699,16 @@ function wireSettings() {
     const el = document.getElementById(id);
     if (!el) return;
     const update = () => {
+      if ([
+        "positionAnchorCount", "positionSolver", "positionAnchors",
+        "positionTags",
+      ].includes(id)) {
+        state.positionSetupDirty = true;
+      }
       if (id === "positionSolver") switchPositionProtocolSettings();
       if (id === "positionMaxAgeSec") savePositionProtocolSettings();
-      if (id === "positionAnchors") {
+      if (id === "positionAnchors" || id === "positionTags") {
         resetPositionTagTrails();
-        resetNativeDsFrameAssembler();
         state.positionSeeds = {};
         state.positionStreamRxTimes = [];
         state.positionStreamIndependentTimes = [];
@@ -14873,6 +14389,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
         self.token = token
         self.quiet = quiet
         self.timeout_sec = timeout_sec
+        self.runtime_transition_lock = threading.Lock()
         self.calibration_job_lock = threading.Lock()
         self.calibration_job: dict[str, Any] | None = None
 
@@ -14892,14 +14409,50 @@ class DashboardHttpServer(ThreadingHTTPServer):
             params = dict(params)
             params.pop("hot_switch", None)
             params["reboot"] = "1"
-        targets = self.resolve_targets(target_modules)
-        with ThreadPoolExecutor(max_workers=min(5, len(targets))) as executor:
-            return list(
-                executor.map(
-                    lambda target: self.send_runtime_config(target, params),
-                    targets,
-                )
+        if not self.runtime_transition_lock.acquire(blocking=False):
+            raise RuntimeError(
+                "Another UWB runtime transition is still in progress"
             )
+        try:
+            targets = self.resolve_targets(target_modules)
+            with ThreadPoolExecutor(max_workers=min(5, len(targets))) as executor:
+                results = list(
+                    executor.map(
+                        lambda target: self.send_runtime_config(target, params),
+                        targets,
+                    )
+                )
+            if not all(item.get("ok") for item in results):
+                return results
+
+            # A successful /config/runtime response means that the request was
+            # accepted, not that the coordinated reboot has completed.  Keep
+            # the transition lock until every module reports the requested
+            # runtime again.  The short delay prevents accepting a status from
+            # the old process in the interval between its HTTP reply and reset.
+            if str(params.get("reboot") or "") == "1":
+                time.sleep(0.6)
+                with ThreadPoolExecutor(max_workers=min(5, len(targets))) as executor:
+                    verified = list(
+                        executor.map(
+                            lambda target: self.wait_for_runtime_config(
+                                target, params
+                            ),
+                            targets,
+                        )
+                    )
+                for result, status in zip(results, verified):
+                    if status is None:
+                        result["ok"] = False
+                        result["error"] = (
+                            "runtime was accepted but not confirmed after reboot"
+                        )
+                        continue
+                    result["verified_after_reboot"] = True
+                    result["module_id"] = status.get("module_id")
+            return results
+        finally:
+            self.runtime_transition_lock.release()
 
     def stop_all_uwb(
         self,
@@ -15834,7 +15387,10 @@ class DashboardHttpServer(ThreadingHTTPServer):
                         response.read().decode("utf-8", errors="replace")
                     )
                 if runtime_config_matches_status(params, status):
-                    return status
+                    switching = bool(status.get("uwb_runtime_switching"))
+                    uwb_ready = str(status.get("uwb_status") or "").lower()
+                    if not switching and uwb_ready in ("", "ready"):
+                        return status
             except (
                 json.JSONDecodeError,
                 urllib.error.URLError,
