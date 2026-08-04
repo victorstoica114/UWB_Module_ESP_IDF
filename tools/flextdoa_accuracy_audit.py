@@ -527,6 +527,10 @@ def main() -> int:
         "pair_corrected_anchor_offsets_cm": {
             str(key): value * 100.0 for key, value in pair_anchor_offsets.items()
         },
+        "runtime_anchor_corrections_mm": {
+            str(key): -value * 1000.0
+            for key, value in rolling_anchor_offsets.items()
+        },
         "index_offsets_cm": {
             str(key): value * 100.0 for key, value in index_offsets.items()
         },

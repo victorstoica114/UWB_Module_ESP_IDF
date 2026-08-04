@@ -45,6 +45,7 @@ struct flex_solver_state {
     uint8_t anchor_count;
     uint32_t geometry_generation;
     struct flextdoa_anchor_position anchors[FLEXTDOA_MAX_ANCHORS];
+    struct flextdoa_anchor_bias anchor_biases[FLEXTDOA_MAX_ANCHORS];
     struct flextdoa_algmin_seed previous_position;
     uint32_t frame_slot_ids[FLEX_SOLVER_FRAME_CAPACITY];
     struct flextdoa_range_difference
@@ -85,6 +86,7 @@ static void flex_solver_load_geometry(struct flex_solver_state *state)
         config->flex_tdoa_geometry_fixed && config->anchor_count >= 3U &&
         config->anchor_count <= FLEXTDOA_MAX_ANCHORS;
     memset(state->anchors, 0, sizeof(state->anchors));
+    memset(state->anchor_biases, 0, sizeof(state->anchor_biases));
     for (size_t index = 0U;
          state->geometry_ready && index < config->anchor_count; ++index) {
         state->anchors[index].anchor_id = config->anchor_ids[index];
@@ -92,6 +94,9 @@ static void flex_solver_load_geometry(struct flex_solver_state *state)
             config->flex_tdoa_anchor_x_mm[index] / 1000.0;
         state->anchors[index].y_m =
             config->flex_tdoa_anchor_y_mm[index] / 1000.0;
+        state->anchor_biases[index].anchor_id = config->anchor_ids[index];
+        state->anchor_biases[index].bias_m =
+            config->flex_tdoa_anchor_correction_mm[index] / 1000.0;
     }
     state->previous_position.valid = false;
     state->frame_tag_id = 0U;
@@ -209,7 +214,8 @@ static void flex_solver_close_frame(struct flex_solver_state *state)
 
     const size_t solver_observation_count =
         flextdoa_frame_aggregator_copy_corrected(
-            frame, NULL, 0U, state->frame_solver_observations,
+            frame, state->anchor_biases, state->anchor_count,
+            state->frame_solver_observations,
             FLEX_SOLVER_FRAME_CAPACITY);
     if (solver_observation_count != frame->observation_count) {
         state->solver_rejected++;
