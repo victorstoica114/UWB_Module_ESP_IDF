@@ -1049,6 +1049,7 @@ static uint8_t s_rx_double_buffer_index;
 static bool s_flex_tdoa_anchor_request_buffer_pending;
 static uint32_t s_rx_double_buffer_resync_count;
 static uint32_t s_rx_double_buffer_cia_not_ready_count;
+static uint32_t s_rx_double_buffer_cia_ready_after_retry_count;
 static uint32_t s_rx_double_buffer_release_max_us;
 static uint32_t s_rx_double_buffer_good_to_rearm_max_us;
 static bool s_flex_tdoa_rx_timestamp_reference_valid;
@@ -2609,6 +2610,7 @@ static esp_err_t uwb_dw3000_configure_high_rate_rx_double_buffer(void)
     s_flex_tdoa_anchor_request_buffer_pending = false;
     s_rx_double_buffer_resync_count = 0;
     s_rx_double_buffer_cia_not_ready_count = 0;
+    s_rx_double_buffer_cia_ready_after_retry_count = 0;
     s_rx_double_buffer_release_max_us = 0;
     s_rx_double_buffer_good_to_rearm_max_us = 0;
     s_rx_double_buffer_enabled = true;
@@ -4060,6 +4062,7 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                     cia_ready = clock_err == ESP_OK &&
                                 (updated_rdb_status & cia_done_mask) != 0U;
                     if (cia_ready) {
+                        s_rx_double_buffer_cia_ready_after_retry_count++;
                         /* The metadata copy preceded CIADONE and may be stale. */
                         clock_err = uwb_dw3000_read_clock_offset_raw(
                             &frame->clock_offset_raw,
@@ -6176,8 +6179,11 @@ static void uwb_flex_tdoa_log_paper_observation(
         (void)wireless_log_service_submit(
                  'I', TAG,
                  "FLEX_TDOA RX metric good_to_rearm_us=%lu "
+                 "cia_ready_after_retry=%lu "
                  "missing_mask[1..7]=%lu/%lu/%lu/%lu/%lu/%lu/%lu",
                  (unsigned long)s_rx_double_buffer_good_to_rearm_max_us,
+                 (unsigned long)
+                     s_rx_double_buffer_cia_ready_after_retry_count,
                  (unsigned long)s_flex_tdoa_missing_mask_since_summary[1],
                  (unsigned long)s_flex_tdoa_missing_mask_since_summary[2],
                  (unsigned long)s_flex_tdoa_missing_mask_since_summary[3],
@@ -6206,6 +6212,7 @@ static void uwb_flex_tdoa_log_paper_observation(
         s_rx_double_buffer_release_max_us = 0;
         s_rx_double_buffer_good_to_rearm_max_us = 0;
         s_rx_double_buffer_cia_not_ready_count = 0;
+        s_rx_double_buffer_cia_ready_after_retry_count = 0;
         s_flex_tdoa_observation_summary_tick = now;
     }
     ESP_LOGD(TAG,
@@ -6797,8 +6804,11 @@ static void uwb_flex_tdoa_log_anchor_result(
                  (unsigned long)s_flex_tdoa_request_arm_max_us);
         (void)wireless_log_service_submit(
                  'I', TAG,
-                 "FLEX_TDOA RX metric good_to_rearm_us=%lu",
-                 (unsigned long)s_rx_double_buffer_good_to_rearm_max_us);
+                 "FLEX_TDOA RX metric good_to_rearm_us=%lu "
+                 "cia_ready_after_retry=%lu",
+                 (unsigned long)s_rx_double_buffer_good_to_rearm_max_us,
+                 (unsigned long)
+                     s_rx_double_buffer_cia_ready_after_retry_count);
         s_flex_tdoa_anchor_results_since_summary = 0;
         s_flex_tdoa_anchor_drops_since_summary = 0;
         s_flex_tdoa_anchor_incoherent_since_summary = 0;
@@ -6811,6 +6821,7 @@ static void uwb_flex_tdoa_log_anchor_result(
         s_rx_double_buffer_release_max_us = 0;
         s_rx_double_buffer_good_to_rearm_max_us = 0;
         s_rx_double_buffer_cia_not_ready_count = 0;
+        s_rx_double_buffer_cia_ready_after_retry_count = 0;
         memset(s_flex_tdoa_req_to_dtx_count, 0,
                sizeof(s_flex_tdoa_req_to_dtx_count));
         memset(s_flex_tdoa_req_to_dtx_sum_us, 0,
