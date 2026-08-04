@@ -35,6 +35,23 @@ uint16_t flextdoa_collector_missing_mask(
     return (uint16_t)(expected_mask & ~collection->received_mask);
 }
 
+uint16_t flextdoa_missing_mask_from_presence(
+    const bool *present, uint8_t responder_count)
+{
+    if (present == NULL || responder_count == 0U ||
+        responder_count > FLEXTDOA_MAX_RESPONDERS) {
+        return 0U;
+    }
+
+    uint16_t missing_mask = 0U;
+    for (uint8_t index = 0U; index < responder_count; ++index) {
+        if (!present[index]) {
+            missing_mask |= (uint16_t)(1U << index);
+        }
+    }
+    return missing_mask;
+}
+
 enum flextdoa_collect_result flextdoa_collector_ingest(
     struct flextdoa_slot_collection *collection,
     const struct flextdoa_packet *packet, uint64_t rx_timestamp_dtu,

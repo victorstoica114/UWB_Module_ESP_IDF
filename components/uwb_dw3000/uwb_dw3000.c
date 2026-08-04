@@ -6227,6 +6227,16 @@ static void uwb_flex_tdoa_log_paper_observation(
     memset(observation, 0, sizeof(*observation));
 }
 
+static void uwb_flex_tdoa_record_incomplete_mask(uint16_t missing_mask)
+{
+    s_flex_tdoa_incomplete_slots_since_summary++;
+    if (missing_mask <
+        (sizeof(s_flex_tdoa_missing_mask_since_summary) /
+         sizeof(s_flex_tdoa_missing_mask_since_summary[0]))) {
+        s_flex_tdoa_missing_mask_since_summary[missing_mask]++;
+    }
+}
+
 static void uwb_flex_tdoa_tag_process_frame(
     const struct uwb_distance_frame *frame,
     struct uwb_flex_tdoa_observation *observations,
@@ -6245,14 +6255,9 @@ static void uwb_flex_tdoa_tag_process_frame(
     if (protocol_packet.type == FLEXTDOA_MESSAGE_REQUEST &&
         s_flex_tdoa_tag_collection.active &&
         !flextdoa_collector_complete(&s_flex_tdoa_tag_collection)) {
-        s_flex_tdoa_incomplete_slots_since_summary++;
-        const uint16_t missing_mask = flextdoa_collector_missing_mask(
-            &s_flex_tdoa_tag_collection);
-        if (missing_mask <
-            (sizeof(s_flex_tdoa_missing_mask_since_summary) /
-             sizeof(s_flex_tdoa_missing_mask_since_summary[0]))) {
-            s_flex_tdoa_missing_mask_since_summary[missing_mask]++;
-        }
+        uwb_flex_tdoa_record_incomplete_mask(
+            flextdoa_collector_missing_mask(
+                &s_flex_tdoa_tag_collection));
     }
     double protocol_cfo_fraction = 0.0;
     if (frame->clock_offset_valid) {
@@ -6398,11 +6403,14 @@ static size_t uwb_flex_tdoa_tag_collect_response_burst(
     size_t anchor_count,
     struct uwb_distance_frame
         responses[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U],
-    bool present[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U])
+    bool present[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U],
+    uint8_t *responder_count_out)
 {
-    if (request == NULL || responses == NULL || present == NULL) {
+    if (request == NULL || responses == NULL || present == NULL ||
+        responder_count_out == NULL) {
         return 0U;
     }
+    *responder_count_out = 0U;
     uint32_t slot_id = 0U;
     uint8_t responder_count = 0U;
     uint8_t responder_ids[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U] = {0};
@@ -6411,6 +6419,7 @@ static size_t uwb_flex_tdoa_tag_collect_response_burst(
             &responder_count, responder_ids, NULL)) {
         return 0U;
     }
+    *responder_count_out = responder_count;
 
     memset(responses, 0,
            sizeof(*responses) *
@@ -6483,6 +6492,56 @@ static size_t uwb_flex_tdoa_tag_collect_response_burst(
     return collected;
 }
 
+static void uwb_flex_tdoa_tag_fast_fail_incomplete_burst(
+    const struct uwb_distance_frame *request,
+    const struct uwb_distance_frame
+        responses[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U],
+    const bool present[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U],
+    uint8_t responder_count, const uint8_t *anchor_ids,
+    size_t anchor_count)
+{
+    if (request == NULL || responses == NULL || present == NULL ||
+        anchor_ids == NULL || responder_count == 0U ||
+        responder_count > UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U) {
+        return;
+    }
+
+    const uint16_t missing_mask =
+        flextdoa_missing_mask_from_presence(present, responder_count);
+    if (missing_mask == 0U) {
+        return;
+    }
+
+    uwb_flex_tdoa_record_incomplete_mask(missing_mask);
+
+    /* Preserve the request/physical-responder and CFO diagnostics without
+     * decoding or publishing observations from a slot that the strict solver
+     * cannot use. */
+    const size_t initiator_index = uwb_anchor_survey_id_index(
+        anchor_ids, anchor_count, request->source_id);
+    if (initiator_index != SIZE_MAX) {
+        s_flex_tdoa_tag_requests_by_anchor[initiator_index]++;
+    }
+    for (uint8_t index = 0U; index < responder_count; ++index) {
+        if (!present[index]) {
+            continue;
+        }
+        const size_t responder_anchor_index = uwb_anchor_survey_id_index(
+            anchor_ids, anchor_count, responses[index].source_id);
+        if (responder_anchor_index != SIZE_MAX) {
+            s_flex_tdoa_tag_responses_by_anchor[responder_anchor_index]++;
+        }
+        if (!responses[index].clock_offset_valid) {
+            s_flex_tdoa_observation_invalid_since_summary++;
+            s_flex_tdoa_observation_invalid_cfo_since_summary++;
+        }
+    }
+
+    flextdoa_collector_reset(&s_flex_tdoa_tag_collection);
+    memset(s_flex_tdoa_tag_observations, 0,
+           sizeof(s_flex_tdoa_tag_observations));
+}
+
 static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
                                      size_t anchor_count)
 {
@@ -6517,8 +6576,19 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
                 struct uwb_distance_frame responses[
                     UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U] = {0};
                 bool present[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U] = {0};
+                uint8_t responder_count = 0U;
                 (void)uwb_flex_tdoa_tag_collect_response_burst(
-                    &frame, anchor_ids, anchor_count, responses, present);
+                    &frame, anchor_ids, anchor_count, responses, present,
+                    &responder_count);
+                const uint16_t missing_mask =
+                    flextdoa_missing_mask_from_presence(
+                        present, responder_count);
+                if (missing_mask != 0U) {
+                    uwb_flex_tdoa_tag_fast_fail_incomplete_burst(
+                        &frame, responses, present, responder_count,
+                        anchor_ids, anchor_count);
+                    continue;
+                }
                 uwb_flex_tdoa_tag_process_frame(
                     &frame, s_flex_tdoa_tag_observations, tag_id,
                     anchor_ids, anchor_count);

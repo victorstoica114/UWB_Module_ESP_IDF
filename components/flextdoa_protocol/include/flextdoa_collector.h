@@ -42,5 +42,7 @@ bool flextdoa_collector_complete(
     const struct flextdoa_slot_collection *collection);
 uint16_t flextdoa_collector_missing_mask(
     const struct flextdoa_slot_collection *collection);
+uint16_t flextdoa_missing_mask_from_presence(
+    const bool *present, uint8_t responder_count);
 
 #endif

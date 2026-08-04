@@ -59,6 +59,18 @@ static void test_ci_cr_schedule(void)
 
 static void test_slot_collector(void)
 {
+    const bool none_present[] = {false, false, false};
+    const bool first_two_present[] = {true, true, false};
+    const bool outer_present[] = {true, false, true};
+    const bool all_present[] = {true, true, true};
+    assert(flextdoa_missing_mask_from_presence(none_present, 3U) == 0x07U);
+    assert(flextdoa_missing_mask_from_presence(first_two_present, 3U) ==
+           0x04U);
+    assert(flextdoa_missing_mask_from_presence(outer_present, 3U) == 0x02U);
+    assert(flextdoa_missing_mask_from_presence(all_present, 3U) == 0U);
+    assert(flextdoa_missing_mask_from_presence(NULL, 3U) == 0U);
+    assert(flextdoa_missing_mask_from_presence(all_present, 0U) == 0U);
+
     const struct flextdoa_packet request = {
         .type = FLEXTDOA_MESSAGE_REQUEST,
         .slot_id = 42U,
