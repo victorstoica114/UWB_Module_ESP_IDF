@@ -346,6 +346,7 @@ def relevant_timing_log(item: dict[str, Any]) -> bool:
         or "FLEX_TDOA solver pos=" in message
         or "FLEX_TDOA anchor n=" in message
         or "FLEX_TDOA tag n=" in message
+        or "FLEX_TDOA RX metric" in message
         or (
             "PASSIVE_DS" in message
             and (

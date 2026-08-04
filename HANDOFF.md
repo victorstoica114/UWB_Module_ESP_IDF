@@ -139,8 +139,10 @@ python3 tools/runtime_config.py --target-list tools/ota_targets.local.txt \
 ```
 
 Use `--reboot` when changing `mode`, `tag`, `anchors`, or survey
-`coordinator`. Timing-only settings can be updated without reboot where the
-running loop reads them dynamically.
+`coordinator`. For reproducible measurements, timing changes currently also
+require a coordinated reboot: the live runtime-config object is not published
+atomically and radio loops can otherwise observe old and new frame fields in
+the same transition.
 
 Other useful examples:
 
@@ -243,7 +245,14 @@ ANCHOR_SURVEY result pair=2-3 seq=... distance=...
 This is a first skeleton. The next session should expect to tune slot timing and
 failure recovery after testing with actual boards.
 
-## Hot Protocol Switching (2026-07-27)
+## Historical Hot Protocol Switching (2026-07-27)
+
+Current operational policy is to reboot all participating modules together
+when changing positioning protocol. The dashboard enforces this policy; the
+direct hot-switch endpoint remains diagnostic only. Timing changes also use a
+coordinated reboot until a frame-boundary, atomic same-protocol reload exists.
+The text below records the earlier hot-switch implementation and test, not the
+recommended field workflow.
 
 The Position tab now changes directly among Native DS-TWR, FlexTDOA, and Passive
 DS-TWR without rebooting the ESP32. It sends an authenticated
