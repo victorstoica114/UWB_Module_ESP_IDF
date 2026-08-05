@@ -131,7 +131,7 @@ typedef struct {
     struct uwb_passive_ds_pipeline_stats passive_ds_pipeline_stats;
     char passive_ds_pipeline_stats_json[1536];
     struct uwb_native_ds_pipeline_stats native_ds_pipeline_stats;
-    char native_ds_pipeline_stats_json[2048];
+    char native_ds_pipeline_stats_json[4096];
     char response[OTA_SERVICE_STATUS_RESPONSE_SIZE];
 } ota_status_context_t;
 
@@ -781,16 +781,37 @@ static void format_native_ds_pipeline_stats_json(
     if (stats == NULL || buffer == NULL || buffer_size == 0U) {
         return;
     }
-    (void)snprintf(
+    const size_t anchor_count =
+        stats->tag_anchor_count <= UWB_NATIVE_DS_PIPELINE_MAX_ANCHORS
+            ? stats->tag_anchor_count
+            : UWB_NATIVE_DS_PIPELINE_MAX_ANCHORS;
+    const int prefix_len = snprintf(
         buffer, buffer_size,
         "{\"poll_tx\":%lu,\"poll_rx\":%lu,"
         "\"response_tx\":%lu,\"response_rx\":%lu,"
         "\"final_tx\":%lu,\"final_rx\":%lu,"
         "\"result_tx\":%lu,\"result_rx\":%lu,"
         "\"completed_ranges\":%lu,\"rx_timeouts\":%lu,"
-        "\"invalid_frames\":%lu,\"delayed_tx_errors\":%lu,"
+        "\"poll_tx_errors\":%lu,"
+        "\"response_timeouts\":%lu,\"response_rx_errors\":%lu,"
+        "\"response_tx_errors\":%lu,"
+        "\"final_timeouts\":%lu,\"final_rx_errors\":%lu,"
+        "\"final_tx_errors\":%lu,"
+        "\"result_timeouts\":%lu,\"result_rx_errors\":%lu,"
+        "\"result_tx_errors\":%lu,"
+        "\"invalid_frames\":%lu,\"crc_errors\":%lu,"
+        "\"delayed_tx_errors\":%lu,"
         "\"rejected_ranges\":%lu,\"slot_overruns\":%lu,"
-        "\"last_distance_mm\":%ld}",
+        "\"recovered_rx_errors\":%lu,"
+        "\"complete_frames\":%lu,\"incomplete_frames\":%lu,"
+        "\"last_missing_anchor_mask\":%lu,"
+        "\"rx_phy_errors\":%lu,\"rx_frame_sync_loss\":%lu,"
+        "\"rx_phr_errors\":%lu,\"rx_fcs_errors\":%lu,"
+        "\"rx_overruns\":%lu,\"rx_cia_errors\":%lu,"
+        "\"rx_filter_rejections\":%lu,\"rx_cp_errors\":%lu,"
+        "\"rx_timestamp_cia_invalid\":%lu,"
+        "\"last_distance_mm\":%ld,\"tag_anchor_count\":%u,"
+        "\"tag_anchors\":[",
         (unsigned long)stats->poll_tx_count,
         (unsigned long)stats->poll_rx_count,
         (unsigned long)stats->response_tx_count,
@@ -801,11 +822,72 @@ static void format_native_ds_pipeline_stats_json(
         (unsigned long)stats->result_rx_count,
         (unsigned long)stats->completed_range_count,
         (unsigned long)stats->rx_timeout_count,
+        (unsigned long)stats->poll_tx_error_count,
+        (unsigned long)stats->response_timeout_count,
+        (unsigned long)stats->response_rx_error_count,
+        (unsigned long)stats->response_tx_error_count,
+        (unsigned long)stats->final_timeout_count,
+        (unsigned long)stats->final_rx_error_count,
+        (unsigned long)stats->final_tx_error_count,
+        (unsigned long)stats->result_timeout_count,
+        (unsigned long)stats->result_rx_error_count,
+        (unsigned long)stats->result_tx_error_count,
         (unsigned long)stats->invalid_frame_count,
+        (unsigned long)stats->crc_error_count,
         (unsigned long)stats->delayed_tx_error_count,
         (unsigned long)stats->rejected_range_count,
         (unsigned long)stats->slot_overrun_count,
-        (long)stats->last_distance_mm);
+        (unsigned long)stats->recovered_rx_error_count,
+        (unsigned long)stats->complete_frame_count,
+        (unsigned long)stats->incomplete_frame_count,
+        (unsigned long)stats->last_frame_missing_anchor_mask,
+        (unsigned long)stats->rx_phy_error_count,
+        (unsigned long)stats->rx_frame_sync_loss_count,
+        (unsigned long)stats->rx_phr_error_count,
+        (unsigned long)stats->rx_fcs_error_count,
+        (unsigned long)stats->rx_overrun_count,
+        (unsigned long)stats->rx_cia_error_count,
+        (unsigned long)stats->rx_filter_rejection_count,
+        (unsigned long)stats->rx_cp_error_count,
+        (unsigned long)stats->rx_timestamp_cia_invalid_count,
+        (long)stats->last_distance_mm,
+        (unsigned)anchor_count);
+    if (prefix_len < 0 || (size_t)prefix_len >= buffer_size) {
+        buffer[buffer_size - 1U] = '\0';
+        return;
+    }
+
+    size_t used = (size_t)prefix_len;
+    for (size_t index = 0U; index < anchor_count; ++index) {
+        const struct uwb_native_ds_tag_anchor_stats *anchor =
+            &stats->tag_anchors[index];
+        const int item_len = snprintf(
+            buffer + used, buffer_size - used,
+            "%s{\"anchor_id\":%u,\"attempts\":%lu,"
+            "\"poll_tx_errors\":%lu,\"response_timeouts\":%lu,"
+            "\"response_rx_errors\":%lu,\"final_tx_errors\":%lu,"
+            "\"result_timeouts\":%lu,\"result_rx_errors\":%lu,"
+            "\"completed_ranges\":%lu}",
+            index == 0U ? "" : ",", (unsigned)anchor->anchor_id,
+            (unsigned long)anchor->attempt_count,
+            (unsigned long)anchor->poll_tx_error_count,
+            (unsigned long)anchor->response_timeout_count,
+            (unsigned long)anchor->response_rx_error_count,
+            (unsigned long)anchor->final_tx_error_count,
+            (unsigned long)anchor->result_timeout_count,
+            (unsigned long)anchor->result_rx_error_count,
+            (unsigned long)anchor->completed_range_count);
+        if (item_len < 0 || (size_t)item_len >= buffer_size - used) {
+            buffer[buffer_size - 1U] = '\0';
+            return;
+        }
+        used += (size_t)item_len;
+    }
+    if (used + 3U > buffer_size) {
+        buffer[buffer_size - 1U] = '\0';
+        return;
+    }
+    memcpy(buffer + used, "]}", 3U);
 }
 
 static bool ota_parse_flex_geometry(
@@ -932,6 +1014,14 @@ static bool runtime_config_reboot_recommended(
                after->flex_tdoa_response_subslot_us ||
            before->flex_tdoa_response_process_us !=
                after->flex_tdoa_response_process_us ||
+           before->ranging_slot_ms != after->ranging_slot_ms ||
+           before->ranging_round_gap_ms != after->ranging_round_gap_ms ||
+           before->ranging_rx_slice_ms != after->ranging_rx_slice_ms ||
+           before->ranging_rx_timeout_ms != after->ranging_rx_timeout_ms ||
+           before->ranging_resp_delay_ms != after->ranging_resp_delay_ms ||
+           before->ranging_final_delay_ms != after->ranging_final_delay_ms ||
+           before->ranging_auto_rx_delay_uus !=
+               after->ranging_auto_rx_delay_uus ||
            before->passive_ds_schedule != after->passive_ds_schedule ||
            before->passive_ds_slot_ms != after->passive_ds_slot_ms ||
            before->passive_ds_round_gap_ms !=
@@ -967,6 +1057,26 @@ static bool runtime_config_hot_switch_eligible(
         !uwb_dw3000_hot_switch_mode_supported(before->runtime_mode) ||
         !uwb_dw3000_hot_switch_mode_supported(after->runtime_mode)) {
         return false;
+    }
+
+    bool ranging_mode_valid = false;
+    const uint8_t ranging_mode =
+        app_runtime_config_runtime_mode_from_string(
+            "ranging", &ranging_mode_valid);
+    if (ranging_mode_valid &&
+        before->runtime_mode == ranging_mode &&
+        after->runtime_mode == ranging_mode) {
+        app_runtime_config_t allowed = *before;
+        allowed.ranging_slot_ms = after->ranging_slot_ms;
+        allowed.ranging_round_gap_ms = after->ranging_round_gap_ms;
+        allowed.ranging_rx_slice_ms = after->ranging_rx_slice_ms;
+        allowed.ranging_rx_timeout_ms = after->ranging_rx_timeout_ms;
+        allowed.ranging_resp_delay_ms = after->ranging_resp_delay_ms;
+        allowed.ranging_final_delay_ms = after->ranging_final_delay_ms;
+        allowed.ranging_auto_rx_delay_uus =
+            after->ranging_auto_rx_delay_uus;
+        allowed.from_nvs = after->from_nvs;
+        return memcmp(&allowed, after, sizeof(allowed)) == 0;
     }
 
     bool passive_mode_valid = false;
@@ -4324,7 +4434,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
                     &before_config, &config)) {
                 return httpd_resp_send_err(
                     req, HTTPD_400_BAD_REQUEST,
-                    "Hot switch supports protocol transitions and in-place Passive DS-TWR timing reloads");
+                    "Hot switch supports protocol transitions and in-place Native or Passive DS-TWR timing reloads");
             }
             err = app_runtime_config_save(&config);
             if (err == ESP_OK &&
@@ -4395,6 +4505,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
     }
 
     const bool reboot_recommended =
+        !hot_switch_started &&
         runtime_config_reboot_recommended(&before_config, active_config);
     ESP_LOGW(TAG,
              "Runtime config: changed=%s cleared=%s mode=%s(%u) tag=%u anchors=%s count=%u K=%u M=%u generation=%lu coord=%u reboot_recommended=%s reboot_requested=%s hot_switch_requested=%s hot_switch_started=%s",

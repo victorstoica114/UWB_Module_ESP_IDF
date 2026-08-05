@@ -209,6 +209,8 @@ def collect_params(args: argparse.Namespace) -> dict[str, str]:
 
     if args.reboot:
         params["reboot"] = "1"
+    elif args.hot_switch:
+        params["hot_switch"] = "1"
 
     if not params:
         raise RuntimeError("No runtime config parameters provided")
@@ -227,7 +229,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-Parallel", "--parallel", type=int, default=5)
     parser.add_argument("-TimeoutSec", "--timeout-sec", type=int, default=10)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--reboot", action="store_true")
+    transition = parser.add_mutually_exclusive_group()
+    transition.add_argument("--reboot", action="store_true")
+    transition.add_argument("--hot-switch", dest="hot_switch", action="store_true")
     parser.add_argument("--clear", action="store_true")
     parser.add_argument("--set", dest="sets", action="append", default=[], metavar="KEY=VALUE")
 

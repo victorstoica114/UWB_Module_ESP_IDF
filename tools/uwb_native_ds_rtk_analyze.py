@@ -8,6 +8,7 @@ import json
 import math
 import pathlib
 import statistics
+import sys
 from typing import Any, Iterable
 
 
@@ -65,6 +66,50 @@ def ecef_to_enu(
     return east, north, up
 
 
+def fit_rigid_2d(
+    source: list[tuple[float, float]],
+    target: list[tuple[float, float]],
+) -> tuple[float, float, float]:
+    """Return the rotation and translation mapping source points to target points."""
+    if len(source) != len(target) or len(source) < 2:
+        raise ValueError("rigid 2D alignment requires matching point sets of size >= 2")
+    source_x = statistics.fmean(point[0] for point in source)
+    source_y = statistics.fmean(point[1] for point in source)
+    target_x = statistics.fmean(point[0] for point in target)
+    target_y = statistics.fmean(point[1] for point in target)
+    dot = cross = source_spread = 0.0
+    for measured, fixed in zip(source, target):
+        measured_x = measured[0] - source_x
+        measured_y = measured[1] - source_y
+        fixed_x = fixed[0] - target_x
+        fixed_y = fixed[1] - target_y
+        dot += measured_x * fixed_x + measured_y * fixed_y
+        cross += measured_x * fixed_y - measured_y * fixed_x
+        source_spread += measured_x * measured_x + measured_y * measured_y
+    if source_spread < 1.0e-12:
+        raise ValueError("rigid 2D alignment requires distinct source points")
+    rotation_rad = math.atan2(cross, dot)
+    cosine = math.cos(rotation_rad)
+    sine = math.sin(rotation_rad)
+    translation_x_m = target_x - (cosine * source_x - sine * source_y)
+    translation_y_m = target_y - (sine * source_x + cosine * source_y)
+    return rotation_rad, translation_x_m, translation_y_m
+
+
+def transform_2d(
+    point: tuple[float, float],
+    rotation_rad: float,
+    translation_x_m: float,
+    translation_y_m: float,
+) -> tuple[float, float]:
+    cosine = math.cos(rotation_rad)
+    sine = math.sin(rotation_rad)
+    return (
+        cosine * point[0] - sine * point[1] + translation_x_m,
+        sine * point[0] + cosine * point[1] + translation_y_m,
+    )
+
+
 def load_events(path: pathlib.Path) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     with path.open(encoding="utf-8") as handle:
@@ -107,7 +152,10 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         metavar="ID:X_M:Y_M",
-        help="Fixed firmware anchor coordinate; repeat for every anchor.",
+        help=(
+            "Override the runtime firmware anchor coordinate; repeat for every "
+            "anchor. By default the geometry is read from captured status events."
+        ),
     )
     parser.add_argument(
         "--range-bias-cm",
@@ -125,6 +173,51 @@ def parse_anchors(entries: list[str]) -> dict[int, tuple[float, float]]:
         anchor_id_text, x_text, y_text = entry.split(":", 2)
         anchors[int(anchor_id_text)] = (float(x_text), float(y_text))
     return anchors
+
+
+def runtime_anchors(events: list[dict[str, Any]]) -> dict[int, tuple[float, float]]:
+    """Return the first complete runtime anchor geometry captured from a module."""
+    for event in events:
+        modules = event.get("modules")
+        candidates = modules if isinstance(modules, list) else [event]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            anchor_ids = candidate.get("runtime_anchor_ids")
+            anchor_x_mm = candidate.get("runtime_flex_tdoa_anchor_x_mm")
+            anchor_y_mm = candidate.get("runtime_flex_tdoa_anchor_y_mm")
+            if not isinstance(anchor_ids, list):
+                continue
+            if not isinstance(anchor_x_mm, list) or not isinstance(anchor_y_mm, list):
+                continue
+            if len(anchor_ids) < 3 or not (
+                len(anchor_ids) == len(anchor_x_mm) == len(anchor_y_mm)
+            ):
+                continue
+            return {
+                int(anchor_id): (float(x_mm) / 1000.0, float(y_mm) / 1000.0)
+                for anchor_id, x_mm, y_mm in zip(anchor_ids, anchor_x_mm, anchor_y_mm)
+            }
+    return {}
+
+
+def geometry_difference_cm(
+    first: dict[int, tuple[float, float]],
+    second: dict[int, tuple[float, float]],
+) -> dict[str, float | int] | None:
+    common = sorted(set(first) & set(second))
+    if not common:
+        return None
+    errors_m = [
+        math.hypot(first[anchor_id][0] - second[anchor_id][0],
+                   first[anchor_id][1] - second[anchor_id][1])
+        for anchor_id in common
+    ]
+    return {
+        "anchors_compared": len(common),
+        "rms_cm": math.sqrt(statistics.fmean(value * value for value in errors_m)) * 100.0,
+        "max_cm": max(errors_m) * 100.0,
+    }
 
 
 def parse_range_biases(entries: list[str]) -> dict[int, float]:
@@ -293,9 +386,26 @@ def main() -> int:
 
     embedded_metrics = error_metrics(aligned)
 
-    anchors = parse_anchors(args.anchor)
+    captured_anchors = runtime_anchors(events)
+    explicit_anchors = parse_anchors(args.anchor)
+    anchors = explicit_anchors or captured_anchors
+    anchor_geometry_source = "command_line" if explicit_anchors else "runtime_status"
+    geometry_override_difference = (
+        geometry_difference_cm(explicit_anchors, captured_anchors)
+        if explicit_anchors and captured_anchors else None
+    )
+    if (
+        geometry_override_difference is not None
+        and geometry_override_difference["max_cm"] > 5.0
+    ):
+        print(
+            "warning: command-line anchor geometry differs from captured runtime "
+            f"geometry by up to {geometry_override_difference['max_cm']:.1f} cm",
+            file=sys.stderr,
+        )
     anchor_fit: dict[str, Any] = {}
     anchor_errors: list[float] = []
+    anchor_pairs: list[tuple[int, tuple[float, float], tuple[float, float]]] = []
     for anchor_id, fixed in sorted(anchors.items()):
         fixes = rtk_by_module.get(anchor_id, [])
         if not fixes:
@@ -311,6 +421,7 @@ def main() -> int:
         dy = fixed[1] - measured[1]
         error = math.hypot(dx, dy)
         anchor_errors.append(error)
+        anchor_pairs.append((anchor_id, (measured[0], measured[1]), fixed))
         anchor_fit[str(anchor_id)] = {
             "fixed_x_m": fixed[0],
             "fixed_y_m": fixed[1],
@@ -320,6 +431,63 @@ def main() -> int:
             "dy_cm": dy * 100.0,
             "error_cm": error * 100.0,
             "rtk_samples": len(fixes),
+        }
+
+    rigid_alignment = None
+    if len(anchor_pairs) >= 2:
+        rotation_rad, translation_x_m, translation_y_m = fit_rigid_2d(
+            [pair[1] for pair in anchor_pairs],
+            [pair[2] for pair in anchor_pairs],
+        )
+        rigid_anchor_fit: dict[str, Any] = {}
+        rigid_anchor_errors: list[float] = []
+        for anchor_id, measured, fixed in anchor_pairs:
+            aligned_anchor = transform_2d(
+                measured,
+                rotation_rad,
+                translation_x_m,
+                translation_y_m,
+            )
+            dx = fixed[0] - aligned_anchor[0]
+            dy = fixed[1] - aligned_anchor[1]
+            error = math.hypot(dx, dy)
+            rigid_anchor_errors.append(error)
+            rigid_anchor_fit[str(anchor_id)] = {
+                "aligned_rtk_x_m": aligned_anchor[0],
+                "aligned_rtk_y_m": aligned_anchor[1],
+                "dx_cm": dx * 100.0,
+                "dy_cm": dy * 100.0,
+                "error_cm": error * 100.0,
+            }
+        rigid_rows: list[dict[str, float]] = []
+        for row in aligned:
+            aligned_rtk = transform_2d(
+                (row["rtk_x_m"], row["rtk_y_m"]),
+                rotation_rad,
+                translation_x_m,
+                translation_y_m,
+            )
+            dx = row["uwb_x_m"] - aligned_rtk[0]
+            dy = row["uwb_y_m"] - aligned_rtk[1]
+            rigid_rows.append({
+                **row,
+                "rtk_x_m": aligned_rtk[0],
+                "rtk_y_m": aligned_rtk[1],
+                "dx_m": dx,
+                "dy_m": dy,
+                "error_m": math.hypot(dx, dy),
+            })
+        rigid_alignment = {
+            "method": "least-squares rigid 2D, RTK anchors to fixed UWB anchors",
+            "rotation_deg": math.degrees(rotation_rad),
+            "translation_x_cm": translation_x_m * 100.0,
+            "translation_y_cm": translation_y_m * 100.0,
+            "anchor_fit_rms_cm": (
+                math.sqrt(statistics.fmean(value * value for value in rigid_anchor_errors))
+                * 100.0
+            ),
+            "anchors": rigid_anchor_fit,
+            "tag_position_error": error_metrics(rigid_rows),
         }
 
     ranges_by_anchor: dict[int, list[float]] = {}
@@ -405,7 +573,7 @@ def main() -> int:
             }
 
     summary = {
-        "schema_version": 1,
+        "schema_version": 3,
         "events_file": str(events_path),
         "coordinate_frame": f"WGS84 ENU, median RTK Fixed M{args.origin_module} origin",
         "position_filter": "none",
@@ -420,11 +588,14 @@ def main() -> int:
         "solver_residual_rms_mean_cm": statistics.fmean(
             row["solver_rms_m"] for row in aligned
         ) * 100.0,
+        "anchor_geometry_source": anchor_geometry_source,
+        "anchor_geometry_override_difference": geometry_override_difference,
         "fixed_anchor_geometry": anchor_fit,
         "anchor_geometry_fit_rms_cm": (
             math.sqrt(statistics.fmean(value * value for value in anchor_errors)) * 100.0
             if anchor_errors else None
         ),
+        "rigid_anchor_alignment": rigid_alignment,
         "range_error_vs_rtk": range_bias,
         "offline_range_corrected_position": offline_metrics,
     }

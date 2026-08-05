@@ -91,10 +91,10 @@ static int64_t runtime_now_us(void *context)
     return runtime->backend.now_us(runtime->backend.context);
 }
 
-static void runtime_delay_ms(void *context, uint32_t delay_ms)
+static void runtime_wait_until_us(void *context, int64_t deadline_us)
 {
     struct uwb_native_ds_runtime_context *runtime = runtime_context(context);
-    runtime->backend.delay_ms(runtime->backend.context, delay_ms);
+    runtime->backend.wait_until_us(runtime->backend.context, deadline_us);
 }
 
 static bool runtime_stop_requested(void *context)
@@ -208,7 +208,7 @@ static bool backend_valid(const struct uwb_native_ds_radio_ops *backend)
            backend->send_delayed_expect_rx != NULL &&
            backend->receive != NULL && backend->add_delay_ms != NULL &&
            backend->programmed_tx_timestamp != NULL &&
-           backend->now_us != NULL && backend->delay_ms != NULL &&
+           backend->now_us != NULL && backend->wait_until_us != NULL &&
            backend->stop_requested != NULL && backend->set_ready != NULL;
 }
 
@@ -257,7 +257,7 @@ esp_err_t uwb_native_ds_runtime_run(
         .add_delay_ms = runtime_add_delay_ms,
         .programmed_tx_timestamp = runtime_programmed_tx_timestamp,
         .now_us = runtime_now_us,
-        .delay_ms = runtime_delay_ms,
+        .wait_until_us = runtime_wait_until_us,
         .stop_requested = runtime_stop_requested,
         .set_ready = runtime_set_ready,
         .consume_report = runtime_consume_report,

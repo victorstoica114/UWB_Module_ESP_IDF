@@ -91,11 +91,11 @@
 #endif
 
 #ifndef APP_UWB_RANGING_SLOT_MS
-#define APP_UWB_RANGING_SLOT_MS 11
+#define APP_UWB_RANGING_SLOT_MS 10
 #endif
 
 #ifndef APP_UWB_RANGING_ROUND_GAP_MS
-#define APP_UWB_RANGING_ROUND_GAP_MS 2
+#define APP_UWB_RANGING_ROUND_GAP_MS 4
 #endif
 
 #ifndef APP_UWB_RANGING_RX_SLICE_MS
@@ -130,11 +130,11 @@
  * and derives TDOA observations without consuming radio airtime.
  */
 #ifndef APP_UWB_PASSIVE_DS_SCHEDULE
-#define APP_UWB_PASSIVE_DS_SCHEDULE 0
+#define APP_UWB_PASSIVE_DS_SCHEDULE 2
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_SLOT_MS
-#define APP_UWB_PASSIVE_DS_SLOT_MS 5
+#define APP_UWB_PASSIVE_DS_SLOT_MS 8
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_ROUND_GAP_MS
@@ -146,25 +146,28 @@
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_RX_TIMEOUT_MS
-#define APP_UWB_PASSIVE_DS_RX_TIMEOUT_MS 4
+#define APP_UWB_PASSIVE_DS_RX_TIMEOUT_MS 5
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_RESP_DELAY_US
-#define APP_UWB_PASSIVE_DS_RESP_DELAY_US 1000
+#define APP_UWB_PASSIVE_DS_RESP_DELAY_US 1500
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_FINAL_DELAY_US
-#define APP_UWB_PASSIVE_DS_FINAL_DELAY_US 1000
+#define APP_UWB_PASSIVE_DS_FINAL_DELAY_US 1500
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US
 #define APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US 750
 #endif
 
-/*
- * Validated FlexTDOA guard reused as a value, not as shared runtime state.
- * The dynamic multipoint profile places this guard after its exchange budget.
- */
+/* Keep every complete POLL..FINAL interval below the 20 ms observation
+ * validity bound, including practical oscillator and scheduling margin. */
+#ifndef APP_UWB_PASSIVE_DS_MAX_EXCHANGE_US
+#define APP_UWB_PASSIVE_DS_MAX_EXCHANGE_US 19000
+#endif
+
+/* Retained for runtime-config ABI compatibility; v2 uses ROUND_GAP_MS. */
 #ifndef APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US
 #define APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US 250
 #endif
@@ -173,17 +176,13 @@
 #define APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS 500
 #endif
 
-/*
- * The established blocking exchange and one-solve-per-frame behavior remain
- * the firmware defaults. The deadline pipeline and rolling solver are
- * independent A/B controls selected at runtime.
- */
+/* Retained for runtime-config ABI compatibility; v2 always uses raw solves. */
 #ifndef APP_UWB_PASSIVE_DS_PIPELINE_MODE
 #define APP_UWB_PASSIVE_DS_PIPELINE_MODE 0
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_SOLVE_MODE
-#define APP_UWB_PASSIVE_DS_SOLVE_MODE 0
+#define APP_UWB_PASSIVE_DS_SOLVE_MODE 2
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_ROLLING_MAX_HZ
@@ -413,27 +412,19 @@
 #define APP_UWB_RADIO_PLEN_2048 0x0A
 
 #ifndef APP_UWB_RADIO_PROFILE
-#define APP_UWB_RADIO_PROFILE APP_UWB_RADIO_PROFILE_LEGACY_CH5_6M8_PLEN128
+#define APP_UWB_RADIO_PROFILE APP_UWB_RADIO_PROFILE_CH9_6M8_PLEN256
 #endif
 
 #ifndef APP_UWB_RADIO_PHY_MODE
-#define APP_UWB_RADIO_PHY_MODE APP_UWB_RADIO_PHY_FAST
+#define APP_UWB_RADIO_PHY_MODE APP_UWB_RADIO_PHY_FAST_PLEN256
 #endif
 
 #ifndef APP_UWB_RADIO_CHANNEL
-#if APP_UWB_RADIO_PROFILE == APP_UWB_RADIO_PROFILE_LEGACY_CH9_6M8_PLEN128
 #define APP_UWB_RADIO_CHANNEL 9
-#else
-#define APP_UWB_RADIO_CHANNEL 5
-#endif
 #endif
 
 #ifndef APP_UWB_RADIO_RF_CHANNEL_BIT
-#if APP_UWB_RADIO_PROFILE == APP_UWB_RADIO_PROFILE_LEGACY_CH9_6M8_PLEN128
 #define APP_UWB_RADIO_RF_CHANNEL_BIT 1
-#else
-#define APP_UWB_RADIO_RF_CHANNEL_BIT 0
-#endif
 #endif
 
 #ifndef APP_UWB_RADIO_PREAMBLE_LEN_CODE

@@ -1,6 +1,7 @@
 #include "passive_ds_solver_service.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "app_runtime_config.h"
@@ -10,6 +11,7 @@
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "passive_ds_batch_policy.h"
 #include "passive_ds_position_solver.h"
 #include "uwb_config.h"
 #include "wireless_log_service.h"
@@ -18,74 +20,30 @@
 static const char *TAG = "passive_ds_solver";
 
 enum {
-    /* Absorb short Wi-Fi/telemetry bursts without dropping radio events. */
+    /* Preserve the validated burst margin while three-star GLS is active. */
     PASSIVE_DS_SOLVER_QUEUE_LEN = 512,
+    /*
+     * The position solver has a worst-case 56 x 56 double precision matrix
+     * in its timing-covariance path.  Keep the established 40 KiB stack so
+     * the raw and covariance solvers can share this task safely.  A 12 KiB
+     * stack overflows as soon as the first complete Passive DS star is
+     * solved, which makes the receive-only tag reboot intermittently.
+     */
     PASSIVE_DS_SOLVER_TASK_STACK_BYTES = 40960,
-    /* Wi-Fi stays above us (6); log/telemetry delivery stays below us (4). */
     PASSIVE_DS_SOLVER_TASK_PRIORITY = 5,
     PASSIVE_DS_SOLVER_FRAME_BUCKETS = 32,
-    PASSIVE_DS_SOLVER_RANGE_MAX_AGE_MS = 2000,
     PASSIVE_DS_SOLVER_FRAME_MAX_AGE_MS = 250,
-    PASSIVE_DS_SOLVER_IDLE_WINDOW_MS = 500,
-    PASSIVE_DS_SOLVER_GEOMETRY_SAMPLES_PER_PAIR = 8,
-    PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION = 3,
-    /*
-     * Preserve a non-overlapping three-star precision stream, then publish
-     * two additional raw three-star windows in each six-star cycle.  The
-     * supplemental results reuse complete radio stars and are therefore
-     * marked as non-independent; they are neither averaged nor temporally
-     * filtered.
-     */
-    PASSIVE_DS_SOLVER_SUPPLEMENTAL_PERIOD_STARS = 6,
-    PASSIVE_DS_SOLVER_SUPPLEMENTAL_A_FIRST_PHASE = 1,
-    PASSIVE_DS_SOLVER_SUPPLEMENTAL_B_FIRST_PHASE = 2,
+    PASSIVE_DS_SOLVER_INDEPENDENT_MAX_FRAME_SPAN = 3,
+    PASSIVE_DS_SOLVER_OVERLAP_MAX_FRAME_SPAN = 6,
     PASSIVE_DS_SOLVER_MAX_OBSERVATIONS =
-        PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION *
-        (APP_RUNTIME_CONFIG_MAX_ANCHORS - 1),
-    PASSIVE_DS_SOLVER_MAX_VARIABLES =
-        2 * APP_RUNTIME_CONFIG_MAX_ANCHORS - 3,
+        PASSIVE_DS_BATCH_STARS_PER_POSITION *
+        (APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U),
 };
 
-/*
- * The exact listener-timestamp covariance for the current 1.5/0.75/1.5 ms
- * star has normalized off-diagonal terms close to 0.25.  This compact GLS
- * form preserves the physically justified same-star correlation without
- * repeatedly inverting matrices on the receive-only tag.  It is spatial
- * weighting only; it does not average or filter positions over time.
- */
-static const double PASSIVE_DS_SOLVER_TIMING_COMMON_CORRELATION = 0.25;
-
-/* Keep supplemental frame keys disjoint from the baseline frame counter. */
-static const uint32_t PASSIVE_DS_SOLVER_SUPPLEMENTAL_A_FRAME_NAMESPACE =
-    UINT32_C(0x80000000);
-static const uint32_t PASSIVE_DS_SOLVER_SUPPLEMENTAL_B_FRAME_NAMESPACE =
-    UINT32_C(0xc0000000);
-
-static size_t multipoint_stars_per_position(
-    const app_runtime_config_t *config)
-{
-    return config != NULL &&
-                   config->passive_ds_solve_mode ==
-                       APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR
-        ? 1U
-        : PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION;
-}
-
-static uint32_t multipoint_period_us(
-    const app_runtime_config_t *config)
-{
-    if (config == NULL) {
-        return 0U;
-    }
-    return config->passive_ds_slot_ms * 1000U +
-           (config->passive_ds_solve_mode ==
-                    APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR
-                ? APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US
-                : config->passive_ds_round_gap_ms * 1000U);
-}
+/* Same-star spatial covariance used by the field-validated raw solver. */
+static const double PASSIVE_DS_SOLVER_COMMON_CORRELATION = 0.25;
 
 enum passive_ds_solver_item_type {
-    PASSIVE_DS_SOLVER_ITEM_RANGE,
     PASSIVE_DS_SOLVER_ITEM_OBSERVATION,
     PASSIVE_DS_SOLVER_ITEM_RESET,
 };
@@ -93,858 +51,626 @@ enum passive_ds_solver_item_type {
 struct passive_ds_solver_item {
     enum passive_ds_solver_item_type type;
     uint8_t tag_id;
-    uint8_t first_id;
-    uint8_t second_id;
-    uint32_t slot_id;
-    int32_t value_mm;
+    uint8_t initiator_id;
+    uint8_t responder_id;
+    uint32_t session_id;
+    uint32_t frame_id;
+    int32_t difference_mm;
     uint16_t delay_ratio_q15;
 };
 
-struct passive_ds_solver_range {
-    bool valid;
-    double value_m;
-    uint32_t slot_id;
-    TickType_t updated_tick;
-};
-
-struct passive_ds_solver_frame_item {
+struct passive_ds_solver_frame_observation {
     bool valid;
     uint8_t initiator_id;
     uint8_t responder_id;
-    double difference_m;
-    double delay_ratio;
-    uint32_t slot_id;
-    TickType_t updated_tick;
+    int32_t difference_mm;
+    uint16_t delay_ratio_q15;
 };
 
 struct passive_ds_solver_frame {
-    bool pending;
-    bool independent_frame;
+    bool active;
     uint8_t tag_id;
+    uint8_t initiator_id;
     uint8_t observation_count;
-    uint8_t initiator_ids[PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION];
     uint16_t observation_mask;
+    uint32_t session_id;
     uint32_t frame_id;
-    uint32_t last_slot_id;
     TickType_t updated_tick;
-    struct passive_ds_solver_frame_item items[PASSIVE_DS_SOLVER_MAX_OBSERVATIONS];
+    struct passive_ds_solver_frame_observation
+        observations[APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U];
+};
+
+struct passive_ds_solver_complete_star {
+    bool valid;
+    uint8_t tag_id;
+    uint8_t initiator_id;
+    uint8_t observation_count;
+    uint16_t observation_mask;
+    uint32_t session_id;
+    uint32_t frame_id;
+    TickType_t completed_tick;
+    struct passive_ds_solver_frame_observation
+        observations[APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U];
 };
 
 struct passive_ds_solver_state {
+    bool geometry_ready;
+    bool geometry_published;
     uint8_t anchor_count;
     uint8_t anchor_ids[APP_RUNTIME_CONFIG_MAX_ANCHORS];
-    struct passive_ds_solver_range
-        ranges[APP_RUNTIME_CONFIG_MAX_ANCHORS]
-              [APP_RUNTIME_CONFIG_MAX_ANCHORS];
-    double range_batch_sum_m[APP_RUNTIME_CONFIG_MAX_ANCHORS]
-                            [APP_RUNTIME_CONFIG_MAX_ANCHORS];
-    uint8_t range_batch_count[APP_RUNTIME_CONFIG_MAX_ANCHORS]
-                             [APP_RUNTIME_CONFIG_MAX_ANCHORS];
-    uint32_t range_batch_slot_id[APP_RUNTIME_CONFIG_MAX_ANCHORS]
-                                [APP_RUNTIME_CONFIG_MAX_ANCHORS];
-    TickType_t range_batch_updated_tick[APP_RUNTIME_CONFIG_MAX_ANCHORS]
-                                           [APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    uint32_t geometry_version;
     struct passive_ds_position_anchor
         anchors[APP_RUNTIME_CONFIG_MAX_ANCHORS];
-    struct passive_ds_solver_frame
-        frames[PASSIVE_DS_SOLVER_FRAME_BUCKETS];
-    uint32_t range_update_mask;
-    uint32_t geometry_version;
-    double geometry_fit_rms_m;
-    bool geometry_ready;
+    struct passive_ds_solver_frame frames[PASSIVE_DS_SOLVER_FRAME_BUCKETS];
+    struct passive_ds_solver_complete_star
+        recent_stars[APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    struct passive_ds_solver_complete_star
+        independent_stars[APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    bool session_valid;
+    uint32_t session_id;
+    bool last_published_frame_valid;
+    uint32_t last_published_frame_id;
     bool previous_position_valid;
     double previous_x_m;
     double previous_y_m;
-    uint32_t position_accepted;
-    uint32_t position_independent_accepted;
-    uint32_t position_rejected;
-    uint32_t frame_rejected;
-    uint32_t geometry_accepted;
-    uint32_t geometry_rejected;
-    uint32_t previous_position_accepted;
-    uint32_t previous_position_rejected;
-    uint32_t previous_frame_rejected;
-    uint32_t previous_geometry_accepted;
-    uint32_t previous_geometry_rejected;
-    uint32_t observation_count[APP_RUNTIME_CONFIG_MAX_ANCHORS]
-                              [APP_RUNTIME_CONFIG_MAX_ANCHORS];
-    double observation_mean_m[APP_RUNTIME_CONFIG_MAX_ANCHORS]
-                             [APP_RUNTIME_CONFIG_MAX_ANCHORS];
-    double observation_m2_m2[APP_RUNTIME_CONFIG_MAX_ANCHORS]
-                            [APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    uint32_t solved_count;
+    uint32_t independent_solved_count;
+    uint32_t rejected_count;
+    uint32_t incomplete_count;
+    uint32_t previous_solved_count;
+    uint32_t previous_independent_solved_count;
+    uint32_t previous_rejected_count;
+    uint32_t previous_incomplete_count;
     TickType_t summary_tick;
-    TickType_t observation_summary_tick;
 };
 
 static QueueHandle_t s_queue;
 static bool s_started;
 static uint32_t s_dropped;
 
-static int anchor_index(
-    const struct passive_ds_solver_state *state, uint8_t id)
+static int anchor_index(const struct passive_ds_solver_state *state,
+                        uint8_t anchor_id)
 {
-    for (size_t index = 0U; index < state->anchor_count; ++index) {
-        if (state->anchor_ids[index] == id) {
+    if (state == NULL || anchor_id == 0U) {
+        return -1;
+    }
+    for (uint8_t index = 0U; index < state->anchor_count; ++index) {
+        if (state->anchor_ids[index] == anchor_id) {
             return (int)index;
         }
     }
     return -1;
 }
 
-static size_t pair_index(size_t first, size_t second, size_t count)
+static bool publish_geometry(struct passive_ds_solver_state *state)
 {
-    if (first == second || first >= count || second >= count) {
-        return SIZE_MAX;
-    }
-    if (first > second) {
-        const size_t temporary = first;
-        first = second;
-        second = temporary;
-    }
-    size_t index = 0U;
-    for (size_t a = 0U; a < count; ++a) {
-        for (size_t b = a + 1U; b < count; ++b) {
-            if (a == first && b == second) {
-                return index;
-            }
-            index++;
-        }
-    }
-    return SIZE_MAX;
-}
-
-static uint32_t expected_pair_mask(size_t anchor_count)
-{
-    const size_t pair_count = anchor_count * (anchor_count - 1U) / 2U;
-    return pair_count >= 32U
-        ? UINT32_MAX
-        : (uint32_t)((1ULL << pair_count) - 1ULL);
-}
-
-static int geometry_variable_index(size_t anchor, bool y_axis)
-{
-    if (anchor == 0U || (anchor == 1U && !y_axis)) {
-        return -1;
-    }
-    if (anchor == 1U) {
-        return 0;
-    }
-    return 1 + (int)(2U * (anchor - 2U)) + (y_axis ? 1 : 0);
-}
-
-static bool solve_linear_system(
-    double matrix[PASSIVE_DS_SOLVER_MAX_VARIABLES]
-                 [PASSIVE_DS_SOLVER_MAX_VARIABLES + 1U],
-    size_t count,
-    double *solution)
-{
-    for (size_t column = 0U; column < count; ++column) {
-        size_t pivot = column;
-        double pivot_abs = fabs(matrix[pivot][column]);
-        for (size_t row = column + 1U; row < count; ++row) {
-            const double candidate = fabs(matrix[row][column]);
-            if (candidate > pivot_abs) {
-                pivot = row;
-                pivot_abs = candidate;
-            }
-        }
-        if (pivot_abs < 1e-12) {
-            return false;
-        }
-        if (pivot != column) {
-            for (size_t item = column; item <= count; ++item) {
-                const double temporary = matrix[column][item];
-                matrix[column][item] = matrix[pivot][item];
-                matrix[pivot][item] = temporary;
-            }
-        }
-        const double divisor = matrix[column][column];
-        for (size_t item = column; item <= count; ++item) {
-            matrix[column][item] /= divisor;
-        }
-        for (size_t row = 0U; row < count; ++row) {
-            if (row == column) {
-                continue;
-            }
-            const double factor = matrix[row][column];
-            for (size_t item = column; item <= count; ++item) {
-                matrix[row][item] -= factor * matrix[column][item];
-            }
-        }
-    }
-    for (size_t index = 0U; index < count; ++index) {
-        solution[index] = matrix[index][count];
-    }
-    return true;
-}
-
-static bool ranges_complete_and_fresh(
-    const struct passive_ds_solver_state *state, TickType_t now)
-{
-    const TickType_t max_age =
-        pdMS_TO_TICKS(PASSIVE_DS_SOLVER_RANGE_MAX_AGE_MS);
-    for (size_t first = 0U; first < state->anchor_count; ++first) {
-        for (size_t second = first + 1U;
-             second < state->anchor_count; ++second) {
-            const struct passive_ds_solver_range *range =
-                &state->ranges[first][second];
-            if (!range->valid || range->value_m <= 0.05 ||
-                now - range->updated_tick > max_age) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-static bool initialize_geometry(
-    struct passive_ds_solver_state *state,
-    double *x_m,
-    double *y_m)
-{
-    const double baseline_m = state->ranges[0][1].value_m;
-    if (!isfinite(baseline_m) || baseline_m <= 0.05) {
+    if (state == NULL || !state->geometry_ready) {
         return false;
     }
-    x_m[0] = 0.0;
-    y_m[0] = 0.0;
-    x_m[1] = 0.0;
-    y_m[1] = baseline_m;
-
-    for (size_t anchor = 2U; anchor < state->anchor_count; ++anchor) {
-        const double d0_m = state->ranges[0][anchor].value_m;
-        const double d1_m = state->ranges[1][anchor].value_m;
-        const double y =
-            (d0_m * d0_m + baseline_m * baseline_m - d1_m * d1_m) /
-            (2.0 * baseline_m);
-        const double x_square = d0_m * d0_m - y * y;
-        if (!isfinite(y) || x_square < -0.02) {
-            return false;
-        }
-        const double x = sqrt(fmax(0.0, x_square));
-        x_m[anchor] = x;
-        y_m[anchor] = y;
-        if (anchor > 2U) {
-            double positive_error = 0.0;
-            double negative_error = 0.0;
-            for (size_t known = 2U; known < anchor; ++known) {
-                const double measured_m =
-                    state->ranges[known][anchor].value_m;
-                positive_error += fabs(
-                    hypot(x - x_m[known], y - y_m[known]) - measured_m);
-                negative_error += fabs(
-                    hypot(-x - x_m[known], y - y_m[known]) - measured_m);
-            }
-            if (negative_error < positive_error) {
-                x_m[anchor] = -x;
-            }
-        }
+    bool published = true;
+    for (uint8_t index = 0U; index < state->anchor_count; ++index) {
+        published &=
+            wireless_telemetry_service_submit_passive_ds_geometry(
+                state->anchors[index].id, state->anchor_count,
+                state->geometry_version,
+                (int32_t)lround(state->anchors[index].x_m * 1000.0),
+                (int32_t)lround(state->anchors[index].y_m * 1000.0),
+                0);
     }
-    return true;
-}
-
-static bool reconstruct_geometry(
-    struct passive_ds_solver_state *state,
-    double *fit_rms_m)
-{
-    double x_m[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
-    double y_m[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
-    if (!initialize_geometry(state, x_m, y_m)) {
-        return false;
-    }
-
-    const size_t variable_count = 2U * state->anchor_count - 3U;
-    for (size_t iteration = 0U; iteration < 8U; ++iteration) {
-        double normal[PASSIVE_DS_SOLVER_MAX_VARIABLES]
-                     [PASSIVE_DS_SOLVER_MAX_VARIABLES + 1U] = {{0}};
-        size_t measurement_count = 0U;
-        for (size_t first = 0U; first < state->anchor_count; ++first) {
-            for (size_t second = first + 1U;
-                 second < state->anchor_count; ++second) {
-                const double dx = x_m[first] - x_m[second];
-                const double dy = y_m[first] - y_m[second];
-                const double predicted_m = hypot(dx, dy);
-                if (predicted_m < 0.02) {
-                    continue;
-                }
-                const double residual_m =
-                    state->ranges[first][second].value_m - predicted_m;
-                double jacobian[PASSIVE_DS_SOLVER_MAX_VARIABLES] = {0};
-                const int first_x = geometry_variable_index(first, false);
-                const int first_y = geometry_variable_index(first, true);
-                const int second_x = geometry_variable_index(second, false);
-                const int second_y = geometry_variable_index(second, true);
-                if (first_x >= 0) jacobian[first_x] = dx / predicted_m;
-                if (first_y >= 0) jacobian[first_y] = dy / predicted_m;
-                if (second_x >= 0) jacobian[second_x] = -dx / predicted_m;
-                if (second_y >= 0) jacobian[second_y] = -dy / predicted_m;
-                for (size_t row = 0U; row < variable_count; ++row) {
-                    normal[row][variable_count] +=
-                        jacobian[row] * residual_m;
-                    for (size_t column = 0U;
-                         column < variable_count; ++column) {
-                        normal[row][column] +=
-                            jacobian[row] * jacobian[column];
-                    }
-                }
-                measurement_count++;
-            }
-        }
-        if (measurement_count < variable_count) {
-            return false;
-        }
-        for (size_t index = 0U; index < variable_count; ++index) {
-            normal[index][index] += 1e-8;
-        }
-        double delta[PASSIVE_DS_SOLVER_MAX_VARIABLES] = {0};
-        if (!solve_linear_system(normal, variable_count, delta)) {
-            return false;
-        }
-        double max_delta_m = 0.0;
-        for (size_t anchor = 1U; anchor < state->anchor_count; ++anchor) {
-            const int x_index = geometry_variable_index(anchor, false);
-            const int y_index = geometry_variable_index(anchor, true);
-            if (x_index >= 0) {
-                x_m[anchor] += delta[x_index];
-                max_delta_m = fmax(max_delta_m, fabs(delta[x_index]));
-            }
-            if (y_index >= 0) {
-                y_m[anchor] += delta[y_index];
-                max_delta_m = fmax(max_delta_m, fabs(delta[y_index]));
-            }
-        }
-        if (max_delta_m < 0.00001) {
-            break;
-        }
-    }
-
-    if (state->anchor_count > 2U && x_m[2] < 0.0) {
-        for (size_t anchor = 2U; anchor < state->anchor_count; ++anchor) {
-            x_m[anchor] = -x_m[anchor];
-        }
-    }
-    double sse = 0.0;
-    size_t count = 0U;
-    for (size_t first = 0U; first < state->anchor_count; ++first) {
-        for (size_t second = first + 1U;
-             second < state->anchor_count; ++second) {
-            const double residual_m =
-                state->ranges[first][second].value_m -
-                hypot(x_m[first] - x_m[second],
-                      y_m[first] - y_m[second]);
-            sse += residual_m * residual_m;
-            count++;
-        }
-    }
-    const double rms_m = count > 0U ? sqrt(sse / (double)count) : NAN;
-    if (!isfinite(rms_m)) {
-        return false;
-    }
-    for (size_t anchor = 0U; anchor < state->anchor_count; ++anchor) {
-        state->anchors[anchor] = (struct passive_ds_position_anchor){
-            .id = state->anchor_ids[anchor],
-            .x_m = x_m[anchor],
-            .y_m = y_m[anchor],
-        };
-    }
-    *fit_rms_m = rms_m;
-    return true;
-}
-
-static void publish_geometry(struct passive_ds_solver_state *state)
-{
-    for (size_t anchor = 0U; anchor < state->anchor_count; ++anchor) {
-        (void)wireless_telemetry_service_submit_passive_ds_geometry(
-            state->anchors[anchor].id, state->anchor_count,
-            state->geometry_version,
-            (int32_t)lround(state->anchors[anchor].x_m * 1000.0),
-            (int32_t)lround(state->anchors[anchor].y_m * 1000.0),
-            (int32_t)lround(state->geometry_fit_rms_m * 1000.0));
-    }
-}
-
-static void try_update_geometry(
-    struct passive_ds_solver_state *state, TickType_t now)
-{
-    const uint32_t expected_mask = expected_pair_mask(state->anchor_count);
-    if ((state->range_update_mask & expected_mask) != expected_mask ||
-        !ranges_complete_and_fresh(state, now)) {
-        return;
-    }
-    double fit_rms_m = 0.0;
-    if (!reconstruct_geometry(state, &fit_rms_m)) {
-        state->geometry_rejected++;
-        return;
-    }
-    state->geometry_ready = true;
-    state->geometry_fit_rms_m = fit_rms_m;
-    state->geometry_version++;
-    state->geometry_accepted++;
-    state->range_update_mask = 0U;
-    publish_geometry(state);
-}
-
-static void reset_range_batch(struct passive_ds_solver_state *state)
-{
-    memset(state->range_batch_sum_m, 0,
-           sizeof(state->range_batch_sum_m));
-    memset(state->range_batch_count, 0,
-           sizeof(state->range_batch_count));
-    memset(state->range_batch_slot_id, 0,
-           sizeof(state->range_batch_slot_id));
-    memset(state->range_batch_updated_tick, 0,
-           sizeof(state->range_batch_updated_tick));
-    state->range_update_mask = 0U;
-}
-
-static void stage_coherent_range(
-    struct passive_ds_solver_state *state, size_t first, size_t second,
-    double value_m, uint32_t slot_id, TickType_t now)
-{
-    uint8_t *count = &state->range_batch_count[first][second];
-    TickType_t *updated_tick =
-        &state->range_batch_updated_tick[first][second];
-    const TickType_t max_pair_age =
-        pdMS_TO_TICKS(PASSIVE_DS_SOLVER_RANGE_MAX_AGE_MS);
-    if (*count > 0U && now - *updated_tick > max_pair_age) {
-        state->range_batch_sum_m[first][second] = 0.0;
-        state->range_batch_slot_id[first][second] = 0U;
-        *count = 0U;
-        const size_t index = pair_index(
-            first, second, state->anchor_count);
-        if (index < 32U) {
-            state->range_update_mask &= ~(uint32_t)(1UL << index);
-        }
-    }
-
-    if (*count < PASSIVE_DS_SOLVER_GEOMETRY_SAMPLES_PER_PAIR) {
-        state->range_batch_sum_m[first][second] += value_m;
-        state->range_batch_slot_id[first][second] = slot_id;
-        *updated_tick = now;
-        (*count)++;
-    }
-    if (*count == PASSIVE_DS_SOLVER_GEOMETRY_SAMPLES_PER_PAIR) {
-        const size_t index = pair_index(first, second, state->anchor_count);
-        if (index < 32U) {
-            state->range_update_mask |= (uint32_t)(1UL << index);
-        }
-    }
-
-    const uint32_t expected_mask = expected_pair_mask(state->anchor_count);
-    if ((state->range_update_mask & expected_mask) != expected_mask) {
-        return;
-    }
-    for (size_t a = 0U; a < state->anchor_count; ++a) {
-        for (size_t b = a + 1U; b < state->anchor_count; ++b) {
-            const uint8_t pair_count = state->range_batch_count[a][b];
-            if (pair_count != PASSIVE_DS_SOLVER_GEOMETRY_SAMPLES_PER_PAIR) {
-                reset_range_batch(state);
-                return;
-            }
-            const struct passive_ds_solver_range range = {
-                .valid = true,
-                .value_m = state->range_batch_sum_m[a][b] /
-                           (double)pair_count,
-                .slot_id = state->range_batch_slot_id[a][b],
-                .updated_tick = state->range_batch_updated_tick[a][b],
-            };
-            state->ranges[a][b] = range;
-            state->ranges[b][a] = range;
-        }
-    }
-    try_update_geometry(state, now);
-    reset_range_batch(state);
-}
-
-static void reset_frame(struct passive_ds_solver_frame *frame)
-{
-    memset(frame, 0, sizeof(*frame));
-}
-
-static struct passive_ds_solver_frame *acquire_frame(
-    struct passive_ds_solver_state *state,
-    uint32_t frame_id,
-    uint8_t tag_id,
-    TickType_t now)
-{
-    struct passive_ds_solver_frame *available = NULL;
-    struct passive_ds_solver_frame *oldest = NULL;
-    TickType_t oldest_age = 0U;
-    for (size_t index = 0U;
-         index < PASSIVE_DS_SOLVER_FRAME_BUCKETS; ++index) {
-        struct passive_ds_solver_frame *frame = &state->frames[index];
-        if (frame->pending && frame->frame_id == frame_id &&
-            frame->tag_id == tag_id) {
-            return frame;
-        }
-        if (!frame->pending) {
-            if (available == NULL) {
-                available = frame;
-            }
-            continue;
-        }
-        const TickType_t age = now - frame->updated_tick;
-        if (age > pdMS_TO_TICKS(PASSIVE_DS_SOLVER_FRAME_MAX_AGE_MS)) {
-            state->frame_rejected++;
-            reset_frame(frame);
-            if (available == NULL) {
-                available = frame;
-            }
-            continue;
-        }
-        if (oldest == NULL || age > oldest_age) {
-            oldest = frame;
-            oldest_age = age;
-        }
-    }
-    if (available == NULL) {
-        available = oldest;
-        if (available != NULL) {
-            state->frame_rejected++;
-            reset_frame(available);
-        }
-    }
-    if (available == NULL) {
-        return NULL;
-    }
-    available->pending = true;
-    available->frame_id = frame_id;
-    available->tag_id = tag_id;
-    for (size_t index = 0U;
-         index < PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION; ++index) {
-        available->initiator_ids[index] = UINT8_MAX;
-    }
-    available->updated_tick = now;
-    return available;
-}
-
-static uint16_t observation_mask_bit(
-    const struct passive_ds_solver_state *state,
-    uint8_t initiator_id,
-    uint8_t responder_id)
-{
-    const int first = anchor_index(state, initiator_id);
-    const int second = anchor_index(state, responder_id);
-    if (first < 0 || second < 0) {
-        return 0U;
-    }
-    const size_t index = pair_index(
-        (size_t)first, (size_t)second, state->anchor_count);
-    return index < 16U ? (uint16_t)(1U << index) : 0U;
-}
-
-static void solve_complete_frame(
-    struct passive_ds_solver_state *state,
-    struct passive_ds_solver_frame *frame,
-    TickType_t now)
-{
-    if (!state->geometry_ready) {
-        reset_frame(frame);
-        return;
-    }
-    const app_runtime_config_t *config = app_runtime_config_get();
-    const bool multipoint = config->passive_ds_schedule ==
-        APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS;
-    const size_t stars_per_position = multipoint
-        ? multipoint_stars_per_position(config)
-        : 1U;
-    const size_t observations_per_star = state->anchor_count - 1U;
-    const size_t expected_count = observations_per_star * stars_per_position;
-    struct passive_ds_position_observation
-        observations[PASSIVE_DS_SOLVER_MAX_OBSERVATIONS];
-    TickType_t oldest_tick = now;
-    TickType_t newest_tick = 0U;
-    for (size_t index = 0U; index < expected_count; ++index) {
-        const struct passive_ds_solver_frame_item *item =
-            &frame->items[index];
-        const size_t star_index = index / observations_per_star;
-        if (!item->valid || star_index >= stars_per_position ||
-            item->initiator_id != frame->initiator_ids[star_index]) {
-            state->frame_rejected++;
-            reset_frame(frame);
-            return;
-        }
-        observations[index] = (struct passive_ds_position_observation){
-            .initiator_id = item->initiator_id,
-            .responder_id = item->responder_id,
-            .difference_m = item->difference_m,
-            .delay_ratio = item->delay_ratio,
-        };
-        if (item->updated_tick < oldest_tick) {
-            oldest_tick = item->updated_tick;
-        }
-        if (item->updated_tick > newest_tick) {
-            newest_tick = item->updated_tick;
-        }
-    }
-
-    struct passive_ds_position_result result = {0};
-    const bool solved = multipoint
-        ? passive_ds_position_solve_correlated(
-              state->anchors, state->anchor_count,
-              observations, expected_count,
-              PASSIVE_DS_SOLVER_TIMING_COMMON_CORRELATION,
-              state->previous_position_valid,
-              state->previous_x_m, state->previous_y_m, &result)
-        : passive_ds_position_solve(
-              state->anchors, state->anchor_count,
-              observations, expected_count,
-              state->previous_position_valid,
-              state->previous_x_m, state->previous_y_m, &result);
-    if (!solved) {
-        state->position_rejected++;
-        reset_frame(frame);
-        return;
-    }
-
-    state->previous_position_valid = true;
-    state->previous_x_m = result.x_m;
-    state->previous_y_m = result.y_m;
-    state->position_accepted++;
-    if (frame->independent_frame) {
-        state->position_independent_accepted++;
-    }
-    const uint32_t measured_span_ms =
-        (uint32_t)((newest_tick - oldest_tick) * portTICK_PERIOD_MS);
-    const uint32_t measured_age_ms =
-        (uint32_t)((now - oldest_tick) * portTICK_PERIOD_MS);
-    const uint32_t nominal_span_ms =
-        config->passive_ds_schedule ==
-                APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS
-            ? (uint32_t)((stars_per_position *
-                              multipoint_period_us(config) +
-                          999U) /
-                         1000U)
-            : ((uint32_t)state->anchor_count - 1U) *
-                      config->passive_ds_slot_ms +
-                  config->passive_ds_round_gap_ms;
-    const uint16_t span_ms = (uint16_t)fmin(
-        UINT16_MAX,
-        (double)fmax(measured_span_ms, nominal_span_ms));
-    const uint16_t age_ms = (uint16_t)fmin(
-        UINT16_MAX,
-        (double)fmax(measured_age_ms, nominal_span_ms));
-    const uint8_t tag_id = frame->tag_id;
-    const uint32_t slot_id = frame->last_slot_id;
-    const uint16_t mask = frame->observation_mask;
-    const bool independent_frame = frame->independent_frame;
-    reset_frame(frame);
-
-    (void)wireless_telemetry_service_submit_passive_ds_position(
-        tag_id, slot_id,
-        (int32_t)lround(result.x_m * 1000.0),
-        (int32_t)lround(result.y_m * 1000.0),
-        (int32_t)lround(result.x_m * 1000.0),
-        (int32_t)lround(result.y_m * 1000.0),
-        (int32_t)lround(result.sigma_m * 1000.0),
-        (int32_t)lround(result.rms_m * 1000.0),
-        result.observation_count, state->anchor_count,
-        state->geometry_version, independent_frame, false, false,
-        state->position_accepted, state->position_independent_accepted,
-        span_ms, age_ms, mask, 0U, 0U,
-        state->position_rejected, true);
-}
-
-static bool stage_observation(
-    struct passive_ds_solver_state *state,
-    const struct passive_ds_solver_item *item,
-    TickType_t now,
-    uint32_t frame_id,
-    uint32_t star_index,
-    uint32_t radio_slot_index,
-    bool independent_frame)
-{
-    const uint32_t slots_per_star = (uint32_t)state->anchor_count - 1U;
-    const app_runtime_config_t *config = app_runtime_config_get();
-    const bool multipoint = config->passive_ds_schedule ==
-        APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS;
-    const uint32_t expected_count = slots_per_star *
-        (multipoint ? (uint32_t)multipoint_stars_per_position(config) : 1U);
-    const uint32_t slot_index = star_index * slots_per_star + radio_slot_index;
-    struct passive_ds_solver_frame *frame = acquire_frame(
-        state, frame_id, item->tag_id, now);
-    if (frame == NULL || slot_index >= expected_count ||
-        star_index >= PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION) {
-        state->frame_rejected++;
-        return false;
-    }
-    frame->independent_frame = independent_frame;
-    if (frame->initiator_ids[star_index] == UINT8_MAX) {
-        frame->initiator_ids[star_index] = item->first_id;
-    } else if (frame->initiator_ids[star_index] != item->first_id) {
-        state->frame_rejected++;
-        reset_frame(frame);
-        return false;
-    }
-    const size_t star_begin = (size_t)star_index * slots_per_star;
-    const size_t star_end = star_begin + slots_per_star;
-    for (size_t index = star_begin; index < star_end; ++index) {
-        if (index != slot_index && frame->items[index].valid &&
-            frame->items[index].responder_id == item->second_id) {
-            state->frame_rejected++;
-            reset_frame(frame);
-            return false;
-        }
-    }
-    if (!frame->items[slot_index].valid) {
-        frame->observation_count++;
-    }
-    frame->items[slot_index] = (struct passive_ds_solver_frame_item){
-        .valid = true,
-        .initiator_id = item->first_id,
-        .responder_id = item->second_id,
-        .difference_m = item->value_mm / 1000.0,
-        .delay_ratio = (double)item->delay_ratio_q15 / 32768.0,
-        .slot_id = item->slot_id,
-        .updated_tick = now,
-    };
-    frame->observation_mask |= observation_mask_bit(
-        state, item->first_id, item->second_id);
-    frame->last_slot_id = item->slot_id;
-    frame->updated_tick = now;
-    if (frame->observation_count == expected_count) {
-        solve_complete_frame(state, frame, now);
-    }
-    return true;
-}
-
-static void handle_observation(
-    struct passive_ds_solver_state *state,
-    const struct passive_ds_solver_item *item,
-    TickType_t now)
-{
-    const int initiator = anchor_index(state, item->first_id);
-    const int responder = anchor_index(state, item->second_id);
-    if (initiator < 0 || responder < 0 || initiator == responder) {
-        state->frame_rejected++;
-        return;
-    }
-    const double difference_m = item->value_mm / 1000.0;
-    const struct passive_ds_solver_range *anchor_range =
-        &state->ranges[initiator][responder];
-    if (!isfinite(difference_m) ||
-        (anchor_range->valid &&
-         fabs(difference_m) > anchor_range->value_m + 0.15)) {
-        state->frame_rejected++;
-        return;
-    }
-
-    /*
-     * Diagnostic only: Welford statistics for each directed radio path.
-     * The estimator still consumes the original, unfiltered observation.
-     * Pooling the per-path variances later lets us compare the three N+2
-     * response positions without mixing their different physical means.
-     */
-    uint32_t *observation_count =
-        &state->observation_count[initiator][responder];
-    double *observation_mean_m =
-        &state->observation_mean_m[initiator][responder];
-    double *observation_m2_m2 =
-        &state->observation_m2_m2[initiator][responder];
-    (*observation_count)++;
-    const double mean_delta = difference_m - *observation_mean_m;
-    *observation_mean_m += mean_delta / (double)*observation_count;
-    *observation_m2_m2 +=
-        mean_delta * (difference_m - *observation_mean_m);
-
-    const app_runtime_config_t *config = app_runtime_config_get();
-    const bool multipoint = config->passive_ds_schedule ==
-        APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS;
-    const uint32_t slots_per_star = (uint32_t)state->anchor_count - 1U;
-    const uint32_t radio_frame_id = item->slot_id / slots_per_star;
-    const uint32_t radio_slot_index = item->slot_id % slots_per_star;
-    if (multipoint) {
-        if (config->passive_ds_solve_mode ==
-            APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR) {
-            /*
-             * Dynamic profile: all three observations originate in one
-             * broadcast DS-TWR star.  Solve it once, mark it independent,
-             * and never reuse it in an overlapping window.  The previous
-             * position is only the nonlinear solver's initial guess; no
-             * position averaging or temporal filter is applied.
-             */
-            (void)stage_observation(
-                state, item, now, radio_frame_id, 0U,
-                radio_slot_index, true);
-            return;
-        }
-
-        /*
-         * Keep the precision baseline deliberately simple: three consecutive
-         * radio stars form one position window and every star is consumed
-         * exactly once.  At the validated 6 ms radio cadence this yields a
-         * 55.6 Hz independent raw stream.  Nine unfiltered observations
-         * reduce measurement noise before the position solve without any
-         * temporal position filter or host-side frame synchronization.
-         */
-        (void)stage_observation(
-            state, item, now,
-            radio_frame_id /
-                PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION,
-            radio_frame_id %
-                PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION,
-            radio_slot_index, true);
-
-        /*
-         * Two overlapping three-star windows target Native DS-TWR precision
-         * while retaining a theoretical 111.1 raw solves/s.  Window A uses
-         * phases 1..3 and window B phases 2..4 of every six-star cycle.  All
-         * inputs remain complete native measurements; reuse occurs only
-         * between explicitly labelled solver windows.
-         */
-        const uint32_t supplemental_phase =
-            radio_frame_id % PASSIVE_DS_SOLVER_SUPPLEMENTAL_PERIOD_STARS;
-        if (supplemental_phase >=
-                PASSIVE_DS_SOLVER_SUPPLEMENTAL_A_FIRST_PHASE &&
-            supplemental_phase <
-                PASSIVE_DS_SOLVER_SUPPLEMENTAL_A_FIRST_PHASE +
-                    PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION) {
-            const uint32_t supplemental_frame_id =
-                PASSIVE_DS_SOLVER_SUPPLEMENTAL_A_FRAME_NAMESPACE |
-                (radio_frame_id /
-                 PASSIVE_DS_SOLVER_SUPPLEMENTAL_PERIOD_STARS);
-            (void)stage_observation(
-                state, item, now, supplemental_frame_id,
-                supplemental_phase -
-                    PASSIVE_DS_SOLVER_SUPPLEMENTAL_A_FIRST_PHASE,
-                radio_slot_index, false);
-        }
-        if (supplemental_phase >=
-                PASSIVE_DS_SOLVER_SUPPLEMENTAL_B_FIRST_PHASE &&
-            supplemental_phase <
-                PASSIVE_DS_SOLVER_SUPPLEMENTAL_B_FIRST_PHASE +
-                    PASSIVE_DS_SOLVER_MULTIPOINT_STARS_PER_POSITION) {
-            const uint32_t supplemental_frame_id =
-                PASSIVE_DS_SOLVER_SUPPLEMENTAL_B_FRAME_NAMESPACE |
-                (radio_frame_id /
-                 PASSIVE_DS_SOLVER_SUPPLEMENTAL_PERIOD_STARS);
-            (void)stage_observation(
-                state, item, now, supplemental_frame_id,
-                supplemental_phase -
-                    PASSIVE_DS_SOLVER_SUPPLEMENTAL_B_FIRST_PHASE,
-                radio_slot_index, false);
-        }
-    } else {
-        /* Legacy schedules still form one non-overlapping complete frame. */
-        (void)stage_observation(
-            state, item, now, radio_frame_id, 0U, radio_slot_index, true);
-    }
+    state->geometry_published = published;
+    return published;
 }
 
 static void apply_runtime_config(struct passive_ds_solver_state *state)
 {
     const app_runtime_config_t *config = app_runtime_config_get();
     memset(state, 0, sizeof(*state));
-    state->anchor_count = config->anchor_count;
-    if (state->anchor_count > APP_RUNTIME_CONFIG_MAX_ANCHORS) {
-        state->anchor_count = APP_RUNTIME_CONFIG_MAX_ANCHORS;
+    if (config == NULL || !config->flex_tdoa_geometry_fixed ||
+        config->anchor_count < 3U ||
+        config->anchor_count > PASSIVE_DS_POSITION_MAX_ANCHORS) {
+        ESP_LOGE(TAG,
+                 "fixed GPS RTK anchor geometry is required");
+        return;
     }
-    memcpy(state->anchor_ids, config->anchor_ids, sizeof(state->anchor_ids));
+    state->anchor_count = config->anchor_count;
+    state->geometry_version = config->flex_tdoa_geometry_generation;
+    for (uint8_t index = 0U; index < state->anchor_count; ++index) {
+        state->anchor_ids[index] = config->anchor_ids[index];
+        state->anchors[index] = (struct passive_ds_position_anchor){
+            .id = config->anchor_ids[index],
+            .x_m = config->flex_tdoa_anchor_x_mm[index] / 1000.0,
+            .y_m = config->flex_tdoa_anchor_y_mm[index] / 1000.0,
+        };
+    }
+    state->geometry_ready = true;
+    (void)publish_geometry(state);
+    ESP_LOGI(TAG,
+             "raw solver geometry=fixed_rtk anchors=%u generation=%lu",
+             (unsigned)state->anchor_count,
+             (unsigned long)state->geometry_version);
 }
 
-static void submit_summary(struct passive_ds_solver_state *state)
+static void reset_frame(struct passive_ds_solver_frame *frame)
 {
-    const TickType_t now = xTaskGetTickCount();
+    if (frame != NULL) {
+        memset(frame, 0, sizeof(*frame));
+    }
+}
+
+static void expire_frames(struct passive_ds_solver_state *state,
+                          TickType_t now)
+{
+    const TickType_t maximum_age =
+        pdMS_TO_TICKS(PASSIVE_DS_SOLVER_FRAME_MAX_AGE_MS);
+    for (size_t index = 0U; index < PASSIVE_DS_SOLVER_FRAME_BUCKETS;
+         ++index) {
+        struct passive_ds_solver_frame *frame = &state->frames[index];
+        if (frame->active && now - frame->updated_tick > maximum_age) {
+            state->incomplete_count++;
+            reset_frame(frame);
+        }
+    }
+}
+
+static struct passive_ds_solver_frame *acquire_frame(
+    struct passive_ds_solver_state *state,
+    const struct passive_ds_solver_item *item,
+    TickType_t now)
+{
+    if (state == NULL || item == NULL) {
+        return NULL;
+    }
+    struct passive_ds_solver_frame *available = NULL;
+    struct passive_ds_solver_frame *oldest = NULL;
+    for (size_t index = 0U; index < PASSIVE_DS_SOLVER_FRAME_BUCKETS;
+         ++index) {
+        struct passive_ds_solver_frame *frame = &state->frames[index];
+        if (frame->active && frame->tag_id == item->tag_id &&
+            frame->session_id == item->session_id &&
+            frame->frame_id == item->frame_id) {
+            if (frame->initiator_id != item->initiator_id) {
+                return NULL;
+            }
+            frame->updated_tick = now;
+            return frame;
+        }
+        if (!frame->active && available == NULL) {
+            available = frame;
+        }
+        if (frame->active &&
+            (oldest == NULL ||
+             frame->updated_tick < oldest->updated_tick)) {
+            oldest = frame;
+        }
+    }
+    struct passive_ds_solver_frame *frame =
+        available != NULL ? available : oldest;
+    if (frame == NULL) {
+        return NULL;
+    }
+    if (frame->active) {
+        state->incomplete_count++;
+    }
+    reset_frame(frame);
+    frame->active = true;
+    frame->tag_id = item->tag_id;
+    frame->initiator_id = item->initiator_id;
+    frame->session_id = item->session_id;
+    frame->frame_id = item->frame_id;
+    frame->updated_tick = now;
+    return frame;
+}
+
+static void reset_session_state(
+    struct passive_ds_solver_state *state, uint32_t session_id)
+{
+    memset(state->frames, 0, sizeof(state->frames));
+    memset(state->recent_stars, 0, sizeof(state->recent_stars));
+    memset(state->independent_stars, 0,
+           sizeof(state->independent_stars));
+    state->previous_position_valid = false;
+    state->last_published_frame_valid = false;
+    state->session_valid = true;
+    state->session_id = session_id;
+}
+
+static bool residual_metrics(
+    const struct passive_ds_solver_state *state,
+    const struct passive_ds_position_observation *observations,
+    size_t observation_count,
+    const struct passive_ds_position_result *result,
+    double *equation_rms_m,
+    double *max_abs_residual_m)
+{
+    if (state == NULL || observations == NULL || result == NULL ||
+        equation_rms_m == NULL || max_abs_residual_m == NULL ||
+        observation_count == 0U) {
+        return false;
+    }
+    double sse = 0.0;
+    double maximum = 0.0;
+    for (size_t index = 0U; index < observation_count; ++index) {
+        const int initiator = anchor_index(
+            state, observations[index].initiator_id);
+        const int responder = anchor_index(
+            state, observations[index].responder_id);
+        if (initiator < 0 || responder < 0 || initiator == responder) {
+            return false;
+        }
+        const double predicted =
+            hypot(result->x_m - state->anchors[responder].x_m,
+                  result->y_m - state->anchors[responder].y_m) -
+            hypot(result->x_m - state->anchors[initiator].x_m,
+                  result->y_m - state->anchors[initiator].y_m);
+        const double residual = observations[index].difference_m - predicted;
+        if (!isfinite(residual)) {
+            return false;
+        }
+        sse += residual * residual;
+        maximum = fmax(maximum, fabs(residual));
+    }
+    *equation_rms_m = sqrt(sse / (double)observation_count);
+    *max_abs_residual_m = maximum;
+    return isfinite(*equation_rms_m) && isfinite(*max_abs_residual_m);
+}
+
+static bool solve_observations(
+    struct passive_ds_solver_state *state,
+    const struct passive_ds_position_observation *observations,
+    size_t observation_count,
+    bool correlated,
+    struct passive_ds_position_result *result,
+    double *equation_rms_m,
+    double *max_abs_residual_m)
+{
+    bool use_previous = state->previous_position_valid;
+    for (size_t attempt = 0U; attempt < (use_previous ? 2U : 1U);
+         ++attempt) {
+        const bool solved = correlated
+            ? passive_ds_position_solve_correlated(
+                  state->anchors, state->anchor_count,
+                  observations, observation_count,
+                  PASSIVE_DS_SOLVER_COMMON_CORRELATION,
+                  use_previous, state->previous_x_m,
+                  state->previous_y_m, result)
+            : passive_ds_position_solve(
+                  state->anchors, state->anchor_count,
+                  observations, observation_count,
+                  use_previous, state->previous_x_m,
+                  state->previous_y_m, result);
+        if (solved && residual_metrics(
+                state, observations, observation_count, result,
+                equation_rms_m, max_abs_residual_m) &&
+            passive_ds_batch_residuals_valid(
+                *equation_rms_m, *max_abs_residual_m)) {
+            return true;
+        }
+        use_previous = false;
+    }
+    return false;
+}
+
+static bool solve_stars(
+    struct passive_ds_solver_state *state,
+    const struct passive_ds_solver_complete_star *stars,
+    size_t star_count,
+    bool independent,
+    uint32_t frame_span)
+{
+    if (state == NULL || stars == NULL ||
+        (star_count != 1U &&
+         star_count != PASSIVE_DS_BATCH_STARS_PER_POSITION)) {
+        return false;
+    }
+    const size_t observations_per_star = state->anchor_count - 1U;
+    const size_t expected_count = star_count * observations_per_star;
+    if (expected_count > PASSIVE_DS_SOLVER_MAX_OBSERVATIONS) {
+        return false;
+    }
+    struct passive_ds_position_observation
+        observations[PASSIVE_DS_SOLVER_MAX_OBSERVATIONS] = {0};
+    size_t output = 0U;
+    uint16_t observation_mask = 0U;
+    for (size_t star_index = 0U; star_index < star_count; ++star_index) {
+        if (!stars[star_index].valid ||
+            stars[star_index].tag_id != stars[0].tag_id ||
+            stars[star_index].session_id != stars[0].session_id ||
+            stars[star_index].observation_count != observations_per_star) {
+            return false;
+        }
+        observation_mask |= stars[star_index].observation_mask;
+        for (size_t item = 0U; item < observations_per_star; ++item) {
+            const struct passive_ds_solver_frame_observation *source =
+                &stars[star_index].observations[item];
+            if (!source->valid ||
+                source->initiator_id != stars[star_index].initiator_id ||
+                source->delay_ratio_q15 == 0U ||
+                source->delay_ratio_q15 >= 32768U) {
+                return false;
+            }
+            observations[output++] =
+                (struct passive_ds_position_observation){
+                    .initiator_id = source->initiator_id,
+                    .responder_id = source->responder_id,
+                    .difference_m = source->difference_mm / 1000.0,
+                    .delay_ratio =
+                        (double)source->delay_ratio_q15 / 32768.0,
+                };
+        }
+    }
+
+    struct passive_ds_position_result result = {0};
+    double equation_rms_m = NAN;
+    double max_abs_residual_m = NAN;
+    if (!solve_observations(
+            state, observations, output, star_count > 1U, &result,
+            &equation_rms_m, &max_abs_residual_m)) {
+        state->rejected_count++;
+        return false;
+    }
+    state->previous_position_valid = true;
+    state->previous_x_m = result.x_m;
+    state->previous_y_m = result.y_m;
+    state->solved_count++;
+    if (independent) {
+        state->independent_solved_count++;
+    }
+
+    const app_runtime_config_t *config = app_runtime_config_get();
+    const uint32_t response_train_us =
+        config->passive_ds_resp_delay_us +
+        APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US *
+            (state->anchor_count - 2U);
+    const uint64_t batch_span_us = star_count > 1U
+        ? (uint64_t)frame_span *
+                  (config->passive_ds_slot_ms * 1000ULL +
+                   config->passive_ds_round_gap_ms * 1000ULL) +
+              response_train_us + config->passive_ds_final_delay_us
+        : response_train_us;
+    const uint16_t batch_span_ms = (uint16_t)fmin(
+        UINT16_MAX, (double)((batch_span_us + 999ULL) / 1000ULL));
+    const uint8_t tag_id = stars[0].tag_id;
+    const uint32_t frame_id = stars[0].frame_id;
+    const bool complete_superframe =
+        star_count == 1U &&
+        frame_id % state->anchor_count == state->anchor_count - 1U;
+
+    (void)wireless_telemetry_service_submit_passive_ds_position(
+        tag_id, frame_id,
+        (int32_t)lround(result.x_m * 1000.0),
+        (int32_t)lround(result.y_m * 1000.0),
+        (int32_t)lround(result.x_m * 1000.0),
+        (int32_t)lround(result.y_m * 1000.0),
+        (int32_t)lround(result.sigma_m * 1000.0),
+        (int32_t)lround(equation_rms_m * 1000.0),
+        result.observation_count, state->anchor_count,
+        state->geometry_version, independent, complete_superframe,
+        false, state->solved_count, state->independent_solved_count,
+        batch_span_ms, batch_span_ms, observation_mask, 0U, 0U,
+        state->rejected_count, true);
+    return true;
+}
+
+static int responder_slot_index(
+    const struct passive_ds_solver_state *state,
+    int initiator_index,
+    int responder_index)
+{
+    if (state == NULL || initiator_index < 0 || responder_index < 0 ||
+        initiator_index == responder_index || state->anchor_count < 2U) {
+        return -1;
+    }
+    const int offset =
+        (responder_index - initiator_index + state->anchor_count) %
+        state->anchor_count;
+    return offset > 0 ? offset - 1 : -1;
+}
+
+static size_t select_stars(
+    struct passive_ds_solver_state *state,
+    const struct passive_ds_solver_complete_star *cache,
+    uint32_t max_frame_span,
+    struct passive_ds_solver_complete_star
+        selected[PASSIVE_DS_BATCH_STARS_PER_POSITION],
+    size_t selected_cache_indices[PASSIVE_DS_BATCH_STARS_PER_POSITION],
+    uint32_t *newest_frame_id,
+    uint32_t *frame_span)
+{
+    struct passive_ds_batch_star_ref
+        references[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+    for (size_t index = 0U; index < state->anchor_count; ++index) {
+        references[index] = (struct passive_ds_batch_star_ref){
+            .valid = cache[index].valid,
+            .initiator_id = cache[index].initiator_id,
+            .frame_id = cache[index].frame_id,
+        };
+    }
+    const size_t count = passive_ds_batch_select_recent_unique(
+        references, state->anchor_count, max_frame_span,
+        selected_cache_indices, newest_frame_id, frame_span);
+    for (size_t index = 0U; index < count; ++index) {
+        selected[index] = cache[selected_cache_indices[index]];
+    }
+    return count;
+}
+
+static void expire_independent_stars(
+    struct passive_ds_solver_state *state, uint32_t newest_frame_id)
+{
+    for (size_t index = 0U; index < state->anchor_count; ++index) {
+        struct passive_ds_solver_complete_star *star =
+            &state->independent_stars[index];
+        if (star->valid &&
+            passive_ds_batch_frame_after(
+                newest_frame_id, star->frame_id) &&
+            newest_frame_id - star->frame_id >
+                PASSIVE_DS_SOLVER_INDEPENDENT_MAX_FRAME_SPAN) {
+            memset(star, 0, sizeof(*star));
+        }
+    }
+}
+
+static void process_complete_star(
+    struct passive_ds_solver_state *state,
+    const struct passive_ds_solver_complete_star *star)
+{
+    const app_runtime_config_t *config = app_runtime_config_get();
+    if (config == NULL || star == NULL || !star->valid) {
+        return;
+    }
+    if (config->passive_ds_solve_mode ==
+        APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR) {
+        (void)solve_stars(state, star, 1U, true, 0U);
+        return;
+    }
+    if (config->passive_ds_solve_mode !=
+        APP_RUNTIME_PASSIVE_DS_SOLVE_PRECISION_THREE_STAR) {
+        state->rejected_count++;
+        return;
+    }
+
+    const int initiator = anchor_index(state, star->initiator_id);
+    if (initiator < 0) {
+        state->rejected_count++;
+        return;
+    }
+    struct passive_ds_solver_complete_star *recent =
+        &state->recent_stars[initiator];
+    if (!recent->valid || passive_ds_batch_frame_after(
+            star->frame_id, recent->frame_id)) {
+        *recent = *star;
+    }
+    struct passive_ds_solver_complete_star *pending =
+        &state->independent_stars[initiator];
+    if (!pending->valid || passive_ds_batch_frame_after(
+            star->frame_id, pending->frame_id)) {
+        *pending = *star;
+    }
+    expire_independent_stars(state, star->frame_id);
+
+    struct passive_ds_solver_complete_star
+        selected[PASSIVE_DS_BATCH_STARS_PER_POSITION] = {0};
+    size_t selected_indices[PASSIVE_DS_BATCH_STARS_PER_POSITION] = {0};
+    uint32_t newest_frame_id = 0U;
+    uint32_t frame_span = 0U;
+    size_t count = select_stars(
+        state, state->independent_stars,
+        PASSIVE_DS_SOLVER_INDEPENDENT_MAX_FRAME_SPAN,
+        selected, selected_indices, &newest_frame_id, &frame_span);
+    if (count == PASSIVE_DS_BATCH_STARS_PER_POSITION) {
+        for (size_t index = 0U; index < count; ++index) {
+            memset(&state->independent_stars[selected_indices[index]],
+                   0, sizeof(state->independent_stars[0]));
+        }
+        if (!state->last_published_frame_valid ||
+            passive_ds_batch_frame_after(
+                newest_frame_id, state->last_published_frame_id)) {
+            if (solve_stars(
+                    state, selected, count, true, frame_span)) {
+                state->last_published_frame_valid = true;
+                state->last_published_frame_id = newest_frame_id;
+            }
+        }
+        return;
+    }
+
+    count = select_stars(
+        state, state->recent_stars,
+        PASSIVE_DS_SOLVER_OVERLAP_MAX_FRAME_SPAN,
+        selected, selected_indices, &newest_frame_id, &frame_span);
+    if (count == PASSIVE_DS_BATCH_STARS_PER_POSITION &&
+        (!state->last_published_frame_valid ||
+         passive_ds_batch_frame_after(
+             newest_frame_id, state->last_published_frame_id)) &&
+        solve_stars(state, selected, count, false, frame_span)) {
+        state->last_published_frame_valid = true;
+        state->last_published_frame_id = newest_frame_id;
+    }
+}
+
+static void handle_observation(
+    struct passive_ds_solver_state *state,
+    const struct passive_ds_solver_item *item, TickType_t now)
+{
+    if (!state->geometry_ready || item->tag_id == 0U ||
+        item->session_id == 0U ||
+        item->initiator_id == item->responder_id ||
+        item->delay_ratio_q15 == 0U ||
+        item->delay_ratio_q15 >= 32768U) {
+        state->rejected_count++;
+        return;
+    }
+    if (!state->session_valid || state->session_id != item->session_id) {
+        reset_session_state(state, item->session_id);
+    }
+    const int initiator_index = anchor_index(
+        state, item->initiator_id);
+    const int responder_index = anchor_index(
+        state, item->responder_id);
+    const uint8_t expected_initiator =
+        state->anchor_ids[item->frame_id % state->anchor_count];
+    if (initiator_index < 0 || responder_index < 0 ||
+        expected_initiator != item->initiator_id) {
+        state->rejected_count++;
+        return;
+    }
+    const int responder_slot = responder_slot_index(
+        state, initiator_index, responder_index);
+    if (responder_slot < 0) {
+        state->rejected_count++;
+        return;
+    }
+
+    struct passive_ds_solver_frame *frame = acquire_frame(
+        state, item, now);
+    if (frame == NULL) {
+        state->rejected_count++;
+        return;
+    }
+    struct passive_ds_solver_frame_observation *observation =
+        &frame->observations[responder_slot];
+    if (observation->valid) {
+        if (observation->initiator_id != item->initiator_id ||
+            observation->responder_id != item->responder_id ||
+            observation->difference_mm != item->difference_mm ||
+            observation->delay_ratio_q15 != item->delay_ratio_q15) {
+            state->rejected_count++;
+            reset_frame(frame);
+        }
+        return;
+    }
+    *observation = (struct passive_ds_solver_frame_observation){
+        .valid = true,
+        .initiator_id = item->initiator_id,
+        .responder_id = item->responder_id,
+        .difference_mm = item->difference_mm,
+        .delay_ratio_q15 = item->delay_ratio_q15,
+    };
+    frame->observation_mask |=
+        (uint16_t)(1U << (uint8_t)responder_index);
+    frame->observation_count++;
+    frame->updated_tick = now;
+    if (frame->observation_count == state->anchor_count - 1U) {
+        struct passive_ds_solver_complete_star star = {
+            .valid = true,
+            .tag_id = frame->tag_id,
+            .initiator_id = frame->initiator_id,
+            .observation_count = frame->observation_count,
+            .observation_mask = frame->observation_mask,
+            .session_id = frame->session_id,
+            .frame_id = frame->frame_id,
+            .completed_tick = now,
+        };
+        memcpy(star.observations, frame->observations,
+               sizeof(star.observations));
+        reset_frame(frame);
+        process_complete_star(state, &star);
+    }
+}
+
+static void submit_summary(struct passive_ds_solver_state *state,
+                           TickType_t now)
+{
     if (state->summary_tick == 0U) {
         state->summary_tick = now;
         return;
@@ -954,79 +680,30 @@ static void submit_summary(struct passive_ds_solver_state *state)
     }
     (void)wireless_log_service_submit(
         'I', TAG,
-        "raw pos=%lu/s reject=%lu frame_reject=%lu geom=%lu/%lu "
-        "ready=%u version=%lu fit=%ldmm queue_drop=%lu stack_free=%luB",
-        (unsigned long)(state->position_accepted -
-                        state->previous_position_accepted),
-        (unsigned long)(state->position_rejected -
-                        state->previous_position_rejected),
-        (unsigned long)(state->frame_rejected -
-                        state->previous_frame_rejected),
-        (unsigned long)(state->geometry_accepted -
-                        state->previous_geometry_accepted),
-        (unsigned long)(state->geometry_rejected -
-                        state->previous_geometry_rejected),
+        "raw fixed-RTK pos=%lu/s independent=%lu/s reject=%lu "
+        "batch_incomplete=%lu "
+        "geometry=%u generation=%lu queue_drop=%lu stack_free=%luB",
+        (unsigned long)(state->solved_count -
+                        state->previous_solved_count),
+        (unsigned long)(state->independent_solved_count -
+                        state->previous_independent_solved_count),
+        (unsigned long)(state->rejected_count -
+                        state->previous_rejected_count),
+        (unsigned long)(state->incomplete_count -
+                        state->previous_incomplete_count),
         state->geometry_ready ? 1U : 0U,
         (unsigned long)state->geometry_version,
-        (long)lround(state->geometry_fit_rms_m * 1000.0),
         (unsigned long)s_dropped,
         (unsigned long)uxTaskGetStackHighWaterMark(NULL));
-    state->previous_position_accepted = state->position_accepted;
-    state->previous_position_rejected = state->position_rejected;
-    state->previous_frame_rejected = state->frame_rejected;
-    state->previous_geometry_accepted = state->geometry_accepted;
-    state->previous_geometry_rejected = state->geometry_rejected;
+    state->previous_solved_count = state->solved_count;
+    state->previous_independent_solved_count =
+        state->independent_solved_count;
+    state->previous_rejected_count = state->rejected_count;
+    state->previous_incomplete_count = state->incomplete_count;
     state->summary_tick = now;
-
-    const app_runtime_config_t *config = app_runtime_config_get();
-    if (config->passive_ds_schedule !=
-            APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS ||
-        (state->observation_summary_tick != 0U &&
-         now - state->observation_summary_tick < pdMS_TO_TICKS(10000))) {
-        return;
+    if (!state->geometry_published) {
+        (void)publish_geometry(state);
     }
-    double pooled_m2[APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U] = {0};
-    uint32_t pooled_dof[APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U] = {0};
-    for (size_t initiator = 0U; initiator < state->anchor_count;
-         ++initiator) {
-        for (size_t responder = 0U; responder < state->anchor_count;
-             ++responder) {
-            if (initiator == responder) {
-                continue;
-            }
-            const uint32_t count =
-                state->observation_count[initiator][responder];
-            const size_t timing_index =
-                (responder + state->anchor_count - initiator - 1U) %
-                state->anchor_count;
-            if (count > 1U && timing_index < state->anchor_count - 1U) {
-                pooled_m2[timing_index] +=
-                    state->observation_m2_m2[initiator][responder];
-                pooled_dof[timing_index] += count - 1U;
-            }
-        }
-    }
-    if (state->anchor_count == 4U) {
-        const double sigma0_mm = pooled_dof[0] > 0U
-            ? 1000.0 * sqrt(pooled_m2[0] / pooled_dof[0])
-            : 0.0;
-        const double sigma1_mm = pooled_dof[1] > 0U
-            ? 1000.0 * sqrt(pooled_m2[1] / pooled_dof[1])
-            : 0.0;
-        const double sigma2_mm = pooled_dof[2] > 0U
-            ? 1000.0 * sqrt(pooled_m2[2] / pooled_dof[2])
-            : 0.0;
-        (void)wireless_log_service_submit(
-            'I', TAG,
-            "raw N+2 within-path sigma timing[0/1/2]=%ld/%ld/%ldmm "
-            "dof=%lu/%lu/%lu (diagnostic only)",
-            (long)lround(sigma0_mm), (long)lround(sigma1_mm),
-            (long)lround(sigma2_mm),
-            (unsigned long)pooled_dof[0],
-            (unsigned long)pooled_dof[1],
-            (unsigned long)pooled_dof[2]);
-    }
-    state->observation_summary_tick = now;
 }
 
 static void passive_ds_solver_task(void *arg)
@@ -1034,9 +711,6 @@ static void passive_ds_solver_task(void *arg)
     (void)arg;
     static struct passive_ds_solver_state state;
     apply_runtime_config(&state);
-    TickType_t last_idle_window_tick = xTaskGetTickCount();
-    ESP_LOGI(TAG, "isolated raw tag solver active anchors=%u core=%d",
-             (unsigned)state.anchor_count, xPortGetCoreID());
     while (true) {
         struct passive_ds_solver_item item = {0};
         if (xQueueReceive(s_queue, &item, portMAX_DELAY) != pdTRUE) {
@@ -1047,55 +721,10 @@ static void passive_ds_solver_task(void *arg)
             xQueueReset(s_queue);
             continue;
         }
-        const int first = anchor_index(&state, item.first_id);
-        const int second = anchor_index(&state, item.second_id);
         const TickType_t now = xTaskGetTickCount();
-        if (first < 0 || second < 0 || first == second) {
-            submit_summary(&state);
-            continue;
-        }
-        if (item.type == PASSIVE_DS_SOLVER_ITEM_RANGE &&
-            item.value_mm > 0) {
-            const size_t a = (size_t)(first < second ? first : second);
-            const size_t b = (size_t)(first < second ? second : first);
-            const app_runtime_config_t *config = app_runtime_config_get();
-            if (config->passive_ds_schedule ==
-                APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS) {
-                stage_coherent_range(
-                    &state, a, b, item.value_mm / 1000.0,
-                    item.slot_id, now);
-                submit_summary(&state);
-                continue;
-            }
-            const struct passive_ds_solver_range range = {
-                .valid = true,
-                .value_m = item.value_mm / 1000.0,
-                .slot_id = item.slot_id,
-                .updated_tick = now,
-            };
-            state.ranges[a][b] = range;
-            state.ranges[b][a] = range;
-            const size_t index = pair_index(a, b, state.anchor_count);
-            if (index < 32U) {
-                state.range_update_mask |= (uint32_t)(1UL << index);
-            }
-            try_update_geometry(&state, now);
-        } else if (item.type == PASSIVE_DS_SOLVER_ITEM_OBSERVATION) {
-            handle_observation(&state, &item, now);
-        }
-        submit_summary(&state);
-
-        /*
-         * At high passive-DS rates this queue intentionally remains busy.
-         * Give the CPU0 idle task one scheduler tick often enough to feed the
-         * task watchdog; queued observations are retained and processed after
-         * the window, so this is neither result decimation nor filtering.
-         */
-        if (now - last_idle_window_tick >=
-            pdMS_TO_TICKS(PASSIVE_DS_SOLVER_IDLE_WINDOW_MS)) {
-            vTaskDelay(1);
-            last_idle_window_tick = xTaskGetTickCount();
-        }
+        expire_frames(&state, now);
+        handle_observation(&state, &item, now);
+        submit_summary(&state, now);
     }
 }
 
@@ -1104,18 +733,11 @@ esp_err_t passive_ds_solver_service_start(void)
     if (s_started) {
         return ESP_OK;
     }
-    s_queue = xQueueCreate(
-        PASSIVE_DS_SOLVER_QUEUE_LEN,
-        sizeof(struct passive_ds_solver_item));
+    s_queue = xQueueCreate(PASSIVE_DS_SOLVER_QUEUE_LEN,
+                           sizeof(struct passive_ds_solver_item));
     if (s_queue == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    /*
-     * The timing-covariance solve intentionally keeps a roughly 25 KiB
-     * matrix on this task's stack.  Keep that isolated workspace in PSRAM so
-     * Wi-Fi, GPS and the UWB radio retain scarce internal RAM.  This task does
-     * not call peripherals or cache-disabled code.
-     */
     const BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
         passive_ds_solver_task, "passive_ds_solver",
         PASSIVE_DS_SOLVER_TASK_STACK_BYTES, NULL,
@@ -1142,6 +764,9 @@ static bool submit_item(const struct passive_ds_solver_item *item)
 
 bool passive_ds_solver_service_reset(void)
 {
+    if (!s_started) {
+        return true;
+    }
     const struct passive_ds_solver_item item = {
         .type = PASSIVE_DS_SOLVER_ITEM_RESET,
     };
@@ -1152,27 +777,26 @@ bool passive_ds_solver_service_submit_anchor_range(
     uint8_t anchor_a_id, uint8_t anchor_b_id, uint32_t slot_id,
     int32_t distance_mm)
 {
-    const struct passive_ds_solver_item item = {
-        .type = PASSIVE_DS_SOLVER_ITEM_RANGE,
-        .first_id = anchor_a_id,
-        .second_id = anchor_b_id,
-        .slot_id = slot_id,
-        .value_mm = distance_mm,
-    };
-    return submit_item(&item);
+    (void)slot_id;
+    /* Anchor ranges are diagnostics only; fixed RTK coordinates drive the
+     * raw solver and no range-derived geometry state is retained here. */
+    return anchor_a_id != 0U && anchor_b_id != 0U &&
+           anchor_a_id != anchor_b_id && distance_mm > 0;
 }
 
 bool passive_ds_solver_service_submit_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
-    uint32_t slot_id, int32_t difference_mm, uint16_t delay_ratio_q15)
+    uint32_t session_id, uint32_t frame_id, int32_t difference_mm,
+    uint16_t delay_ratio_q15)
 {
     const struct passive_ds_solver_item item = {
         .type = PASSIVE_DS_SOLVER_ITEM_OBSERVATION,
         .tag_id = tag_id,
-        .first_id = initiator_id,
-        .second_id = responder_id,
-        .slot_id = slot_id,
-        .value_mm = difference_mm,
+        .initiator_id = initiator_id,
+        .responder_id = responder_id,
+        .session_id = session_id,
+        .frame_id = frame_id,
+        .difference_mm = difference_mm,
         .delay_ratio_q15 = delay_ratio_q15,
     };
     return submit_item(&item);

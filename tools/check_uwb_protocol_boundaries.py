@@ -91,6 +91,8 @@ def main() -> int:
             r'"uwb_flex_tdoa_runtime\.c"',
             r'"uwb_native_ds_runtime\.c"',
             r'"uwb_passive_ds_runtime\.c"',
+            r'"uwb_passive_ds_protocol\.c"',
+            r'"uwb_passive_ds_observation\.c"',
             r'"uwb_anchor_range_cache\.c"',
         ),
     )

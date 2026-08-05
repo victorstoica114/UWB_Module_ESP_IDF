@@ -1424,7 +1424,8 @@ bool wireless_telemetry_service_submit_flex_geometry(
                 .anchor_id = anchor_id,
                 .anchor_count = anchor_count,
                 .tag_id = tag_id,
-                .flags = 1U,
+                /* FlexTDOA positions use fixed GPS RTK ENU geometry. */
+                .flags = 0U,
             },
         },
     };
@@ -1677,7 +1678,8 @@ bool wireless_telemetry_service_submit_passive_ds_geometry(
                 .anchor_id = anchor_id,
                 .anchor_count = anchor_count,
                 .tag_id = app_identity_get_module_id(),
-                .flags = 1U,
+                /* Bit 0 denotes dynamic range-derived geometry. */
+                .flags = 0U,
             },
         },
     };

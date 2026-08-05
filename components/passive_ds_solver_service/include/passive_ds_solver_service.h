@@ -17,7 +17,8 @@ bool passive_ds_solver_service_submit_anchor_range(
     int32_t distance_mm);
 bool passive_ds_solver_service_submit_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
-    uint32_t slot_id, int32_t difference_mm, uint16_t delay_ratio_q15);
+    uint32_t session_id, uint32_t frame_id, int32_t difference_mm,
+    uint16_t delay_ratio_q15);
 
 #ifdef __cplusplus
 }

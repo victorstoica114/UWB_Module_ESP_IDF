@@ -68,6 +68,26 @@ STATUS_KEYS = (
     "uwb_tx_error_count",
     "uwb_rx_count",
     "uwb_rx_error_count",
+    "uwb_rx_ignored_count",
+    "wireless_log_dropped",
+    "wireless_telemetry_status",
+    "wireless_telemetry_connected",
+    "wireless_telemetry_dropped",
+    "wireless_telemetry_drop_full",
+    "wireless_telemetry_drop_mutex",
+    "wireless_telemetry_drop_format",
+    "wireless_telemetry_queue_depth",
+    "wireless_telemetry_queue_high_water",
+    "wireless_telemetry_binary_frames",
+    "wireless_telemetry_binary_samples",
+    "wireless_telemetry_text_frames",
+    "wireless_telemetry_connect_count",
+    "wireless_telemetry_send_failures",
+    "wireless_telemetry_send_timeouts",
+    "wireless_telemetry_socket_closes",
+    "wireless_telemetry_last_send_ms",
+    "wireless_telemetry_max_send_ms",
+    "wireless_telemetry_last_error",
     "runtime_flex_tdoa_guard_us",
     "runtime_flex_tdoa_request_subslot_us",
     "runtime_flex_tdoa_request_process_us",
@@ -198,6 +218,22 @@ def clean_item(item: dict[str, Any]) -> dict[str, Any]:
         for key, value in item.items()
         if key not in {"raw", "stats"} and value is not None
     }
+
+
+def ds_range_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    tag_id = int(item.get("tag_id") or 0)
+    anchor_id = int(item.get("anchor_id") or 0)
+    slot_id = item.get("slot_id")
+    if slot_id is not None:
+        return ("slot", tag_id, anchor_id, int(slot_id))
+    return (
+        "seq",
+        tag_id,
+        anchor_id,
+        int(item.get("seq") or 0),
+        int(item.get("context_token") or 0),
+        int(item.get("round_index") or 0),
+    )
 
 
 def status_summary(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -553,7 +589,7 @@ def main() -> int:
     next_log_capture = started_monotonic
     next_position_capture = started_monotonic
     next_gps_capture = started_monotonic
-    seen_ds: set[tuple[int, int, int, int, int]] = set()
+    seen_ds: set[tuple[Any, ...]] = set()
     seen_tdoa: set[tuple[int, int, int, int, int]] = set()
     seen_anchor: set[tuple[int, int, int, int]] = set()
     seen_position: set[tuple[int, int]] = set()
@@ -648,13 +684,7 @@ def main() -> int:
                     counters["timing_log"] += captured
                     if args.protocol == "ds_twr":
                         for item in log_ranges:
-                            key = (
-                                int(item["tag_id"]),
-                                int(item["anchor_id"]),
-                                int(item["seq"]),
-                                int(item.get("context_token") or 0),
-                                int(item.get("round_index") or 0),
-                            )
+                            key = ds_range_key(item)
                             if key in seen_ds:
                                 continue
                             seen_ds.add(key)
@@ -758,13 +788,7 @@ def main() -> int:
                     event_time = received_at(item, captured_at)
                     if event_time + 0.05 < started_at:
                         continue
-                    key = (
-                        int(item.get("tag_id") or 0),
-                        int(item.get("anchor_id") or 0),
-                        int(item.get("seq") or 0),
-                        int(item.get("context_token") or 0),
-                        int(item.get("round_index") or 0),
-                    )
+                    key = ds_range_key(item)
                     if key in seen_ds:
                         continue
                     seen_ds.add(key)
@@ -900,13 +924,7 @@ def main() -> int:
                 counters["timing_log"] += captured
                 if args.protocol == "ds_twr":
                     for item in log_ranges:
-                        key = (
-                            int(item["tag_id"]),
-                            int(item["anchor_id"]),
-                            int(item["seq"]),
-                            int(item.get("context_token") or 0),
-                            int(item.get("round_index") or 0),
-                        )
+                        key = ds_range_key(item)
                         if key in seen_ds:
                             continue
                         seen_ds.add(key)

@@ -45,6 +45,20 @@ struct uwb_passive_ds_pipeline_stats {
     struct uwb_passive_ds_stage_stats rx_rearm;
 };
 
+#define UWB_NATIVE_DS_PIPELINE_MAX_ANCHORS 10U
+
+struct uwb_native_ds_tag_anchor_stats {
+    uint8_t anchor_id;
+    uint32_t attempt_count;
+    uint32_t poll_tx_error_count;
+    uint32_t response_timeout_count;
+    uint32_t response_rx_error_count;
+    uint32_t final_tx_error_count;
+    uint32_t result_timeout_count;
+    uint32_t result_rx_error_count;
+    uint32_t completed_range_count;
+};
+
 struct uwb_native_ds_pipeline_stats {
     uint32_t poll_tx_count;
     uint32_t poll_rx_count;
@@ -56,11 +70,38 @@ struct uwb_native_ds_pipeline_stats {
     uint32_t result_rx_count;
     uint32_t completed_range_count;
     uint32_t rx_timeout_count;
+    uint32_t poll_tx_error_count;
+    uint32_t response_timeout_count;
+    uint32_t response_rx_error_count;
+    uint32_t response_tx_error_count;
+    uint32_t final_timeout_count;
+    uint32_t final_rx_error_count;
+    uint32_t final_tx_error_count;
+    uint32_t result_timeout_count;
+    uint32_t result_rx_error_count;
+    uint32_t result_tx_error_count;
     uint32_t invalid_frame_count;
+    uint32_t crc_error_count;
     uint32_t delayed_tx_error_count;
     uint32_t rejected_range_count;
     uint32_t slot_overrun_count;
+    uint32_t recovered_rx_error_count;
+    uint32_t complete_frame_count;
+    uint32_t incomplete_frame_count;
+    uint32_t last_frame_missing_anchor_mask;
+    uint32_t rx_phy_error_count;
+    uint32_t rx_frame_sync_loss_count;
+    uint32_t rx_phr_error_count;
+    uint32_t rx_fcs_error_count;
+    uint32_t rx_overrun_count;
+    uint32_t rx_cia_error_count;
+    uint32_t rx_filter_rejection_count;
+    uint32_t rx_cp_error_count;
+    uint32_t rx_timestamp_cia_invalid_count;
     int32_t last_distance_mm;
+    uint8_t tag_anchor_count;
+    struct uwb_native_ds_tag_anchor_stats
+        tag_anchors[UWB_NATIVE_DS_PIPELINE_MAX_ANCHORS];
 };
 
 esp_err_t uwb_dw3000_start(void);

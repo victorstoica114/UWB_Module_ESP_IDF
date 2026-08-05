@@ -44,6 +44,17 @@ static void codec_round_trip(enum uwb_native_ds_message_type type)
 
     assert(!uwb_native_ds_protocol_decode(payload, payload_len - 1U,
                                           &decoded));
+    for (size_t index = 0U; index < payload_len; ++index) {
+        payload[index] ^= 0x01U;
+        if (index >= 6U) {
+            assert(uwb_native_ds_protocol_decode_ex(
+                       payload, payload_len, &decoded) ==
+                   UWB_NATIVE_DS_DECODE_CRC_ERROR);
+        }
+        assert(!uwb_native_ds_protocol_decode(payload, payload_len,
+                                              &decoded));
+        payload[index] ^= 0x01U;
+    }
     payload[4]++;
     assert(!uwb_native_ds_protocol_decode(payload, payload_len, &decoded));
 }
