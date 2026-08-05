@@ -36,6 +36,7 @@ enum {
      * fully transitioned.  Keep startup configuration deterministic; this
      * delay is paid once and does not affect the 8 Hz moving-base stream. */
     GPS_MB_CONFIG_STEP_DELAY_MS = 5000,
+    GPS_POSITION_UPDATE_RATE_HZ = 8,
 };
 
 typedef struct {
@@ -56,6 +57,7 @@ static uint32_t s_last_downlink_ms;
 static uint32_t s_uplink_sequence;
 static uint32_t s_last_downlink_sequence;
 static uint8_t s_config_step;
+static bool s_receiver_config_pending;
 static skytraq_stream_parser_t s_binary_parser;
 
 static esp_err_t send_datagram(uint8_t kind, const uint8_t *payload,
@@ -247,11 +249,11 @@ static esp_err_t configure_rtk_role(void)
     return send_skytraq_payload(payload, sizeof(payload));
 }
 
-static esp_err_t configure_advanced_moving_base_rate(void)
+static esp_err_t configure_position_update_rate(void)
 {
     const uint8_t payload[3] = {
         0x0E, /* Configure system position update rate */
-        8,    /* 8 Hz: PX1105R Advanced Moving Base maximum */
+        GPS_POSITION_UPDATE_RATE_HZ,
         0,    /* SRAM only */
     };
     return send_skytraq_payload(payload, sizeof(payload));
@@ -631,6 +633,8 @@ esp_err_t gps_moving_base_start(uart_port_t primary_uart, uint8_t module_id)
     s_primary_uart = primary_uart;
     s_module_id = module_id;
     s_snapshot.role = role_for_module(module_id);
+    s_started_ms = ticks_to_ms();
+    s_receiver_config_pending = true;
     if (s_snapshot.role == GPS_MB_ROLE_NONE) {
         /* Software identity is useful on every physical module, including
          * anchors that do not participate in the moving-base transport.  The
@@ -657,7 +661,6 @@ esp_err_t gps_moving_base_start(uart_port_t primary_uart, uint8_t module_id)
     }
 
     s_snapshot.active = true;
-    s_started_ms = ticks_to_ms();
     err = gps_ntrip_client_start(s_module_id, ntrip_write_corrections, NULL);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "NTRIP client start failed: %s", esp_err_to_name(err));
@@ -691,6 +694,7 @@ void gps_moving_base_stop(void)
     s_uplink_sequence = 0;
     s_last_downlink_sequence = 0;
     s_config_step = 0;
+    s_receiver_config_pending = false;
 }
 
 void gps_moving_base_set_gga(const char *sentence)
@@ -728,7 +732,7 @@ void gps_moving_base_process_primary_bytes(const uint8_t *data, size_t length)
 
 static void configure_receiver_if_due(uint32_t now_ms)
 {
-    if (!s_snapshot.active || s_snapshot.receiver_config_sent ||
+    if (!s_receiver_config_pending || s_snapshot.receiver_config_sent ||
         (uint32_t)(now_ms - s_started_ms) < GPS_MB_CONFIG_START_DELAY_MS) {
         return;
     }
@@ -748,6 +752,8 @@ static void configure_receiver_if_due(uint32_t now_ms)
         } else if (s_config_step == 1) {
             err = configure_rtk_role();
         } else if (s_config_step == 2) {
+            err = configure_position_update_rate();
+        } else if (s_config_step == 3) {
             err = configure_local_base_rtcm();
         } else {
             err = query_rtk_role();
@@ -758,7 +764,7 @@ static void configure_receiver_if_due(uint32_t now_ms)
         if (s_config_step == 0) {
             err = query_software_version();
         } else if (s_config_step == 1) {
-            err = configure_advanced_moving_base_rate();
+            err = configure_position_update_rate();
         } else if (s_config_step == 2) {
             /* The extended raw stream is an RTK-base output.  Enter the
              * final Advanced Moving Base role before configuring it. */
@@ -780,6 +786,8 @@ static void configure_receiver_if_due(uint32_t now_ms)
             err = query_software_version();
         } else if (s_config_step == 1) {
             err = configure_rtk_role();
+        } else if (s_config_step == 2) {
+            err = configure_position_update_rate();
         } else {
             err = query_rtk_role();
             final_step = true;
@@ -790,17 +798,23 @@ static void configure_receiver_if_due(uint32_t now_ms)
             err = query_software_version();
         } else if (s_config_step == 1) {
             err = configure_rtk_role();
+        } else if (s_config_step == 2) {
+            err = configure_position_update_rate();
         } else {
             err = query_rtk_role();
             final_step = true;
         }
         break;
     case GPS_MB_ROLE_NONE:
+        err = configure_position_update_rate();
+        final_step = true;
+        break;
     default:
         return;
     }
     if (final_step) {
         s_snapshot.receiver_config_sent = err == ESP_OK;
+        s_receiver_config_pending = err != ESP_OK;
     }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Receiver configuration step %u failed: %s",
@@ -811,11 +825,11 @@ static void configure_receiver_if_due(uint32_t now_ms)
 
 void gps_moving_base_poll(void)
 {
+    const uint32_t now_ms = ticks_to_ms();
+    configure_receiver_if_due(now_ms);
     if (!s_snapshot.active) {
         return;
     }
-    const uint32_t now_ms = ticks_to_ms();
-    configure_receiver_if_due(now_ms);
     receive_datagrams();
     if (s_last_heartbeat_ms == 0 ||
         (uint32_t)(now_ms - s_last_heartbeat_ms) >=

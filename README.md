@@ -2168,6 +2168,12 @@ out over UWB-Lab to modules 2 through 5, which inject them into their own RXD2
 inputs. Coordinates are still calculated independently by each PX1105R; only
 the correction stream is shared.
 
+Every PX1105R is explicitly configured for an `8 Hz` position update rate
+after GPS startup. The SkyTraq command uses the SRAM-only option, so firmware
+normalizes receivers that retained different historical backup-SRAM settings
+without adding GNSS flash writes. The same rate is compatible with both normal
+RTK rover operation and the optional Advanced Moving Base topology.
+
 The UWB-Lab hotspot forwards client internet traffic through the non-VPN Wi-Fi
 uplink using the version-controlled `tools/uwb-hotspot` service script. Its
 policy route matches packets arriving on the AP interface, rather than every
