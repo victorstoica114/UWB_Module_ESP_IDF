@@ -1596,7 +1596,8 @@ bool wireless_telemetry_service_submit_native_ds_geometry(
                 .anchor_id = anchor_id,
                 .anchor_count = anchor_count,
                 .tag_id = app_identity_get_module_id(),
-                .flags = 1U,
+                /* Native DS positions are published in fixed RTK ENU. */
+                .flags = 0U,
             },
         },
     };

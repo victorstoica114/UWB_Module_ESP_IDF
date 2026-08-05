@@ -77,6 +77,10 @@ typedef struct {
     uint32_t ranging_resp_delay_ms;
     uint32_t ranging_final_delay_ms;
     uint32_t ranging_auto_rx_delay_uus;
+    bool native_ds_calibration_enabled;
+    uint32_t native_ds_calibration_generation;
+    /* Measured range minus RTK truth, subtracted before positioning. */
+    int32_t native_ds_range_bias_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS];
     uint8_t passive_ds_schedule;
     uint32_t passive_ds_slot_ms;
     uint32_t passive_ds_round_gap_ms;
@@ -134,6 +138,8 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config);
 esp_err_t app_runtime_config_clear(void);
 void app_runtime_config_defaults(app_runtime_config_t *config);
 void app_runtime_config_reset_flex_tdoa(app_runtime_config_t *config);
+void app_runtime_config_reset_native_ds_calibration(
+    app_runtime_config_t *config);
 void app_runtime_config_reset_passive_ds_calibration(
     app_runtime_config_t *config);
 bool app_runtime_config_validate(const app_runtime_config_t *config);

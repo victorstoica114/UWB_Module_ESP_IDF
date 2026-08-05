@@ -2436,10 +2436,10 @@ static bool uwb_dw3000_payload_is_flextdoa_localization(
 static bool uwb_dw3000_payload_is_native_ds_frame(const uint8_t *payload,
                                                   size_t payload_len)
 {
-    return payload != NULL && payload_len >= 10U &&
+    return payload != NULL && payload_len >= 18U &&
            payload[0] == 'N' && payload[1] == 'D' &&
-           payload[2] == 'S' && payload[3] == '2' && payload[4] == 2U &&
-           payload[5] >= 1U && payload[5] <= 3U;
+           payload[2] == 'S' && payload[3] == '4' && payload[4] == 1U &&
+           payload[5] >= 1U && payload[5] <= 4U;
 }
 
 static bool uwb_dw3000_should_capture_rx_diagnostics(const uint8_t *payload,
@@ -9998,34 +9998,6 @@ static void native_ds_set_ready(void *context)
     s_status = UWB_DW3000_STATUS_READY;
 }
 
-static void native_ds_publish_range(
-    void *context, uint8_t initiator_id, uint8_t responder_id,
-    uint16_t frame_id, double distance_m)
-{
-    (void)context;
-    const int32_t distance_mm = uwb_distance_meters_to_mm(distance_m);
-    const uint8_t tag_id = app_runtime_config_get()->tag_id;
-    if (initiator_id == tag_id) {
-        ESP_LOGI(TAG,
-                 "UWB_RANGING result tag=%u anchor=%u frame=%u "
-                 "distance=%.3f m %.1f cm",
-                 (unsigned)initiator_id, (unsigned)responder_id,
-                 (unsigned)frame_id, distance_m, distance_m * 100.0);
-        (void)wireless_telemetry_service_submit_native_ds_tag_range(
-            initiator_id, responder_id, frame_id, (uint32_t)frame_id,
-            distance_mm, distance_mm);
-        return;
-    }
-    ESP_LOGI(TAG,
-             "NATIVE_DS anchor result pair=%u-%u frame=%u "
-             "distance=%.3f m %.1f cm",
-             (unsigned)initiator_id, (unsigned)responder_id,
-             (unsigned)frame_id, distance_m, distance_m * 100.0);
-    (void)wireless_telemetry_service_submit_native_ds_anchor_range(
-        initiator_id, responder_id, frame_id, (uint32_t)frame_id,
-        distance_mm, distance_mm);
-}
-
 static void uwb_dw3000_ranging_loop(void)
 {
     uint8_t anchor_ids[UWB_NATIVE_DS_MAX_ANCHORS] = {0};
@@ -10049,8 +10021,21 @@ static void uwb_dw3000_ranging_loop(void)
         .final_delay_ms = runtime->ranging_final_delay_ms,
         .auto_rx_delay_uus = runtime->ranging_auto_rx_delay_uus,
         .maximum_distance_m = APP_UWB_RANGING_MAX_DISTANCE_M,
+        .fixed_geometry = runtime->flex_tdoa_geometry_fixed,
+        .geometry_version = runtime->flex_tdoa_geometry_generation,
+        .range_calibration_enabled =
+            runtime->native_ds_calibration_enabled,
+        .range_calibration_generation =
+            runtime->native_ds_calibration_generation,
     };
     memcpy(config.anchor_ids, anchor_ids, anchor_count);
+    memcpy(config.anchor_x_mm, runtime->flex_tdoa_anchor_x_mm,
+           anchor_count * sizeof(config.anchor_x_mm[0]));
+    memcpy(config.anchor_y_mm, runtime->flex_tdoa_anchor_y_mm,
+           anchor_count * sizeof(config.anchor_y_mm[0]));
+    memcpy(config.anchor_range_bias_mm,
+           runtime->native_ds_range_bias_mm,
+           anchor_count * sizeof(config.anchor_range_bias_mm[0]));
 
     const struct uwb_native_ds_radio_ops radio = {
         .send_immediate_expect_rx = native_ds_send_immediate_expect_rx,
@@ -10063,7 +10048,6 @@ static void uwb_dw3000_ranging_loop(void)
         .delay_ms = native_ds_delay_ms,
         .stop_requested = native_ds_stop_requested,
         .set_ready = native_ds_set_ready,
-        .publish_range = native_ds_publish_range,
         .consume_report = NULL,
         .context = NULL,
     };
@@ -10071,13 +10055,16 @@ static void uwb_dw3000_ranging_loop(void)
     ESP_LOGI(TAG,
              "Native DS-TWR clean runtime: source=%u tag=%u anchors=%u "
              "slot=%lu ms gap=%lu ms timeout=%lu ms resp=%lu ms "
-             "final=%lu ms; no clock correction",
+             "final=%lu ms range_cal=%s generation=%lu; "
+             "no clock correction",
              (unsigned)config.source_id, (unsigned)config.tag_id,
              (unsigned)config.anchor_count, (unsigned long)config.slot_ms,
              (unsigned long)config.round_gap_ms,
              (unsigned long)config.rx_timeout_ms,
              (unsigned long)config.response_delay_ms,
-             (unsigned long)config.final_delay_ms);
+             (unsigned long)config.final_delay_ms,
+             config.range_calibration_enabled ? "on" : "off",
+             (unsigned long)config.range_calibration_generation);
     const esp_err_t err = uwb_native_ds_runtime_run(&config, &radio);
     if (err != ESP_OK && !uwb_dw3000_runtime_switch_pending()) {
         s_status = UWB_DW3000_STATUS_FAILED;

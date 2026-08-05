@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import pathlib
 import re
 import sys
@@ -561,7 +562,7 @@ def main() -> int:
         (
             log_path.open("w", encoding="utf-8", buffering=1)
             if log_path is not None
-            else open("/dev/null", "w", encoding="utf-8")
+            else open(os.devnull, "w", encoding="utf-8")
         ) as log_handle,
     ):
         while time.monotonic() < deadline:

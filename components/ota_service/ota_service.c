@@ -125,6 +125,7 @@ typedef struct {
     char runtime_flex_anchor_x_json[128];
     char runtime_flex_anchor_y_json[128];
     char runtime_flex_anchor_correction_json[128];
+    char runtime_native_ds_range_bias_json[128];
     char runtime_passive_ds_anchor_bias_json[128];
     char runtime_passive_ds_range_bias_json[512];
     struct uwb_passive_ds_pipeline_stats passive_ds_pipeline_stats;
@@ -785,6 +786,7 @@ static void format_native_ds_pipeline_stats_json(
         "{\"poll_tx\":%lu,\"poll_rx\":%lu,"
         "\"response_tx\":%lu,\"response_rx\":%lu,"
         "\"final_tx\":%lu,\"final_rx\":%lu,"
+        "\"result_tx\":%lu,\"result_rx\":%lu,"
         "\"completed_ranges\":%lu,\"rx_timeouts\":%lu,"
         "\"invalid_frames\":%lu,\"delayed_tx_errors\":%lu,"
         "\"rejected_ranges\":%lu,\"slot_overruns\":%lu,"
@@ -795,6 +797,8 @@ static void format_native_ds_pipeline_stats_json(
         (unsigned long)stats->response_rx_count,
         (unsigned long)stats->final_tx_count,
         (unsigned long)stats->final_rx_count,
+        (unsigned long)stats->result_tx_count,
+        (unsigned long)stats->result_rx_count,
         (unsigned long)stats->completed_range_count,
         (unsigned long)stats->rx_timeout_count,
         (unsigned long)stats->invalid_frame_count,
@@ -1226,6 +1230,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #define runtime_flex_anchor_y_json (ctx->runtime_flex_anchor_y_json)
 #define runtime_flex_anchor_correction_json \
     (ctx->runtime_flex_anchor_correction_json)
+#define runtime_native_ds_range_bias_json \
+    (ctx->runtime_native_ds_range_bias_json)
 #define runtime_passive_ds_anchor_bias_json \
     (ctx->runtime_passive_ds_anchor_bias_json)
 #define runtime_passive_ds_range_bias_json \
@@ -1290,6 +1296,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                           runtime_config->anchor_count,
                           runtime_flex_anchor_correction_json,
                           sizeof(runtime_flex_anchor_correction_json));
+    format_i32_array_json(runtime_config->native_ds_range_bias_mm,
+                          runtime_config->anchor_count,
+                          runtime_native_ds_range_bias_json,
+                          sizeof(runtime_native_ds_range_bias_json));
     format_i32_array_json(runtime_config->passive_ds_anchor_bias_mm,
                           runtime_config->anchor_count,
                           runtime_passive_ds_anchor_bias_json,
@@ -1387,6 +1397,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"runtime_ranging_resp_delay_ms\":%lu,"
         "\"runtime_ranging_final_delay_ms\":%lu,"
         "\"runtime_ranging_auto_rx_delay_uus\":%lu,"
+        "\"runtime_native_ds_calibration_enabled\":%s,"
+        "\"runtime_native_ds_calibration_generation\":%lu,"
+        "\"runtime_native_ds_range_bias_mm\":%s,"
         "\"native_ds_pipeline_stats\":%s,"
         "\"runtime_passive_ds_schedule\":%u,"
         "\"runtime_passive_ds_slot_ms\":%lu,"
@@ -1958,6 +1971,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)runtime_config->ranging_resp_delay_ms,
         (unsigned long)runtime_config->ranging_final_delay_ms,
         (unsigned long)runtime_config->ranging_auto_rx_delay_uus,
+        runtime_config->native_ds_calibration_enabled ? "true" : "false",
+        (unsigned long)runtime_config->native_ds_calibration_generation,
+        runtime_native_ds_range_bias_json,
         native_ds_pipeline_stats_json,
         (unsigned)runtime_config->passive_ds_schedule,
         (unsigned long)runtime_config->passive_ds_slot_ms,
@@ -2498,6 +2514,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 #undef runtime_flex_anchor_x_json
 #undef runtime_flex_anchor_y_json
 #undef runtime_flex_anchor_correction_json
+#undef runtime_native_ds_range_bias_json
 #undef runtime_passive_ds_anchor_bias_json
 #undef runtime_passive_ds_range_bias_json
 #undef passive_ds_pipeline_stats
@@ -3913,6 +3930,48 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
             return httpd_resp_send_err(
                 req, HTTPD_400_BAD_REQUEST,
                 "Invalid FlexTDOA anchor correction list");
+        }
+
+        const bool native_ds_calibration_clear =
+            ota_query_option_enabled(
+                query, "native_ds_calibration_clear");
+        char native_ds_range_bias_text[256] = {0};
+        const esp_err_t native_ds_range_bias_err =
+            httpd_query_key_value(
+                query, "native_ds_range_bias_mm",
+                native_ds_range_bias_text,
+                sizeof(native_ds_range_bias_text));
+        if (native_ds_range_bias_err == ESP_OK) {
+            int32_t range_bias[APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+            uint8_t range_bias_count = 0;
+            if (native_ds_calibration_clear ||
+                !ota_parse_i32_list(
+                    native_ds_range_bias_text, range_bias,
+                    APP_RUNTIME_CONFIG_MAX_ANCHORS,
+                    &range_bias_count) ||
+                range_bias_count != config.anchor_count) {
+                return httpd_resp_send_err(
+                    req, HTTPD_400_BAD_REQUEST,
+                    "Invalid Native DS range bias list");
+            }
+            memset(config.native_ds_range_bias_mm, 0,
+                   sizeof(config.native_ds_range_bias_mm));
+            memcpy(config.native_ds_range_bias_mm, range_bias,
+                   (size_t)range_bias_count * sizeof(range_bias[0]));
+            config.native_ds_calibration_enabled = true;
+            config.native_ds_calibration_generation =
+                before_config.native_ds_calibration_generation ==
+                        UINT32_MAX
+                    ? 1U
+                    : before_config.native_ds_calibration_generation + 1U;
+            changed = true;
+        } else if (native_ds_range_bias_err != ESP_ERR_NOT_FOUND) {
+            return httpd_resp_send_err(
+                req, HTTPD_400_BAD_REQUEST,
+                "Invalid Native DS range bias list");
+        } else if (native_ds_calibration_clear) {
+            app_runtime_config_reset_native_ds_calibration(&config);
+            changed = true;
         }
 
         const bool passive_ds_calibration_clear =

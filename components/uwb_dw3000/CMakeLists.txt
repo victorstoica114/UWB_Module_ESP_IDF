@@ -1,6 +1,7 @@
 idf_component_register(SRCS "uwb_dw3000.c" "uwb_anchor_range_cache.c"
                             "uwb_flex_tdoa_runtime.c"
                             "uwb_native_ds_twr.c"
+                            "uwb_native_ds_protocol.c"
                             "uwb_native_ds_runtime.c"
                             "uwb_native_ds_position_solver.c"
                             "uwb_passive_ds_runtime.c"

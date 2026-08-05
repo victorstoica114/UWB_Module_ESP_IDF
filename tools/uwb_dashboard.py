@@ -336,6 +336,8 @@ def runtime_config_matches_status(
     for key, field in (
         ("flex_tdoa_anchor_correction_mm",
          "runtime_flex_tdoa_anchor_correction_mm"),
+        ("native_ds_range_bias_mm",
+         "runtime_native_ds_range_bias_mm"),
         ("passive_ds_anchor_bias_mm",
          "runtime_passive_ds_anchor_bias_mm"),
         ("passive_ds_range_bias_mm",
@@ -360,6 +362,11 @@ def runtime_config_matches_status(
 
     if "passive_ds_calibration_clear" in params:
         if bool(status.get("runtime_passive_ds_calibration_enabled")):
+            return False
+        checked += 1
+
+    if "native_ds_calibration_clear" in params:
+        if bool(status.get("runtime_native_ds_calibration_enabled")):
             return False
         checked += 1
 
@@ -1426,6 +1433,7 @@ class DashboardState:
             anchor_id=anchor_id,
             frame_id=frame_id,
             distance_m=distance_m,
+            raw_distance_m=None,
             item=item,
             raw_message=raw_message,
         )
@@ -1438,6 +1446,7 @@ class DashboardState:
             anchor_id = int(item["responder_id"])
             frame_id = int(item["seq"])
             distance_m = float(item["distance_m"])
+            raw_distance_m = float(item.get("raw_distance_m", distance_m))
         except (KeyError, TypeError, ValueError):
             return
         self.store_native_ds_range_locked(
@@ -1445,6 +1454,7 @@ class DashboardState:
             anchor_id=anchor_id,
             frame_id=frame_id,
             distance_m=distance_m,
+            raw_distance_m=raw_distance_m,
             item=item,
             raw_message="binary native DS-TWR telemetry",
         )
@@ -1456,6 +1466,7 @@ class DashboardState:
         anchor_id: int,
         frame_id: int,
         distance_m: float,
+        raw_distance_m: float | None,
         item: dict[str, Any],
         raw_message: str,
     ) -> None:
@@ -1483,6 +1494,9 @@ class DashboardState:
             "tag_id": tag_id,
             "anchor_id": anchor_id,
             "distance_m": distance_m,
+            "raw_distance_m": (
+                distance_m if raw_distance_m is None else raw_distance_m
+            ),
             "frame_id": frame_id,
             "seq": frame_id,
             "received_at": now,
@@ -4444,7 +4458,7 @@ tr.status-stale td { color: #4f3b1d; }
           <div class="flex-timing-head">
             <div>
               <h2>Native DS-TWR Protocol Timing</h2>
-              <div class="muted">Live POLL → RESP → FINAL frame structure, read from the active modules.</div>
+              <div class="muted">Live POLL → RESP → FINAL → RESULT frame structure, read from the active modules.</div>
             </div>
             <div class="flex-timing-select">
               <label for="dsTimingSlotSelect">Inspect exchange</label>
@@ -4794,9 +4808,31 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p id="rangingProfileNote" class="muted profile-note">Each slot contains exactly POLL, RESP and FINAL. A complete frame ranges the tag to every configured anchor, then applies the frame gap.</p>
+          <p id="rangingProfileNote" class="muted profile-note">Each slot contains POLL, RESP, FINAL and one one-shot RESULT. A complete frame ranges the tag to every configured anchor, then applies the frame gap.</p>
           <div id="rangingActiveProfile" class="profile-validation">Waiting for live Native DS-TWR timing...</div>
           <div id="rangingProfileGrid" class="profile-grid"></div>
+          <div class="profile-card" style="margin-top:12px">
+            <h3>Native DS-TWR range calibration</h3>
+            <p class="muted">Static per-anchor range bias, ordered like the configured anchor IDs. Each value is measured range minus RTK truth in millimetres and is subtracted before the raw independent-frame solver. This is a hardware calibration, not a temporal filter.</p>
+            <div class="form-grid">
+              <label for="nativeDsCalibrationTargets">Targets</label>
+              <select id="nativeDsCalibrationTargets">
+                <option value="all" selected>all modules</option>
+                <option value="1">module 1</option>
+                <option value="2">module 2</option>
+                <option value="3">module 3</option>
+                <option value="4">module 4</option>
+                <option value="5">module 5</option>
+              </select>
+              <label for="nativeDsRangeBiasMm">Range bias mm</label>
+              <input id="nativeDsRangeBiasMm" value="-49,60,13,-54">
+            </div>
+            <div id="nativeDsCalibrationStatus" class="profile-summary">calibration status unavailable</div>
+            <div class="form-actions">
+              <button id="applyNativeDsCalibration" class="primary">Apply Calibration</button>
+              <button id="clearNativeDsCalibration">Clear Calibration</button>
+            </div>
+          </div>
           <div class="form-actions">
             <button id="resetAllRangingProfiles">Reset All Profile Defaults</button>
           </div>
@@ -4883,7 +4919,7 @@ tr.status-stale td { color: #4f3b1d; }
                 <input id="uwbRangingAutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
               <div class="param-legend">
-                <div><b>Native exchange</b><span>Position ranging transmits only POLL, RESP and FINAL. It does not use REPORT, REPORT2 or RANGING_CMD.</span></div>
+                <div><b>Native exchange</b><span>Position ranging uses POLL, RESP, FINAL and one one-shot RESULT carrying the raw range. Session and frame IDs prevent stale reports.</span></div>
                 <div><b>Frame</b><span>For N anchors, frame duration is N × Slot + Frame gap.</span></div>
               </div>
             </div>
@@ -5166,27 +5202,27 @@ const rangingProfileFields = [
 const rangingProfileDefaults = {
   reference100: {
     prefix: "profileReference100",
-    label: "100 ms Slot Precision Reference",
-    description: "Validated Native DS-TWR and antenna-delay calibration reference. Each anchor has a 100 ms exchange slot; four anchors plus the 10 ms guard time produce a 410 ms complete position frame.",
+    label: "100 ms RTK-Validated Baseline",
+    description: "Field-validated four-packet Native DS-TWR baseline. Each anchor has a 100 ms exchange slot; four anchors plus the 10 ms frame gap produce a 410 ms complete position frame.",
     validationClass: "good",
-    validationText: "validated calibrated reference · 2026-07-31",
+    validationText: "channel 9 · raw 1.45 cm RTK RMSE · no position filter",
     buttonLabel: "Apply 100 ms Reference",
     dsPositionMaxAgeSec: 0.5,
     slotMs: 100,
     roundGapMs: 10,
     dsRxSliceMs: 100,
-    timeoutMs: 90,
+    timeoutMs: 30,
     respDelayMs: 20,
     finalDelayMs: 20,
     autoRxDelayUus: 500,
   },
   frame64: {
     prefix: "profileFrame64",
-    label: "64 ms Rejected Timing Interaction",
-    description: "Retained as a diagnostic profile. On the current clean runtime its 15 ms slots interact poorly with live geometry traffic and produced tag and anchor-range spikes.",
-    validationClass: "bad",
-    validationText: "rejected · 3 tag spikes + 10 geometry spikes / 180 s",
-    buttonLabel: "Apply 64 ms Diagnostic",
+    label: "64 ms Four-Packet Baseline",
+    description: "Four 15 ms tag-anchor slots plus a 4 ms frame gap. The hidden geometry traffic that invalidated the old result no longer exists.",
+    validationClass: "warn",
+    validationText: "new four-packet runtime · field revalidation required",
+    buttonLabel: "Apply 64 ms Baseline",
     dsPositionMaxAgeSec: 0.2,
     slotMs: 15,
     roundGapMs: 4,
@@ -5198,11 +5234,11 @@ const rangingProfileDefaults = {
   },
   frame60: {
     prefix: "profileFrame60",
-    label: "60 ms Validated Fast Profile",
-    description: "Fastest recommended Native DS-TWR profile. The current calibrated runtime preserved reference precision and produced zero tag-ranging spikes during a 180 s validation.",
-    validationClass: "good",
-    validationText: "recommended · 1.64 cm RMS · 12.21 coherent frames/s · 0 tag spikes / 180 s",
-    buttonLabel: "Apply 60 ms Fast Profile",
+    label: "60 ms Four-Packet Fast Candidate",
+    description: "Four 14 ms tag-anchor slots plus a 4 ms frame gap. This preserves the former fast timing but must be revalidated with the new one-shot RESULT exchange.",
+    validationClass: "warn",
+    validationText: "candidate · historical 1.64 cm was measured on the replaced runtime",
+    buttonLabel: "Apply 60 ms Candidate",
     dsPositionMaxAgeSec: 0.2,
     slotMs: 14,
     roundGapMs: 4,
@@ -5248,7 +5284,7 @@ function renderNativeDsActiveProfile() {
   );
   const profileLabel = match?.label || "Custom Native DS-TWR timing";
   root.textContent = consistent
-    ? `Active on ${statuses.length}/${state.statuses.length || statuses.length} modules: ${profileLabel} · slot ${live.slotMs} ms · gap ${live.roundGapMs} ms · timeout ${live.timeoutMs} ms · RESP/FINAL ${live.respDelayMs}+${live.finalDelayMs} ms.`
+    ? `Active on ${statuses.length}/${state.statuses.length || statuses.length} modules: ${profileLabel} · slot ${live.slotMs} ms · gap ${live.roundGapMs} ms · timeout ${live.timeoutMs} ms · RESP/FINAL/RESULT ${live.respDelayMs}+${live.finalDelayMs}+${live.respDelayMs} ms.`
     : `Native DS-TWR timing differs between the ${statuses.length} active modules.`;
   root.className = `profile-validation ${consistent && match ? match.validationClass : "warn"}`;
 }
@@ -7361,7 +7397,9 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
       complete: true,
       positionReady: true,
       canFix: false,
-      status: protocol === "flextdoa" ? "esp_fixed_rtk" : "esp_dynamic",
+      status: protocol === "flextdoa" || espGeometry.dynamic === false
+        ? "esp_fixed_rtk"
+        : "esp_dynamic",
       protocol,
       updates: Number(espGeometry.geometry_version || 0),
       frameId: Number(espGeometry.geometry_version || 0),
@@ -8189,12 +8227,19 @@ function renderPositionGeometryPanel(model) {
 
   const geometry = model.geometry || {};
   const fixedRtk = geometry.status === "esp_fixed_rtk";
-  if (head) {
+  const fixedNativeDs = fixedRtk &&
+    positionGeometryProtocol(model.settings.solver) === "native_ds";
+  if (head && fixedNativeDs) {
+    head.innerHTML = `<tr><th>Pair</th><th>RTK distance</th><th>survey</th><th>age</th><th>delta</th></tr>`;
+  } else if (head) {
     head.innerHTML = fixedRtk
       ? `<tr><th>Pair</th><th>live TWR</th><th>TWR robust σ (10 s)</th><th>age</th><th>Δ vs RTK</th></tr>`
       : `<tr><th>Pair</th><th>live range / stable</th><th>range robust σ</th><th>age</th><th>fit</th></tr>`;
   }
-  if (note) {
+  if (note && fixedNativeDs) {
+    note.textContent =
+      "Native DS-TWR solves directly in the fixed GPS RTK ENU geometry. Inter-anchor survey traffic is disabled in the positioning frame.";
+  } else if (note) {
     note.textContent = fixedRtk
       ? "Diagnostic only: FlexTDOA uses the fixed GPS RTK geometry, not the live inter-anchor TWR ranges shown below. Δ = live TWR − RTK distance."
       : "Live inter-anchor ranges used to maintain the protocol-specific geometry.";
@@ -8202,7 +8247,7 @@ function renderPositionGeometryPanel(model) {
   if (status) {
     if (fixedRtk) {
       status.textContent =
-        `Fixed FlexTDOA geometry · GPS RTK ENU · ` +
+        `Fixed ${positionSolverLabel(model.settings.solver)} geometry · GPS RTK ENU · ` +
         `ESP32 tag M${geometry.sourceTagId || "?"} · ` +
         `generation ${geometry.updates || 0} · ` +
         `latest ${fmtFixed(geometry.lastUpdateAgeSec, 1)} s · fit N/A`;
@@ -8299,10 +8344,18 @@ function renderPositionGeometryPanel(model) {
           Number(anchorA.x) - Number(anchorB.x),
           Number(anchorA.y) - Number(anchorB.y))
       : NaN;
+    const displayDistance = fixedNativeDs ? rtkDistance : Number(item?.distance_m);
+    const surveySigmaText = fixedNativeDs
+      ? "disabled"
+      : Number.isFinite(robustSigma)
+        ? fmtCmFromM(robustSigma, 1) + " cm"
+        : "-";
     const rtkDelta = fixedRtk && item && Number.isFinite(rtkDistance)
       ? Number(item.distance_m) - rtkDistance
       : NaN;
-    const fitCell = fixedRtk
+    const fitCell = fixedNativeDs
+      ? "-"
+      : fixedRtk
       ? Number.isFinite(rtkDelta)
         ? `${rtkDelta >= 0 ? "+" : ""}${fmtFixed(rtkDelta * 100, 1)} cm`
         : "-"
@@ -8311,8 +8364,8 @@ function renderPositionGeometryPanel(model) {
         : `${fmtFixed(residual * 100, 1)} cm`;
     return `<tr>
       <td>A${esc(a)}-A${esc(b)}<br><span class="muted">${direction}</span>${gateHtml}</td>
-      <td>${item ? fmtFixed(item.distance_m, 3) : "-"}<br><span class="muted">${Number.isFinite(accepted) ? "stable " + fmtFixed(accepted, 3) : ""}</span></td>
-      <td>${Number.isFinite(robustSigma) ? fmtCmFromM(robustSigma, 1) + " cm" : "-"}</td>
+      <td>${Number.isFinite(displayDistance) ? fmtFixed(displayDistance, 3) : "-"}<br><span class="muted">${!fixedNativeDs && Number.isFinite(accepted) ? "stable " + fmtFixed(accepted, 3) : ""}</span></td>
+      <td>${surveySigmaText}</td>
       <td class="${item && Number(item.age_sec) <= model.settings.maxAge ? "fresh" : "stale"}">${item ? fmtFixed(item.age_sec, 1) + "s" : "-"}</td>
       <td>${fitCell}</td>
     </tr>`;
@@ -11013,6 +11066,7 @@ function renderInfo(snapshot) {
   renderPosition();
   renderFlexTdoaTimingDiagram();
   renderNativeDsTwrTimingDiagram();
+  renderNativeDsCalibration();
   renderPassiveDsTimingDiagram();
   renderPassiveDsActiveProfile();
   renderPassiveDsExperimentControls();
@@ -11073,6 +11127,10 @@ function hydrateSettingsFromStatus(item) {
   setSettingIfFresh("uwbRangingRespDelayMs", item.runtime_ranging_resp_delay_ms);
   setSettingIfFresh("uwbRangingFinalDelayMs", item.runtime_ranging_final_delay_ms);
   setSettingIfFresh("uwbRangingAutoRxDelayUus", item.runtime_ranging_auto_rx_delay_uus);
+  setSettingIfFresh(
+    "nativeDsRangeBiasMm",
+    (item.runtime_native_ds_range_bias_mm || []).join(",")
+  );
   setSettingIfFresh("uwbDtInitiator", item.runtime_distance_test_initiator_id);
   setSettingIfFresh("uwbDtResponder", item.runtime_distance_test_responder_id);
   setSettingIfFresh("uwbDtIntervalMs", item.runtime_distance_test_interval_ms);
@@ -12239,7 +12297,7 @@ function rangingProfileDescription(values, solver) {
   if (solver !== "ranging") return "";
   const baseFrameMs = 4 * values.slotMs + values.roundGapMs;
   return `${fmtFixed(values.dsPositionMaxAgeSec, 1)} s distance freshness; ` +
-    `native POLL → RESP → FINAL base frame is ${fmtFixed(baseFrameMs, 0)} ms ` +
+    `native POLL → RESP → FINAL → RESULT base frame is ${fmtFixed(baseFrameMs, 0)} ms ` +
     "for four anchors. No geometry-maintenance packets are inserted.";
 }
 
@@ -12255,7 +12313,7 @@ function updateRangingSettingsProtocol() {
     ranging: {
       title: "DS-TWR Settings",
       label: "Native DS-TWR",
-      hint: "Selected in Position Setup. The clean baseline uses exactly POLL, delayed RESP and delayed FINAL for each tag-anchor range.",
+      hint: "Selected in Position Setup. The clean baseline uses POLL, delayed RESP, delayed FINAL and a one-shot delayed RESULT for each tag-anchor range.",
       note: "Use the 64 ms stable reference first, then compare the 60 ms precision-speed target. Applying a profile persists it and reboots the selected modules; FlexTDOA, Passive DS-TWR, distance-test and calibration timing remain untouched.",
     },
     passive_ds: {
@@ -12706,6 +12764,7 @@ function nativeDsPipelineDiagnosticsHtml() {
         <td>${esc(stats.poll_tx ?? 0)}/${esc(stats.poll_rx ?? 0)}</td>
         <td>${esc(stats.response_tx ?? 0)}/${esc(stats.response_rx ?? 0)}</td>
         <td>${esc(stats.final_tx ?? 0)}/${esc(stats.final_rx ?? 0)}</td>
+        <td>${esc(stats.result_tx ?? 0)}/${esc(stats.result_rx ?? 0)}</td>
         <td>${esc(stats.completed_ranges ?? 0)}</td>
         <td>${esc(stats.rx_timeouts ?? 0)}</td>
         <td>${esc(stats.invalid_frames ?? 0)}/${esc(stats.delayed_tx_errors ?? 0)}/${esc(stats.rejected_ranges ?? 0)}</td>
@@ -12721,12 +12780,12 @@ function nativeDsPipelineDiagnosticsHtml() {
   return `<div class="flex-parameter-map">
     <div class="flex-timing-label">
       <strong>Live protocol counters</strong>
-      <span>Direct counters from the clean POLL → RESP → FINAL implementation.</span>
+      <span>Direct counters from the clean POLL → RESP → FINAL → RESULT implementation.</span>
     </div>
     <div class="table-wrap"><table class="flex-parameter-table">
       <thead><tr>
         <th>Module</th><th>Role</th><th>POLL TX/RX</th>
-        <th>RESP TX/RX</th><th>FINAL TX/RX</th><th>Ranges</th>
+        <th>RESP TX/RX</th><th>FINAL TX/RX</th><th>RESULT TX/RX</th><th>Ranges</th>
         <th>RX timeout</th><th>invalid/delayed/rejected</th>
         <th>slot overrun</th><th>last m</th>
       </tr></thead><tbody>${rows}</tbody>
@@ -12769,9 +12828,9 @@ function renderNativeDsTwrTimingDiagram() {
   const frameHz = frameMs > 0 ? 1000 / frameMs : NaN;
   const exchangeHz = N * frameHz;
   const slotRemainderMs = Math.max(
-    0, config.slotMs - config.respDelayMs - config.finalDelayMs
+    0, config.slotMs - 2 * config.respDelayMs - config.finalDelayMs
   );
-  const timingOverrun = config.respDelayMs + config.finalDelayMs >
+  const timingOverrun = 2 * config.respDelayMs + config.finalDelayMs >
     config.slotMs;
 
   const frameSlots = liveFrameAnchorIds.map((anchorId, index) => {
@@ -12784,7 +12843,7 @@ function renderNativeDsTwrTimingDiagram() {
     return `<div class="${classes}">
       <b>slot[${index}]${slotFrameId === null ? "" : ` · frame ${esc(slotFrameId)}`}</b>
       <strong>T${esc(config.tagId)} ↔ A${esc(anchorId)}</strong>
-      <span>POLL → RESP → FINAL</span>
+      <span>POLL → RESP → FINAL → RESULT</span>
     </div>`;
   }).join("");
   const gapCell = config.roundGapMs > 0
@@ -12825,6 +12884,13 @@ function renderNativeDsTwrTimingDiagram() {
       duration: config.finalDelayMs,
       cls: "response",
       detail: `T${config.tagId} schedules FINAL at RESP_RX + ${fmtFixed(config.finalDelayMs, 0)} ms`,
+    },
+    {
+      key: "FINAL → RESULT",
+      short: "FINAL → RESULT",
+      duration: config.respDelayMs,
+      cls: "req",
+      detail: `A${selectedAnchorId} computes the raw range and schedules its one-shot RESULT + ${fmtFixed(config.respDelayMs, 0)} ms after FINAL_RX`,
     },
     {
       key: "Guard time",
@@ -12898,7 +12964,7 @@ function renderNativeDsTwrTimingDiagram() {
         </div>
         <div class="flex-timing-label">
           <strong>Selected exchange · T${esc(config.tagId)} ↔ A${esc(selectedAnchorId)}${frameId === null ? "" : ` · frame ${esc(frameId)}`}</strong>
-          <span>native three-packet DS-TWR</span>
+          <span>native four-packet DS-TWR with one-shot result</span>
         </div>
         <div class="flex-slot-track" style="grid-template-columns:${slotColumns}">${segmentCells}</div>
         <div class="flex-slot-axis">${slotAxis}</div>
@@ -12928,6 +12994,10 @@ function renderNativeDsTwrTimingDiagram() {
           <b>FINAL · T${esc(config.tagId)} → A${esc(selectedAnchorId)} · +${fmtFixed(config.finalDelayMs, 0)} ms</b>
           <code>carries POLL_TX, RESP_RX and programmed FINAL_TX timestamps; the anchor computes the range</code>
         </div>
+        <div class="flex-packet-row">
+          <b>RESULT · A${esc(selectedAnchorId)} → T${esc(config.tagId)} · +${fmtFixed(config.respDelayMs, 0)} ms</b>
+          <code>one-shot raw distance; session and 32-bit frame must match before the tag accepts it</code>
+        </div>
       </div>
     </div>
     ${nativeDsPipelineDiagnosticsHtml()}
@@ -12941,8 +13011,8 @@ function renderNativeDsTwrTimingDiagram() {
         <tbody>
           <tr>
             <td><span class="flex-scope fixed">DS-TWR radio</span></td>
-            <td>RESP ${fmtFixed(config.respDelayMs, 0)} ms · FINAL ${fmtFixed(config.finalDelayMs, 0)} ms · timeout ${fmtFixed(config.timeoutMs, 0)} ms · auto RX ${esc(config.autoRxDelayUus)} UUS</td>
-            <td>Defines delayed-TX targets and the receive timeout inside each POLL → RESP → FINAL exchange.</td>
+            <td>RESP ${fmtFixed(config.respDelayMs, 0)} ms · FINAL ${fmtFixed(config.finalDelayMs, 0)} ms · RESULT ${fmtFixed(config.respDelayMs, 0)} ms · timeout ${fmtFixed(config.timeoutMs, 0)} ms · auto RX ${esc(config.autoRxDelayUus)} UUS</td>
+            <td>Defines delayed-TX targets and the receive timeout inside each POLL → RESP → FINAL → RESULT exchange.</td>
           </tr>
           <tr>
             <td><span class="flex-scope host">DS-TWR scheduler</span></td>
@@ -12952,7 +13022,7 @@ function renderNativeDsTwrTimingDiagram() {
         </tbody>
       </table>
     </div>
-    <div class="flex-timing-note ${timingOverrun ? "warn" : ""}">Colored widths show delayed-TX timing budgets, not packet airtime. PROPAGATION and packet airtime are much smaller than the millisecond scale shown here. The range becomes available at the responder after FINAL; a position result is counted only after all ${N} anchors complete the same frame.${timingOverrun ? " Warning: RESP + FINAL exceeds the configured slot." : ""}</div>`;
+    <div class="flex-timing-note ${timingOverrun ? "warn" : ""}">Colored widths show delayed-TX timing budgets, not packet airtime. PROPAGATION and packet airtime are much smaller than the millisecond scale shown here. A range is accepted once at the tag after RESULT; a position is emitted only after all ${N} anchors complete the same frame.${timingOverrun ? " Warning: RESP + FINAL + RESULT exceeds the configured slot." : ""}</div>`;
 }
 
 const passiveDsProfileDefaults = {
@@ -13255,6 +13325,58 @@ async function applyPassiveDsQuickProfile(key) {
     applyPassiveDsSpeedPreset(key, "maximum");
   }
   await applyPassiveDsProfile(key);
+}
+
+function nativeDsCalibrationStatus() {
+  const candidates = state.statuses || [];
+  return candidates.find(item =>
+    statusIsFresh(item) && item.runtime_mode_name === "uwb_ranging"
+  ) || candidates.find(statusIsFresh) || candidates[0] || {};
+}
+
+function renderNativeDsCalibration() {
+  const root = document.getElementById("nativeDsCalibrationStatus");
+  if (!root) return;
+  const status = nativeDsCalibrationStatus();
+  if (!statusIsFresh(status)) {
+    root.textContent = "calibration status unavailable";
+    root.className = "profile-summary warn";
+    return;
+  }
+  const anchorIds = (status.runtime_anchor_ids || []).map(Number);
+  const rangeBias = status.runtime_native_ds_range_bias_mm || [];
+  if (!status.runtime_native_ds_calibration_enabled) {
+    root.textContent = "disabled · solver receives uncorrected raw DS ranges";
+    root.className = "profile-summary";
+    return;
+  }
+  root.textContent =
+    `enabled · generation ${status.runtime_native_ds_calibration_generation || 0} · ` +
+    `[${anchorIds.map((id, index) => `A${id}:${rangeBias[index] || 0}`).join(", ")}] mm · ` +
+    "subtracted before the independent-frame solver";
+  root.className = "profile-summary good";
+}
+
+async function applyNativeDsCalibration(clear = false) {
+  const params = clear
+    ? {native_ds_calibration_clear: "1", reboot: "1"}
+    : {
+        native_ds_range_bias_mm:
+          document.getElementById("nativeDsRangeBiasMm").value,
+        reboot: "1",
+      };
+  setToast(
+    "rangingProfileToast",
+    clear ? "clearing Native DS-TWR calibration..." : "applying Native DS-TWR calibration...",
+    "",
+    null,
+    false
+  );
+  const data = await postConfig({
+    target_modules: document.getElementById("nativeDsCalibrationTargets").value,
+    params,
+  }, "rangingProfileToast");
+  if (apiResponseOk(data)) setTimeout(fetchSnapshot, 500);
 }
 
 async function applyPassiveDsProfile(key) {
@@ -13780,11 +13902,11 @@ function profileSummaryText(values, solver, anchorCount = 4) {
   const frameHz = dsCycleMs > 0 ? 1000 / dsCycleMs : NaN;
   const warnings = [];
   if (values.timeoutMs > values.slotMs) warnings.push("timeout > slot");
-  if (values.respDelayMs + values.finalDelayMs >= values.slotMs) {
-    warnings.push("RESP + FINAL >= slot");
+  if (2 * values.respDelayMs + values.finalDelayMs >= values.slotMs) {
+    warnings.push("RESP + FINAL + RESULT >= slot");
   }
   const warnText = warnings.length ? ` · ${warnings.join(", ")}` : "";
-  return `fresh ${fmtFixed(values.dsPositionMaxAgeSec, 1)} s · POLL → delayed RESP → delayed FINAL · ${fmtFixed(values.slotMs, 0)} ms slot · ${fmtFixed(values.roundGapMs, 0)} ms gap · ${fmtFixed(dsCycleMs, 0)} ms frame · ${fmtFixed(frameHz, 2)} Hz${warnText}`;
+  return `fresh ${fmtFixed(values.dsPositionMaxAgeSec, 1)} s · POLL → delayed RESP → delayed FINAL → delayed RESULT · ${fmtFixed(values.slotMs, 0)} ms slot · ${fmtFixed(values.roundGapMs, 0)} ms gap · ${fmtFixed(dsCycleMs, 0)} ms frame · ${fmtFixed(frameHz, 2)} Hz${warnText}`;
 }
 
 function updateRangingProfileSummary(profileKey) {
@@ -13801,7 +13923,7 @@ function updateRangingProfileSummary(profileKey) {
     : "incomplete profile";
   const warn = solver === "ranging" && (
     values.timeoutMs > values.slotMs ||
-    values.respDelayMs + values.finalDelayMs >= values.slotMs
+    2 * values.respDelayMs + values.finalDelayMs >= values.slotMs
   );
   summary.className = `profile-summary ${valid && warn ? "warn" : ""}`.trim();
 }
@@ -13819,6 +13941,14 @@ async function applyRangingProfile(profileKey) {
   const visibleFields = rangingProtocolProfileFields[solver];
   if (![...visibleFields].every(key => Number.isFinite(values[key]) && values[key] > 0)) {
     setToast("rangingProfileToast", "Profile has invalid values", "bad");
+    return;
+  }
+  if (2 * values.respDelayMs + values.finalDelayMs >= values.slotMs) {
+    setToast(
+      "rangingProfileToast",
+      "Invalid timing: RESP + FINAL + RESULT must fit strictly inside the slot.",
+      "bad"
+    );
     return;
   }
   setToast("rangingProfileToast", `applying ${profile.label} to ${positionSolverLabel(solver)}...`, "", null, false);
@@ -13865,6 +13995,7 @@ function persistedSettingIds() {
     "calAutoApply", "calMinApplyDtu", "calReferenceGuardCm", "calTimeoutSec",
     ...rangingProfileIds(),
     "passiveDsProfileTargets",
+    "nativeDsCalibrationTargets", "nativeDsRangeBiasMm",
     "passiveDsCalibrationTargets",
     "passiveDsAnchorBiasMm", "passiveDsRangeBiasMm",
     ...passiveDsProfileIds(),
@@ -14277,6 +14408,12 @@ function wireSettings() {
     }
     setToast("rangingProfileToast", "all profile defaults restored locally; press Apply to write ESP NVS", "");
   });
+  document.getElementById("applyNativeDsCalibration")?.addEventListener(
+    "click", () => applyNativeDsCalibration(false)
+  );
+  document.getElementById("clearNativeDsCalibration")?.addEventListener(
+    "click", () => applyNativeDsCalibration(true)
+  );
   document.querySelectorAll(".flex-profile-card input").forEach(el => {
     const update = () => {
       const profile = el.closest(".flex-profile-card")?.dataset.flexProfile;

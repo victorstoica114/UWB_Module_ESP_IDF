@@ -15,6 +15,9 @@ struct uwb_native_ds_runtime_context {
     struct uwb_native_ds_radio_ops backend;
     struct uwb_native_ds_position_solver solver;
     bool solver_ready;
+    uint32_t position_publish_count;
+    bool range_calibration_enabled;
+    int32_t anchor_range_bias_mm[UWB_NATIVE_DS_MAX_ANCHORS];
 };
 
 static struct uwb_native_ds_runtime_context *runtime_context(void *context)
@@ -106,16 +109,6 @@ static void runtime_set_ready(void *context)
     runtime->backend.set_ready(runtime->backend.context);
 }
 
-static void runtime_publish_range(
-    void *context, uint8_t initiator_id, uint8_t responder_id,
-    uint16_t frame_id, double distance_m)
-{
-    struct uwb_native_ds_runtime_context *runtime = runtime_context(context);
-    runtime->backend.publish_range(
-        runtime->backend.context, initiator_id, responder_id, frame_id,
-        distance_m);
-}
-
 static int32_t meters_to_mm(float value_m)
 {
     const float value_mm = value_m * 1000.0f;
@@ -123,13 +116,41 @@ static int32_t meters_to_mm(float value_m)
                                      : value_mm - 0.5f);
 }
 
+static void runtime_publish_geometry(
+    const struct uwb_native_ds_position_solver *solver, int32_t fit_rms_mm)
+{
+    struct uwb_native_ds_position_output geometry = {0};
+    if (!uwb_native_ds_position_solver_geometry(solver, &geometry)) {
+        return;
+    }
+    for (size_t index = 0U; index < geometry.anchor_count; ++index) {
+        (void)wireless_telemetry_service_submit_native_ds_geometry(
+            solver->anchor_ids[index], geometry.anchor_count,
+            geometry.geometry_version,
+            meters_to_mm(geometry.anchor_x_m[index]),
+            meters_to_mm(geometry.anchor_y_m[index]), fit_rms_mm);
+    }
+}
+
 static void runtime_consume_report(
     void *context, bool tag_range, uint8_t initiator_id,
-    uint8_t responder_id, uint16_t frame_id, double distance_m)
+    uint8_t responder_id, uint32_t frame_id, double distance_m)
 {
     struct uwb_native_ds_runtime_context *runtime = runtime_context(context);
     if (runtime == NULL || !runtime->solver_ready) {
         return;
+    }
+
+    const double raw_distance_m = distance_m;
+    if (tag_range && runtime->range_calibration_enabled) {
+        for (size_t index = 0U; index < runtime->solver.anchor_count;
+             ++index) {
+            if (runtime->solver.anchor_ids[index] == responder_id) {
+                distance_m -=
+                    (double)runtime->anchor_range_bias_mm[index] / 1000.0;
+                break;
+            }
+        }
     }
 
     struct uwb_native_ds_position_output output = {0};
@@ -145,13 +166,14 @@ static void runtime_consume_report(
     }
 
     const int32_t distance_mm = meters_to_mm((float)distance_m);
+    const int32_t raw_distance_mm = meters_to_mm((float)raw_distance_m);
     if (tag_range) {
         (void)wireless_telemetry_service_submit_native_ds_tag_range(
-            initiator_id, responder_id, frame_id, (uint32_t)frame_id,
-            distance_mm, distance_mm);
+            initiator_id, responder_id, (uint16_t)frame_id, frame_id,
+            distance_mm, raw_distance_mm);
     } else {
         (void)wireless_telemetry_service_submit_native_ds_anchor_range(
-            initiator_id, responder_id, frame_id, (uint32_t)frame_id,
+            initiator_id, responder_id, (uint16_t)frame_id, frame_id,
             distance_mm, distance_mm);
     }
 
@@ -171,6 +193,10 @@ static void runtime_consume_report(
             meters_to_mm(output.y_m), meters_to_mm(output.sigma_m),
             meters_to_mm(output.rms_m), output.observation_count,
             output.anchor_count, output.geometry_version);
+        runtime->position_publish_count++;
+        if ((runtime->position_publish_count % 32U) == 0U) {
+            runtime_publish_geometry(&runtime->solver, 0);
+        }
     }
 }
 
@@ -183,8 +209,7 @@ static bool backend_valid(const struct uwb_native_ds_radio_ops *backend)
            backend->receive != NULL && backend->add_delay_ms != NULL &&
            backend->programmed_tx_timestamp != NULL &&
            backend->now_us != NULL && backend->delay_ms != NULL &&
-           backend->stop_requested != NULL && backend->set_ready != NULL &&
-           backend->publish_range != NULL;
+           backend->stop_requested != NULL && backend->set_ready != NULL;
 }
 
 esp_err_t uwb_native_ds_runtime_run(
@@ -197,15 +222,30 @@ esp_err_t uwb_native_ds_runtime_run(
 
     struct uwb_native_ds_runtime_context runtime = {
         .backend = *radio_backend,
+        .range_calibration_enabled = config->range_calibration_enabled,
     };
+    memcpy(runtime.anchor_range_bias_mm, config->anchor_range_bias_mm,
+           sizeof(runtime.anchor_range_bias_mm));
     if (config->source_id == config->tag_id) {
+        if (!config->fixed_geometry) {
+            ESP_LOGE(TAG, "Native DS-TWR requires fixed RTK geometry");
+            return ESP_ERR_INVALID_STATE;
+        }
+        float anchor_x_m[UWB_NATIVE_DS_POSITION_MAX_ANCHORS] = {0};
+        float anchor_y_m[UWB_NATIVE_DS_POSITION_MAX_ANCHORS] = {0};
+        for (size_t index = 0U; index < config->anchor_count; ++index) {
+            anchor_x_m[index] = (float)config->anchor_x_mm[index] / 1000.0f;
+            anchor_y_m[index] = (float)config->anchor_y_mm[index] / 1000.0f;
+        }
         runtime.solver_ready = uwb_native_ds_position_solver_init(
             &runtime.solver, config->tag_id, config->anchor_ids,
-            config->anchor_count);
+            anchor_x_m, anchor_y_m, config->anchor_count,
+            config->geometry_version);
         if (!runtime.solver_ready) {
             ESP_LOGE(TAG, "Native DS-TWR position solver init failed");
             return ESP_ERR_INVALID_STATE;
         }
+        runtime_publish_geometry(&runtime.solver, 0);
     }
 
     const struct uwb_native_ds_radio_ops radio = {
@@ -220,7 +260,6 @@ esp_err_t uwb_native_ds_runtime_run(
         .delay_ms = runtime_delay_ms,
         .stop_requested = runtime_stop_requested,
         .set_ready = runtime_set_ready,
-        .publish_range = runtime_publish_range,
         .consume_report = runtime_consume_report,
     };
     return uwb_native_ds_twr_run(config, &radio);

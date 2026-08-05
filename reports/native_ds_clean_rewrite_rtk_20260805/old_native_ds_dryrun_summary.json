@@ -1,0 +1,96 @@
+{
+  "alignment_age_p95_ms": 763.5424137115479,
+  "anchor_geometry_fit_rms_cm": 0.3680948278945619,
+  "bias_2d_cm": 235.12993958607046,
+  "coordinate_frame": "WGS84 ENU, median RTK Fixed M2 origin",
+  "events_file": "D:\\Documente\\UWB_ESP_IDF\\reports\\antenna_delay_rtk_channel9_20260804\\native_ds_dryrun\\data\\native_ds_rtk_ch9_dryrun.jsonl",
+  "fixed_anchor_geometry": {
+    "2": {
+      "dx_cm": 0.0,
+      "dy_cm": 0.0,
+      "error_cm": 0.0,
+      "fixed_x_m": 0.0,
+      "fixed_y_m": 0.0,
+      "rtk_samples": 63,
+      "rtk_x_m": 0.0,
+      "rtk_y_m": 0.0
+    },
+    "3": {
+      "dx_cm": 0.38985205709756166,
+      "dy_cm": -0.39059002903485407,
+      "error_cm": 0.5518561381416797,
+      "fixed_x_m": 3.844,
+      "fixed_y_m": 2.923,
+      "rtk_samples": 81,
+      "rtk_x_m": 3.8401014794290242,
+      "rtk_y_m": 2.9269059002903486
+    },
+    "4": {
+      "dx_cm": 0.47175844935694045,
+      "dy_cm": -0.020679327434436345,
+      "error_cm": 0.47221146653041535,
+      "fixed_x_m": -3.12,
+      "fixed_y_m": 3.899,
+      "rtk_samples": 81,
+      "rtk_x_m": -3.1247175844935695,
+      "rtk_y_m": 3.8992067932743444
+    },
+    "5": {
+      "dx_cm": 0.06674917489128962,
+      "dy_cm": 0.0999544426965926,
+      "error_cm": 0.12019294057245783,
+      "fixed_x_m": 1.055,
+      "fixed_y_m": 6.836,
+      "rtk_samples": 81,
+      "rtk_x_m": 1.054332508251087,
+      "rtk_y_m": 6.835000455573034
+    }
+  },
+  "max_2d_cm": 238.26121644479034,
+  "mean_dx_cm": 213.34725989995871,
+  "mean_dy_cm": -98.8384296866792,
+  "p50_2d_cm": 235.13503381944315,
+  "p95_2d_cm": 236.93787211775881,
+  "position_filter": "none",
+  "position_rate_hz": 2.2719510786649044,
+  "positions_aligned": 271,
+  "positions_captured": 271,
+  "precision_p95_cm": 2.7230777302231433,
+  "precision_rms_cm": 1.6114664572060882,
+  "range_error_vs_rtk": {
+    "2": {
+      "mean_bias_cm": -4.87995472606491,
+      "p95_abs_cm": 6.5025494578907495,
+      "rmse_cm": 4.977121522558059,
+      "samples": 291,
+      "std_cm": 0.9803485162543563
+    },
+    "3": {
+      "mean_bias_cm": 6.022238502493486,
+      "p95_abs_cm": 7.730348827910359,
+      "rmse_cm": 6.114947027834168,
+      "samples": 290,
+      "std_cm": 1.0625977927197674
+    },
+    "4": {
+      "mean_bias_cm": 1.2540104267187098,
+      "p95_abs_cm": 3.648282375404932,
+      "rmse_cm": 1.9603630285273128,
+      "samples": 290,
+      "std_cm": 1.5094162411747452
+    },
+    "5": {
+      "mean_bias_cm": -5.39119018860615,
+      "p95_abs_cm": 7.544977542941594,
+      "rmse_cm": 5.536029777181366,
+      "samples": 290,
+      "std_cm": 1.2602263662117141
+    }
+  },
+  "rmse_2d_cm": 235.13546162561667,
+  "rtk_tag_samples": 81,
+  "schema_version": 1,
+  "solution_kind": "independent_frame",
+  "solver_residual_rms_mean_cm": 8.155350553505535,
+  "span_sec": 119.28073740005493
+}

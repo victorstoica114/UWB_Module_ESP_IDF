@@ -11,12 +11,17 @@ extern "C" {
 
 #define UWB_NATIVE_DS_POSITION_MAX_ANCHORS 10U
 
+/*
+ * Native DS-TWR positions use the fixed survey frame supplied by the
+ * application (currently GPS RTK ENU).  Anchor-to-anchor ranges never move
+ * this geometry; they are retained only to report a ranging residual.
+ */
 struct uwb_native_ds_position_output {
     bool geometry_updated;
     bool position_valid;
     uint8_t tag_id;
     uint8_t anchor_count;
-    uint16_t frame_id;
+    uint32_t frame_id;
     uint32_t geometry_version;
     float anchor_x_m[UWB_NATIVE_DS_POSITION_MAX_ANCHORS];
     float anchor_y_m[UWB_NATIVE_DS_POSITION_MAX_ANCHORS];
@@ -33,39 +38,42 @@ struct uwb_native_ds_position_solver {
     uint8_t tag_id;
     uint8_t anchor_count;
     uint8_t anchor_ids[UWB_NATIVE_DS_POSITION_MAX_ANCHORS];
+    uint32_t geometry_version;
+    float anchor_x_m[UWB_NATIVE_DS_POSITION_MAX_ANCHORS];
+    float anchor_y_m[UWB_NATIVE_DS_POSITION_MAX_ANCHORS];
+
     bool pair_valid[UWB_NATIVE_DS_POSITION_MAX_ANCHORS]
                    [UWB_NATIVE_DS_POSITION_MAX_ANCHORS];
     float pair_range_m[UWB_NATIVE_DS_POSITION_MAX_ANCHORS]
                       [UWB_NATIVE_DS_POSITION_MAX_ANCHORS];
-    uint16_t pair_frame_id[UWB_NATIVE_DS_POSITION_MAX_ANCHORS]
-                          [UWB_NATIVE_DS_POSITION_MAX_ANCHORS];
     uint64_t pair_cycle_mask;
-    bool geometry_ready;
-    uint32_t geometry_version;
-    float anchor_x_m[UWB_NATIVE_DS_POSITION_MAX_ANCHORS];
-    float anchor_y_m[UWB_NATIVE_DS_POSITION_MAX_ANCHORS];
-    float geometry_fit_rms_m;
-    bool tag_range_valid[UWB_NATIVE_DS_POSITION_MAX_ANCHORS];
+
+    bool tag_frame_active;
+    bool tag_frame_emitted;
+    uint32_t tag_frame_id;
+    uint16_t tag_range_mask;
     float tag_range_m[UWB_NATIVE_DS_POSITION_MAX_ANCHORS];
-    uint16_t tag_frame_id[UWB_NATIVE_DS_POSITION_MAX_ANCHORS];
-    bool position_valid;
-    uint16_t last_position_frame_id;
-    float position_x_m;
-    float position_y_m;
 };
 
 bool uwb_native_ds_position_solver_init(
     struct uwb_native_ds_position_solver *solver, uint8_t tag_id,
-    const uint8_t *anchor_ids, size_t anchor_count);
+    const uint8_t *anchor_ids, const float *anchor_x_m,
+    const float *anchor_y_m, size_t anchor_count,
+    uint32_t geometry_version);
+
+/* Returns the immutable fixed geometry for initial/periodic telemetry. */
+bool uwb_native_ds_position_solver_geometry(
+    const struct uwb_native_ds_position_solver *solver,
+    struct uwb_native_ds_position_output *output);
 
 bool uwb_native_ds_position_solver_submit_anchor_range(
     struct uwb_native_ds_position_solver *solver, uint8_t initiator_id,
-    uint8_t responder_id, uint16_t frame_id, float distance_m,
+    uint8_t responder_id, uint32_t frame_id, float distance_m,
     struct uwb_native_ds_position_output *output);
 
 bool uwb_native_ds_position_solver_submit_tag_range(
     struct uwb_native_ds_position_solver *solver, uint8_t tag_id,
-    uint8_t anchor_id, uint16_t frame_id, float distance_m,
+    uint8_t anchor_id, uint32_t frame_id, float distance_m,
     struct uwb_native_ds_position_output *output);
 
 #ifdef __cplusplus

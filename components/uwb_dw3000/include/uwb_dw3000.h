@@ -52,6 +52,8 @@ struct uwb_native_ds_pipeline_stats {
     uint32_t response_rx_count;
     uint32_t final_tx_count;
     uint32_t final_rx_count;
+    uint32_t result_tx_count;
+    uint32_t result_rx_count;
     uint32_t completed_range_count;
     uint32_t rx_timeout_count;
     uint32_t invalid_frame_count;

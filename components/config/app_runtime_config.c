@@ -50,6 +50,9 @@ static const char *TAG = "app_runtime_config";
 #define KEY_RNG_RESP "rng_resp"
 #define KEY_RNG_FINAL "rng_final"
 #define KEY_RNG_ARX "rng_arx"
+#define KEY_NDS_CAL "nds_cal"
+#define KEY_NDS_CGEN "nds_cgen"
+#define KEY_NDS_RBIAS "nds_rbias"
 #define KEY_PDS_SCHED "pds_sched"
 #define KEY_PDS_SLOT "pds_slot"
 #define KEY_PDS_GAP "pds_gap"
@@ -261,6 +264,24 @@ static bool flex_tdoa_correction_valid(const app_runtime_config_t *config)
     return true;
 }
 
+static bool native_ds_calibration_valid(
+    const app_runtime_config_t *config)
+{
+    if (!config->native_ds_calibration_enabled) {
+        return true;
+    }
+    if (config->native_ds_calibration_generation == 0U) {
+        return false;
+    }
+    for (size_t index = 0U; index < config->anchor_count; ++index) {
+        if (config->native_ds_range_bias_mm[index] < -5000 ||
+            config->native_ds_range_bias_mm[index] > 5000) {
+            return false;
+        }
+    }
+    return true;
+}
+
 size_t app_runtime_config_anchor_pair_index(size_t first_index,
                                             size_t second_index)
 {
@@ -455,6 +476,7 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->ranging_final_delay_ms = APP_UWB_RANGING_FINAL_DELAY_MS;
     config->ranging_auto_rx_delay_uus =
         APP_UWB_RANGING_AUTO_RX_DELAY_UUS;
+    app_runtime_config_reset_native_ds_calibration(config);
     config->passive_ds_schedule = APP_UWB_PASSIVE_DS_SCHEDULE;
     config->passive_ds_slot_ms = APP_UWB_PASSIVE_DS_SLOT_MS;
     config->passive_ds_round_gap_ms = APP_UWB_PASSIVE_DS_ROUND_GAP_MS;
@@ -554,6 +576,21 @@ void app_runtime_config_reset_flex_tdoa(app_runtime_config_t *config)
             : config->flex_tdoa_geometry_generation + 1U;
 }
 
+void app_runtime_config_reset_native_ds_calibration(
+    app_runtime_config_t *config)
+{
+    if (config == NULL) {
+        return;
+    }
+    config->native_ds_calibration_enabled = false;
+    memset(config->native_ds_range_bias_mm, 0,
+           sizeof(config->native_ds_range_bias_mm));
+    config->native_ds_calibration_generation =
+        config->native_ds_calibration_generation == UINT32_MAX
+            ? 1U
+            : config->native_ds_calibration_generation + 1U;
+}
+
 void app_runtime_config_reset_passive_ds_calibration(
     app_runtime_config_t *config)
 {
@@ -591,6 +628,7 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         !ms_valid(config->ranging_resp_delay_ms) ||
         !ms_valid(config->ranging_final_delay_ms) ||
         config->ranging_auto_rx_delay_uus == 0 ||
+        !native_ds_calibration_valid(config) ||
         (config->passive_ds_schedule != APP_RUNTIME_PASSIVE_DS_FAST_STAR &&
          config->passive_ds_schedule !=
              APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING &&
@@ -746,6 +784,30 @@ static bool read_passive_ds_anchor_bias(
            read_size == compact_size;
 }
 
+static bool read_native_ds_range_bias(
+    nvs_handle_t handle, app_runtime_config_t *config)
+{
+    size_t size = 0;
+    if (config->anchor_count > APP_RUNTIME_CONFIG_MAX_ANCHORS ||
+        nvs_get_blob(handle, KEY_NDS_RBIAS, NULL, &size) != ESP_OK) {
+        return false;
+    }
+    if (size == sizeof(config->native_ds_range_bias_mm)) {
+        return read_blob_exact(handle, KEY_NDS_RBIAS,
+                               config->native_ds_range_bias_mm, size);
+    }
+    const size_t compact_size =
+        (size_t)config->anchor_count * sizeof(int32_t);
+    if (size != compact_size) {
+        return false;
+    }
+    size_t read_size = compact_size;
+    return nvs_get_blob(handle, KEY_NDS_RBIAS,
+                        config->native_ds_range_bias_mm,
+                        &read_size) == ESP_OK &&
+           read_size == compact_size;
+}
+
 static bool read_flex_tdoa_anchor_correction(
     nvs_handle_t handle, app_runtime_config_t *config)
 {
@@ -887,6 +949,11 @@ static void read_config_from_nvs(app_runtime_config_t *config)
                       &config->ranging_final_delay_ms);
     found |= read_u32(handle, KEY_RNG_ARX,
                       &config->ranging_auto_rx_delay_uus);
+    found |= read_bool(handle, KEY_NDS_CAL,
+                       &config->native_ds_calibration_enabled);
+    found |= read_u32(handle, KEY_NDS_CGEN,
+                      &config->native_ds_calibration_generation);
+    found |= read_native_ds_range_bias(handle, config);
     found |= read_u8(handle, KEY_PDS_SCHED, &config->passive_ds_schedule);
     found |= read_u32(handle, KEY_PDS_SLOT, &config->passive_ds_slot_ms);
     found |= read_u32(handle, KEY_PDS_GAP,
@@ -1138,6 +1205,13 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
                             config->ranging_final_delay_ms));
     WRITE_OR_GOTO(write_u32(handle, KEY_RNG_ARX,
                             config->ranging_auto_rx_delay_uus));
+    WRITE_OR_GOTO(write_bool(handle, KEY_NDS_CAL,
+                             config->native_ds_calibration_enabled));
+    WRITE_OR_GOTO(write_u32(handle, KEY_NDS_CGEN,
+                            config->native_ds_calibration_generation));
+    WRITE_OR_GOTO(nvs_set_blob(
+        handle, KEY_NDS_RBIAS, config->native_ds_range_bias_mm,
+        (size_t)config->anchor_count * sizeof(int32_t)));
     WRITE_OR_GOTO(write_u8(handle, KEY_PDS_SCHED,
                            config->passive_ds_schedule));
     WRITE_OR_GOTO(write_u32(handle, KEY_PDS_SLOT,
