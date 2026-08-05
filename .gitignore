@@ -1,5 +1,6 @@
 build/
 build-*/
+build_*/
 firmware_images/
 managed_components/
 sdkconfig
@@ -19,6 +20,14 @@ reference/external/
 __pycache__/
 *.pyc
 logs/
+
+# Raw field captures are large and locally reproducible. Keep curated
+# READMEs, summaries, tables, and final reports visible for versioning.
+reports/**/data/
+reports/**/*.jsonl
+reports/**/*.jsonl.xz
+reports/**/*.metadata.json
+reports/**/*.sse
 *.bak
 *.kicad_prl
 fp-info-cache
