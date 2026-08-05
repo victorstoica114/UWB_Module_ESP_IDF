@@ -39,7 +39,7 @@ struct uwb_native_ds_radio_ops {
     uint64_t (*programmed_tx_timestamp)(void *context,
                                         uint64_t due_timestamp);
     int64_t (*now_us)(void *context);
-    void (*delay_ms)(void *context, uint32_t delay_ms);
+    void (*wait_until_us)(void *context, int64_t deadline_us);
     bool (*stop_requested)(void *context);
     void (*set_ready)(void *context);
     void (*consume_report)(void *context, bool tag_range,

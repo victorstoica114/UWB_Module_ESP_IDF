@@ -640,14 +640,10 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         !ms_valid(config->passive_ds_rx_timeout_ms) ||
         !us_valid(config->passive_ds_resp_delay_us) ||
         !us_valid(config->passive_ds_final_delay_us) ||
-        ((config->passive_ds_schedule ==
-              APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS
-              ? config->passive_ds_resp_delay_us +
-                    APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US *
-                        (config->anchor_count - 2U) +
-                    config->passive_ds_final_delay_us
-              : config->passive_ds_resp_delay_us +
-                    config->passive_ds_final_delay_us) >=
+        (config->passive_ds_resp_delay_us +
+             APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US *
+                 (config->anchor_count - 2U) +
+             config->passive_ds_final_delay_us >=
          config->passive_ds_slot_ms * 1000U) ||
         config->passive_ds_auto_rx_delay_uus == 0 ||
         (config->passive_ds_pipeline_mode !=
@@ -1039,6 +1035,38 @@ esp_err_t app_runtime_config_reload(void)
     app_runtime_config_t loaded = {0};
     app_runtime_config_defaults(&loaded);
     read_config_from_nvs(&loaded);
+
+    /*
+     * Passive DS-TWR v2 has one wire schedule and one raw solve policy. Keep
+     * surveyed geometry and calibration from older NVS records, but migrate
+     * the retired schedule/pipeline/rolling selectors in RAM.
+     */
+    const bool legacy_passive_ds_profile =
+        loaded.passive_ds_schedule !=
+            APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS ||
+        loaded.passive_ds_pipeline_mode !=
+            APP_RUNTIME_PASSIVE_DS_PIPELINE_LEGACY ||
+        loaded.passive_ds_solve_mode !=
+            APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME;
+    loaded.passive_ds_schedule = APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS;
+    loaded.passive_ds_pipeline_mode = APP_RUNTIME_PASSIVE_DS_PIPELINE_LEGACY;
+    loaded.passive_ds_solve_mode = APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME;
+    if (legacy_passive_ds_profile) {
+        loaded.passive_ds_slot_ms = APP_UWB_PASSIVE_DS_SLOT_MS;
+        loaded.passive_ds_round_gap_ms =
+            APP_UWB_PASSIVE_DS_ROUND_GAP_MS;
+        loaded.passive_ds_rx_slice_ms = APP_UWB_PASSIVE_DS_RX_SLICE_MS;
+        loaded.passive_ds_rx_timeout_ms =
+            APP_UWB_PASSIVE_DS_RX_TIMEOUT_MS;
+        loaded.passive_ds_resp_delay_us =
+            APP_UWB_PASSIVE_DS_RESP_DELAY_US;
+        loaded.passive_ds_final_delay_us =
+            APP_UWB_PASSIVE_DS_FINAL_DELAY_US;
+        loaded.passive_ds_auto_rx_delay_uus =
+            APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS;
+        ESP_LOGW(TAG,
+                 "Migrated legacy Passive DS profile to PDS2 field baseline");
+    }
 
     if (!app_runtime_config_validate(&loaded)) {
         ESP_LOGE(TAG, "Invalid runtime config in NVS; using firmware defaults");

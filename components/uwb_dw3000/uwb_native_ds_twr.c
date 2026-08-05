@@ -49,6 +49,17 @@ static esp_err_t receive_matching(
         if (err != ESP_OK) {
             if (err == ESP_ERR_TIMEOUT) {
                 s_stats.rx_timeout_count++;
+            } else if (err == ESP_ERR_INVALID_RESPONSE) {
+                /*
+                 * A DW3000 PHY error can precede the expected frame in the
+                 * same receive window.  The driver has already stopped RX,
+                 * cleared the error status and marked the receiver for
+                 * re-arm.  Keep the original absolute timeout and let the
+                 * next receive call re-arm instead of discarding the whole
+                 * exchange immediately.
+                 */
+                s_stats.recovered_rx_error_count++;
+                continue;
             }
             return err;
         }
@@ -224,6 +235,7 @@ static void run_tag(const struct uwb_native_ds_config *config,
 
     while (!radio->stop_requested(radio->context)) {
         const uint32_t current_frame_id = frame_id++;
+        uint32_t completed_anchor_mask = 0U;
         if (frame_id == 0U) {
             frame_id = 1U;
         }
@@ -234,6 +246,9 @@ static void run_tag(const struct uwb_native_ds_config *config,
             const int64_t slot_started_us = radio->now_us(radio->context);
             const esp_err_t err = tag_exchange(
                 config, radio, index, session_id, current_frame_id);
+            if (err == ESP_OK) {
+                completed_anchor_mask |= 1UL << index;
+            }
             if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
                 ESP_LOGW(TAG, "tag exchange anchor=%u frame=%lu failed: %s",
                          (unsigned)config->anchor_ids[index],
@@ -244,16 +259,28 @@ static void run_tag(const struct uwb_native_ds_config *config,
                 radio->now_us(radio->context) - slot_started_us;
             const int64_t slot_us = (int64_t)config->slot_ms * 1000LL;
             if (elapsed_us < slot_us) {
-                radio->delay_ms(
-                    radio->context,
-                    (uint32_t)((slot_us - elapsed_us + 999LL) / 1000LL));
+                radio->wait_until_us(radio->context,
+                                     slot_started_us + slot_us);
             } else {
                 s_stats.slot_overrun_count++;
             }
         }
+        const uint32_t expected_anchor_mask =
+            (1UL << config->anchor_count) - 1UL;
+        s_stats.last_frame_missing_anchor_mask =
+            expected_anchor_mask & ~completed_anchor_mask;
+        if (completed_anchor_mask == expected_anchor_mask) {
+            s_stats.complete_frame_count++;
+        } else {
+            s_stats.incomplete_frame_count++;
+        }
         if (config->round_gap_ms > 0U &&
             !radio->stop_requested(radio->context)) {
-            radio->delay_ms(radio->context, config->round_gap_ms);
+            const int64_t gap_started_us =
+                radio->now_us(radio->context);
+            radio->wait_until_us(
+                radio->context,
+                gap_started_us + (int64_t)config->round_gap_ms * 1000LL);
         }
     }
 }
@@ -397,6 +424,9 @@ static void run_anchor(const struct uwb_native_ds_config *config,
         if (rx_err == ESP_ERR_TIMEOUT) {
             continue;
         }
+        if (rx_err == ESP_ERR_INVALID_RESPONSE) {
+            continue;
+        }
         if (rx_err != ESP_OK) {
             if (!radio->stop_requested(radio->context)) {
                 ESP_LOGW(TAG, "anchor receive failed: %s",
@@ -450,7 +480,7 @@ static bool config_valid(const struct uwb_native_ds_config *config,
         radio->send_delayed_expect_rx == NULL || radio->receive == NULL ||
         radio->add_delay_ms == NULL ||
         radio->programmed_tx_timestamp == NULL || radio->now_us == NULL ||
-        radio->delay_ms == NULL || radio->stop_requested == NULL ||
+        radio->wait_until_us == NULL || radio->stop_requested == NULL ||
         radio->set_ready == NULL || radio->consume_report == NULL) {
         return false;
     }
@@ -501,7 +531,9 @@ esp_err_t uwb_native_ds_twr_run(const struct uwb_native_ds_config *config,
     ESP_LOGW(TAG, "idle source id=%u is not the tag or a configured anchor",
              (unsigned)config->source_id);
     while (!radio->stop_requested(radio->context)) {
-        radio->delay_ms(radio->context, 1000U);
+        const int64_t idle_started_us = radio->now_us(radio->context);
+        radio->wait_until_us(radio->context,
+                             idle_started_us + 1000000LL);
     }
     return ESP_OK;
 }

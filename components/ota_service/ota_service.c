@@ -802,6 +802,13 @@ static void format_native_ds_pipeline_stats_json(
         "\"invalid_frames\":%lu,\"crc_errors\":%lu,"
         "\"delayed_tx_errors\":%lu,"
         "\"rejected_ranges\":%lu,\"slot_overruns\":%lu,"
+        "\"recovered_rx_errors\":%lu,"
+        "\"complete_frames\":%lu,\"incomplete_frames\":%lu,"
+        "\"last_missing_anchor_mask\":%lu,"
+        "\"rx_phy_errors\":%lu,\"rx_frame_sync_loss\":%lu,"
+        "\"rx_phr_errors\":%lu,\"rx_fcs_errors\":%lu,"
+        "\"rx_overruns\":%lu,\"rx_cia_errors\":%lu,"
+        "\"rx_filter_rejections\":%lu,\"rx_cp_errors\":%lu,"
         "\"rx_timestamp_cia_invalid\":%lu,"
         "\"last_distance_mm\":%ld,\"tag_anchor_count\":%u,"
         "\"tag_anchors\":[",
@@ -830,6 +837,18 @@ static void format_native_ds_pipeline_stats_json(
         (unsigned long)stats->delayed_tx_error_count,
         (unsigned long)stats->rejected_range_count,
         (unsigned long)stats->slot_overrun_count,
+        (unsigned long)stats->recovered_rx_error_count,
+        (unsigned long)stats->complete_frame_count,
+        (unsigned long)stats->incomplete_frame_count,
+        (unsigned long)stats->last_frame_missing_anchor_mask,
+        (unsigned long)stats->rx_phy_error_count,
+        (unsigned long)stats->rx_frame_sync_loss_count,
+        (unsigned long)stats->rx_phr_error_count,
+        (unsigned long)stats->rx_fcs_error_count,
+        (unsigned long)stats->rx_overrun_count,
+        (unsigned long)stats->rx_cia_error_count,
+        (unsigned long)stats->rx_filter_rejection_count,
+        (unsigned long)stats->rx_cp_error_count,
         (unsigned long)stats->rx_timestamp_cia_invalid_count,
         (long)stats->last_distance_mm,
         (unsigned)anchor_count);

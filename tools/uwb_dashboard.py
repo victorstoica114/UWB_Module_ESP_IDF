@@ -3869,7 +3869,7 @@ tr.status-stale td { color: #4f3b1d; }
             <div><b>Ranging method</b><span>FlexTDOA and Passive DS-TWR use receive-only tags. Native DS-TWR ranges each active tag to every anchor. Each protocol keeps independent timing profiles.</span></div>
             <div class="native-ds-position-option"><b>Native calculation</b><span>The ESP32 tag solves each complete coherent frame. The Raspberry only receives and displays positions and diagnostics.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In both passive protocols every non-anchor module only listens on UWB, so additional tags consume no radio slots.</span></div>
-            <div><b>Geometry</b><span>FlexTDOA uses fixed GPS RTK ENU anchor geometry. Passive and Native DS-TWR retain their protocol-specific range geometry.</span></div>
+            <div><b>Geometry</b><span>FlexTDOA and Passive DS-TWR use the same fixed GPS RTK ENU anchor geometry. Passive anchor-to-anchor DS-TWR ranges are diagnostics only. Native DS-TWR retains its live range geometry.</span></div>
             <div><b>Known reference</b><span>GPS RTK first fits the RTK anchor geometry to the active UWB anchors with one rigid 2D rotation/translation, then compares every UWB point with the nearest RTK-fixed tag sample. Centroid and manual coordinates remain available for static tests.</span></div>
           </div>
           <div id="positionToast" class="toast"></div>
@@ -4480,43 +4480,13 @@ tr.status-stale td { color: #4f3b1d; }
           <div class="flex-timing-head">
             <div>
               <h2>Passive DS-TWR Protocol Timing</h2>
-              <div class="muted">Three on-air packets per anchor-pair exchange: POLL → RESP → FINAL. Receive-only tags listen to all three packets and transmit none.</div>
+              <div class="muted">Clean rotating full-DS: one broadcast POLL, three staggered RESP frames and one aggregate FINAL. Tags timestamp POLL/RESP, apply CFO and never transmit.</div>
             </div>
           </div>
           <div id="passiveDsTimingDiagram" class="muted">Waiting for Passive DS-TWR runtime status...</div>
           <div class="profile-card" style="margin-top:12px">
-            <h3>Experimental pipeline and position-window policy</h3>
-            <p class="muted">For Multipoint Full-DS, Single coherent star produces one independent position from each radio exchange. Three-star precision preserves the validated static reference. Neither option applies a temporal position filter.</p>
-            <div class="form-grid">
-              <label for="passiveDsExperimentTargets">Targets</label>
-              <select id="passiveDsExperimentTargets">
-                <option value="all">all modules</option>
-                <option value="1">module 1</option>
-                <option value="2">module 2</option>
-                <option value="3">module 3</option>
-                <option value="4">module 4</option>
-                <option value="5">module 5</option>
-              </select>
-              <label for="passiveDsPipelineMode">Anchor pipeline</label>
-              <select id="passiveDsPipelineMode">
-                <option value="0">Legacy control</option>
-                <option value="1">DW3000 deadline state machine</option>
-              </select>
-              <label for="passiveDsSolveMode">Position-window policy</label>
-              <select id="passiveDsSolveMode">
-                <option value="0">Single coherent star (dynamic)</option>
-                <option value="1">Legacy mixed rolling (A/B control)</option>
-                <option value="2">Three-star precision window</option>
-                <option value="3">Coherent superframe correction + prediction</option>
-                <option value="4">Motion-compensated rolling (experimental)</option>
-              </select>
-              <label for="passiveDsRollingMaxHz">Rolling cap Hz</label>
-              <input id="passiveDsRollingMaxHz" value="100" type="number" min="1" max="500" step="1">
-            </div>
-            <div class="form-actions">
-              <button id="applyPassiveDsExperimentMode" class="primary">Apply position-window policy</button>
-            </div>
-            <div id="passiveDsExperimentToast" class="toast"></div>
+            <h3>Raw position path</h3>
+            <p class="muted">Every complete radio star produces one independent AlgMin position in the fixed GPS RTK ENU anchor geometry. Raw and displayed coordinates are identical: no EKF, rolling window, prediction or temporal position filter is active.</p>
           </div>
           <div class="profile-card" style="margin-top:12px">
             <h3>Pipeline diagnostics</h3>
@@ -4714,16 +4684,13 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p class="muted profile-note">Fast Star and Robust Rotating use one native three-packet exchange per anchor pair. Multipoint Full-DS combines the same full double-sided equations into one broadcast POLL, three staggered RESP frames and one broadcast FINAL, while every tag remains receive-only.</p>
+          <p class="muted profile-note">The clean protocol uses one rotating full-DS star: broadcast POLL, three delayed RESP frames and one aggregate FINAL. Anchor ranges are diagnostics; tag positioning uses fixed RTK geometry and CFO-corrected POLL/RESP timestamps.</p>
           <div id="passiveDsActiveProfile" class="profile-validation">Waiting for live Passive DS-TWR timing...</div>
           <div class="form-actions">
-            <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="fast">Apply Fast Star · 10 ms Maximum</button>
-            <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="robust">Apply Robust Rotating · 10 ms Maximum</button>
-            <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="multi_precision">Apply Multipoint · Static Precision</button>
-            <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="multi_dynamic">Apply Multipoint · Single-Star Dynamic</button>
+            <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="multi_dynamic">Apply Clean Rotating Full-DS · Field Baseline</button>
           </div>
           <div class="profile-grid">
-            <div class="profile-card passive-ds-profile-card" data-passive-ds-profile="fast">
+            <div class="profile-card passive-ds-profile-card" data-passive-ds-profile="fast" style="display:none">
               <h3>Fast Star</h3>
               <p class="muted">The first configured anchor initiates one exchange to every other anchor for three frames; the fourth is a rotating geometry-maintenance frame.</p>
               <div class="profile-validation">implementation baseline · hardware validation pending</div>
@@ -4741,7 +4708,7 @@ tr.status-stale td { color: #4f3b1d; }
               <div class="profile-summary" id="passiveDsFastSummary"></div>
               <div class="form-actions"><button class="primary apply-passive-ds-profile" data-passive-ds-profile="fast">Apply Fast Star</button><button class="reset-passive-ds-profile" data-passive-ds-profile="fast">Reset Defaults</button></div>
             </div>
-            <div class="profile-card passive-ds-profile-card" data-passive-ds-profile="robust">
+            <div class="profile-card passive-ds-profile-card" data-passive-ds-profile="robust" style="display:none">
               <h3>Robust Rotating</h3>
               <p class="muted">The reference rotates through the configured anchor order after every frame. Every position frame remains solvable, with diversified directed paths over a superframe.</p>
               <div class="profile-validation">diversity profile · hardware validation pending</div>
@@ -4760,11 +4727,11 @@ tr.status-stale td { color: #4f3b1d; }
               <div class="form-actions"><button class="primary apply-passive-ds-profile" data-passive-ds-profile="robust">Apply Robust Rotating</button><button class="reset-passive-ds-profile" data-passive-ds-profile="robust">Reset Defaults</button></div>
             </div>
             <div class="profile-card passive-ds-profile-card" data-passive-ds-profile="multi">
-              <h3>Multipoint Full-DS · N+2</h3>
-              <p class="muted">One rotating reference broadcasts POLL, all three other anchors answer in native delayed-TX slots, then the reference broadcasts one aggregate FINAL. Three coherent full-DS passive observations from only five packets.</p>
-              <div class="profile-validation">experimental N+2 protocol · isolated hardware validation</div>
+              <h3>Clean Rotating Full-DS · N+2</h3>
+              <p class="muted">One rotating reference broadcasts POLL, all three other anchors answer in fixed delayed-TX subslots, then the reference broadcasts FINAL. The tag emits three CFO-corrected observations immediately from POLL/RESP.</p>
+              <div class="profile-validation">clean protocol v1 · CRC protected · raw fixed-RTK solver</div>
               <div class="form-grid compact">
-                <label for="passiveDsMultiSolveMode">Position window</label><select id="passiveDsMultiSolveMode"><option value="2">Three-star precision (validated static reference)</option><option value="0">Single coherent star (dynamic, no overlap)</option></select>
+                <label for="passiveDsMultiSolveMode">Position solver</label><select id="passiveDsMultiSolveMode"><option value="0">One coherent star · raw AlgMin</option></select>
                 <label for="passiveDsMultiSlotMs">Exchange budget ms</label><input id="passiveDsMultiSlotMs" value="8" type="number" min="5" max="60000" step="1">
                 <label for="passiveDsMultiGapMs">Frame gap ms</label><input id="passiveDsMultiGapMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsMultiRxMs">Anchor RX slice ms</label><input id="passiveDsMultiRxMs" value="100" type="number" min="1" max="60000" step="1">
@@ -4775,7 +4742,7 @@ tr.status-stale td { color: #4f3b1d; }
                 <label for="passiveDsMultiFreshSec">Observation freshness s</label><input id="passiveDsMultiFreshSec" value="0.2" type="number" min="0.05" step="0.05">
               </div>
               <div class="profile-summary" id="passiveDsMultiSummary"></div>
-              <div class="form-actions"><button class="primary apply-passive-ds-profile" data-passive-ds-profile="multi">Apply Multipoint Full-DS</button><button class="reset-passive-ds-profile" data-passive-ds-profile="multi">Reset Defaults</button></div>
+              <div class="form-actions"><button class="primary apply-passive-ds-profile" data-passive-ds-profile="multi">Apply Clean Rotating Full-DS</button><button class="reset-passive-ds-profile" data-passive-ds-profile="multi">Reset Defaults</button></div>
             </div>
           </div>
           <div class="profile-card" style="margin-top:12px">
@@ -5415,7 +5382,7 @@ const rangingProtocolProfileFields = {
 };
 const rangingProfileDefaultsVersion = "2026-08-05-native-ds-speed-v4";
 const flexProfileDefaultsVersion = "2026-08-05-flextdoa-field-fast-v4";
-const passiveDsProfileDefaultsVersion = "2026-08-01-passive-ds-single-star-v2";
+const passiveDsProfileDefaultsVersion = "2026-08-05-passive-ds-clean-v1";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",
   0x01: "Charge Voltage MSB",
@@ -6041,14 +6008,14 @@ function switchPositionProtocolSettings() {
     element.classList.toggle("hidden", solver !== "ranging");
   });
   document.querySelectorAll(".dynamic-geometry-option").forEach(element => {
-    element.classList.toggle("hidden", solver !== "passive_ds");
+    element.classList.add("hidden");
   });
   const restartGeometry =
     document.getElementById("positionRestartAnchorSelfLocalization");
   if (restartGeometry) {
-    restartGeometry.disabled = false;
+    restartGeometry.disabled = true;
     restartGeometry.title =
-      "Restart the Passive DS-TWR live anchor estimate.";
+      "Passive DS-TWR v2 uses fixed GPS RTK anchor geometry.";
   }
 }
 
@@ -7372,7 +7339,13 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
     const expectedIds = anchorIds.map(Number);
     const candidates = Object.values(state.tdoa?.local_geometries || {})
       .filter(item => {
-        if (!item?.complete || Number(item.age_sec) > maxAge) return false;
+        // Fixed RTK geometry is immutable for its published generation and
+        // is intentionally sent only when the ESP32 solver starts.  Do not
+        // age it out like a live, range-derived geometry; doing so hides
+        // otherwise fresh tag positions a fraction of a second later.
+        const fixedGeometry = item?.dynamic === false;
+        if (!item?.complete ||
+            (!fixedGeometry && Number(item.age_sec) > maxAge)) return false;
         if (String(item?.tdoa_protocol || "passive_ds") !== protocol) return false;
         const ids = Object.keys(item.anchors || {}).map(Number);
         return ids.length === expectedIds.length &&
@@ -7383,6 +7356,18 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
         Number(left.geometry_version || 0));
     const espGeometry = candidates[0] || null;
     if (!espGeometry) {
+      // A dashboard restart clears its telemetry cache, while the modules
+      // continue to expose the same fixed RTK coordinates in /status.  Use
+      // that live, generation-tagged configuration as the authoritative
+      // fallback for fixed TDOA protocols instead of waiting for a radio
+      // geometry event that is intentionally emitted only at solver start.
+      const persisted = protocol === "native_ds"
+        ? null
+        : persistedModuleAnchorGeometry(anchorIds);
+      if (persisted) {
+        return persistedModuleGeometryResult(
+          anchorIds, persisted, protocol);
+      }
       return {
         anchors: {},
         distanceItems: batch.distanceItems,
@@ -8086,27 +8071,6 @@ function drawPosition(model) {
   const tx = positionTransform(model, width, height);
   drawPositionGrid(ctx, tx, width, height);
 
-  if (model.reference) {
-    const x = tx.x(model.reference.x);
-    const y = tx.y(model.reference.y);
-    ctx.save();
-    ctx.strokeStyle = "#6d4c9f";
-    ctx.fillStyle = "#6d4c9f";
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([4, 3]);
-    ctx.beginPath();
-    ctx.arc(x, y, 9, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.beginPath();
-    ctx.moveTo(x - 6, y);
-    ctx.lineTo(x + 6, y);
-    ctx.moveTo(x, y - 6);
-    ctx.lineTo(x, y + 6);
-    ctx.stroke();
-    ctx.restore();
-  }
-
   ctx.strokeStyle = "#98a2b3";
   ctx.lineWidth = 2;
   const anchorIds = model.settings.anchorIds.filter(id => model.anchors[id]);
@@ -8232,6 +8196,30 @@ function drawPosition(model) {
     ctx.fillText(
       `Tag ${tag.tagId}${tag.heldPosition ? " · held" : ""}`,
       x + 11, y - 12);
+  }
+
+  // Draw the ground-truth marker last. With centimetre-level agreement the
+  // red UWB tag can sit almost exactly on the RTK point; drawing RTK first
+  // made the small purple cross disappear under the tag marker.
+  if (model.reference) {
+    const x = tx.x(model.reference.x);
+    const y = tx.y(model.reference.y);
+    ctx.save();
+    ctx.strokeStyle = "#6d4c9f";
+    ctx.fillStyle = "#6d4c9f";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.arc(x, y, 9, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(x - 6, y);
+    ctx.lineTo(x + 6, y);
+    ctx.moveTo(x, y - 6);
+    ctx.lineTo(x, y + 6);
+    ctx.stroke();
+    ctx.restore();
   }
 }
 
@@ -8468,7 +8456,7 @@ function renderPositionSolverStatus(model) {
       ? model.observedTagIds.map(id => `T${id}`).join(",")
       : "none";
     pills.push(
-      `<span class="position-pill warn">setup ${esc(requested)} · radio ${esc(observed)}</span>`
+      `<span class="position-pill warn">setup ${esc(requested)} · fresh ESP32 positions ${esc(observed)}</span>`
     );
   }
   const geometryStatus = String(model.geometry?.status || "waiting");
@@ -8550,15 +8538,15 @@ function renderPositionReadout(model) {
   const missingCoords = model.settings.anchorIds.filter(id => !model.anchors[id]);
   if (missingCoords.length) {
     overlay.classList.add("active");
-    const fixedFlex = model.settings.solver === "flextdoa";
-    overlay.querySelector("h2").textContent = fixedFlex
+    const fixedTdoa = positionProtocolUsesTdoa(model.settings.solver);
+    overlay.querySelector("h2").textContent = fixedTdoa
       ? "Waiting for fixed GPS RTK geometry"
       : "Waiting for live anchor geometry";
-    overlay.querySelector("p").textContent = fixedFlex
+    overlay.querySelector("p").textContent = fixedTdoa
       ? `Apply RTK-fixed ENU geometry for anchors ${missingCoords.join(", ")} from the GPS map panel.`
       : `Waiting for fresh ${solverName} anchor-to-anchor ranges involving: ${missingCoords.join(", ")}. Positioning starts automatically when the dynamic geometry is complete.`;
     if (overlayButton) {
-      overlayButton.textContent = fixedFlex
+      overlayButton.textContent = fixedTdoa
         ? "Waiting for RTK Geometry"
         : "Waiting for Anchor Ranges";
       overlayButton.disabled = true;
@@ -8566,15 +8554,15 @@ function renderPositionReadout(model) {
     }
   } else if (!model.geometry?.positionReady) {
     overlay.classList.add("active");
-    const fixedFlex = model.settings.solver === "flextdoa";
-    overlay.querySelector("h2").textContent = fixedFlex
-      ? "Fixed FlexTDOA geometry is not active"
+    const fixedTdoa = positionProtocolUsesTdoa(model.settings.solver);
+    overlay.querySelector("h2").textContent = fixedTdoa
+      ? "Fixed RTK geometry is not active"
       : "Dynamic anchor self-localization in progress";
-    overlay.querySelector("p").textContent = fixedFlex
+    overlay.querySelector("p").textContent = fixedTdoa
       ? "Collect RTK-fixed GPS samples and apply the ENU geometry from the GPS map panel."
       : "No geometry has to be fixed. The TWR-EKF starts positioning automatically after a complete live anchor-range set.";
     if (overlayButton) {
-      overlayButton.textContent = fixedFlex
+      overlayButton.textContent = fixedTdoa
         ? "Waiting for RTK Geometry"
         : "Waiting for Dynamic Geometry";
       overlayButton.disabled = true;
@@ -8595,7 +8583,9 @@ function renderPositionReadout(model) {
       ? (tag.observations || []).length
       : Object.keys(tag.distances || {}).length;
     const total = usesTdoa
-      ? Math.max(0, model.settings.anchorIds.length * (model.settings.anchorIds.length - 1))
+      ? (model.settings.solver === "passive_ds"
+          ? Math.max(0, model.settings.anchorIds.length - 1)
+          : Math.max(0, model.settings.anchorIds.length * (model.settings.anchorIds.length - 1)))
       : model.settings.anchorIds.length;
     if (!tag.position) {
       return `<div class="position-tag-card"><b>Tag ${esc(tag.tagId)}</b><span>${freshCount}/${total} fresh ${usesTdoa ? "TDOA observations" : "distances"}</span></div>`;
@@ -8627,7 +8617,7 @@ function renderPositionReadout(model) {
     return `<div class="position-tag-card"><b id="positionTagSummary${esc(tag.tagId)}">Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span id="positionTagMeta${esc(tag.tagId)}">${countText}${accuracyText}${referenceText}</span></div>`;
   });
   const emptyTagCard = !model.geometry?.positionReady
-    ? `<div class="position-tag-card"><b>waiting for geometry</b><span>${model.settings.solver === "flextdoa" ? "Apply fixed RTK ENU anchor coordinates from the GPS map." : "Positioning starts automatically after fresh anchor-to-anchor ranges initialize the geometry."}</span></div>`
+    ? `<div class="position-tag-card"><b>waiting for geometry</b><span>${positionProtocolUsesTdoa(model.settings.solver) ? "Apply fixed RTK ENU anchor coordinates from the GPS map." : "Positioning starts automatically after fresh anchor-to-anchor ranges initialize the geometry."}</span></div>`
     : `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
   readout.innerHTML = `${renderPositionSolverStatus(model)}${tagCards.join("") || emptyTagCard}`;
   const accuracyTableRows = Object.values(model.tags).map(tag => {
@@ -12843,6 +12833,15 @@ function nativeDsPipelineDiagnosticsHtml() {
       const moduleId = Number(item.module_id);
       const tagId = Number(item.runtime_tag_id || 1);
       const role = moduleId === tagId ? "tag" : "anchor";
+      const phyDetail = [
+        `FSL ${stats.rx_frame_sync_loss ?? 0}`,
+        `PHR ${stats.rx_phr_errors ?? 0}`,
+        `FCS ${stats.rx_fcs_errors ?? 0}`,
+        `OVR ${stats.rx_overruns ?? 0}`,
+        `CIA ${stats.rx_cia_errors ?? 0}`,
+        `ARFE ${stats.rx_filter_rejections ?? 0}`,
+        `CP ${stats.rx_cp_errors ?? 0}`,
+      ].join(" · ");
       return `<tr>
         <td>M${esc(item.module_id)}</td>
         <td>${role}</td>
@@ -12851,7 +12850,9 @@ function nativeDsPipelineDiagnosticsHtml() {
         <td>${esc(stats.final_tx ?? 0)}/${esc(stats.final_rx ?? 0)}</td>
         <td>${esc(stats.result_tx ?? 0)}/${esc(stats.result_rx ?? 0)}</td>
         <td>${esc(stats.completed_ranges ?? 0)}</td>
+        <td>${esc(stats.complete_frames ?? 0)}/${esc(stats.incomplete_frames ?? 0)}</td>
         <td>${esc(stats.rx_timeouts ?? 0)}</td>
+        <td title="${esc(phyDetail)}">${esc(stats.rx_phy_errors ?? 0)}/${esc(stats.recovered_rx_errors ?? 0)}</td>
         <td>${esc(stats.invalid_frames ?? 0)}/${esc(stats.delayed_tx_errors ?? 0)}/${esc(stats.rejected_ranges ?? 0)}</td>
         <td>${esc(stats.slot_overruns ?? 0)}</td>
         <td>${Number.isFinite(Number(stats.last_distance_mm)) ? fmtFixed(Number(stats.last_distance_mm) / 1000, 3) : "-"}</td>
@@ -12871,7 +12872,7 @@ function nativeDsPipelineDiagnosticsHtml() {
       <thead><tr>
         <th>Module</th><th>Role</th><th>POLL TX/RX</th>
         <th>RESP TX/RX</th><th>FINAL TX/RX</th><th>RESULT TX/RX</th><th>Ranges</th>
-        <th>RX timeout</th><th>invalid/delayed/rejected</th>
+        <th>Frames ok/lost</th><th>RX timeout</th><th>PHY/recovered</th><th>invalid/delayed/rejected</th>
         <th>slot overrun</th><th>last m</th>
       </tr></thead><tbody>${rows}</tbody>
     </table></div>
@@ -13139,17 +13140,17 @@ const passiveDsProfileDefaults = {
   },
   multi: {
     prefix: "passiveDsMulti",
-    label: "Multipoint Full-DS",
+    label: "Clean Rotating Full-DS",
     schedule: 2,
-    slotMs: 5,
+    slotMs: 8,
     gapMs: 1,
     rxMs: 100,
-    timeoutMs: 4,
+    timeoutMs: 5,
     respUs: 1500,
     finalUs: 1500,
     autoRxUus: 500,
     freshSec: 0.2,
-    solveMode: 2,
+    solveMode: 0,
   },
 };
 const passiveDsFastGeometryFrameInterval = 4;
@@ -13157,10 +13158,6 @@ const passiveDsMultipointResponseSpacingUs = 750;
 const passiveDsDynamicGuardUs = 250;
 const passiveDsMultipointDynamicDefaults = {
   ...passiveDsProfileDefaults.multi,
-  slotMs: 10,
-  timeoutMs: 5,
-  respUs: 4500,
-  finalUs: 2500,
   solveMode: 0,
 };
 const passiveDsSpeedPresets = {
@@ -13323,7 +13320,7 @@ function updatePassiveDsProfileSummary(key) {
 }
 
 function profileSummaryScheduleLabel(key) {
-  if (key === "multi") return "Multipoint Full-DS · N+2";
+  if (key === "multi") return "Clean Rotating Full-DS · N+2";
   return key === "robust" ? "Robust Rotating" : "Fast Star";
 }
 
@@ -13366,33 +13363,12 @@ function renderPassiveDsActiveProfile() {
     root.className = "profile-validation warn";
     return;
   }
-  const presetKey = matchingPassiveDsSpeedPreset(live);
-  const scheduleLabel = live.schedule === 2
-    ? "Multipoint Full-DS · N+2"
-    : (live.schedule === 1 ? "Robust Rotating" : "Fast Star");
-  const singleStar = live.schedule === 2 && live.solveMode === 0;
-  const presetLabel = live.schedule === 2
-    ? (singleStar
-        ? `Single-Star Dynamic · ${passiveDsDynamicGuardUs} µs guard`
-        : "Static Precision · three stars")
-    : (passiveDsSpeedPresets[presetKey]?.label || "Custom timing");
-  const liveGuardMs = singleStar
-    ? passiveDsDynamicGuardUs / 1000
-    : live.gapMs;
-  const frameMs = live.schedule === 2
-    ? live.slotMs + liveGuardMs
-    : (live.anchorCount - 1) * live.slotMs + live.gapMs;
+  const frameMs = live.slotMs + live.gapMs;
   const frameHz = frameMs > 0 ? 1000 / frameMs : 0;
-  const activeTimingText = live.schedule === 2
-    ? `${fmtFixed(frameMs, 2)} ms radio star · ` +
-      (singleStar
-        ? `one independent position/star · ${fmtFixed(frameHz, 2)} Hz`
-        : `${fmtFixed(frameMs * 3, 2)} ms precision window · ` +
-          `${fmtFixed(frameHz / 3, 2)} independent Hz`)
-    : `${fmtFixed(frameMs, 0)} ms frame · ${fmtFixed(frameHz, 2)} Hz`;
   root.textContent =
     `Active on ${statuses.length}/${freshStatuses.length || statuses.length} modules: ` +
-    `${scheduleLabel} · ${presetLabel} · ${activeTimingText} · ` +
+    `Clean Rotating Full-DS · N+2 · ${fmtFixed(frameMs, 2)} ms radio star · ` +
+    `one independent raw position/star · ${fmtFixed(frameHz, 2)} Hz · ` +
     `RESP/FINAL ${live.respUs}+${live.finalUs} µs.`;
   root.className = "profile-validation good";
 }
@@ -13600,13 +13576,13 @@ function passiveDsRuntimeConfig() {
     .filter(Number.isFinite);
   return {
     anchorIds,
-    schedule: Number(status.runtime_passive_ds_schedule || 0),
-    slotMs: Number(status.runtime_passive_ds_slot_ms || 5),
+    schedule: Number(status.runtime_passive_ds_schedule ?? 2),
+    slotMs: Number(status.runtime_passive_ds_slot_ms || 8),
     gapMs: Number(status.runtime_passive_ds_round_gap_ms ?? 1),
     rxMs: Number(status.runtime_passive_ds_rx_slice_ms || 100),
-    timeoutMs: Number(status.runtime_passive_ds_rx_timeout_ms || 4),
-    respUs: Number(status.runtime_passive_ds_resp_delay_us || 1000),
-    finalUs: Number(status.runtime_passive_ds_final_delay_us || 1000),
+    timeoutMs: Number(status.runtime_passive_ds_rx_timeout_ms || 5),
+    respUs: Number(status.runtime_passive_ds_resp_delay_us || 1500),
+    finalUs: Number(status.runtime_passive_ds_final_delay_us || 1500),
     autoRxUus: Number(status.runtime_passive_ds_auto_rx_delay_uus || 500),
     pipelineMode: Number(status.runtime_passive_ds_pipeline_mode || 0),
     solveMode: Number(status.runtime_passive_ds_solve_mode || 0),
@@ -13753,18 +13729,11 @@ function renderPassiveDsMultipointTiming(root, config) {
   const radioMs = firstResponseDelayMs +
     Math.max(0, responderCount - 1) * responseSpacingMs + finalDelayMs;
   const schedulerSlackMs = Math.max(0, config.slotMs - radioMs);
-  const singleStar = config.solveMode === 0;
-  const frameGuardMs = singleStar
-    ? passiveDsDynamicGuardUs / 1000
-    : config.gapMs;
+  const frameGuardMs = config.gapMs;
   const radioStarMs = config.slotMs + frameGuardMs;
   const radioStarHz = radioStarMs > 0 ? 1000 / radioStarMs : NaN;
-  const starsPerPosition = singleStar ? 1 : 3;
-  const independentWindowMs = radioStarMs * starsPerPosition;
-  const independentHz = radioStarHz / starsPerPosition;
-  const nominalRawSolveHz = singleStar
-    ? radioStarHz
-    : independentHz + 2 * radioStarHz / 6;
+  const independentWindowMs = radioStarMs;
+  const independentHz = radioStarHz;
   const segments = [
     ...Array.from({length: responderCount}, (_, index) => ({
       key: index === 0 ? "POLL → RESP[0]" : `RESP[${index - 1}] → RESP[${index}]`,
@@ -13799,14 +13768,14 @@ function renderPassiveDsMultipointTiming(root, config) {
   root.className = "";
   root.innerHTML = `
     <div class="flex-timing-metrics">
-      <div class="flex-timing-metric"><span>Protocol</span><strong>Multipoint Full-DS · N+2</strong></div>
+      <div class="flex-timing-metric"><span>Protocol</span><strong>Clean Rotating Full-DS · N+2</strong></div>
       <div class="flex-timing-metric"><span>Reference</span><strong>rotates every radio star</strong></div>
-      <div class="flex-timing-metric"><span>Position policy</span><strong>${singleStar ? "single coherent star" : "three-star precision"}</strong></div>
+      <div class="flex-timing-metric"><span>Position policy</span><strong>one coherent star · no filter</strong></div>
       <div class="flex-timing-metric"><span>Radio star</span><strong>${fmtFixed(radioStarMs, 2)} ms · ${fmtFixed(radioStarHz, 2)} Hz</strong></div>
       <div class="flex-timing-metric"><span>Independent position</span><strong>${fmtFixed(independentWindowMs, 2)} ms · ${fmtFixed(independentHz, 2)} Hz</strong></div>
-      <div class="flex-timing-metric"><span>Raw solver output</span><strong>up to ${fmtFixed(nominalRawSolveHz, 2)} /s*</strong></div>
+      <div class="flex-timing-metric"><span>Raw solver output</span><strong>up to ${fmtFixed(radioStarHz, 2)} /s</strong></div>
       <div class="flex-timing-metric"><span>UWB packets</span><strong>${N + 1} per radio star</strong></div>
-      <div class="flex-timing-metric"><span>Tag solver</span><strong>raw GLS/AlgMin on ESP32</strong></div>
+      <div class="flex-timing-metric"><span>Tag solver</span><strong>raw AlgMin on ESP32 · fixed RTK geometry</strong></div>
       <div class="flex-timing-metric"><span>Tag airtime</span><strong>0 packets</strong></div>
     </div>
     <div class="flex-timing-scroll">
@@ -13826,19 +13795,17 @@ function renderPassiveDsMultipointTiming(root, config) {
       </div>
     </div>
     <div class="flex-packet-flow" style="margin-top:12px">
-      <div class="flex-packet-row"><b>POLL · rotating reference → broadcast</b><code>frame32 | previous full-DS range</code></div>
-      <div class="flex-packet-row"><b>RESP[0..${responderCount - 1}] · delayed native TX</b><code>frame32 | responder index | exact reply_dtu32 | previous full-DS range</code></div>
-      <div class="flex-packet-row"><b>FINAL · reference → broadcast</b><code>poll_tx40 | final_tx40 | responder ID + resp_rx40 for each response</code></div>
-      <div class="flex-packet-row"><b>Receive-only tags</b><code>${responderCount} full three-clock double-sided observations; no CFO, no absolute clock synchronization, no filter</code></div>
+      <div class="flex-packet-row"><b>POLL · rotating initiator → broadcast</b><code>PDS2 v1 | session | frame | initiator | CRC16</code></div>
+      <div class="flex-packet-row"><b>RESP[0..${responderCount - 1}] · delayed native TX</b><code>responder index | exact reply_dtu32 | CRC16</code></div>
+      <div class="flex-packet-row"><b>FINAL · initiator → broadcast</b><code>poll_tx40 | final_tx40 | responder ID + resp_rx40 | CRC16</code></div>
+      <div class="flex-packet-row"><b>Receive-only tags</b><code>POLL_RX + RESP_RX + per-response CFO + fixed RTK baseline; FINAL is not required by the tag</code></div>
     </div>
     <div class="flex-timing-note ${overrun ? "warn" : ""}">
       ${config.live ? "Live configuration" : "Configured fallback"} ·
       first RESP ${fmtFixed(firstResponseDelayMs, 3)} ms · response spacing ${fmtFixed(responseSpacingMs, 3)} ms ·
       FINAL delay ${fmtFixed(finalDelayMs, 3)} ms · scheduler slack ${fmtFixed(schedulerSlackMs, 3)} ms ·
       guard time ${fmtFixed(frameGuardMs, 3)} ms.
-      ${singleStar
-        ? "Every star is solved exactly once and reported as an independent position; there are no overlapping windows and no temporal filter."
-        : "Independent results use non-overlapping groups of three stars. Two overlapping three-star windows per six-star cycle are explicitly marked non-independent; no temporal filter is used."}
+      Every complete star is solved exactly once and reported as an independent raw position; there are no overlapping windows, predictions or temporal filters.
       ${overrun ? " Warning: response train and FINAL delay exceed the exchange budget." : ""}
     </div>`;
 }
@@ -13852,10 +13819,8 @@ function renderPassiveDsTimingDiagram() {
     root.textContent = "Passive DS-TWR topology is unavailable.";
     return;
   }
-  if (config.schedule === 2) {
-    renderPassiveDsMultipointTiming(root, config);
-    return;
-  }
+  renderPassiveDsMultipointTiming(root, config);
+  return;
   const slots = N - 1;
   const frameMs = slots * config.slotMs + config.gapMs;
   const frameHz = frameMs > 0 ? 1000 / frameMs : NaN;

@@ -11,6 +11,7 @@ struct mock_radio {
     uint8_t attempt_index;
     uint8_t receive_index;
     uint8_t slot_delay_count;
+    bool injected_phy_error;
     uint32_t report_count;
     struct uwb_native_ds_packet poll;
 };
@@ -67,6 +68,11 @@ static esp_err_t mock_receive(void *context,
 {
     struct mock_radio *mock = context;
     (void)timeout_ms;
+    if (mock->attempt_index == 2U && mock->receive_index == 0U &&
+        !mock->injected_phy_error) {
+        mock->injected_phy_error = true;
+        return ESP_ERR_INVALID_RESPONSE;
+    }
     if (mock->attempt_index == 0U ||
         (mock->attempt_index == 1U && mock->receive_index == 1U)) {
         mock->receive_index++;
@@ -112,10 +118,11 @@ static int64_t mock_now_us(void *context)
     return ((struct mock_radio *)context)->now_us;
 }
 
-static void mock_delay_ms(void *context, uint32_t delay_ms)
+static void mock_wait_until_us(void *context, int64_t deadline_us)
 {
     struct mock_radio *mock = context;
-    mock->now_us += (int64_t)delay_ms * 1000LL;
+    assert(deadline_us >= mock->now_us);
+    mock->now_us = deadline_us;
     mock->slot_delay_count++;
 }
 
@@ -166,7 +173,7 @@ int main(void)
         .add_delay_ms = mock_add_delay_ms,
         .programmed_tx_timestamp = mock_programmed_tx,
         .now_us = mock_now_us,
-        .delay_ms = mock_delay_ms,
+        .wait_until_us = mock_wait_until_us,
         .stop_requested = mock_stop_requested,
         .set_ready = mock_set_ready,
         .consume_report = mock_consume_report,
@@ -183,6 +190,10 @@ int main(void)
     assert(stats.rx_timeout_count == 2U);
     assert(stats.response_timeout_count == 1U);
     assert(stats.result_timeout_count == 1U);
+    assert(stats.recovered_rx_error_count == 1U);
+    assert(stats.complete_frame_count == 0U);
+    assert(stats.incomplete_frame_count == 1U);
+    assert(stats.last_frame_missing_anchor_mask == 0x03U);
     assert(stats.tag_anchor_count == 3U);
     assert(stats.tag_anchors[0].anchor_id == 2U);
     assert(stats.tag_anchors[0].attempt_count == 1U);

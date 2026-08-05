@@ -37,11 +37,12 @@ bool uwb_passive_ds_runtime_submit_anchor_range(
 
 bool uwb_passive_ds_runtime_submit_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
-    uint32_t slot_id, int32_t difference_mm, uint16_t delay_ratio_q15)
+    uint32_t session_id, uint32_t frame_id, int32_t difference_mm,
+    uint16_t delay_ratio_q15)
 {
     return passive_ds_solver_service_submit_observation(
-        tag_id, initiator_id, responder_id, slot_id, difference_mm,
-        delay_ratio_q15);
+        tag_id, initiator_id, responder_id, session_id, frame_id,
+        difference_mm, delay_ratio_q15);
 }
 
 int32_t uwb_passive_ds_runtime_store_anchor_range(

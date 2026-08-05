@@ -85,6 +85,18 @@ struct uwb_native_ds_pipeline_stats {
     uint32_t delayed_tx_error_count;
     uint32_t rejected_range_count;
     uint32_t slot_overrun_count;
+    uint32_t recovered_rx_error_count;
+    uint32_t complete_frame_count;
+    uint32_t incomplete_frame_count;
+    uint32_t last_frame_missing_anchor_mask;
+    uint32_t rx_phy_error_count;
+    uint32_t rx_frame_sync_loss_count;
+    uint32_t rx_phr_error_count;
+    uint32_t rx_fcs_error_count;
+    uint32_t rx_overrun_count;
+    uint32_t rx_cia_error_count;
+    uint32_t rx_filter_rejection_count;
+    uint32_t rx_cp_error_count;
     uint32_t rx_timestamp_cia_invalid_count;
     int32_t last_distance_mm;
     uint8_t tag_anchor_count;

@@ -130,11 +130,11 @@
  * and derives TDOA observations without consuming radio airtime.
  */
 #ifndef APP_UWB_PASSIVE_DS_SCHEDULE
-#define APP_UWB_PASSIVE_DS_SCHEDULE 0
+#define APP_UWB_PASSIVE_DS_SCHEDULE 2
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_SLOT_MS
-#define APP_UWB_PASSIVE_DS_SLOT_MS 5
+#define APP_UWB_PASSIVE_DS_SLOT_MS 8
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_ROUND_GAP_MS
@@ -146,25 +146,22 @@
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_RX_TIMEOUT_MS
-#define APP_UWB_PASSIVE_DS_RX_TIMEOUT_MS 4
+#define APP_UWB_PASSIVE_DS_RX_TIMEOUT_MS 5
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_RESP_DELAY_US
-#define APP_UWB_PASSIVE_DS_RESP_DELAY_US 1000
+#define APP_UWB_PASSIVE_DS_RESP_DELAY_US 1500
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_FINAL_DELAY_US
-#define APP_UWB_PASSIVE_DS_FINAL_DELAY_US 1000
+#define APP_UWB_PASSIVE_DS_FINAL_DELAY_US 1500
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US
 #define APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US 750
 #endif
 
-/*
- * Validated FlexTDOA guard reused as a value, not as shared runtime state.
- * The dynamic multipoint profile places this guard after its exchange budget.
- */
+/* Retained for runtime-config ABI compatibility; v2 uses ROUND_GAP_MS. */
 #ifndef APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US
 #define APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US 250
 #endif
@@ -173,11 +170,7 @@
 #define APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS 500
 #endif
 
-/*
- * The established blocking exchange and one-solve-per-frame behavior remain
- * the firmware defaults. The deadline pipeline and rolling solver are
- * independent A/B controls selected at runtime.
- */
+/* Retained for runtime-config ABI compatibility; v2 always uses raw frames. */
 #ifndef APP_UWB_PASSIVE_DS_PIPELINE_MODE
 #define APP_UWB_PASSIVE_DS_PIPELINE_MODE 0
 #endif

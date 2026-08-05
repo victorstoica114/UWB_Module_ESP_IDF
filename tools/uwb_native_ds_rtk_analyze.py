@@ -8,6 +8,7 @@ import json
 import math
 import pathlib
 import statistics
+import sys
 from typing import Any, Iterable
 
 
@@ -151,7 +152,10 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         metavar="ID:X_M:Y_M",
-        help="Fixed firmware anchor coordinate; repeat for every anchor.",
+        help=(
+            "Override the runtime firmware anchor coordinate; repeat for every "
+            "anchor. By default the geometry is read from captured status events."
+        ),
     )
     parser.add_argument(
         "--range-bias-cm",
@@ -169,6 +173,51 @@ def parse_anchors(entries: list[str]) -> dict[int, tuple[float, float]]:
         anchor_id_text, x_text, y_text = entry.split(":", 2)
         anchors[int(anchor_id_text)] = (float(x_text), float(y_text))
     return anchors
+
+
+def runtime_anchors(events: list[dict[str, Any]]) -> dict[int, tuple[float, float]]:
+    """Return the first complete runtime anchor geometry captured from a module."""
+    for event in events:
+        modules = event.get("modules")
+        candidates = modules if isinstance(modules, list) else [event]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            anchor_ids = candidate.get("runtime_anchor_ids")
+            anchor_x_mm = candidate.get("runtime_flex_tdoa_anchor_x_mm")
+            anchor_y_mm = candidate.get("runtime_flex_tdoa_anchor_y_mm")
+            if not isinstance(anchor_ids, list):
+                continue
+            if not isinstance(anchor_x_mm, list) or not isinstance(anchor_y_mm, list):
+                continue
+            if len(anchor_ids) < 3 or not (
+                len(anchor_ids) == len(anchor_x_mm) == len(anchor_y_mm)
+            ):
+                continue
+            return {
+                int(anchor_id): (float(x_mm) / 1000.0, float(y_mm) / 1000.0)
+                for anchor_id, x_mm, y_mm in zip(anchor_ids, anchor_x_mm, anchor_y_mm)
+            }
+    return {}
+
+
+def geometry_difference_cm(
+    first: dict[int, tuple[float, float]],
+    second: dict[int, tuple[float, float]],
+) -> dict[str, float | int] | None:
+    common = sorted(set(first) & set(second))
+    if not common:
+        return None
+    errors_m = [
+        math.hypot(first[anchor_id][0] - second[anchor_id][0],
+                   first[anchor_id][1] - second[anchor_id][1])
+        for anchor_id in common
+    ]
+    return {
+        "anchors_compared": len(common),
+        "rms_cm": math.sqrt(statistics.fmean(value * value for value in errors_m)) * 100.0,
+        "max_cm": max(errors_m) * 100.0,
+    }
 
 
 def parse_range_biases(entries: list[str]) -> dict[int, float]:
@@ -337,7 +386,23 @@ def main() -> int:
 
     embedded_metrics = error_metrics(aligned)
 
-    anchors = parse_anchors(args.anchor)
+    captured_anchors = runtime_anchors(events)
+    explicit_anchors = parse_anchors(args.anchor)
+    anchors = explicit_anchors or captured_anchors
+    anchor_geometry_source = "command_line" if explicit_anchors else "runtime_status"
+    geometry_override_difference = (
+        geometry_difference_cm(explicit_anchors, captured_anchors)
+        if explicit_anchors and captured_anchors else None
+    )
+    if (
+        geometry_override_difference is not None
+        and geometry_override_difference["max_cm"] > 5.0
+    ):
+        print(
+            "warning: command-line anchor geometry differs from captured runtime "
+            f"geometry by up to {geometry_override_difference['max_cm']:.1f} cm",
+            file=sys.stderr,
+        )
     anchor_fit: dict[str, Any] = {}
     anchor_errors: list[float] = []
     anchor_pairs: list[tuple[int, tuple[float, float], tuple[float, float]]] = []
@@ -508,7 +573,7 @@ def main() -> int:
             }
 
     summary = {
-        "schema_version": 2,
+        "schema_version": 3,
         "events_file": str(events_path),
         "coordinate_frame": f"WGS84 ENU, median RTK Fixed M{args.origin_module} origin",
         "position_filter": "none",
@@ -523,6 +588,8 @@ def main() -> int:
         "solver_residual_rms_mean_cm": statistics.fmean(
             row["solver_rms_m"] for row in aligned
         ) * 100.0,
+        "anchor_geometry_source": anchor_geometry_source,
+        "anchor_geometry_override_difference": geometry_override_difference,
         "fixed_anchor_geometry": anchor_fit,
         "anchor_geometry_fit_rms_cm": (
             math.sqrt(statistics.fmean(value * value for value in anchor_errors)) * 100.0
