@@ -4533,7 +4533,7 @@ tr.status-stale td { color: #4f3b1d; }
             <div class="profile-card flex-profile-card" data-flex-profile="paper20200">
               <h3>20.20 ms Paper Reference</h3>
               <p class="muted">Equation (20) timing from the FlexTDOA paper for four anchors and K=3.</p>
-              <div class="profile-validation good">reference default · paper-faithful timing</div>
+              <div class="profile-validation warn">paper reference · exact timing, not the field default</div>
               <div class="form-grid compact">
                 <label for="flexProfile20200GuardUs">Guard us</label>
                 <input id="flexProfile20200GuardUs" value="250" type="number" min="1" max="65535" step="10">
@@ -4556,56 +4556,56 @@ tr.status-stale td { color: #4f3b1d; }
                 <button class="reset-flex-profile" data-flex-profile="paper20200">Reset Defaults</button>
               </div>
             </div>
-            <div class="profile-card flex-profile-card" data-flex-profile="frame14800">
-              <h3>14.80 ms Frame</h3>
-              <p class="muted">Fastest clean steady-state profile measured on all five modules.</p>
-              <div class="profile-validation good">recommended · 0 TX failures / 60 s</div>
+            <div class="profile-card flex-profile-card" data-flex-profile="field32200">
+              <h3>32.20 ms Field Fast</h3>
+              <p class="muted">Fast field profile validated on channel 9 with the complete ESP32 workload.</p>
+              <div class="profile-validation good">recommended · 30.02 positions/s · 2.92% loss · 2.03 cm RTK RMSE</div>
               <div class="form-grid compact">
-                <label for="flexProfile14800GuardUs">Guard us</label>
-                <input id="flexProfile14800GuardUs" value="250" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile14800ReqUs">REQ us</label>
-                <input id="flexProfile14800ReqUs" value="250" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile14800ReqProcessUs">Process REQ us</label>
-                <input id="flexProfile14800ReqProcessUs" value="1250" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile14800RespUs">RESP subslot us</label>
-                <input id="flexProfile14800RespUs" value="250" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile14800RespProcessUs">Process RESP us / response</label>
-                <input id="flexProfile14800RespProcessUs" value="400" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile14800RxSliceMs">RX host slice ms</label>
-                <input id="flexProfile14800RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
-                <label for="flexProfile14800FreshAgeSec">Observation freshness s</label>
-                <input id="flexProfile14800FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+                <label for="flexProfile32200GuardUs">Guard us</label>
+                <input id="flexProfile32200GuardUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile32200ReqUs">REQ us</label>
+                <input id="flexProfile32200ReqUs" value="2000" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile32200ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile32200ReqProcessUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile32200RespUs">RESP subslot us</label>
+                <input id="flexProfile32200RespUs" value="850" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile32200RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile32200RespProcessUs" value="1000" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile32200RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile32200RxSliceMs" value="6" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile32200FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile32200FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
               </div>
-              <div class="profile-summary" id="flexProfile14800Summary"></div>
+              <div class="profile-summary" id="flexProfile32200Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-flex-profile" data-flex-profile="frame14800">Apply 14.80 ms</button>
-                <button class="reset-flex-profile" data-flex-profile="frame14800">Reset Defaults</button>
+                <button class="primary apply-flex-profile" data-flex-profile="field32200">Apply Field Fast</button>
+                <button class="reset-flex-profile" data-flex-profile="field32200">Reset Defaults</button>
               </div>
             </div>
-            <div class="profile-card flex-profile-card" data-flex-profile="frame14200">
-              <h3>14.20 ms Frame</h3>
-              <p class="muted">First timing boundary below the recommended profile.</p>
-              <div class="profile-validation warn">borderline · 1 delayed-TX failure / 30 s</div>
+            <div class="profile-card flex-profile-card" data-flex-profile="field34000">
+              <h3>34.00 ms Field Stable</h3>
+              <p class="muted">Conservative field baseline for accuracy comparisons and additional timing margin.</p>
+              <div class="profile-validation good">baseline · 28.61 positions/s · 3.00% loss · 1.95 cm RTK RMSE</div>
               <div class="form-grid compact">
-                <label for="flexProfile14200GuardUs">Guard us</label>
-                <input id="flexProfile14200GuardUs" value="250" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile14200ReqUs">REQ us</label>
-                <input id="flexProfile14200ReqUs" value="250" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile14200ReqProcessUs">Process REQ us</label>
-                <input id="flexProfile14200ReqProcessUs" value="1250" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile14200RespUs">RESP subslot us</label>
-                <input id="flexProfile14200RespUs" value="250" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile14200RespProcessUs">Process RESP us / response</label>
-                <input id="flexProfile14200RespProcessUs" value="350" type="number" min="1" max="65535" step="10">
-                <label for="flexProfile14200RxSliceMs">RX host slice ms</label>
-                <input id="flexProfile14200RxSliceMs" value="5" type="number" min="1" max="60000" step="1">
-                <label for="flexProfile14200FreshAgeSec">Observation freshness s</label>
-                <input id="flexProfile14200FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
+                <label for="flexProfile34000GuardUs">Guard us</label>
+                <input id="flexProfile34000GuardUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile34000ReqUs">REQ us</label>
+                <input id="flexProfile34000ReqUs" value="2000" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile34000ReqProcessUs">Process REQ us</label>
+                <input id="flexProfile34000ReqProcessUs" value="250" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile34000RespUs">RESP subslot us</label>
+                <input id="flexProfile34000RespUs" value="1000" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile34000RespProcessUs">Process RESP us / response</label>
+                <input id="flexProfile34000RespProcessUs" value="1000" type="number" min="1" max="65535" step="10">
+                <label for="flexProfile34000RxSliceMs">RX host slice ms</label>
+                <input id="flexProfile34000RxSliceMs" value="6" type="number" min="1" max="60000" step="1">
+                <label for="flexProfile34000FreshAgeSec">Observation freshness s</label>
+                <input id="flexProfile34000FreshAgeSec" value="0.5" type="number" min="0.1" step="0.1">
               </div>
-              <div class="profile-summary" id="flexProfile14200Summary"></div>
+              <div class="profile-summary" id="flexProfile34000Summary"></div>
               <div class="form-actions">
-                <button class="primary apply-flex-profile" data-flex-profile="frame14200">Apply 14.20 ms</button>
-                <button class="reset-flex-profile" data-flex-profile="frame14200">Reset Defaults</button>
+                <button class="primary apply-flex-profile" data-flex-profile="field34000">Apply Field Stable</button>
+                <button class="reset-flex-profile" data-flex-profile="field34000">Reset Defaults</button>
               </div>
             </div>
             <div class="profile-card flex-profile-card" data-flex-profile="frame13600">
@@ -5335,26 +5335,26 @@ const flexProfileDefaults = {
     rxSliceMs: 6,
     positionMaxAgeSec: 0.5,
   },
-  frame14800: {
-    prefix: "flexProfile14800",
-    label: "14.80 ms Frame",
+  field32200: {
+    prefix: "flexProfile32200",
+    label: "32.20 ms Field Fast",
     guardUs: 250,
-    requestUs: 250,
-    requestProcessUs: 1250,
-    responseUs: 250,
-    responseProcessUs: 400,
-    rxSliceMs: 5,
+    requestUs: 2000,
+    requestProcessUs: 250,
+    responseUs: 850,
+    responseProcessUs: 1000,
+    rxSliceMs: 6,
     positionMaxAgeSec: 0.5,
   },
-  frame14200: {
-    prefix: "flexProfile14200",
-    label: "14.20 ms Frame",
+  field34000: {
+    prefix: "flexProfile34000",
+    label: "34.00 ms Field Stable",
     guardUs: 250,
-    requestUs: 250,
-    requestProcessUs: 1250,
-    responseUs: 250,
-    responseProcessUs: 350,
-    rxSliceMs: 5,
+    requestUs: 2000,
+    requestProcessUs: 250,
+    responseUs: 1000,
+    responseProcessUs: 1000,
+    rxSliceMs: 6,
     positionMaxAgeSec: 0.5,
   },
   frame13600: {
@@ -5400,7 +5400,7 @@ const rangingProtocolProfileFields = {
   ]),
 };
 const rangingProfileDefaultsVersion = "2026-08-05-native-ds-speed-v3";
-const flexProfileDefaultsVersion = "2026-08-04-flextdoa-paper-reference-v3";
+const flexProfileDefaultsVersion = "2026-08-05-flextdoa-field-fast-v4";
 const passiveDsProfileDefaultsVersion = "2026-08-01-passive-ds-single-star-v2";
 const BQ_REG_NAMES = {
   0x00: "Minimal System Voltage",

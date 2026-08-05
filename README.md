@@ -483,51 +483,45 @@ tested combination is kept as a named frame-length profile in the dashboard:
 
 ```text
 t_slot = guard + request_subslot + request_process
-       + K * response_subslot + response_process
-
-guard
-request_subslot
-request_process
-response_subslot
-response_process = K * response_process_per_responder
+       + K * response_subslot
+       + K * response_process_per_responder
 ```
 
-For four anchors, `K = 3`, the dashboard keeps the validated profiles and the
-complete timing-limit search:
+For four anchors, `K = 3`, the dashboard exposes the two field-validated
+profiles plus the exact equation (20) paper reference:
 
 | Profile | Guard | REQ | Process REQ | 3 x RESP | 3 x Process RESP | Slot | Frame | Frame rate |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `19.20 ms Frame` | `500 us` | `250 us` | `1500 us` | `750 us` | `1800 us` | `4.800 ms` | `19.200 ms` | `52.08 Hz` |
-| `14.80 ms Frame` | `250 us` | `250 us` | `1250 us` | `750 us` | `1200 us` | `3.700 ms` | `14.800 ms` | `67.57 Hz` |
-| `14.20 ms Frame` | `250 us` | `250 us` | `1250 us` | `750 us` | `1050 us` | `3.550 ms` | `14.200 ms` | `70.42 Hz` |
-| `13.60 ms Frame` | `250 us` | `250 us` | `1250 us` | `750 us` | `900 us` | `3.400 ms` | `13.600 ms` | `73.53 Hz` |
-| `12.60 ms Frame` | `250 us` | `250 us` | `1000 us` | `750 us` | `900 us` | `3.150 ms` | `12.600 ms` | `79.37 Hz` |
-| `12.00 ms Frame` | `250 us` | `250 us` | `1000 us` | `750 us` | `750 us` | `3.000 ms` | `12.000 ms` | `83.33 Hz` |
+| `32.20 ms Field Fast` | `250 us` | `2000 us` | `250 us` | `2550 us` | `3000 us` | `8.050 ms` | `32.200 ms` | `31.06 Hz` |
+| `34.00 ms Field Stable` | `250 us` | `2000 us` | `250 us` | `3000 us` | `3000 us` | `8.500 ms` | `34.000 ms` | `29.41 Hz` |
+| `20.20 ms Paper Reference` | `250 us` | `2000 us` | `250 us` | `750 us` | `1800 us` | `5.050 ms` | `20.200 ms` | `49.50 Hz` |
 
-The `19.20 ms Frame` profile is the conservative hardware-validated baseline.
-The `14.80 ms Frame` profile is the fastest clean steady-state profile observed
-on all five modules. Shorter profiles remain available as explicitly marked
-experiments, but are not recommended defaults. The dashboard exposes every
-term directly and computes slot length, frame length, frame rate, and response
-rate before applying a profile.
+`32.20 ms Field Fast` is the firmware default. A clean 120 s channel-9 run on
+all five deployed modules produced `30.02` independent positions/s, `2.924%`
+effective slot loss, zero new delayed-TX errors, `2.03 cm` RMSE and `3.58 cm`
+P95 against the static RTK reference, with no position filter. The
+`34.00 ms Field Stable` profile remains available as the conservative control.
+The paper reference is kept exact for protocol comparison, but its `250 us`
+response spacing does not provide enough margin for the complete ESP32-S3
+field workload.
 
-For the conservative profile, one slot is:
+For the selected field profile, one slot is:
 
 ```text
-500 + 250 + 1500 + 3*250 + 3*600 = 4800 us
+250 + 2000 + 250 + 3*850 + 3*1000 = 8050 us
 ```
 
 The selected responder transmits using DW3000 delayed TX from the request RX
-timestamp. For the conservative profile:
+timestamp. For the selected field profile:
 
 ```text
-RESP[0] = REQ_RX + 1750 us
-RESP[1] = REQ_RX + 2000 us
-RESP[2] = REQ_RX + 2250 us
+RESP[0] = REQ_RX + 2250 us
+RESP[1] = REQ_RX + 3100 us
+RESP[2] = REQ_RX + 3950 us
 
-four-anchor frame = 4 * 4800 us = 19.20 ms
-frame rate        = 52.08 frames/s
-response rate     = 12 / 19.20 ms = 625.00 responses/s
+four-anchor frame = 4 * 8050 us = 32.20 ms
+frame rate        = 31.06 frames/s theoretical
+measured rate     = 30.02 complete positions/s
 ```
 
 The responder does not read `SYS_TIME` to turn that relative delay into an
@@ -556,11 +550,10 @@ and delayed-TX failure diagnostics; they are not part of the normal FlexTDOA
 slot.
 
 The request RX timestamp marks the radio timing reference near the beginning of
-the received frame. The `250 us` request subslot budgets the compact frame's
-airtime. `request_process` gives the responder time to complete reception, read
-and decode the request over SPI, release the RX double buffer, and arm delayed
-TX. Instrumentation measures about `230-250 us` on average and less than
-`500 us` at the observed maximum. `K * response_process` is the paper's
+the received frame. The field profile reserves a `2000 us` request subslot and
+a `250 us` request-processing term before the first response. Together they
+cover packet airtime, SPI decode, RX double-buffer release, and delayed-TX
+arming. `K * response_process` is the paper's
 aggregate response-processing budget, not extra spacing between responses.
 The configured quiet guard ends the slot before the next request.
 
@@ -569,10 +562,10 @@ For a slot where `A3` is the initiator:
 ```text
 A3 initiator                  A4/A5/A2 responders             passive tag
  t=0.00 ms  REQ ------------------------>|------------------------> RX REQ
- t=1.75 ms  <---------------- RESP[0] A4 |------------------------> RX RESP
- t=2.00 ms  <---------------- RESP[1] A5 |------------------------> RX RESP
- t=2.25 ms  <---------------- RESP[2] A2 |------------------------> RX RESP
- t=4.80 ms  next initiator request ------|------------------------> next slot
+ t=2.25 ms  <---------------- RESP[0] A4 |------------------------> RX RESP
+ t=3.10 ms  <---------------- RESP[1] A5 |------------------------> RX RESP
+ t=3.95 ms  <---------------- RESP[2] A2 |------------------------> RX RESP
+ t=8.05 ms  next initiator request ------|------------------------> next slot
 ```
 
 The ESP task wakes before its own next request and programs delayed TX. This
@@ -608,7 +601,7 @@ estimator are deliberately kept outside this radio validation.
 | Paper requirement | Firmware state |
 | --- | --- |
 | Passive DL-TDOA tag | Implemented. The tag only receives `FLEX_TDOA_REQ/RESP`. |
-| One request and `K` responses per slot | Implemented with the paper's `250 us` response spacing. The request budget is compacted to `250 us`; request processing uses the hardware-validated `1500 us` margin and the final guard is `500 us`. |
+| One request and `K` responses per slot | Implemented. The exact paper profile uses `250 us` response spacing; the field default uses the validated `850 us` response spacing with `2000 us` REQ, `250 us` request processing, `1000 us` response processing, and `250 us` guard terms. |
 | Request carries responder count/list/order | Implemented in `FLEX_TDOA_REQ`. |
 | Every localization packet carries 32-bit slot ID | Implemented in every request and response. This avoids the 256-slot wrap ambiguity of an 8-bit counter. |
 | CI-CR schedule | Implemented by rotating initiator and responder order every slot/round. |
@@ -618,7 +611,7 @@ estimator are deliberately kept outside this radio validation.
 | General `N/K/M` topology | Implemented for `3..10` anchors, configurable responder count, initiator slots, and per-slot responder masks. |
 | Configuration propagation | Implemented as versioned UWB frames. Topology is persisted and rebroadcast during startup; the legacy fixed-geometry generation is cleared for live positioning. |
 | Local solver | Implemented on the tag ESP32-S3. It continuously reconstructs relative geometry from fresh anchor TWR ranges. Raw TDOA observations feed a damped 2D least-squares AlgMin service on core 0; UWB remains on core 1. |
-| Paper radio setup | Use CH5, 6.8 Mb/s, PRF 64 MHz, preamble 128 when matching the paper. |
+| Radio setup | The field deployment uses CH9 and the validated PHY2 profile. CH5, 6.8 Mb/s, PRF 64 MHz, preamble 128 remains the paper-reference setup. |
 | Firmware-side measurement filters | None. The radio path emits every structurally valid raw anchor range and tag range difference. |
 
 The local solver is the planar specialization needed by the present hardware
@@ -635,7 +628,8 @@ core 1 and the local solver runs on core 0.
 
 The local solver removes the PC/network round trip from the positioning path;
 it does not shorten radio airtime. With `M=4`, one solution can be published
-after every `19.20 ms` complete frame, or approximately `52.1` solutions/s.
+after every `32.20 ms` complete field frame. The validated deployment produced
+`30.02` independent solutions/s.
 The dashboard prefers this `ESP32 AlgMin` result while it is fresh and falls
 back to its PC solver only when local position telemetry is unavailable.
 

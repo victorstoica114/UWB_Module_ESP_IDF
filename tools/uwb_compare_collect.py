@@ -510,6 +510,13 @@ def main() -> int:
         if args.log_output
         else None
     )
+    if log_path == events_path:
+        print(
+            "--log-output must differ from the automatically generated "
+            f"event file: {events_path}",
+            file=sys.stderr,
+        )
+        return 2
     runtime_mode = PROTOCOL_MODES[args.protocol]
 
     initial = wait_for_runtime(
