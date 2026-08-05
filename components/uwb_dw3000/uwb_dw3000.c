@@ -3921,7 +3921,17 @@ static esp_err_t uwb_dw3000_arm_rx(void)
     const bool profile =
         s_runtime_mode == UWB_DW3000_RUNTIME_PASSIVE_DS_TWR;
     const int64_t started_us = profile ? esp_timer_get_time() : 0;
-    esp_err_t err = uwb_dw3000_clear_status();
+    /*
+     * W4R enables the DW3000 frame-wait timeout.  It remains enabled after
+     * that exchange, so a later manually armed/continuous receiver would
+     * otherwise inherit the short W4R timeout instead of staying active for
+     * the host-side receive interval.  This function is only called when RX
+     * is not already armed, so the auto-RX window following TX is untouched.
+     */
+    esp_err_t err = uwb_dw3000_set_rx_timeout(0);
+    if (err == ESP_OK) {
+        err = uwb_dw3000_clear_status();
+    }
     if (err == ESP_OK) {
         err = uwb_dw3000_fast_command(DW3000_CMD_RX);
     }

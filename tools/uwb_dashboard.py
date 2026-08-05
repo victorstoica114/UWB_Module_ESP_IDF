@@ -1432,6 +1432,7 @@ class DashboardState:
             tag_id=tag_id,
             anchor_id=anchor_id,
             frame_id=frame_id,
+            slot_id=None,
             distance_m=distance_m,
             raw_distance_m=None,
             item=item,
@@ -1445,6 +1446,10 @@ class DashboardState:
             tag_id = int(item["initiator_id"])
             anchor_id = int(item["responder_id"])
             frame_id = int(item["seq"])
+            slot_id_value = item.get("slot_id")
+            slot_id = (
+                int(slot_id_value) if slot_id_value is not None else None
+            )
             distance_m = float(item["distance_m"])
             raw_distance_m = float(item.get("raw_distance_m", distance_m))
         except (KeyError, TypeError, ValueError):
@@ -1453,6 +1458,7 @@ class DashboardState:
             tag_id=tag_id,
             anchor_id=anchor_id,
             frame_id=frame_id,
+            slot_id=slot_id,
             distance_m=distance_m,
             raw_distance_m=raw_distance_m,
             item=item,
@@ -1465,6 +1471,7 @@ class DashboardState:
         tag_id: int,
         anchor_id: int,
         frame_id: int,
+        slot_id: int | None,
         distance_m: float,
         raw_distance_m: float | None,
         item: dict[str, Any],
@@ -1499,6 +1506,7 @@ class DashboardState:
             ),
             "frame_id": frame_id,
             "seq": frame_id,
+            "slot_id": slot_id,
             "received_at": now,
             "log_id": item.get("id"),
             "source_module_id": item.get("module_id"),
@@ -1857,6 +1865,7 @@ class DashboardState:
                 "distance_m": float(item["distance_m"]),
                 "frame_id": int(item["frame_id"]),
                 "seq": int(item["seq"]),
+                "slot_id": item.get("slot_id"),
                 "age_sec": now - float(item["received_at"]),
                 "log_id": item.get("log_id"),
                 "source_module_id": item.get("source_module_id"),
@@ -3861,7 +3870,7 @@ tr.status-stale td { color: #4f3b1d; }
             <div class="native-ds-position-option"><b>Native calculation</b><span>The ESP32 tag solves each complete coherent frame. The Raspberry only receives and displays positions and diagnostics.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In both passive protocols every non-anchor module only listens on UWB, so additional tags consume no radio slots.</span></div>
             <div><b>Geometry</b><span>FlexTDOA uses fixed GPS RTK ENU anchor geometry. Passive and Native DS-TWR retain their protocol-specific range geometry.</span></div>
-            <div><b>Known reference</b><span>GPS RTK compares each UWB point with the nearest RTK-fixed tag sample in the same ENU frame. Centroid and manual coordinates remain available for static tests.</span></div>
+            <div><b>Known reference</b><span>GPS RTK first fits the RTK anchor geometry to the active UWB anchors with one rigid 2D rotation/translation, then compares every UWB point with the nearest RTK-fixed tag sample. Centroid and manual coordinates remain available for static tests.</span></div>
           </div>
           <div id="positionToast" class="toast"></div>
           <div class="section" style="margin-top:12px;">
@@ -4813,7 +4822,7 @@ tr.status-stale td { color: #4f3b1d; }
           <div id="rangingProfileGrid" class="profile-grid"></div>
           <div class="profile-card" style="margin-top:12px">
             <h3>Native DS-TWR range calibration</h3>
-            <p class="muted">Static per-anchor range bias, ordered like the configured anchor IDs. Each value is measured range minus RTK truth in millimetres and is subtracted before the raw independent-frame solver. The defaults below were validated on channel 9 with the 46 ms profile. This is a hardware/timing calibration, not a temporal filter.</p>
+            <p class="muted">Static per-anchor range bias, ordered like the configured anchor IDs. Each value is measured range minus RTK truth in millimetres and is subtracted before the raw independent-frame solver. The defaults below were validated on channel 9 with the 44 ms profile. This is a hardware/timing calibration, not a temporal filter.</p>
             <div class="form-grid">
               <label for="nativeDsCalibrationTargets">Targets</label>
               <select id="nativeDsCalibrationTargets">
@@ -4881,12 +4890,13 @@ tr.status-stale td { color: #4f3b1d; }
                 <label for="uwbRadioChannel">Radio channel</label>
                 <select id="uwbRadioChannel">
                   <option value="5">CH5</option>
-                  <option value="9">CH9</option>
+                  <option value="9" selected>CH9</option>
                 </select>
                 <label for="uwbRadioPhyMode">Radio PHY</label>
                 <select id="uwbRadioPhyMode">
                   <option value="0">Fast · 6.8 Mb/s · preamble 128</option>
                   <option value="1">Long range · 850 kb/s · preamble 1024</option>
+                  <option value="2" selected>Field fast · 6.8 Mb/s · preamble 256</option>
                 </select>
                 <label for="uwbSurveyRxMs">RX slice ms</label>
                 <input id="uwbSurveyRxMs" value="100" type="number" min="1" step="1">
@@ -4904,17 +4914,17 @@ tr.status-stale td { color: #4f3b1d; }
               <h2>Native DS-TWR Ranging Timing</h2>
               <div class="form-grid">
                 <label for="uwbRangingSlotMs">Slot ms</label>
-                <input id="uwbRangingSlotMs" value="30" type="number" min="1" step="1">
+                <input id="uwbRangingSlotMs" value="10" type="number" min="1" step="1">
                 <label for="uwbRangingGapMs">Frame gap ms</label>
                 <input id="uwbRangingGapMs" value="4" type="number" min="1" step="1">
                 <label for="uwbRangingRxMs">Anchor RX slice ms</label>
-                <input id="uwbRangingRxMs" value="10" type="number" min="1" step="1">
+                <input id="uwbRangingRxMs" value="100" type="number" min="1" step="1">
                 <label for="uwbRangingTimeoutMs">RX timeout ms</label>
-                <input id="uwbRangingTimeoutMs" value="12" type="number" min="1" step="1">
+                <input id="uwbRangingTimeoutMs" value="5" type="number" min="1" step="1">
                 <label for="uwbRangingRespDelayMs">RESP delay ms</label>
-                <input id="uwbRangingRespDelayMs" value="5" type="number" min="1" step="1">
+                <input id="uwbRangingRespDelayMs" value="2" type="number" min="1" step="1">
                 <label for="uwbRangingFinalDelayMs">FINAL delay ms</label>
-                <input id="uwbRangingFinalDelayMs" value="5" type="number" min="1" step="1">
+                <input id="uwbRangingFinalDelayMs" value="2" type="number" min="1" step="1">
                 <label for="uwbRangingAutoRxDelayUus">Auto RX delay UUS</label>
                 <input id="uwbRangingAutoRxDelayUus" value="500" type="number" min="1" step="1">
               </div>
@@ -5215,6 +5225,7 @@ const rangingProfileDefaults = {
     respDelayMs: 20,
     finalDelayMs: 20,
     autoRxDelayUus: 500,
+    radioChannel: 9,
   },
   frame64: {
     prefix: "profileFrame64",
@@ -5231,22 +5242,24 @@ const rangingProfileDefaults = {
     respDelayMs: 2,
     finalDelayMs: 2,
     autoRxDelayUus: 500,
+    radioChannel: 9,
   },
-  frame46: {
-    prefix: "profileFrame46",
-    label: "46 ms RTK-Validated Fast",
-    description: "Four 11 ms tag-anchor slots plus a 2 ms frame gap, paced by the high-resolution blocking timer. This is the recommended high-rate profile.",
+  frame44: {
+    prefix: "profileFrame44",
+    label: "44 ms RTK-Validated Fast",
+    description: "Four 10 ms tag-anchor slots plus a 4 ms frame gap, paced by the high-resolution blocking timer. This is the recommended high-rate profile.",
     validationClass: "good",
-    validationText: "channel 9 · 19.16 positions/s · 1.76 cm RTK RMSE · no filter",
-    buttonLabel: "Apply 46 ms Fast",
+    validationText: "channel 9 · 20.82 positions/s · 1.80 cm RTK RMSE · 99.70% complete · no filter",
+    buttonLabel: "Apply 44 ms Fast",
     dsPositionMaxAgeSec: 0.2,
-    slotMs: 11,
-    roundGapMs: 2,
+    slotMs: 10,
+    roundGapMs: 4,
     dsRxSliceMs: 100,
     timeoutMs: 5,
     respDelayMs: 2,
     finalDelayMs: 2,
     autoRxDelayUus: 500,
+    radioChannel: 9,
   },
 };
 
@@ -5269,11 +5282,12 @@ function renderNativeDsActiveProfile() {
     respDelayMs: Number(item.runtime_ranging_resp_delay_ms),
     finalDelayMs: Number(item.runtime_ranging_final_delay_ms),
     autoRxDelayUus: Number(item.runtime_ranging_auto_rx_delay_uus),
+    radioChannel: Number(item.runtime_radio_channel),
   });
   const live = timing(statuses[0]);
   const fields = [
     "slotMs", "roundGapMs", "dsRxSliceMs", "timeoutMs",
-    "respDelayMs", "finalDelayMs", "autoRxDelayUus",
+    "respDelayMs", "finalDelayMs", "autoRxDelayUus", "radioChannel",
   ];
   const consistent = statuses.every(item => {
     const candidate = timing(item);
@@ -5284,7 +5298,7 @@ function renderNativeDsActiveProfile() {
   );
   const profileLabel = match?.label || "Custom Native DS-TWR timing";
   root.textContent = consistent
-    ? `Active on ${statuses.length}/${state.statuses.length || statuses.length} modules: ${profileLabel} · slot ${live.slotMs} ms · gap ${live.roundGapMs} ms · timeout ${live.timeoutMs} ms · RESP/FINAL/RESULT ${live.respDelayMs}+${live.finalDelayMs}+${live.respDelayMs} ms.`
+    ? `Active on ${statuses.length}/${state.statuses.length || statuses.length} modules: ${profileLabel} · CH${live.radioChannel} · slot ${live.slotMs} ms · gap ${live.roundGapMs} ms · timeout ${live.timeoutMs} ms · RESP/FINAL/RESULT ${live.respDelayMs}+${live.finalDelayMs}+${live.respDelayMs} ms.`
     : `Native DS-TWR timing differs between the ${statuses.length} active modules.`;
   root.className = `profile-validation ${consistent && match ? match.validationClass : "warn"}`;
 }
@@ -5399,7 +5413,7 @@ const rangingProtocolProfileFields = {
     "respDelayMs", "finalDelayMs", "autoRxDelayUus",
   ]),
 };
-const rangingProfileDefaultsVersion = "2026-08-05-native-ds-speed-v3";
+const rangingProfileDefaultsVersion = "2026-08-05-native-ds-speed-v4";
 const flexProfileDefaultsVersion = "2026-08-05-flextdoa-field-fast-v4";
 const passiveDsProfileDefaultsVersion = "2026-08-01-passive-ds-single-star-v2";
 const BQ_REG_NAMES = {
@@ -6132,16 +6146,19 @@ function synchronizePositionAnchorsFromRuntime(statuses) {
 function positionKnownReference(settings, anchors) {
   if (settings.referenceMode === "gps_rtk") {
     const tagId = Number(settings.tagIds?.[0] || 1);
-    const track = gpsRtkTagTrack(tagId);
+    const rtkAlignment = gpsRtkToUwbAlignment(
+      gpsRtkGeometryModel(), anchors, settings.anchorIds);
+    const track = gpsRtkTagTrack(tagId, rtkAlignment);
     const latest = track[track.length - 1];
     if (!latest) return null;
     return {
       x: latest.x,
       y: latest.y,
-      label: `GPS RTK tag M${tagId}`,
+      label: `GPS RTK tag M${tagId}${rtkAlignment ? " (anchor-aligned)" : ""}`,
       dynamicGps: true,
       tagId,
       capturedAt: latest.t,
+      rtkAlignment,
     };
   }
   if (settings.referenceMode === "centroid") {
@@ -9716,7 +9733,70 @@ function gpsRtkGeometryModel() {
   };
 }
 
-function gpsRtkTagTrack(moduleId = 1) {
+function gpsRtkToUwbAlignment(geometry, anchors, anchorIds = gpsRtkAnchorIds) {
+  if (!geometry || !anchors) return null;
+  const pairs = (anchorIds || [])
+    .map(Number)
+    .filter(Number.isFinite)
+    .map(anchorId => ({
+      measured: geometry.points.get(anchorId),
+      fixed: anchors[anchorId],
+    }))
+    .filter(pair => pair.measured && pair.fixed &&
+      Number.isFinite(Number(pair.measured.east)) &&
+      Number.isFinite(Number(pair.measured.north)) &&
+      Number.isFinite(Number(pair.fixed.x)) &&
+      Number.isFinite(Number(pair.fixed.y)));
+  if (pairs.length < 2) return null;
+
+  const measuredX = pairs.reduce(
+    (sum, pair) => sum + Number(pair.measured.east), 0) / pairs.length;
+  const measuredY = pairs.reduce(
+    (sum, pair) => sum + Number(pair.measured.north), 0) / pairs.length;
+  const fixedX = pairs.reduce(
+    (sum, pair) => sum + Number(pair.fixed.x), 0) / pairs.length;
+  const fixedY = pairs.reduce(
+    (sum, pair) => sum + Number(pair.fixed.y), 0) / pairs.length;
+  let dot = 0;
+  let cross = 0;
+  let measuredSpread = 0;
+  for (const pair of pairs) {
+    const mx = Number(pair.measured.east) - measuredX;
+    const my = Number(pair.measured.north) - measuredY;
+    const fx = Number(pair.fixed.x) - fixedX;
+    const fy = Number(pair.fixed.y) - fixedY;
+    dot += mx * fx + my * fy;
+    cross += mx * fy - my * fx;
+    measuredSpread += mx * mx + my * my;
+  }
+  if (measuredSpread < 1e-12) return null;
+  const rotationRad = Math.atan2(cross, dot);
+  const cosine = Math.cos(rotationRad);
+  const sine = Math.sin(rotationRad);
+  const translationX = fixedX -
+    (cosine * measuredX - sine * measuredY);
+  const translationY = fixedY -
+    (sine * measuredX + cosine * measuredY);
+  const squaredErrors = pairs.map(pair => {
+    const x = cosine * Number(pair.measured.east) -
+      sine * Number(pair.measured.north) + translationX;
+    const y = sine * Number(pair.measured.east) +
+      cosine * Number(pair.measured.north) + translationY;
+    return (x - Number(pair.fixed.x)) ** 2 +
+      (y - Number(pair.fixed.y)) ** 2;
+  });
+  return {
+    rotationRad,
+    translationX,
+    translationY,
+    anchorCount: pairs.length,
+    anchorFitRmsM: Math.sqrt(
+      squaredErrors.reduce((sum, value) => sum + value, 0) /
+      squaredErrors.length),
+  };
+}
+
+function gpsRtkTagTrack(moduleId = 1, alignment = null) {
   const geometry = gpsRtkGeometryModel();
   const samples = state.gpsRtkSamples.get(Number(moduleId)) || [];
   if (!geometry || !samples.length) return [];
@@ -9729,9 +9809,13 @@ function gpsRtkTagTrack(moduleId = 1) {
       gpsRtkEcef(sample.latitude, sample.longitude, sample.altitude),
       originEcef, geometry.originLatitude, geometry.originLongitude
     );
+    const cosine = alignment ? Math.cos(alignment.rotationRad) : 1;
+    const sine = alignment ? Math.sin(alignment.rotationRad) : 0;
     return {
-      x: point.east,
-      y: point.north,
+      x: cosine * point.east - sine * point.north +
+        Number(alignment?.translationX || 0),
+      y: sine * point.east + cosine * point.north +
+        Number(alignment?.translationY || 0),
       z: point.up,
       t: sample.capturedAt / 1000,
     };
@@ -9739,7 +9823,8 @@ function gpsRtkTagTrack(moduleId = 1) {
 }
 
 function positionGpsReferenceErrorStats(tagId, position, reference, windowSec) {
-  const track = gpsRtkTagTrack(reference.tagId || tagId);
+  const track = gpsRtkTagTrack(
+    reference.tagId || tagId, reference.rtkAlignment || null);
   if (!track.length) return null;
   const now = Date.now() / 1000;
   const uwbSamples = (state.positionTrail[String(tagId)] || []).filter(point =>
@@ -12241,7 +12326,7 @@ function rangingProfileRuntimeParams(values, solver) {
       ranging_resp_delay_ms: String(values.respDelayMs),
       ranging_final_delay_ms: String(values.finalDelayMs),
       ranging_auto_rx_delay_uus: String(values.autoRxDelayUus),
-      reboot: "1",
+      hot_switch: "1",
     };
   }
   return {};
@@ -12314,7 +12399,7 @@ function updateRangingSettingsProtocol() {
       title: "DS-TWR Settings",
       label: "Native DS-TWR",
       hint: "Selected in Position Setup. The clean baseline uses POLL, delayed RESP, delayed FINAL and a one-shot delayed RESULT for each tag-anchor range.",
-      note: "Use the 46 ms RTK-validated profile for high-rate operation, 64 ms as an intermediate step, and 100 ms as the conservative fallback. Applying a profile persists it and reboots the selected modules; FlexTDOA, Passive DS-TWR, distance-test and calibration timing remain untouched.",
+      note: "Use the 44 ms RTK-validated profile for high-rate operation, 64 ms as an intermediate step, and 100 ms as the conservative fallback. Applying a profile persists it and cleanly restarts only the UWB runtime on the selected modules; Wi-Fi, GPS and the ESP32 stay online. FlexTDOA, Passive DS-TWR, distance-test and calibration timing remain untouched.",
     },
     passive_ds: {
       title: "Passive DS-TWR Settings",
@@ -12684,12 +12769,12 @@ function renderFlexTdoaTimingDiagram() {
 }
 
 const dsTimingFallback = {
-  slotMs: 3,
-  roundGapMs: 1,
+  slotMs: 10,
+  roundGapMs: 4,
   rxSliceMs: 100,
-  timeoutMs: 3,
-  respDelayMs: 1,
-  finalDelayMs: 1,
+  timeoutMs: 5,
+  respDelayMs: 2,
+  finalDelayMs: 2,
   autoRxDelayUus: 500,
 };
 
@@ -15020,12 +15105,28 @@ class DashboardHttpServer(ThreadingHTTPServer):
             raise RuntimeError("APP_OTA_PASSWORD missing in secrets.h")
         if not params:
             raise RuntimeError("No runtime config parameters provided")
-        # Older dashboard tabs requested an in-place DW3000 hot switch.  That
-        # leaves the Passive DS-TWR frame state out of phase across modules and
-        # can produce fresh anchor ranges without a tag position.  Treat every
-        # dashboard hot-switch request as a coordinated parallel reboot.  The
-        # direct module endpoint remains available for firmware diagnostics.
-        if str(params.get("hot_switch") or "") == "1":
+        # Native DS-TWR has no shared anchor schedule: the tag starts every
+        # exchange, so a coordinated in-place UWB restart safely reloads its
+        # timing while Wi-Fi, GPS and the ESP32 remain online. Passive DS-TWR
+        # does have shared frame state; retain the conservative reboot fallback
+        # for every hot-switch request that is not Native timing-only.
+        native_timing_keys = {
+            "ranging_slot_ms",
+            "ranging_gap_ms",
+            "ranging_rx_ms",
+            "ranging_timeout_ms",
+            "ranging_resp_delay_ms",
+            "ranging_final_delay_ms",
+            "ranging_auto_rx_delay_uus",
+        }
+        hot_switch_requested = str(params.get("hot_switch") or "") == "1"
+        changed_keys = set(params) - {"hot_switch"}
+        native_timing_hot_switch = (
+            hot_switch_requested
+            and bool(changed_keys)
+            and changed_keys <= native_timing_keys
+        )
+        if hot_switch_requested and not native_timing_hot_switch:
             params = dict(params)
             params.pop("hot_switch", None)
             params["reboot"] = "1"
@@ -15046,11 +15147,14 @@ class DashboardHttpServer(ThreadingHTTPServer):
                 return results
 
             # A successful /config/runtime response means that the request was
-            # accepted, not that the coordinated reboot has completed.  Keep
-            # the transition lock until every module reports the requested
-            # runtime again.  The short delay prevents accepting a status from
-            # the old process in the interval between its HTTP reply and reset.
-            if str(params.get("reboot") or "") == "1":
+            # accepted, not that the coordinated transition has completed.
+            # Keep the lock until every module reports the requested timing
+            # after either an ESP reboot or an in-place UWB restart.
+            transition_kind = (
+                "hot switch" if native_timing_hot_switch else "reboot"
+            )
+            if (str(params.get("reboot") or "") == "1" or
+                    native_timing_hot_switch):
                 time.sleep(0.6)
                 with ThreadPoolExecutor(max_workers=min(5, len(targets))) as executor:
                     verified = list(
@@ -15065,10 +15169,15 @@ class DashboardHttpServer(ThreadingHTTPServer):
                     if status is None:
                         result["ok"] = False
                         result["error"] = (
-                            "runtime was accepted but not confirmed after reboot"
+                            "runtime was accepted but not confirmed after "
+                            + transition_kind
                         )
                         continue
-                    result["verified_after_reboot"] = True
+                    result[
+                        "verified_after_hot_switch"
+                        if native_timing_hot_switch
+                        else "verified_after_reboot"
+                    ] = True
                     result["module_id"] = status.get("module_id")
             return results
         finally:

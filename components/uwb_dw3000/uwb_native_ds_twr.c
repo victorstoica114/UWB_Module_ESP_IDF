@@ -93,9 +93,14 @@ static bool delayed_timestamp_valid(uint64_t expected, uint64_t programmed,
 
 static esp_err_t tag_exchange(
     const struct uwb_native_ds_config *config,
-    const struct uwb_native_ds_radio_ops *radio, uint8_t anchor_id,
+    const struct uwb_native_ds_radio_ops *radio, size_t anchor_index,
     uint32_t session_id, uint32_t frame_id)
 {
+    const uint8_t anchor_id = config->anchor_ids[anchor_index];
+    struct uwb_native_ds_tag_anchor_stats *anchor_stats =
+        &s_stats.tag_anchors[anchor_index];
+    anchor_stats->attempt_count++;
+
     uint8_t payload[UWB_NATIVE_DS_MAX_FRAME_LEN] = {0};
     size_t payload_len = 0U;
     struct uwb_native_ds_packet packet = {
@@ -115,6 +120,8 @@ static esp_err_t tag_exchange(
         radio->context, payload, payload_len, config->auto_rx_delay_uus,
         config->rx_timeout_ms, &poll_tx);
     if (err != ESP_OK) {
+        s_stats.poll_tx_error_count++;
+        anchor_stats->poll_tx_error_count++;
         return err;
     }
     s_stats.poll_tx_count++;
@@ -124,6 +131,13 @@ static esp_err_t tag_exchange(
                            anchor_id, session_id, frame_id,
                            config->rx_timeout_ms, &response);
     if (err != ESP_OK) {
+        if (err == ESP_ERR_TIMEOUT) {
+            s_stats.response_timeout_count++;
+            anchor_stats->response_timeout_count++;
+        } else if (!radio->stop_requested(radio->context)) {
+            s_stats.response_rx_error_count++;
+            anchor_stats->response_rx_error_count++;
+        }
         return err;
     }
     s_stats.response_rx_count++;
@@ -150,6 +164,8 @@ static esp_err_t tag_exchange(
         !delayed_timestamp_valid(expected_final_tx, programmed_final_tx,
                                  actual_final_tx)) {
         s_stats.delayed_tx_error_count++;
+        s_stats.final_tx_error_count++;
+        anchor_stats->final_tx_error_count++;
         return err == ESP_OK ? ESP_ERR_INVALID_STATE : err;
     }
     s_stats.final_tx_count++;
@@ -159,6 +175,13 @@ static esp_err_t tag_exchange(
                            anchor_id, session_id, frame_id,
                            config->rx_timeout_ms, &result);
     if (err != ESP_OK) {
+        if (err == ESP_ERR_TIMEOUT) {
+            s_stats.result_timeout_count++;
+            anchor_stats->result_timeout_count++;
+        } else if (!radio->stop_requested(radio->context)) {
+            s_stats.result_rx_error_count++;
+            anchor_stats->result_rx_error_count++;
+        }
         return err;
     }
     s_stats.result_rx_count++;
@@ -169,6 +192,7 @@ static esp_err_t tag_exchange(
         return ESP_ERR_INVALID_RESPONSE;
     }
     s_stats.completed_range_count++;
+    anchor_stats->completed_range_count++;
     s_stats.last_distance_mm = (int32_t)result.packet.distance_mm;
     radio->consume_report(radio->context, true, config->tag_id, anchor_id,
                           frame_id, distance_m);
@@ -204,8 +228,7 @@ static void run_tag(const struct uwb_native_ds_config *config,
              ++index) {
             const int64_t slot_started_us = radio->now_us(radio->context);
             const esp_err_t err = tag_exchange(
-                config, radio, config->anchor_ids[index], session_id,
-                current_frame_id);
+                config, radio, index, session_id, current_frame_id);
             if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
                 ESP_LOGW(TAG, "tag exchange anchor=%u frame=%lu failed: %s",
                          (unsigned)config->anchor_ids[index],
@@ -264,6 +287,7 @@ static esp_err_t anchor_exchange(
                                  programmed_response_tx,
                                  actual_response_tx)) {
         s_stats.delayed_tx_error_count++;
+        s_stats.response_tx_error_count++;
         return err == ESP_OK ? ESP_ERR_INVALID_STATE : err;
     }
     s_stats.response_tx_count++;
@@ -274,6 +298,11 @@ static esp_err_t anchor_exchange(
                            poll->packet.frame_id, config->rx_timeout_ms,
                            &final);
     if (err != ESP_OK) {
+        if (err == ESP_ERR_TIMEOUT) {
+            s_stats.final_timeout_count++;
+        } else if (!radio->stop_requested(radio->context)) {
+            s_stats.final_rx_error_count++;
+        }
         return err;
     }
     s_stats.final_rx_count++;
@@ -306,6 +335,7 @@ static esp_err_t anchor_exchange(
         &programmed_result_tx, &actual_result_tx);
     if (err != ESP_OK) {
         s_stats.delayed_tx_error_count++;
+        s_stats.result_tx_error_count++;
         return err;
     }
     if (!delayed_timestamp_valid(expected_result_tx, programmed_result_tx,
@@ -443,6 +473,11 @@ esp_err_t uwb_native_ds_twr_run(const struct uwb_native_ds_config *config,
     }
     memset(&s_stats, 0, sizeof(s_stats));
     if (config->source_id == config->tag_id) {
+        s_stats.tag_anchor_count = config->anchor_count;
+        for (size_t index = 0U; index < config->anchor_count; ++index) {
+            s_stats.tag_anchors[index].anchor_id =
+                config->anchor_ids[index];
+        }
         run_tag(config, radio);
         return ESP_OK;
     }

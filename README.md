@@ -16,7 +16,7 @@ Current step:
 - DW3000 hardware RXOK/SFD/RX/TX LED blink configured once at radio init
 - first DS-TWR two-module distance test runtime
 - antenna delay calibration runtime for two-module and three-module setups
-- native three-frame, tag-initiated 1-tag/4-anchor DS-TWR ranging runtime with dashboard
+- native four-packet, tag-initiated 1-tag/4-anchor DS-TWR ranging runtime with dashboard
   position view
 - optional BNO085 accelerometer hardware test via `components/bno085_service`
 - fixed PX1105R firmware update through ESP32 PSRAM; see
@@ -61,31 +61,30 @@ Active pin mapping lives in `components/config/include/board_config.h`.
 
 The DWM3000 data sheet specifies a maximum SPI clock of `38 MHz` in mode 0
 after OTP boot has completed. ESP32-S3 SPI2 is sourced from the `80 MHz` APB
-clock. With the stock ESP-IDF divider, the fastest realizable clock below the
-radio limit is `80 / 3 = 26.666 MHz`; the next divider is `40 MHz`, which would
-exceed the DWM3000 specification. Requesting `38 MHz` also selects that nearer
-`40 MHz` divider, so the driver requests `32 MHz` and validates the reported
-effective clock against the `38 MHz` limit.
+clock and can generate `40 MHz` exactly. This project deliberately selects
+that divider after field validation on all five modules. It is a documented
+2 MHz overclock, guarded by an explicit compile-time opt-in and a separate
+`38 MHz` data-sheet-limit constant so the exception cannot be accidental.
 
 The driver therefore uses two phases:
 
 1. reset, `DEV_ID` probe, soft reset, OTP reads, and radio configuration at
    `4 MHz`;
-2. operational RX/TX traffic requested at `32 MHz` and realized at
-   `26.666 MHz`, after eight consecutive `DEV_ID` read-backs succeed.
+2. operational RX/TX traffic requested and realized at `40 MHz`, after eight
+   consecutive `DEV_ID` read-backs succeed.
 
 If the operational verification fails, the driver automatically restores the
 `4 MHz` device configuration so the module remains reachable. `/status`
 exposes the effective value as `uwb_spi_clock_hz`; this is the frequency
 reported by the ESP-IDF SPI driver, not only the requested value.
 
-Hardware validation on all five modules, 2026-07-18:
+Hardware validation on all five modules, updated 2026-08-05:
 
 | Metric | Result |
 | --- | ---: |
-| Effective SPI clock, every module | `26.666 MHz` |
+| Effective SPI clock, every module | `40 MHz` |
 | Pure CI-CR validation window | `35 s` |
-| Selected slot / four-anchor frame | `6.60 ms / 26.40 ms` |
+| Selected slot / four-anchor frame | `4.80 ms / 19.20 ms` |
 | Passive observations | `443-450/s` |
 | Telemetry drops | `0` |
 | Responder-index balance per anchor | typically `37-39 / 37-39 / 37-39` per second |
@@ -333,15 +332,11 @@ persistent module ID and runtime config from NVS.
 `APP_RUNTIME_MODE_UWB_RANGING` is tag-initiated. The tag owns the complete
 frame schedule and starts one native DS-TWR exchange in every anchor slot.
 There is no coordinator, `RANGING_CMD`, `REPORT`, or `REPORT2`. Each responding
-anchor calculates the range after `FINAL` and emits the dashboard-compatible
-Wi-Fi log line:
-
-```text
-UWB_RANGING result tag=<tag_id> anchor=<anchor_id> seq=<seq> distance=<m> m ...
-```
-
-The PC/dashboard remains the place where the position is solved from the four
-independent tag-anchor distances.
+anchor calculates the range after `FINAL` and returns it in a one-shot UWB
+`RESULT` packet. The ESP32 tag solves every coherent four-anchor frame and
+publishes the range and raw independent-frame position over Wi-Fi. The
+dashboard displays that result and the host tools can independently replay it
+for RTK comparison; no temporal position filter is applied.
 
 The tag schedules anchors sequentially:
 
@@ -363,28 +358,32 @@ The important timing parameters are exposed by `/status`, can be changed with
 
 | Name | Default / lab value | Meaning |
 | --- | ---: | --- |
-| `ranging_slot_ms` | `30 ms` | Time budget for one native three-frame exchange. |
+| `ranging_slot_ms` | `10 ms` | Time budget for one native four-packet exchange. |
 | `ranging_round_gap_ms` | `4 ms` | Gap after all anchor slots in one frame. |
-| `ranging_rx_slice_ms` | `10 ms` | RX window used by idle anchor responders. |
-| `ranging_rx_timeout_ms` | `12 ms` | Maximum wait for the expected `RESP` or `FINAL`. |
-| `ranging_resp_delay_ms` | `5 ms` | Delayed TX offset from `POLL RX` to `RESP TX`. |
-| `ranging_final_delay_ms` | `5 ms` | Delayed TX offset from `RESP RX` to `FINAL TX`. |
+| `ranging_rx_slice_ms` | `100 ms` | RX window used by idle anchor responders. |
+| `ranging_rx_timeout_ms` | `5 ms` | Maximum wait for the expected `RESP`, `FINAL`, or `RESULT`. |
+| `ranging_resp_delay_ms` | `2 ms` | Delayed TX offset from `POLL RX` to `RESP TX`; also used from `FINAL RX` to `RESULT TX`. |
+| `ranging_final_delay_ms` | `2 ms` | Delayed TX offset from `RESP RX` to `FINAL TX`. |
 | `ranging_auto_rx_delay_uus` | `500 UUS` | DW3000 hardware delay before auto-RX opens after TX. |
 
 These values have their own NVS keys and dashboard profiles. Changing them does
 not modify FlexTDOA, distance-test, calibration, or anchor-survey timing. The
 tag uses a high-resolution host timer for slot and frame-gap boundaries, so
-profiles are not rounded to the 10 ms FreeRTOS tick. For four anchors, the
-default conservative frame is `4 * 30 + 4 = 124 ms`.
+profiles are not rounded to the 10 ms FreeRTOS tick. Native DS-TWR timing is
+copied when its UWB task starts. Timing-only changes can request an in-place
+UWB hot switch, which cleanly restarts the radio runtime while Wi-Fi, GPS and
+the ESP32 stay online. For four anchors, the default frame is
+`4 * 10 + 4 = 44 ms`.
 
-The validated fast lab profile is a 15 ms slot, 4 ms frame gap, 100 ms idle
-anchor RX slice, 8 ms expected-frame timeout, and 2 ms for each delayed
-`RESP`/`FINAL` transmission. Its complete frame is `4 * 15 + 4 = 64 ms`. A
-20-second five-module run produced 1,245 ranges distributed evenly across the
-four anchors, with zero failed exchanges and zero slot overruns: approximately
-62.2 ranges/s total or 15.55 complete four-anchor frames/s. The 52, 56, and
-60 ms lab candidates showed periodic host-runtime alignment losses and are not
-presented as stable dashboard profiles.
+The selected field profile is a 10 ms slot, 4 ms frame gap, 100 ms idle-anchor
+RX slice, 5 ms expected-frame timeout, and 2 ms for each delayed transmission.
+In a 180-second channel-9 run it completed 15,138 of 15,183 exchanges
+(`99.704%`), produced 20.82 raw positions/s, and measured 1.80 cm RMSE and
+3.07 cm P95 against stabilized RTK, without position filtering. A 42 ms frame
+raised throughput to 21.45 positions/s but reduced completion to 99.357%; a
+43 ms frame reached 21.12 positions/s at 99.491%. The 44 ms profile is the
+recommended robustness/throughput tradeoff. The 64 ms and 100 ms profiles
+remain available as intermediate and conservative fallbacks.
 
 ### FlexTDOA Runtime
 
@@ -815,8 +814,9 @@ firmware was restored to the original task-dispatched timer and fixed
 #### FlexTDOA Speed Notes
 
 The runtime is limited by worst-case host/radio turnaround rather than the
-`6.8 Mbps` UWB PHY. DW3000 SPI requests `32 MHz` and runs at the verified
-`26.666 MHz` ESP32-S3 divider, below the data-sheet limit of `38 MHz`. The hot
+`6.8 Mbps` UWB PHY. DW3000 SPI requests and runs at the field-validated
+`40 MHz` ESP32-S3 divider. This intentionally exceeds the data-sheet limit of
+`38 MHz`, as documented in the hardware section above. The hot
 path uses polling SPI, compact payload/metadata reads, targeted RX status
 clears plus `DB_TOGGLE`, cached `TX_FCTRL`, early request-buffer release, and
 DW3000 delayed TX.
@@ -1642,7 +1642,7 @@ uwb_antenna_delay_from_nvs
 | `DS-TWR REPORT wait failed` | Responder received `FINAL` but did not receive the timestamp report. |
 | `DS-TWR REPORT2 wait failed` | Responder calculated distance, but initiator did not receive verification report. |
 | `UWB distance RX error` | DW3000 reported PHY/RX error instead of a valid frame. |
-| `UWB_RANGING result` | Native three-frame exchange completed; the responding anchor calculated and published its tag distance. |
+| `UWB_RANGING result` | Native four-packet exchange completed; the tag received the anchor's one-shot `RESULT` distance. |
 | `DS-TWR tag verify` | Initiator recalculated the same exchange and compared against anchor result. |
 | `UWB CAL slot skipped due to sync fail` | Calibration slot synchronization failed; dashboard marks the run invalid. |
 
@@ -2466,13 +2466,16 @@ as OTA and stores values in NVS:
 ```sh
 python3 tools/runtime_config.py --target-list tools/ota_targets.local.txt \
   --parallel 5 --mode ranging --tag 1 --anchors 2,3,4,5 \
-  --ranging-slot-ms 350 --ranging-gap-ms 500 --reboot
+  --ranging-slot-ms 10 --ranging-gap-ms 4 --ranging-rx-ms 100 \
+  --ranging-timeout-ms 5 --ranging-resp-delay-ms 2 \
+  --ranging-final-delay-ms 2 --ranging-auto-rx-delay-uus 500 --hot-switch
 ```
 
 Useful mode names are `ranging`, `survey`, `calibration`, `distance`, and
 `beacon`. Runtime role changes such as `mode`, `tag`, `anchors`, and survey
-`coordinator` should be sent with `--reboot`; timing-only changes can be sent
-without reboot and will be picked up by the long-running loops where supported.
+`coordinator` should be sent with `--reboot`. Native and Passive DS-TWR
+timing-only changes can use `--hot-switch` to restart the UWB runtime in place;
+other timing changes require the protocol-specific behavior documented above.
 The UWB radio channel is also runtime-configurable as `--radio-channel 5` or
 `--radio-channel 9`. Send it to all active modules together and reboot so every
 DW3000 is reinitialized with the same RF profile.

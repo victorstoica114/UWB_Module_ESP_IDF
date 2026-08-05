@@ -9,7 +9,7 @@
 #include "uwb_dw3000.h"
 
 #define UWB_NATIVE_DS_MAX_FRAME_LEN 64U
-#define UWB_NATIVE_DS_MAX_ANCHORS 10U
+#define UWB_NATIVE_DS_MAX_ANCHORS UWB_NATIVE_DS_PIPELINE_MAX_ANCHORS
 
 struct uwb_native_ds_rx_frame {
     uint8_t payload[UWB_NATIVE_DS_MAX_FRAME_LEN];
