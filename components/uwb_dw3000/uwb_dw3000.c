@@ -19,6 +19,7 @@
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
@@ -41,6 +42,10 @@
 
 static const char *TAG = "uwb_dw3000";
 
+static StaticSemaphore_t s_native_ds_delay_semaphore_storage;
+static SemaphoreHandle_t s_native_ds_delay_semaphore;
+static esp_timer_handle_t s_native_ds_delay_timer;
+
 enum {
     /* ESP-IDF expresses the task stack depth in bytes. The multipoint
      * receive-only path keeps several complete radio frames on this task's
@@ -51,13 +56,15 @@ enum {
     // work; the task sleeps on the DW3000 interrupt between radio events.
     UWB_DW3000_TASK_PRIORITY = 20,
     UWB_DW3000_SPI_BOOT_CLOCK_HZ = 4 * 1000 * 1000,
-    // ESP32-S3 GPSPI uses the 80 MHz APB source with integer dividers. It
-    // cannot generate 38 MHz: requesting 38 MHz selects the nearer 40 MHz
-    // divider and violates the DW3000 limit. A 32 MHz request selects 80/3,
-    // or 26.666 MHz, the fastest realizable datasheet-compliant clock.
-    UWB_DW3000_SPI_OPERATION_REQUEST_HZ = 32 * 1000 * 1000,
+    // Project default: ESP32-S3 GPSPI generates 40 MHz exactly from the
+    // 80 MHz APB source. This intentionally exceeds the DW3000 datasheet
+    // limit of 38 MHz; all field modules have passed repeated DEV_ID reads,
+    // OTA boots and sustained FlexTDOA traffic at this clock. Keep the opt-in
+    // and the explicit datasheet limit so the exception cannot be accidental.
+    UWB_DW3000_SPI_ALLOW_OVERCLOCK = 1,
+    UWB_DW3000_SPI_OPERATION_REQUEST_HZ = 40 * 1000 * 1000,
     UWB_DW3000_SPI_DATASHEET_MAX_HZ = 38 * 1000 * 1000,
-    UWB_DW3000_SPI_VALIDATED_MAX_HZ = 38 * 1000 * 1000,
+    UWB_DW3000_SPI_VALIDATED_MAX_HZ = 40 * 1000 * 1000,
     UWB_DW3000_SPI_VERIFY_READS = 8,
     UWB_DW3000_SPI_MAX_TRANSFER_BYTES = 96,
     UWB_DW3000_RESET_SETTLE_MS = 5,
@@ -73,12 +80,17 @@ enum {
     UWB_DW3000_PAYLOAD_LEN = 64,
 };
 
-_Static_assert(UWB_DW3000_SPI_OPERATION_REQUEST_HZ <=
-                   UWB_DW3000_SPI_DATASHEET_MAX_HZ,
+_Static_assert(UWB_DW3000_SPI_ALLOW_OVERCLOCK ||
+                   UWB_DW3000_SPI_OPERATION_REQUEST_HZ <=
+                       UWB_DW3000_SPI_DATASHEET_MAX_HZ,
                "DW3000 operational SPI request exceeds datasheet maximum");
-_Static_assert(UWB_DW3000_SPI_VALIDATED_MAX_HZ <=
-                   UWB_DW3000_SPI_DATASHEET_MAX_HZ,
+_Static_assert(UWB_DW3000_SPI_ALLOW_OVERCLOCK ||
+                   UWB_DW3000_SPI_VALIDATED_MAX_HZ <=
+                       UWB_DW3000_SPI_DATASHEET_MAX_HZ,
                "DW3000 validated SPI maximum exceeds datasheet maximum");
+_Static_assert(UWB_DW3000_SPI_OPERATION_REQUEST_HZ <=
+                   UWB_DW3000_SPI_VALIDATED_MAX_HZ,
+               "DW3000 operational SPI request exceeds validated maximum");
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
 #define UWB_DW3000_TASK_CORE 1
@@ -308,6 +320,12 @@ _Static_assert(UWB_DW3000_SPI_VALIDATED_MAX_HZ <=
 #define UWB_DISTANCE_FRAME_RAW_DISTANCE_MM_OFFSET 44U
 #define UWB_DISTANCE_FRAME_FINAL_TIMESTAMPS_LEN \
     (UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET + 5U)
+#define UWB_DISTANCE_FRAME_POLL_LEN UWB_DISTANCE_FRAME_HEADER_LEN
+#define UWB_DISTANCE_FRAME_RESP_LEN UWB_DISTANCE_FRAME_HEADER_LEN
+#define UWB_DISTANCE_FRAME_FINAL_LEN UWB_DISTANCE_FRAME_HEADER_LEN
+#define UWB_DISTANCE_FRAME_REPORT_LEN UWB_DISTANCE_FRAME_FINAL_TIMESTAMPS_LEN
+#define UWB_DISTANCE_FRAME_REPORT2_LEN \
+    (UWB_DISTANCE_FRAME_RAW_DISTANCE_MM_OFFSET + sizeof(int32_t))
 #define UWB_DISTANCE_FRAME_BROADCAST_ID 255U
 
 /*
@@ -482,6 +500,7 @@ struct uwb_dw3000_rx_frame {
     uint16_t payload_len;
     uint64_t rx_timestamp;
     int64_t rx_host_time_us;
+    uint32_t rx_gptimer_time_us;
     uint8_t rx_buffer_index;
     uint8_t rx_buffer_status;
     bool clock_offset_valid;
@@ -497,6 +516,7 @@ struct uwb_distance_frame {
     uint16_t sequence;
     uint64_t rx_timestamp;
     int64_t rx_host_time_us;
+    uint32_t rx_gptimer_time_us;
     uint8_t rx_buffer_index;
     uint8_t rx_buffer_status;
     bool clock_offset_valid;
@@ -1067,6 +1087,7 @@ static bool s_started;
 static bool s_rx_armed;
 static bool s_irq_enabled;
 static TaskHandle_t s_task_handle;
+static volatile uint32_t s_last_dw3000_irq_gptimer_us;
 static uint8_t s_source_id;
 static uint32_t s_device_id;
 static enum uwb_dw3000_runtime_mode s_runtime_mode =
@@ -1114,6 +1135,46 @@ static uint32_t s_flex_tdoa_observation_invalid_cfo_since_summary;
 static uint32_t s_flex_tdoa_observation_invalid_order_since_summary;
 static uint32_t s_flex_tdoa_complete_slots_since_summary;
 static uint32_t s_flex_tdoa_incomplete_slots_since_summary;
+static bool s_flex_tdoa_tag_request_slot_valid;
+static uint32_t s_flex_tdoa_tag_last_request_slot_id;
+static uint32_t s_flex_tdoa_missed_requests_since_summary;
+static uint32_t s_flex_tdoa_deferred_requests_since_summary;
+static uint32_t s_flex_tdoa_burst_deadline_exits_since_summary;
+static uint32_t s_flex_tdoa_burst_deadline_overshoot_max_us;
+enum uwb_flex_tdoa_tag_rx_phase {
+    UWB_FLEX_TDOA_TAG_RX_INACTIVE = 0,
+    UWB_FLEX_TDOA_TAG_RX_SEEK_REQUEST,
+    UWB_FLEX_TDOA_TAG_RX_RESPONSE_BURST,
+};
+static enum uwb_flex_tdoa_tag_rx_phase s_flex_tdoa_tag_rx_phase;
+static uint32_t s_flex_tdoa_tag_burst_request_gptimer_us;
+static uint32_t s_flex_tdoa_tag_burst_response_start_us;
+static uint32_t s_flex_tdoa_tag_burst_response_subslot_us;
+static uint8_t s_flex_tdoa_tag_burst_responder_count;
+static uint8_t s_flex_tdoa_tag_burst_responder_anchor_index[
+    UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
+static uint32_t s_flex_tdoa_rx_seek_errors_since_summary;
+static uint32_t s_flex_tdoa_rx_burst_errors_since_summary[
+    UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
+static uint32_t s_flex_tdoa_rx_burst_other_errors_since_summary;
+static uint32_t s_flex_tdoa_rx_burst_before_errors_since_summary;
+static uint32_t s_flex_tdoa_rx_burst_after_errors_since_summary;
+static uint32_t s_flex_tdoa_rx_burst_errors_by_anchor[
+    UWB_ANCHOR_SURVEY_MAX_ANCHORS];
+static uint32_t s_flex_tdoa_rx_error_rdb_status_or_since_summary;
+static uint32_t s_flex_tdoa_irq_to_poll_max_us;
+static uint32_t s_flex_tdoa_irq_events_since_summary;
+static uint32_t s_flex_tdoa_irq_fallbacks_since_summary;
+static uint32_t s_flex_tdoa_last_accounted_irq_gptimer_us;
+static uint32_t s_flex_tdoa_rdb_resync_since_summary;
+static uint32_t s_flex_tdoa_rdb_both_good_since_summary;
+static uint32_t s_flex_tdoa_irq_gt_100us_since_summary;
+static uint32_t s_flex_tdoa_irq_gt_200us_since_summary;
+static bool s_flex_tdoa_evc_summary_pending;
+static uint32_t s_flex_tdoa_orphan_responses_by_anchor[
+    UWB_ANCHOR_SURVEY_MAX_ANCHORS];
+static uint32_t s_flex_tdoa_missed_requests_by_anchor[
+    UWB_ANCHOR_SURVEY_MAX_ANCHORS];
 static uint32_t s_flex_tdoa_missing_mask_since_summary[
     1U << (UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U)];
 static uint32_t s_flex_tdoa_observation_invalid_age_index_since_summary[
@@ -1133,6 +1194,11 @@ static uint32_t s_flex_tdoa_response_tx_by_initiator[
 static TickType_t s_flex_tdoa_anchor_summary_tick;
 static uint32_t s_flex_tdoa_rx_errors_since_summary;
 static uint32_t s_flex_tdoa_rx_error_status_since_summary;
+static uint32_t s_flex_tdoa_rx_phe_since_summary;
+static uint32_t s_flex_tdoa_rx_fce_since_summary;
+static uint32_t s_flex_tdoa_rx_fsl_since_summary;
+static uint32_t s_flex_tdoa_rx_ciaerr_since_summary;
+static uint32_t s_flex_tdoa_rx_arfe_since_summary;
 static uint32_t s_flex_tdoa_req_to_dtx_count[
     UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
 static uint64_t s_flex_tdoa_req_to_dtx_sum_us[
@@ -1461,19 +1527,36 @@ static esp_err_t uwb_calibration_timer_init(void)
         .resolution_hz = 1000000U,
     };
 
-    ESP_RETURN_ON_ERROR(gptimer_new_timer(&timer_config,
-                                          &s_calibration_timer),
-                        TAG, "calibration timer create failed");
+    esp_err_t err = gptimer_new_timer(&timer_config,
+                                      &s_calibration_timer);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "calibration timer create failed: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
     const gptimer_event_callbacks_t callbacks = {
         .on_alarm = uwb_calibration_timer_alarm_callback,
     };
-    ESP_RETURN_ON_ERROR(gptimer_register_event_callbacks(
-                            s_calibration_timer, &callbacks, NULL),
-                        TAG, "calibration timer callback register failed");
-    ESP_RETURN_ON_ERROR(gptimer_enable(s_calibration_timer), TAG,
-                        "calibration timer enable failed");
-    ESP_RETURN_ON_ERROR(gptimer_set_raw_count(s_calibration_timer, 0), TAG,
-                        "calibration timer initial clear failed");
+    err = gptimer_register_event_callbacks(
+        s_calibration_timer, &callbacks, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "calibration timer callback register failed: %s",
+                 esp_err_to_name(err));
+        goto fail_delete;
+    }
+    err = gptimer_enable(s_calibration_timer);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "calibration timer enable failed: %s",
+                 esp_err_to_name(err));
+        goto fail_delete;
+    }
+    err = gptimer_set_raw_count(s_calibration_timer, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "calibration timer initial clear failed: %s",
+                 esp_err_to_name(err));
+        (void)gptimer_disable(s_calibration_timer);
+        goto fail_delete;
+    }
 
     s_calibration_timer_running = false;
     s_calibration_timer_irq_armed = false;
@@ -1482,6 +1565,16 @@ static esp_err_t uwb_calibration_timer_init(void)
     s_calibration_timer_wait_task = NULL;
     ESP_LOGI(TAG, "UWB calibration timer ready at 1 MHz");
     return ESP_OK;
+
+fail_delete:
+    (void)gptimer_del_timer(s_calibration_timer);
+    s_calibration_timer = NULL;
+    s_calibration_timer_running = false;
+    s_calibration_timer_irq_armed = false;
+    s_calibration_timer_irq_started = false;
+    s_calibration_timer_start_on_tx_done = false;
+    s_calibration_timer_wait_task = NULL;
+    return err;
 }
 
 static esp_err_t uwb_calibration_timer_stop_if_running(void)
@@ -1525,7 +1618,7 @@ static esp_err_t uwb_calibration_timer_start(void)
     }
 
     const esp_err_t err = gptimer_start(s_calibration_timer);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    if (err != ESP_OK) {
         return err;
     }
     s_calibration_timer_running = true;
@@ -1652,6 +1745,11 @@ static void IRAM_ATTR uwb_dw3000_irq_isr_handler(void *arg)
 {
     (void)arg;
     uwb_calibration_timer_start_from_isr();
+    uint64_t irq_gptimer_us = 0;
+    if (s_calibration_timer_running && s_calibration_timer != NULL &&
+        gptimer_get_raw_count(s_calibration_timer, &irq_gptimer_us) == ESP_OK) {
+        s_last_dw3000_irq_gptimer_us = (uint32_t)irq_gptimer_us;
+    }
     BaseType_t higher_priority_task_woken = pdFALSE;
     if (s_task_handle != NULL) {
         vTaskNotifyGiveFromISR(s_task_handle, &higher_priority_task_woken);
@@ -2433,15 +2531,6 @@ static bool uwb_dw3000_payload_is_flextdoa_localization(
            packet.type == expected_type;
 }
 
-static bool uwb_dw3000_payload_is_native_ds_frame(const uint8_t *payload,
-                                                  size_t payload_len)
-{
-    return payload != NULL && payload_len >= 18U &&
-           payload[0] == 'N' && payload[1] == 'D' &&
-           payload[2] == 'S' && payload[3] == '4' && payload[4] == 1U &&
-           payload[5] >= 1U && payload[5] <= 4U;
-}
-
 static bool uwb_dw3000_should_capture_rx_diagnostics(const uint8_t *payload,
                                                      size_t payload_len)
 {
@@ -2449,14 +2538,16 @@ static bool uwb_dw3000_should_capture_rx_diagnostics(const uint8_t *payload,
     const app_runtime_config_t *config = app_runtime_config_get();
     if (config != NULL &&
         config->runtime_mode == APP_RUNTIME_MODE_UWB_RANGING) {
-        if (!uwb_dw3000_payload_is_native_ds_frame(payload, payload_len) ||
-            APP_UWB_DIAGNOSTICS_LOG_EVERY == 0) {
-            return false;
-        }
-        const uint16_t sequence =
-            (uint16_t)(((uint16_t)payload[8]) |
-                       ((uint16_t)payload[9] << 8));
-        return (sequence % APP_UWB_DIAGNOSTICS_LOG_EVERY) == 0;
+        /*
+         * Native DS-TWR has a delayed TX deadline immediately after every
+         * useful RX frame. Reading the full CIA diagnostic register set and
+         * forwarding an ESP_LOG line here consumed several milliseconds on
+         * the field modules, enough to make an otherwise valid 2-5 ms reply
+         * late. Keep RF diagnostics for the dedicated distance-test modes;
+         * Native DS exposes its timestamps, range and pipeline counters after
+         * the exchange has completed instead.
+         */
+        return false;
     }
 
     if (!uwb_dw3000_payload_is_distance_frame(payload, payload_len) ||
@@ -2838,39 +2929,26 @@ uwb_dw3000_read_event_counters(struct uwb_event_counters *counters)
     memset(counters, 0, sizeof(*counters));
 
 #if APP_UWB_EVENT_COUNTERS_ENABLED
-    uint32_t count0 = 0;
-    uint32_t count1 = 0;
-    uint32_t count2 = 0;
-    uint32_t count3 = 0;
-    uint32_t count4 = 0;
-    uint32_t count5 = 0;
-    uint32_t count6 = 0;
-    uint32_t count7 = 0;
-
-    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
-                                          DW3000_EVC_COUNT0_SUB, &count0),
-                        TAG, "EVC_COUNT0 read failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
-                                          DW3000_EVC_COUNT1_SUB, &count1),
-                        TAG, "EVC_COUNT1 read failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
-                                          DW3000_EVC_COUNT2_SUB, &count2),
-                        TAG, "EVC_COUNT2 read failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
-                                          DW3000_EVC_COUNT3_SUB, &count3),
-                        TAG, "EVC_COUNT3 read failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
-                                          DW3000_EVC_COUNT4_SUB, &count4),
-                        TAG, "EVC_COUNT4 read failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
-                                          DW3000_EVC_COUNT5_SUB, &count5),
-                        TAG, "EVC_COUNT5 read failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
-                                          DW3000_EVC_COUNT6_SUB, &count6),
-                        TAG, "EVC_COUNT6 read failed");
-    ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_DIG_DIAG,
-                                          DW3000_EVC_COUNT7_SUB, &count7),
-                        TAG, "EVC_COUNT7 read failed");
+    /* COUNT0..COUNT7 occupy one register-file span (with reserved holes).
+     * Reading the span in one SPI transaction keeps live diagnostics from
+     * adding eight separate command/header latencies to the RX task. */
+    uint8_t raw[(DW3000_EVC_COUNT7_SUB + sizeof(uint32_t)) -
+                DW3000_EVC_COUNT0_SUB] = {0};
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_read_bytes(DW3000_REG_DIG_DIAG,
+                              DW3000_EVC_COUNT0_SUB, raw, sizeof(raw)),
+        TAG, "EVC counter span read failed");
+#define UWB_EVC_RAW32(sub)                                                \
+    uwb_distance_get_u32(raw, (size_t)((sub) - DW3000_EVC_COUNT0_SUB))
+    const uint32_t count0 = UWB_EVC_RAW32(DW3000_EVC_COUNT0_SUB);
+    const uint32_t count1 = UWB_EVC_RAW32(DW3000_EVC_COUNT1_SUB);
+    const uint32_t count2 = UWB_EVC_RAW32(DW3000_EVC_COUNT2_SUB);
+    const uint32_t count3 = UWB_EVC_RAW32(DW3000_EVC_COUNT3_SUB);
+    const uint32_t count4 = UWB_EVC_RAW32(DW3000_EVC_COUNT4_SUB);
+    const uint32_t count5 = UWB_EVC_RAW32(DW3000_EVC_COUNT5_SUB);
+    const uint32_t count6 = UWB_EVC_RAW32(DW3000_EVC_COUNT6_SUB);
+    const uint32_t count7 = UWB_EVC_RAW32(DW3000_EVC_COUNT7_SUB);
+#undef UWB_EVC_RAW32
 
     counters->phe = (uint16_t)(count0 & DW3000_EVC_12BIT_LOW_MASK);
     counters->rse = (uint16_t)((count0 & DW3000_EVC_12BIT_HIGH_MASK) >>
@@ -3128,6 +3206,199 @@ static esp_err_t uwb_dw3000_clear_status(void)
 {
     return uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW, 0x44,
                                     DW3000_STATUS_CLEAR_MASK, 4);
+}
+
+static uint32_t uwb_flex_tdoa_note_irq_to_poll(void)
+{
+    uint64_t poll_gptimer_us_64 = 0;
+    const bool poll_time_valid = s_calibration_timer_running &&
+        s_calibration_timer != NULL &&
+        gptimer_get_raw_count(s_calibration_timer,
+                              &poll_gptimer_us_64) == ESP_OK;
+    const uint32_t poll_gptimer_us = (uint32_t)poll_gptimer_us_64;
+    if (s_flex_tdoa_tag_rx_phase == UWB_FLEX_TDOA_TAG_RX_INACTIVE) {
+        return poll_time_valid ? poll_gptimer_us : 0U;
+    }
+    const uint32_t irq_us = s_last_dw3000_irq_gptimer_us;
+    const uint32_t elapsed_us = poll_gptimer_us - irq_us;
+    if (poll_time_valid && irq_us != 0U &&
+        irq_us != s_flex_tdoa_last_accounted_irq_gptimer_us &&
+        elapsed_us < 100000U) {
+        s_flex_tdoa_last_accounted_irq_gptimer_us = irq_us;
+        s_flex_tdoa_irq_events_since_summary++;
+        if (elapsed_us > s_flex_tdoa_irq_to_poll_max_us) {
+            s_flex_tdoa_irq_to_poll_max_us = elapsed_us;
+        }
+        if (elapsed_us > 100U) {
+            s_flex_tdoa_irq_gt_100us_since_summary++;
+        }
+        if (elapsed_us > 200U) {
+            s_flex_tdoa_irq_gt_200us_since_summary++;
+        }
+        return irq_us;
+    }
+    s_flex_tdoa_irq_fallbacks_since_summary++;
+    return poll_time_valid ? poll_gptimer_us : 0U;
+}
+
+static void uwb_flex_tdoa_note_rx_error_phase(uint8_t rdb_status,
+                                               uint32_t error_gptimer_us)
+{
+    if (s_flex_tdoa_tag_rx_phase == UWB_FLEX_TDOA_TAG_RX_INACTIVE) {
+        return;
+    }
+    s_flex_tdoa_rx_error_rdb_status_or_since_summary |= rdb_status;
+    if (s_flex_tdoa_tag_rx_phase !=
+        UWB_FLEX_TDOA_TAG_RX_RESPONSE_BURST) {
+        s_flex_tdoa_rx_seek_errors_since_summary++;
+        return;
+    }
+
+    const uint32_t request_elapsed_us =
+        error_gptimer_us - s_flex_tdoa_tag_burst_request_gptimer_us;
+    if (request_elapsed_us < s_flex_tdoa_tag_burst_response_start_us ||
+        s_flex_tdoa_tag_burst_response_subslot_us == 0U) {
+        s_flex_tdoa_rx_burst_other_errors_since_summary++;
+        s_flex_tdoa_rx_burst_before_errors_since_summary++;
+        return;
+    }
+    const uint32_t response_elapsed_us =
+        request_elapsed_us - s_flex_tdoa_tag_burst_response_start_us;
+    const uint32_t response_index =
+        (uint32_t)response_elapsed_us /
+        s_flex_tdoa_tag_burst_response_subslot_us;
+    if (response_index < s_flex_tdoa_tag_burst_responder_count &&
+        response_index < UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U) {
+        s_flex_tdoa_rx_burst_errors_since_summary[response_index]++;
+        const uint8_t anchor_index =
+            s_flex_tdoa_tag_burst_responder_anchor_index[response_index];
+        if (anchor_index < UWB_ANCHOR_SURVEY_MAX_ANCHORS) {
+            s_flex_tdoa_rx_burst_errors_by_anchor[anchor_index]++;
+        }
+    } else {
+        s_flex_tdoa_rx_burst_other_errors_since_summary++;
+        s_flex_tdoa_rx_burst_after_errors_since_summary++;
+    }
+}
+
+static void uwb_micro_timer_wait_for_event_until(int64_t deadline_us)
+{
+    int64_t remaining_us = deadline_us - esp_timer_get_time();
+    if (remaining_us <= 0) {
+        return;
+    }
+
+#if APP_UWB_IRQ_ENABLED
+    if (s_irq_enabled &&
+        uwb_calibration_timer_start() == ESP_OK) {
+        uint64_t timer_now_us = 0;
+        if (uwb_calibration_timer_get_us(&timer_now_us) == ESP_OK) {
+            remaining_us = deadline_us - esp_timer_get_time();
+            if (remaining_us <= 0) {
+                return;
+            }
+
+            const gptimer_alarm_config_t alarm_config = {
+                .alarm_count = timer_now_us + (uint64_t)remaining_us,
+                .reload_count = 0,
+                .flags = {
+                    .auto_reload_on_alarm = false,
+                },
+            };
+            s_calibration_timer_wait_task = xTaskGetCurrentTaskHandle();
+            if (gptimer_set_alarm_action(s_calibration_timer,
+                                         &alarm_config) == ESP_OK) {
+                uint64_t armed_timer_us = 0;
+                if (uwb_calibration_timer_get_us(&armed_timer_us) != ESP_OK ||
+                    armed_timer_us >= alarm_config.alarm_count ||
+                    esp_timer_get_time() >= deadline_us) {
+                    (void)gptimer_set_alarm_action(s_calibration_timer, NULL);
+                    s_calibration_timer_wait_task = NULL;
+                    return;
+                }
+                /* Either the DW3000 IRQ or the 1 MHz GPTimer alarm wakes the
+                 * same radio task. One RTOS tick is only a safety backstop;
+                 * it is no longer the requested sub-millisecond deadline. */
+                (void)ulTaskNotifyTake(pdTRUE, 1U);
+                (void)gptimer_set_alarm_action(s_calibration_timer, NULL);
+                s_calibration_timer_wait_task = NULL;
+                return;
+            }
+            s_calibration_timer_wait_task = NULL;
+        }
+    }
+#endif
+
+    /* IRQ-less/failure fallback: poll without sleeping past the deadline. */
+    remaining_us = deadline_us - esp_timer_get_time();
+    if (remaining_us > 0) {
+        const uint32_t delay_us =
+            (uint32_t)(remaining_us > 1000 ? 1000 : remaining_us);
+        esp_rom_delay_us(delay_us);
+    }
+}
+
+static void uwb_gptimer_delay_us(uint32_t delay_us)
+{
+    if (delay_us == 0U) {
+        return;
+    }
+
+    if (uwb_calibration_timer_start() != ESP_OK) {
+        esp_rom_delay_us(delay_us);
+        return;
+    }
+
+    uint64_t start_us = 0;
+    if (uwb_calibration_timer_get_us(&start_us) != ESP_OK) {
+        esp_rom_delay_us(delay_us);
+        return;
+    }
+    const uint64_t deadline_us = start_us + (uint64_t)delay_us;
+
+    while (true) {
+        uint64_t now_us = 0;
+        if (uwb_calibration_timer_get_us(&now_us) != ESP_OK) {
+            esp_rom_delay_us(delay_us);
+            return;
+        }
+        if (now_us >= deadline_us) {
+            return;
+        }
+
+        const gptimer_alarm_config_t alarm_config = {
+            .alarm_count = deadline_us,
+            .reload_count = 0,
+            .flags = {
+                .auto_reload_on_alarm = false,
+            },
+        };
+        s_calibration_timer_wait_task = xTaskGetCurrentTaskHandle();
+        if (gptimer_set_alarm_action(s_calibration_timer, &alarm_config) !=
+            ESP_OK) {
+            s_calibration_timer_wait_task = NULL;
+            esp_rom_delay_us((uint32_t)(deadline_us - now_us));
+            return;
+        }
+
+        uint64_t armed_us = 0;
+        if (uwb_calibration_timer_get_us(&armed_us) != ESP_OK ||
+            armed_us >= deadline_us) {
+            (void)gptimer_set_alarm_action(s_calibration_timer, NULL);
+            s_calibration_timer_wait_task = NULL;
+            return;
+        }
+
+        const uint64_t remaining_us = deadline_us - armed_us;
+        TickType_t ticks = pdMS_TO_TICKS(
+            (uint32_t)((remaining_us + 999U) / 1000U));
+        if (ticks == 0U) {
+            ticks = 1U;
+        }
+        (void)ulTaskNotifyTake(pdTRUE, ticks);
+        (void)gptimer_set_alarm_action(s_calibration_timer, NULL);
+        s_calibration_timer_wait_task = NULL;
+    }
 }
 
 static esp_err_t uwb_dw3000_read_otp(uint8_t address, uint32_t *value)
@@ -3894,8 +4165,9 @@ static uint32_t uwb_dw3000_remaining_ms(int64_t start_us,
     return (uint32_t)((remaining_us + 999LL) / 1000LL);
 }
 
-static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
-                                          uint32_t timeout_ms)
+static esp_err_t uwb_dw3000_receive_frame_until(
+    struct uwb_dw3000_rx_frame *frame, uint32_t timeout_ms,
+    int64_t precise_deadline_us)
 {
     if (frame == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -3928,6 +4200,12 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                     ? DW3000_RDB_BUFFER_1_GOOD_MASK
                     : DW3000_RDB_BUFFER_0_GOOD_MASK;
             rx_good = (rdb_status & current_good) != 0U;
+            if (s_flex_tdoa_tag_rx_phase !=
+                    UWB_FLEX_TDOA_TAG_RX_INACTIVE &&
+                (rdb_status & current_good) != 0U &&
+                (rdb_status & other_good) != 0U) {
+                s_flex_tdoa_rdb_both_good_since_summary++;
+            }
             if (!rx_good && (rdb_status & other_good) != 0U) {
                 // Keep the host and DW3000 buffer pointers aligned. A local
                 // index flip alone would read the other buffer without
@@ -3937,6 +4215,10 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                     "double-buffer pointer recovery toggle failed");
                 s_rx_double_buffer_index ^= 1U;
                 s_rx_double_buffer_resync_count++;
+                if (s_flex_tdoa_tag_rx_phase !=
+                    UWB_FLEX_TDOA_TAG_RX_INACTIVE) {
+                    s_flex_tdoa_rdb_resync_since_summary++;
+                }
                 rx_good = true;
                 if (s_rx_double_buffer_resync_count <= 4U ||
                     (s_rx_double_buffer_resync_count % 100U) == 0U) {
@@ -3960,10 +4242,21 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             rx_good = (status & DW3000_RX_GOOD_MASK) != 0;
         }
 
+        uint32_t rx_event_gptimer_us = 0U;
+        if (rx_good ||
+            (status & (DW3000_RX_ERROR_MASK |
+                       DW3000_RX_TIMEOUT_MASK)) != 0U) {
+            rx_event_gptimer_us = uwb_flex_tdoa_note_irq_to_poll();
+        }
+
         if (rx_good) {
-            const int64_t double_buffer_start_us =
-                s_rx_double_buffer_enabled ? esp_timer_get_time() : 0;
+            uint64_t double_buffer_start_us = 0U;
+            if (s_rx_double_buffer_enabled) {
+                (void)uwb_calibration_timer_get_us(
+                    &double_buffer_start_us);
+            }
             frame->rx_host_time_us = esp_timer_get_time();
+            frame->rx_gptimer_time_us = rx_event_gptimer_us;
             frame->rx_buffer_index = s_rx_double_buffer_index;
             frame->rx_buffer_status = rdb_status;
             bool spi_bus_acquired = false;
@@ -3992,8 +4285,15 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                     }
                     s_rx_armed = true;
                     double_buffer_early_rearmed = true;
-                    const uint32_t good_to_rearm_us = (uint32_t)(
-                        esp_timer_get_time() - double_buffer_start_us);
+                    uint64_t rearmed_us = 0U;
+                    (void)uwb_calibration_timer_get_us(&rearmed_us);
+                    const uint32_t good_to_rearm_us =
+                        rearmed_us >= double_buffer_start_us &&
+                                rearmed_us - double_buffer_start_us <=
+                                    UINT32_MAX
+                            ? (uint32_t)(rearmed_us -
+                                         double_buffer_start_us)
+                            : 0U;
                     if (good_to_rearm_us >
                         s_rx_double_buffer_good_to_rearm_max_us) {
                         s_rx_double_buffer_good_to_rearm_max_us =
@@ -4168,8 +4468,14 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
                              esp_err_to_name(release_err));
                     return release_err;
                 }
-                const uint32_t release_us = (uint32_t)(
-                    esp_timer_get_time() - double_buffer_start_us);
+                uint64_t released_us = 0U;
+                (void)uwb_calibration_timer_get_us(&released_us);
+                const uint32_t release_us =
+                    released_us >= double_buffer_start_us &&
+                            released_us - double_buffer_start_us <= UINT32_MAX
+                        ? (uint32_t)(released_us -
+                                     double_buffer_start_us)
+                        : 0U;
                 if (release_us > s_rx_double_buffer_release_max_us) {
                     s_rx_double_buffer_release_max_us = release_us;
                 }
@@ -4222,8 +4528,25 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
         if ((status & DW3000_RX_ERROR_MASK) != 0) {
             s_rx_error_count++;
             if (s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
+                uwb_flex_tdoa_note_rx_error_phase(rdb_status,
+                                                   rx_event_gptimer_us);
                 s_flex_tdoa_rx_errors_since_summary++;
                 s_flex_tdoa_rx_error_status_since_summary |= status;
+                if ((status & DW3000_STATUS_RXPHE) != 0U) {
+                    s_flex_tdoa_rx_phe_since_summary++;
+                }
+                if ((status & DW3000_STATUS_RXFCE) != 0U) {
+                    s_flex_tdoa_rx_fce_since_summary++;
+                }
+                if ((status & DW3000_STATUS_RXFSL) != 0U) {
+                    s_flex_tdoa_rx_fsl_since_summary++;
+                }
+                if ((status & DW3000_STATUS_CIAERR) != 0U) {
+                    s_flex_tdoa_rx_ciaerr_since_summary++;
+                }
+                if ((status & DW3000_STATUS_ARFE) != 0U) {
+                    s_flex_tdoa_rx_arfe_since_summary++;
+                }
             } else {
                 ESP_LOGW(TAG, "UWB distance RX error SYS_STATUS=0x%08lx",
                          (unsigned long)status);
@@ -4252,7 +4575,11 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             return ESP_ERR_NOT_FINISHED;
         }
 
-        if (uwb_dw3000_remaining_ms(start, timeout_ms) == 0) {
+        const bool receive_timed_out =
+            precise_deadline_us > 0
+                ? esp_timer_get_time() >= precise_deadline_us
+                : uwb_dw3000_remaining_ms(start, timeout_ms) == 0;
+        if (receive_timed_out) {
             if (s_rx_double_buffer_enabled) {
                 // A passive tag has no TX path that would recover a silently
                 // idle receiver. In a healthy FlexTDOA frame a 5 ms receive
@@ -4269,9 +4596,19 @@ static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
             return ESP_ERR_TIMEOUT;
         }
 
-        uwb_dw3000_wait_for_event_or_delay(start, timeout_ms,
-                                           UWB_DW3000_POLL_INTERVAL_MS);
+        if (precise_deadline_us > 0) {
+            uwb_micro_timer_wait_for_event_until(precise_deadline_us);
+        } else {
+            uwb_dw3000_wait_for_event_or_delay(
+                start, timeout_ms, UWB_DW3000_POLL_INTERVAL_MS);
+        }
     }
+}
+
+static esp_err_t uwb_dw3000_receive_frame(struct uwb_dw3000_rx_frame *frame,
+                                          uint32_t timeout_ms)
+{
+    return uwb_dw3000_receive_frame_until(frame, timeout_ms, 0);
 }
 
 static void uwb_distance_put_u16(uint8_t *payload, size_t offset,
@@ -4387,6 +4724,7 @@ static bool uwb_distance_parse_frame(const struct uwb_dw3000_rx_frame *rx_frame,
         frame->sequence = (uint16_t)packet.slot_id;
         frame->rx_timestamp = rx_frame->rx_timestamp;
         frame->rx_host_time_us = rx_frame->rx_host_time_us;
+        frame->rx_gptimer_time_us = rx_frame->rx_gptimer_time_us;
         frame->rx_buffer_index = rx_frame->rx_buffer_index;
         frame->rx_buffer_status = rx_frame->rx_buffer_status;
         frame->clock_offset_valid = rx_frame->clock_offset_valid;
@@ -4413,6 +4751,7 @@ static bool uwb_distance_parse_frame(const struct uwb_dw3000_rx_frame *rx_frame,
     frame->sequence = uwb_distance_get_u16(payload, 8);
     frame->rx_timestamp = rx_frame->rx_timestamp;
     frame->rx_host_time_us = rx_frame->rx_host_time_us;
+    frame->rx_gptimer_time_us = rx_frame->rx_gptimer_time_us;
     frame->rx_buffer_index = rx_frame->rx_buffer_index;
     frame->rx_buffer_status = rx_frame->rx_buffer_status;
     frame->clock_offset_valid = rx_frame->clock_offset_valid;
@@ -4714,11 +5053,12 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
                              payload);
 #if APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX
     esp_err_t err = uwb_dw3000_send_payload_expect_rx(
-        payload, sizeof(payload), auto_rx_delay_uus, rx_timeout_ms,
+        payload, UWB_DISTANCE_FRAME_POLL_LEN, auto_rx_delay_uus, rx_timeout_ms,
         &poll_tx_ts);
 #else
     esp_err_t err =
-        uwb_dw3000_send_payload(payload, sizeof(payload), &poll_tx_ts);
+        uwb_dw3000_send_payload(payload, UWB_DISTANCE_FRAME_POLL_LEN,
+                                &poll_tx_ts);
 #endif
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "DS-TWR POLL TX failed seq=%u peer=%u: %s",
@@ -4735,18 +5075,13 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
         return err;
     }
     resp_rx_ts = response.rx_timestamp;
-    if (uwb_distance_should_log_diagnostics(sequence)) {
-        uwb_distance_log_rx_diagnostics(sequence, "RESP_RX",
-                                        &response.diagnostics);
-    }
-
     uwb_distance_build_frame(UWB_DISTANCE_FRAME_FINAL, peer_id, sequence,
                              payload);
 #if APP_UWB_DISTANCE_TEST_USE_DELAYED_TX
     const uint64_t final_tx_due = uwb_dw3000_add_timestamp_delta(
         resp_rx_ts, uwb_dw3000_ms_to_dtu(final_delay_ms));
     uint64_t final_tx_actual_ts = 0;
-    err = uwb_dw3000_send_payload_delayed(payload, sizeof(payload),
+    err = uwb_dw3000_send_payload_delayed(payload, UWB_DISTANCE_FRAME_FINAL_LEN,
                                           final_tx_due, &final_tx_ts,
                                           &final_tx_actual_ts);
     ESP_LOGD(TAG,
@@ -4757,7 +5092,8 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
              (unsigned long long)final_tx_actual_ts);
 #else
     uwb_dw3000_delay_ms(final_delay_ms);
-    err = uwb_dw3000_send_payload(payload, sizeof(payload), &final_tx_ts);
+    err = uwb_dw3000_send_payload(payload, UWB_DISTANCE_FRAME_FINAL_LEN,
+                                  &final_tx_ts);
 #endif
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "DS-TWR FINAL TX failed seq=%u peer=%u: %s",
@@ -4765,7 +5101,7 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
         return err;
     }
 
-    uwb_dw3000_delay_ms(report_delay_ms);
+    uwb_gptimer_delay_us(report_delay_ms * 1000U);
     uwb_distance_build_frame(UWB_DISTANCE_FRAME_REPORT, peer_id, sequence,
                              payload);
     uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_POLL_TX_TS_OFFSET,
@@ -4775,11 +5111,12 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
     uwb_distance_put_ts40(payload, UWB_DISTANCE_FRAME_FINAL_TX_TS_OFFSET,
                           final_tx_ts);
 #if APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX
-    err = uwb_dw3000_send_payload_expect_rx(payload, sizeof(payload),
-                                            auto_rx_delay_uus, rx_timeout_ms,
-                                            NULL);
+    err = uwb_dw3000_send_payload_expect_rx(payload,
+                                             UWB_DISTANCE_FRAME_REPORT_LEN,
+                                             auto_rx_delay_uus, rx_timeout_ms,
+                                             NULL);
 #else
-    err = uwb_dw3000_send_payload(payload, sizeof(payload), NULL);
+    err = uwb_dw3000_send_payload(payload, UWB_DISTANCE_FRAME_REPORT_LEN, NULL);
 #endif
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "DS-TWR REPORT TX failed seq=%u peer=%u: %s",
@@ -4800,6 +5137,11 @@ static esp_err_t uwb_distance_initiate_once(uint8_t peer_id, uint16_t sequence,
     } else {
         ESP_LOGW(TAG, "DS-TWR REPORT2 wait failed seq=%u peer=%u: %s",
                  (unsigned)sequence, (unsigned)peer_id, esp_err_to_name(err));
+    }
+
+    if (uwb_distance_should_log_diagnostics(sequence)) {
+        uwb_distance_log_rx_diagnostics(sequence, "RESP_RX",
+                                        &response.diagnostics);
     }
 
     if (log_success) {
@@ -4959,9 +5301,10 @@ uwb_distance_send_report2(const struct uwb_distance_measurement *measurement)
     const app_runtime_config_t *config = app_runtime_config_get();
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
 
-    uwb_dw3000_delay_ms(config->distance_test_report_delay_ms);
+    uwb_gptimer_delay_us(config->distance_test_report_delay_ms * 1000U);
     uwb_distance_build_report2(measurement, payload);
-    return uwb_dw3000_send_payload(payload, sizeof(payload), NULL);
+    return uwb_dw3000_send_payload(payload, UWB_DISTANCE_FRAME_REPORT2_LEN,
+                                   NULL);
 }
 
 static esp_err_t
@@ -4993,11 +5336,11 @@ uwb_distance_respond_to_poll(const struct uwb_distance_frame *poll,
     uint64_t resp_tx_actual_ts = 0;
 #if APP_UWB_DISTANCE_TEST_AUTO_RX_AFTER_TX
     esp_err_t err = uwb_dw3000_send_payload_delayed_expect_rx(
-        payload, sizeof(payload), resp_tx_due, auto_rx_delay_uus,
+        payload, UWB_DISTANCE_FRAME_RESP_LEN, resp_tx_due, auto_rx_delay_uus,
         rx_timeout_ms, &resp_tx_ts, &resp_tx_actual_ts);
 #else
     esp_err_t err = uwb_dw3000_send_payload_delayed(
-        payload, sizeof(payload), resp_tx_due, &resp_tx_ts,
+        payload, UWB_DISTANCE_FRAME_RESP_LEN, resp_tx_due, &resp_tx_ts,
         &resp_tx_actual_ts);
 #endif
     ESP_LOGD(TAG,
@@ -5009,7 +5352,8 @@ uwb_distance_respond_to_poll(const struct uwb_distance_frame *poll,
 #else
     uwb_dw3000_delay_ms(resp_delay_ms);
     esp_err_t err =
-        uwb_dw3000_send_payload(payload, sizeof(payload), &resp_tx_ts);
+        uwb_dw3000_send_payload(payload, UWB_DISTANCE_FRAME_RESP_LEN,
+                                &resp_tx_ts);
 #endif
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "DS-TWR RESP TX failed seq=%u peer=%u: %s",
@@ -6187,8 +6531,12 @@ static void uwb_flex_tdoa_log_paper_observation(
     if (s_flex_tdoa_observation_summary_tick == 0 ||
         now - s_flex_tdoa_observation_summary_tick >= pdMS_TO_TICKS(1000)) {
         (void)wireless_log_service_submit('I', TAG,
-                 "FLEX_TDOA tag n=%lu drop=%lu slots=%lu/%lu inv=%lu(age=%lu idx=%lu/%lu/%lu cfo=%lu ord=%lu) "
-                 "req=%lu/%lu/%lu/%lu resp=%lu/%lu/%lu/%lu rxerr=%lu/0x%08lx rdb=%lu cia=%lu",
+                 "FLEX_TDOA tag n=%lu drop=%lu slots=%lu/%lu "
+                 "inv=%lu(age=%lu idx=%lu/%lu/%lu cfo=%lu ord=%lu) "
+                 "req_gap=%lu defer_req=%lu deadline=%lu/%luus "
+                 "req=%lu/%lu/%lu/%lu resp=%lu/%lu/%lu/%lu "
+                 "rxerr=%lu/0x%08lx(phe=%lu fce=%lu fsl=%lu cia=%lu arfe=%lu) "
+                 "rdb_release_gpt_us=%lu cia=%lu",
                  (unsigned long)s_flex_tdoa_observations_since_summary,
                  (unsigned long)s_flex_tdoa_observation_drops_since_summary,
                  (unsigned long)s_flex_tdoa_complete_slots_since_summary,
@@ -6200,6 +6548,10 @@ static void uwb_flex_tdoa_log_paper_observation(
                  (unsigned long)s_flex_tdoa_observation_invalid_age_index_since_summary[2],
                  (unsigned long)s_flex_tdoa_observation_invalid_cfo_since_summary,
                  (unsigned long)s_flex_tdoa_observation_invalid_order_since_summary,
+                 (unsigned long)s_flex_tdoa_missed_requests_since_summary,
+                 (unsigned long)s_flex_tdoa_deferred_requests_since_summary,
+                 (unsigned long)s_flex_tdoa_burst_deadline_exits_since_summary,
+                 (unsigned long)s_flex_tdoa_burst_deadline_overshoot_max_us,
                  (unsigned long)s_flex_tdoa_tag_requests_by_anchor[0],
                  (unsigned long)s_flex_tdoa_tag_requests_by_anchor[1],
                  (unsigned long)s_flex_tdoa_tag_requests_by_anchor[2],
@@ -6210,11 +6562,16 @@ static void uwb_flex_tdoa_log_paper_observation(
                  (unsigned long)s_flex_tdoa_tag_responses_by_anchor[3],
                  (unsigned long)s_flex_tdoa_rx_errors_since_summary,
                  (unsigned long)s_flex_tdoa_rx_error_status_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_phe_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_fce_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_fsl_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_ciaerr_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_arfe_since_summary,
                  (unsigned long)s_rx_double_buffer_release_max_us,
                  (unsigned long)s_rx_double_buffer_cia_not_ready_count);
         (void)wireless_log_service_submit(
                  'I', TAG,
-                 "FLEX_TDOA RX metric good_to_rearm_us=%lu "
+                 "FLEX_TDOA RX metric good_to_rearm_gpt_us=%lu "
                  "cia_ready_after_retry=%lu "
                  "missing_mask[1..7]=%lu/%lu/%lu/%lu/%lu/%lu/%lu",
                  (unsigned long)s_rx_double_buffer_good_to_rearm_max_us,
@@ -6227,10 +6584,77 @@ static void uwb_flex_tdoa_log_paper_observation(
                  (unsigned long)s_flex_tdoa_missing_mask_since_summary[5],
                  (unsigned long)s_flex_tdoa_missing_mask_since_summary[6],
                  (unsigned long)s_flex_tdoa_missing_mask_since_summary[7]);
+        (void)wireless_log_service_submit(
+                 'I', TAG,
+                 "FLEX_TDOA RX phase seek_err=%lu rxerr_window=%lu/%lu/%lu "
+                 "before=%lu after=%lu burst_anchor=%lu/%lu/%lu/%lu",
+                 (unsigned long)s_flex_tdoa_rx_seek_errors_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_burst_errors_since_summary[0],
+                 (unsigned long)s_flex_tdoa_rx_burst_errors_since_summary[1],
+                 (unsigned long)s_flex_tdoa_rx_burst_errors_since_summary[2],
+                 (unsigned long)s_flex_tdoa_rx_burst_before_errors_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_burst_after_errors_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_burst_errors_by_anchor[0],
+                 (unsigned long)s_flex_tdoa_rx_burst_errors_by_anchor[1],
+                 (unsigned long)s_flex_tdoa_rx_burst_errors_by_anchor[2],
+                 (unsigned long)s_flex_tdoa_rx_burst_errors_by_anchor[3]);
+        (void)wireless_log_service_submit(
+                 'I', TAG,
+                 "FLEX_TDOA RX link orphan_resp=%lu/%lu/%lu/%lu "
+                 "miss_req=%lu/%lu/%lu/%lu",
+                 (unsigned long)s_flex_tdoa_orphan_responses_by_anchor[0],
+                 (unsigned long)s_flex_tdoa_orphan_responses_by_anchor[1],
+                 (unsigned long)s_flex_tdoa_orphan_responses_by_anchor[2],
+                 (unsigned long)s_flex_tdoa_orphan_responses_by_anchor[3],
+                 (unsigned long)s_flex_tdoa_missed_requests_by_anchor[0],
+                 (unsigned long)s_flex_tdoa_missed_requests_by_anchor[1],
+                 (unsigned long)s_flex_tdoa_missed_requests_by_anchor[2],
+                 (unsigned long)s_flex_tdoa_missed_requests_by_anchor[3]);
+        (void)wireless_log_service_submit(
+                 'I', TAG,
+                 "FLEX_TDOA RX buffer irq_gpt=%lu/%lu "
+                 "irq_poll_max_gpt_us=%lu irq_gt100=%lu irq_gt200=%lu "
+                 "rdb_err_or=0x%02lx rdb_resync=%lu rdb_both_good=%lu",
+                 (unsigned long)s_flex_tdoa_irq_events_since_summary,
+                 (unsigned long)s_flex_tdoa_irq_fallbacks_since_summary,
+                 (unsigned long)s_flex_tdoa_irq_to_poll_max_us,
+                 (unsigned long)s_flex_tdoa_irq_gt_100us_since_summary,
+                 (unsigned long)s_flex_tdoa_irq_gt_200us_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_error_rdb_status_or_since_summary,
+                 (unsigned long)s_flex_tdoa_rdb_resync_since_summary,
+                 (unsigned long)s_flex_tdoa_rdb_both_good_since_summary);
+        /* Snapshot only after all frames already copied for this burst have
+         * been processed. The single-span SPI read is deliberately kept out
+         * of the response collection path. */
+        s_flex_tdoa_evc_summary_pending = true;
         s_flex_tdoa_observations_since_summary = 0;
         s_flex_tdoa_observation_drops_since_summary = 0;
         s_flex_tdoa_complete_slots_since_summary = 0;
         s_flex_tdoa_incomplete_slots_since_summary = 0;
+        s_flex_tdoa_missed_requests_since_summary = 0;
+        s_flex_tdoa_deferred_requests_since_summary = 0;
+        s_flex_tdoa_burst_deadline_exits_since_summary = 0;
+        s_flex_tdoa_burst_deadline_overshoot_max_us = 0;
+        s_flex_tdoa_rx_seek_errors_since_summary = 0;
+        memset(s_flex_tdoa_rx_burst_errors_since_summary, 0,
+               sizeof(s_flex_tdoa_rx_burst_errors_since_summary));
+        s_flex_tdoa_rx_burst_other_errors_since_summary = 0;
+        s_flex_tdoa_rx_burst_before_errors_since_summary = 0;
+        s_flex_tdoa_rx_burst_after_errors_since_summary = 0;
+        memset(s_flex_tdoa_rx_burst_errors_by_anchor, 0,
+               sizeof(s_flex_tdoa_rx_burst_errors_by_anchor));
+        s_flex_tdoa_rx_error_rdb_status_or_since_summary = 0;
+        s_flex_tdoa_irq_to_poll_max_us = 0;
+        s_flex_tdoa_irq_events_since_summary = 0;
+        s_flex_tdoa_irq_fallbacks_since_summary = 0;
+        s_flex_tdoa_irq_gt_100us_since_summary = 0;
+        s_flex_tdoa_irq_gt_200us_since_summary = 0;
+        s_flex_tdoa_rdb_resync_since_summary = 0;
+        s_flex_tdoa_rdb_both_good_since_summary = 0;
+        memset(s_flex_tdoa_orphan_responses_by_anchor, 0,
+               sizeof(s_flex_tdoa_orphan_responses_by_anchor));
+        memset(s_flex_tdoa_missed_requests_by_anchor, 0,
+               sizeof(s_flex_tdoa_missed_requests_by_anchor));
         memset(s_flex_tdoa_missing_mask_since_summary, 0,
                sizeof(s_flex_tdoa_missing_mask_since_summary));
         s_flex_tdoa_observation_invalid_since_summary = 0;
@@ -6245,6 +6669,11 @@ static void uwb_flex_tdoa_log_paper_observation(
                sizeof(s_flex_tdoa_tag_responses_by_anchor));
         s_flex_tdoa_rx_errors_since_summary = 0;
         s_flex_tdoa_rx_error_status_since_summary = 0;
+        s_flex_tdoa_rx_phe_since_summary = 0;
+        s_flex_tdoa_rx_fce_since_summary = 0;
+        s_flex_tdoa_rx_fsl_since_summary = 0;
+        s_flex_tdoa_rx_ciaerr_since_summary = 0;
+        s_flex_tdoa_rx_arfe_since_summary = 0;
         s_rx_double_buffer_release_max_us = 0;
         s_rx_double_buffer_good_to_rearm_max_us = 0;
         s_rx_double_buffer_cia_not_ready_count = 0;
@@ -6263,6 +6692,63 @@ static void uwb_flex_tdoa_log_paper_observation(
     memset(observation, 0, sizeof(*observation));
 }
 
+static void uwb_flex_tdoa_maybe_log_evc(void)
+{
+    if (!s_flex_tdoa_evc_summary_pending) {
+        return;
+    }
+    s_flex_tdoa_evc_summary_pending = false;
+
+#if APP_UWB_EVENT_COUNTERS_ENABLED
+    uint64_t started_us = 0;
+    uint64_t finished_us = 0;
+    (void)uwb_calibration_timer_get_us(&started_us);
+    struct uwb_event_counters event_counters = {0};
+    const esp_err_t read_err =
+        uwb_dw3000_read_event_counters(&event_counters);
+    const esp_err_t clear_err = read_err == ESP_OK
+        ? uwb_dw3000_write_u32_len(
+              DW3000_REG_DIG_DIAG, DW3000_EVC_CTRL_SUB,
+              DW3000_EVC_CTRL_CLR_BIT_MASK, 1U)
+        : read_err;
+    const esp_err_t enable_err = clear_err == ESP_OK
+        ? uwb_dw3000_write_u32_len(
+              DW3000_REG_DIG_DIAG, DW3000_EVC_CTRL_SUB,
+              DW3000_EVC_CTRL_EN_BIT_MASK, 1U)
+        : clear_err;
+    (void)uwb_calibration_timer_get_us(&finished_us);
+    if (read_err != ESP_OK || clear_err != ESP_OK || enable_err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "FLEX_TDOA EVC snapshot failed read=%s clear=%s enable=%s",
+                 esp_err_to_name(read_err), esp_err_to_name(clear_err),
+                 esp_err_to_name(enable_err));
+        return;
+    }
+    const uint32_t snapshot_us =
+        finished_us >= started_us && finished_us - started_us <= UINT32_MAX
+            ? (uint32_t)(finished_us - started_us)
+            : 0U;
+    (void)wireless_log_service_submit(
+             'I', TAG,
+             "FLEX_TDOA EVC fcg=%u fce=%u phe=%u rse=%u sfdt=%u "
+             "pto=%u fwto=%u ffr=%u ovr=%u prej=%u cpqe=%u "
+             "vwarn=%u snapshot_gpt_us=%lu",
+             (unsigned)event_counters.fcg,
+             (unsigned)event_counters.fce,
+             (unsigned)event_counters.phe,
+             (unsigned)event_counters.rse,
+             (unsigned)event_counters.sfdt,
+             (unsigned)event_counters.pto,
+             (unsigned)event_counters.fwto,
+             (unsigned)event_counters.ffr,
+             (unsigned)event_counters.ovr,
+             (unsigned)event_counters.prej,
+             (unsigned)event_counters.cpqe,
+             (unsigned)event_counters.vwarn,
+             (unsigned long)snapshot_us);
+#endif
+}
+
 static void uwb_flex_tdoa_record_incomplete_mask(uint16_t missing_mask)
 {
     s_flex_tdoa_incomplete_slots_since_summary++;
@@ -6271,6 +6757,99 @@ static void uwb_flex_tdoa_record_incomplete_mask(uint16_t missing_mask)
          sizeof(s_flex_tdoa_missing_mask_since_summary[0]))) {
         s_flex_tdoa_missing_mask_since_summary[missing_mask]++;
     }
+}
+
+static esp_err_t uwb_distance_receive_next_until(
+    struct uwb_distance_frame *frame, int64_t deadline_us)
+{
+    if (frame == NULL || deadline_us <= 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    while (true) {
+        const int64_t remaining_us = deadline_us - esp_timer_get_time();
+        if (remaining_us <= 0) {
+            return ESP_ERR_TIMEOUT;
+        }
+        const uint32_t remaining_ms =
+            (uint32_t)((remaining_us + 999LL) / 1000LL);
+
+        struct uwb_dw3000_rx_frame rx_frame = {0};
+        const esp_err_t err = uwb_dw3000_receive_frame_until(
+            &rx_frame, remaining_ms, deadline_us);
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        if (!uwb_distance_parse_frame(&rx_frame, frame)) {
+            s_rx_ignored_count++;
+            ESP_LOGD(TAG, "Ignoring non-ranging frame len=%u ignored=%lu",
+                     (unsigned)rx_frame.payload_len,
+                     (unsigned long)s_rx_ignored_count);
+            continue;
+        }
+
+        s_last_rx_source_id = frame->source_id;
+        s_last_rx_sequence = frame->sequence;
+        return ESP_OK;
+    }
+}
+
+static void uwb_flex_tdoa_tag_note_request_slot(uint32_t slot_id)
+{
+    if (s_flex_tdoa_tag_request_slot_valid) {
+        const int32_t delta =
+            (int32_t)(slot_id - s_flex_tdoa_tag_last_request_slot_id);
+        /* A forward gap is an exact count of requests not observed by the
+         * passive tag. Ignore implausibly large jumps: distributed schedule
+         * bootstrap intentionally restarts the slot sequence after resync. */
+        if (delta > 1 && delta <= 4096) {
+            s_flex_tdoa_missed_requests_since_summary +=
+                (uint32_t)(delta - 1);
+            const app_runtime_config_t *config = app_runtime_config_get();
+            if (config != NULL && config->flex_tdoa_slot_count > 0U) {
+                const uint32_t missing_count = (uint32_t)(delta - 1);
+                const uint32_t complete_cycles =
+                    missing_count / config->flex_tdoa_slot_count;
+                const uint32_t remainder =
+                    missing_count % config->flex_tdoa_slot_count;
+                for (uint32_t schedule_index = 0U;
+                     schedule_index < config->flex_tdoa_slot_count;
+                     ++schedule_index) {
+                    uint32_t occurrences = complete_cycles;
+                    for (uint32_t remainder_index = 0U;
+                         remainder_index < remainder;
+                         ++remainder_index) {
+                        const uint32_t missing_schedule_index =
+                            (s_flex_tdoa_tag_last_request_slot_id + 1U +
+                             remainder_index) %
+                            config->flex_tdoa_slot_count;
+                        if (missing_schedule_index == schedule_index) {
+                            occurrences++;
+                        }
+                    }
+                    if (occurrences == 0U) {
+                        continue;
+                    }
+                    const uint8_t initiator_id =
+                        config->flex_tdoa_slot_initiator_ids[
+                            schedule_index];
+                    for (size_t anchor_index = 0U;
+                         anchor_index < config->anchor_count;
+                         ++anchor_index) {
+                        if (config->anchor_ids[anchor_index] ==
+                            initiator_id) {
+                            s_flex_tdoa_missed_requests_by_anchor[
+                                anchor_index] += occurrences;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    s_flex_tdoa_tag_last_request_slot_id = slot_id;
+    s_flex_tdoa_tag_request_slot_valid = true;
 }
 
 static void uwb_flex_tdoa_tag_process_frame(
@@ -6440,13 +7019,17 @@ static size_t uwb_flex_tdoa_tag_collect_response_burst(
     struct uwb_distance_frame
         responses[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U],
     bool present[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U],
-    uint8_t *responder_count_out)
+    uint8_t *responder_count_out,
+    struct uwb_distance_frame *deferred_request,
+    bool *deferred_request_valid)
 {
     if (request == NULL || responses == NULL || present == NULL ||
-        responder_count_out == NULL) {
+        responder_count_out == NULL || deferred_request == NULL ||
+        deferred_request_valid == NULL) {
         return 0U;
     }
     *responder_count_out = 0U;
+    *deferred_request_valid = false;
     uint32_t slot_id = 0U;
     uint8_t responder_count = 0U;
     uint8_t responder_ids[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U] = {0};
@@ -6455,6 +7038,7 @@ static size_t uwb_flex_tdoa_tag_collect_response_burst(
             &responder_count, responder_ids, NULL)) {
         return 0U;
     }
+    uwb_flex_tdoa_tag_note_request_slot(slot_id);
     *responder_count_out = responder_count;
 
     memset(responses, 0,
@@ -6480,14 +7064,26 @@ static size_t uwb_flex_tdoa_tag_collect_response_burst(
     if (collection_us == 0U) {
         return 0U;
     }
-    /*
-     * Stop at the end of the response train. receive_next() already rounds
-     * a positive sub-millisecond remainder up to one millisecond, which is
-     * sufficient to catch the IRQ for an on-time final response. Adding a
-     * second 1 ms grace here made a missing response consume the paper's
-     * response-processing interval and caused the following request to be
-     * missed almost deterministically.
-     */
+    s_flex_tdoa_tag_rx_phase = UWB_FLEX_TDOA_TAG_RX_RESPONSE_BURST;
+    s_flex_tdoa_tag_burst_request_gptimer_us =
+        request->rx_gptimer_time_us;
+    s_flex_tdoa_tag_burst_response_start_us =
+        timing.request_subslot_us + timing.request_process_us;
+    s_flex_tdoa_tag_burst_response_subslot_us =
+        timing.response_subslot_us;
+    s_flex_tdoa_tag_burst_responder_count = responder_count;
+    for (uint8_t index = 0U; index < responder_count; ++index) {
+        const size_t anchor_index = uwb_anchor_survey_id_index(
+            anchor_ids, anchor_count, responder_ids[index]);
+        s_flex_tdoa_tag_burst_responder_anchor_index[index] =
+            anchor_index < UWB_ANCHOR_SURVEY_MAX_ANCHORS
+                ? (uint8_t)anchor_index
+                : UINT8_MAX;
+    }
+    /* Stop exactly at the end of the response train. The receive path uses
+     * the existing 1 MHz GPTimer because a FreeRTOS tick is 10 ms in this
+     * build. A deferred-request guard remains as a lossless safety net if a
+     * radio IRQ and the deadline alarm arrive together. */
     const int64_t deadline_us = request_host_us + (int64_t)collection_us;
     size_t collected = 0U;
     while (collected < responder_count &&
@@ -6496,16 +7092,39 @@ static size_t uwb_flex_tdoa_tag_collect_response_burst(
         if (remaining_us <= 0) {
             break;
         }
-        const uint32_t remaining_ms =
-            (uint32_t)((remaining_us + 999LL) / 1000LL);
         struct uwb_distance_frame candidate = {0};
         const esp_err_t err =
-            uwb_distance_receive_next(&candidate, remaining_ms);
+            uwb_distance_receive_next_until(&candidate, deadline_us);
         if (err == ESP_ERR_TIMEOUT || err == ESP_ERR_NOT_FINISHED) {
+            const int64_t overshoot_us = esp_timer_get_time() - deadline_us;
+            s_flex_tdoa_burst_deadline_exits_since_summary++;
+            if (overshoot_us > 0 &&
+                (uint64_t)overshoot_us >
+                    s_flex_tdoa_burst_deadline_overshoot_max_us) {
+                s_flex_tdoa_burst_deadline_overshoot_max_us =
+                    overshoot_us > UINT32_MAX
+                        ? UINT32_MAX
+                        : (uint32_t)overshoot_us;
+            }
             break;
         }
-        if (err != ESP_OK ||
-            candidate.type != UWB_DISTANCE_FRAME_FLEX_TDOA_RESP) {
+        if (err != ESP_OK) {
+            continue;
+        }
+        if (candidate.type == UWB_DISTANCE_FRAME_FLEX_TDOA_REQ) {
+            /*
+             * CONFIG_FREERTOS_HZ=100 means a nominal 1 ms receive timeout
+             * blocks for one 10 ms tick. If the final response is absent,
+             * the following request can therefore wake receive_next() while
+             * this burst is still active. Preserve it for the outer loop;
+             * discarding it creates a second, artificial lost slot.
+             */
+            *deferred_request = candidate;
+            *deferred_request_valid = true;
+            s_flex_tdoa_deferred_requests_since_summary++;
+            break;
+        }
+        if (candidate.type != UWB_DISTANCE_FRAME_FLEX_TDOA_RESP) {
             continue;
         }
         struct flextdoa_packet packet = {0};
@@ -6525,57 +7144,8 @@ static size_t uwb_flex_tdoa_tag_collect_response_burst(
             }
         }
     }
+    s_flex_tdoa_tag_rx_phase = UWB_FLEX_TDOA_TAG_RX_SEEK_REQUEST;
     return collected;
-}
-
-static void uwb_flex_tdoa_tag_fast_fail_incomplete_burst(
-    const struct uwb_distance_frame *request,
-    const struct uwb_distance_frame
-        responses[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U],
-    const bool present[UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U],
-    uint8_t responder_count, const uint8_t *anchor_ids,
-    size_t anchor_count)
-{
-    if (request == NULL || responses == NULL || present == NULL ||
-        anchor_ids == NULL || responder_count == 0U ||
-        responder_count > UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U) {
-        return;
-    }
-
-    const uint16_t missing_mask =
-        flextdoa_missing_mask_from_presence(present, responder_count);
-    if (missing_mask == 0U) {
-        return;
-    }
-
-    uwb_flex_tdoa_record_incomplete_mask(missing_mask);
-
-    /* Preserve the request/physical-responder and CFO diagnostics without
-     * decoding or publishing observations from a slot that the strict solver
-     * cannot use. */
-    const size_t initiator_index = uwb_anchor_survey_id_index(
-        anchor_ids, anchor_count, request->source_id);
-    if (initiator_index != SIZE_MAX) {
-        s_flex_tdoa_tag_requests_by_anchor[initiator_index]++;
-    }
-    for (uint8_t index = 0U; index < responder_count; ++index) {
-        if (!present[index]) {
-            continue;
-        }
-        const size_t responder_anchor_index = uwb_anchor_survey_id_index(
-            anchor_ids, anchor_count, responses[index].source_id);
-        if (responder_anchor_index != SIZE_MAX) {
-            s_flex_tdoa_tag_responses_by_anchor[responder_anchor_index]++;
-        }
-        if (!responses[index].clock_offset_valid) {
-            s_flex_tdoa_observation_invalid_since_summary++;
-            s_flex_tdoa_observation_invalid_cfo_since_summary++;
-        }
-    }
-
-    flextdoa_collector_reset(&s_flex_tdoa_tag_collection);
-    memset(s_flex_tdoa_tag_observations, 0,
-           sizeof(s_flex_tdoa_tag_observations));
 }
 
 static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
@@ -6584,6 +7154,42 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
     memset(s_flex_tdoa_tag_observations, 0,
            sizeof(s_flex_tdoa_tag_observations));
     flextdoa_collector_reset(&s_flex_tdoa_tag_collection);
+    s_flex_tdoa_tag_request_slot_valid = false;
+    s_flex_tdoa_tag_last_request_slot_id = 0U;
+    s_flex_tdoa_missed_requests_since_summary = 0U;
+    s_flex_tdoa_deferred_requests_since_summary = 0U;
+    s_flex_tdoa_burst_deadline_exits_since_summary = 0U;
+    s_flex_tdoa_burst_deadline_overshoot_max_us = 0U;
+    s_flex_tdoa_tag_rx_phase = UWB_FLEX_TDOA_TAG_RX_SEEK_REQUEST;
+    s_flex_tdoa_tag_burst_request_gptimer_us = 0U;
+    s_flex_tdoa_tag_burst_response_start_us = 0U;
+    s_flex_tdoa_tag_burst_response_subslot_us = 0U;
+    s_flex_tdoa_tag_burst_responder_count = 0U;
+    memset(s_flex_tdoa_tag_burst_responder_anchor_index, UINT8_MAX,
+           sizeof(s_flex_tdoa_tag_burst_responder_anchor_index));
+    s_flex_tdoa_rx_seek_errors_since_summary = 0U;
+    memset(s_flex_tdoa_rx_burst_errors_since_summary, 0,
+           sizeof(s_flex_tdoa_rx_burst_errors_since_summary));
+    s_flex_tdoa_rx_burst_other_errors_since_summary = 0U;
+    s_flex_tdoa_rx_burst_before_errors_since_summary = 0U;
+    s_flex_tdoa_rx_burst_after_errors_since_summary = 0U;
+    memset(s_flex_tdoa_rx_burst_errors_by_anchor, 0,
+           sizeof(s_flex_tdoa_rx_burst_errors_by_anchor));
+    s_flex_tdoa_rx_error_rdb_status_or_since_summary = 0U;
+    s_flex_tdoa_irq_to_poll_max_us = 0U;
+    s_flex_tdoa_irq_events_since_summary = 0U;
+    s_flex_tdoa_irq_fallbacks_since_summary = 0U;
+    s_flex_tdoa_last_accounted_irq_gptimer_us =
+        s_last_dw3000_irq_gptimer_us;
+    s_flex_tdoa_rdb_resync_since_summary = 0U;
+    s_flex_tdoa_rdb_both_good_since_summary = 0U;
+    s_flex_tdoa_irq_gt_100us_since_summary = 0U;
+    s_flex_tdoa_irq_gt_200us_since_summary = 0U;
+    s_flex_tdoa_evc_summary_pending = false;
+    memset(s_flex_tdoa_orphan_responses_by_anchor, 0,
+           sizeof(s_flex_tdoa_orphan_responses_by_anchor));
+    memset(s_flex_tdoa_missed_requests_by_anchor, 0,
+           sizeof(s_flex_tdoa_missed_requests_by_anchor));
     const app_runtime_config_t *config = app_runtime_config_get();
     flextdoa_cfo_estimator_reset(&s_flex_tdoa_cfo_estimator);
     if (config != NULL) {
@@ -6597,6 +7203,19 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
         ESP_LOGW(TAG, "FlexTDOA local solver unavailable: %s",
                  esp_err_to_name(solver_err));
     }
+    const esp_err_t timer_err = uwb_calibration_timer_start();
+    if (timer_err != ESP_OK) {
+        ESP_LOGW(TAG, "FlexTDOA 1 MHz deadline timer unavailable: %s",
+                 esp_err_to_name(timer_err));
+    }
+#if APP_UWB_EVENT_COUNTERS_ENABLED
+    const esp_err_t event_counter_err =
+        uwb_dw3000_configure_event_counters();
+    if (event_counter_err != ESP_OK) {
+        ESP_LOGW(TAG, "FlexTDOA EVC reset failed: %s",
+                 esp_err_to_name(event_counter_err));
+    }
+#endif
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
              "FlexTDOA radio-passive tag active: tag_id=%u anchors=[%u,%u,%u,%u] rx_slice=%u ms",
@@ -6605,11 +7224,20 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
              (unsigned)anchor_ids[3],
              (unsigned)config->anchor_survey_rx_slice_ms);
 
+    struct uwb_distance_frame deferred_request = {0};
+    bool deferred_request_valid = false;
     while (!uwb_dw3000_runtime_switch_pending()) {
         config = app_runtime_config_get();
         struct uwb_distance_frame frame = {0};
-        const esp_err_t err =
-            uwb_distance_receive_next(&frame, config->anchor_survey_rx_slice_ms);
+        esp_err_t err = ESP_OK;
+        if (deferred_request_valid) {
+            frame = deferred_request;
+            memset(&deferred_request, 0, sizeof(deferred_request));
+            deferred_request_valid = false;
+        } else {
+            err = uwb_distance_receive_next(
+                &frame, config->anchor_survey_rx_slice_ms);
+        }
         if (err == ESP_OK) {
             if (uwb_flex_tdoa_handle_runtime_config(&frame)) {
                 continue;
@@ -6621,15 +7249,13 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
                 uint8_t responder_count = 0U;
                 (void)uwb_flex_tdoa_tag_collect_response_burst(
                     &frame, anchor_ids, anchor_count, responses, present,
-                    &responder_count);
+                    &responder_count, &deferred_request,
+                    &deferred_request_valid);
                 const uint16_t missing_mask =
                     flextdoa_missing_mask_from_presence(
                         present, responder_count);
                 if (missing_mask != 0U) {
-                    uwb_flex_tdoa_tag_fast_fail_incomplete_burst(
-                        &frame, responses, present, responder_count,
-                        anchor_ids, anchor_count);
-                    continue;
+                    uwb_flex_tdoa_record_incomplete_mask(missing_mask);
                 }
                 uwb_flex_tdoa_tag_process_frame(
                     &frame, s_flex_tdoa_tag_observations, tag_id,
@@ -6644,7 +7270,26 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
                             anchor_ids, anchor_count);
                     }
                 }
+                if (missing_mask != 0U) {
+                    /* Valid responses were already submitted to the frame
+                     * solver. Drop only the unfinished slot-local collector
+                     * state so the next request cannot count it twice. */
+                    flextdoa_collector_reset(&s_flex_tdoa_tag_collection);
+                    memset(s_flex_tdoa_tag_observations, 0,
+                           sizeof(s_flex_tdoa_tag_observations));
+                }
+                uwb_flex_tdoa_maybe_log_evc();
             } else {
+                if (frame.type == UWB_DISTANCE_FRAME_FLEX_TDOA_RESP) {
+                    const size_t anchor_index =
+                        uwb_anchor_survey_id_index(
+                            anchor_ids, anchor_count, frame.source_id);
+                    if (anchor_index <
+                        UWB_ANCHOR_SURVEY_MAX_ANCHORS) {
+                        s_flex_tdoa_orphan_responses_by_anchor[
+                            anchor_index]++;
+                    }
+                }
                 uwb_flex_tdoa_tag_process_frame(
                     &frame, s_flex_tdoa_tag_observations, tag_id,
                     anchor_ids, anchor_count);
@@ -6656,6 +7301,7 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
                      esp_err_to_name(err));
         }
     }
+    s_flex_tdoa_tag_rx_phase = UWB_FLEX_TDOA_TAG_RX_INACTIVE;
 }
 
 static esp_err_t uwb_flex_tdoa_send_response_preparsed(
@@ -6905,7 +7551,9 @@ static void uwb_flex_tdoa_log_anchor_result(
                                         : 0U;
         (void)wireless_log_service_submit('I', TAG,
                  "FLEX_TDOA anchor n=%lu drop=%lu incoh=%lu idx=%lu/%lu/%lu "
-                 "txresp=%lu/%lu/%lu/%lu rxerr=%lu/0x%08lx rdb=%lu cia=%lu "
+                 "txresp=%lu/%lu/%lu/%lu "
+                 "rxerr=%lu/0x%08lx(phe=%lu fce=%lu fsl=%lu cia=%lu arfe=%lu) "
+                 "rdb=%lu cia=%lu "
                  "path_us=%lu/%lu,%lu/%lu,%lu/%lu arm_max=%lu req_arm_max=%lu",
                  (unsigned long)s_flex_tdoa_anchor_results_since_summary,
                  (unsigned long)s_flex_tdoa_anchor_drops_since_summary,
@@ -6919,6 +7567,11 @@ static void uwb_flex_tdoa_log_anchor_result(
                  (unsigned long)s_flex_tdoa_response_tx_by_initiator[3],
                  (unsigned long)s_flex_tdoa_rx_errors_since_summary,
                  (unsigned long)s_flex_tdoa_rx_error_status_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_phe_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_fce_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_fsl_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_ciaerr_since_summary,
+                 (unsigned long)s_flex_tdoa_rx_arfe_since_summary,
                  (unsigned long)s_rx_double_buffer_release_max_us,
                  (unsigned long)s_rx_double_buffer_cia_not_ready_count,
                  (unsigned long)path_avg_0,
@@ -6945,6 +7598,11 @@ static void uwb_flex_tdoa_log_anchor_result(
                sizeof(s_flex_tdoa_response_tx_by_initiator));
         s_flex_tdoa_rx_errors_since_summary = 0;
         s_flex_tdoa_rx_error_status_since_summary = 0;
+        s_flex_tdoa_rx_phe_since_summary = 0;
+        s_flex_tdoa_rx_fce_since_summary = 0;
+        s_flex_tdoa_rx_fsl_since_summary = 0;
+        s_flex_tdoa_rx_ciaerr_since_summary = 0;
+        s_flex_tdoa_rx_arfe_since_summary = 0;
         s_rx_double_buffer_release_max_us = 0;
         s_rx_double_buffer_good_to_rearm_max_us = 0;
         s_rx_double_buffer_cia_not_ready_count = 0;
@@ -7250,9 +7908,13 @@ static void uwb_flex_tdoa_arm_schedule_alarm(int64_t request_due_host_us)
 }
 
 static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
-                                      const uint8_t *anchor_ids,
-                                      size_t anchor_count)
+                                       const uint8_t *anchor_ids,
+                                       size_t anchor_count)
 {
+    /* Diagnostic counters below are meaningful only while the passive tag is
+     * receiving.  A hot protocol/role switch must not leave the ISR path
+     * attributed to the tag's last receive phase. */
+    s_flex_tdoa_tag_rx_phase = UWB_FLEX_TDOA_TAG_RX_INACTIVE;
     const app_runtime_config_t *config = app_runtime_config_get();
     struct uwb_flex_tdoa_schedule schedule = {0};
     bool owns_slot = false;
@@ -9928,33 +10590,6 @@ static esp_err_t native_ds_receive(
     frame->payload_len = radio_frame.payload_len;
     frame->rx_timestamp = radio_frame.rx_timestamp;
     memcpy(frame->payload, radio_frame.payload, radio_frame.payload_len);
-    if (uwb_dw3000_payload_is_native_ds_frame(
-            radio_frame.payload, radio_frame.payload_len) &&
-        radio_frame.diagnostics.valid) {
-        const uint16_t frame_id =
-            (uint16_t)(((uint16_t)radio_frame.payload[8]) |
-                       ((uint16_t)radio_frame.payload[9] << 8));
-        ESP_LOGI(
-            TAG,
-            "NATIVE_DS_RX_DIAG local=%u frame=%u type=%u src=%u dst=%u "
-            "rx_ts=0x%010llx pacc=%u fp=%.2f peak_idx=%u peak_amp=%lu "
-            "power=%lu f1=%lu f2=%lu f3=%lu acc=%u xtal=%d",
-            (unsigned)s_source_id, (unsigned)frame_id,
-            (unsigned)radio_frame.payload[5],
-            (unsigned)radio_frame.payload[6],
-            (unsigned)radio_frame.payload[7],
-            (unsigned long long)radio_frame.rx_timestamp,
-            (unsigned)radio_frame.diagnostics.rx_pacc,
-            (double)radio_frame.diagnostics.ipatov_fp_index / 64.0,
-            (unsigned)radio_frame.diagnostics.ipatov_peak_index,
-            (unsigned long)radio_frame.diagnostics.ipatov_peak_amp,
-            (unsigned long)radio_frame.diagnostics.ipatov_power,
-            (unsigned long)radio_frame.diagnostics.ipatov_f1,
-            (unsigned long)radio_frame.diagnostics.ipatov_f2,
-            (unsigned long)radio_frame.diagnostics.ipatov_f3,
-            (unsigned)radio_frame.diagnostics.ipatov_accum_count,
-            (int)radio_frame.diagnostics.xtal_offset);
-    }
     return ESP_OK;
 }
 
@@ -9980,10 +10615,60 @@ static int64_t native_ds_now_us(void *context)
     return esp_timer_get_time();
 }
 
+static void native_ds_delay_timer_callback(void *arg)
+{
+    SemaphoreHandle_t semaphore = (SemaphoreHandle_t)arg;
+    if (semaphore != NULL) {
+        (void)xSemaphoreGive(semaphore);
+    }
+}
+
+static esp_err_t native_ds_delay_timer_ensure_ready(void)
+{
+    if (s_native_ds_delay_timer != NULL &&
+        s_native_ds_delay_semaphore != NULL) {
+        return ESP_OK;
+    }
+    if (s_native_ds_delay_semaphore == NULL) {
+        s_native_ds_delay_semaphore = xSemaphoreCreateBinaryStatic(
+            &s_native_ds_delay_semaphore_storage);
+        if (s_native_ds_delay_semaphore == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    const esp_timer_create_args_t timer_args = {
+        .callback = native_ds_delay_timer_callback,
+        .arg = s_native_ds_delay_semaphore,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "native_ds_pace",
+        .skip_unhandled_events = true,
+    };
+    return esp_timer_create(&timer_args, &s_native_ds_delay_timer);
+}
+
 static void native_ds_delay_ms(void *context, uint32_t delay_ms)
 {
     (void)context;
-    uwb_dw3000_delay_ms(delay_ms);
+    if (delay_ms == 0U) {
+        return;
+    }
+    if (native_ds_delay_timer_ensure_ready() != ESP_OK) {
+        uwb_dw3000_delay_ms(delay_ms);
+        return;
+    }
+
+    /* Drain a callback left by a stopped/restarted runtime before arming the
+     * next one-shot. There is only one Native DS task, so this timer and
+     * semaphore never have concurrent waiters. */
+    while (xSemaphoreTake(s_native_ds_delay_semaphore, 0) == pdTRUE) {
+    }
+    (void)esp_timer_stop(s_native_ds_delay_timer);
+    if (esp_timer_start_once(s_native_ds_delay_timer,
+                             (uint64_t)delay_ms * 1000ULL) != ESP_OK) {
+        uwb_dw3000_delay_ms(delay_ms);
+        return;
+    }
+    (void)xSemaphoreTake(s_native_ds_delay_semaphore, portMAX_DELAY);
 }
 
 static bool native_ds_stop_requested(void *context)

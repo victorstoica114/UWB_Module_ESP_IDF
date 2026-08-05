@@ -17,6 +17,7 @@ from typing import Any
 
 
 PROTOCOL_MODES = {
+    "distance_test": "uwb_distance_test",
     "ds_twr": "uwb_ranging",
     "flextdoa": "uwb_flex_tdoa",
     "passive_ds": "uwb_passive_ds_twr",
@@ -55,6 +56,18 @@ STATUS_KEYS = (
     "runtime_ranging_final_delay_ms",
     "runtime_ranging_auto_rx_delay_uus",
     "native_ds_pipeline_stats",
+    "runtime_distance_test_initiator_id",
+    "runtime_distance_test_responder_id",
+    "runtime_distance_test_interval_ms",
+    "runtime_distance_test_rx_timeout_ms",
+    "runtime_distance_test_resp_delay_ms",
+    "runtime_distance_test_final_delay_ms",
+    "runtime_distance_test_report_delay_ms",
+    "runtime_distance_test_auto_rx_delay_uus",
+    "uwb_tx_count",
+    "uwb_tx_error_count",
+    "uwb_rx_count",
+    "uwb_rx_error_count",
     "runtime_flex_tdoa_guard_us",
     "runtime_flex_tdoa_request_subslot_us",
     "runtime_flex_tdoa_request_process_us",
@@ -326,6 +339,8 @@ def relevant_timing_log(item: dict[str, Any]) -> bool:
     message = str(item.get("message") or "")
     return (
         "UWB_RANGING result" in message
+        or message.startswith("DS-TWR ")
+        or message.startswith("DW3000 counters ")
         or "UWB_RANGING rejected" in message
         or "UWB_RANGING trace_" in message
         or "UWB_RANGING initiator active" in message
@@ -348,6 +363,10 @@ def relevant_timing_log(item: dict[str, Any]) -> bool:
         or "FLEX_TDOA anchor n=" in message
         or "FLEX_TDOA tag n=" in message
         or "FLEX_TDOA RX metric" in message
+        or "FLEX_TDOA RX phase" in message
+        or "FLEX_TDOA RX link" in message
+        or "FLEX_TDOA RX buffer" in message
+        or "FLEX_TDOA EVC" in message
         or (
             "PASSIVE_DS" in message
             and (
@@ -513,18 +532,12 @@ def main() -> int:
         time.sleep(min(0.25, warmup_deadline - time.monotonic()))
 
     last_snapshot = fetch_json(snapshot_url)
-    if args.protocol == "ds_twr":
-        # Native DS-TWR positions are calculated inside the dashboard and do
-        # not enter the firmware position-event stream. Avoid polling and
-        # draining unrelated FlexTDOA/passive events during long captures.
-        position_cursor = 0
-    else:
-        initial_position_events = fetch_json(
-            f"{position_events_url}?after=0&limit=1"
-        )
-        position_cursor = int(
-            initial_position_events.get("next_event_id") or 0
-        )
+    initial_position_events = fetch_json(
+        f"{position_events_url}?after=0&limit=1"
+    )
+    position_cursor = int(
+        initial_position_events.get("next_event_id") or 0
+    )
     log_cursor = max(
         0,
         int(last_snapshot.get("next_log_id") or 0) - 1,
@@ -665,10 +678,7 @@ def main() -> int:
                         )
                 next_log_capture += 1.0
 
-            if (
-                args.protocol != "ds_twr"
-                and time.monotonic() >= next_position_capture
-            ):
+            if time.monotonic() >= next_position_capture:
                 try:
                     while True:
                         response = fetch_json(
@@ -692,6 +702,7 @@ def main() -> int:
                             if item.get("position_stream_type") not in (
                                 "flextdoa_position",
                                 "passive_ds_position",
+                                "native_ds_position",
                             ):
                                 continue
                             event_time = received_at(

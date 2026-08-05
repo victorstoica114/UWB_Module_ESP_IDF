@@ -7,6 +7,7 @@
 #define FLEXTDOA_ALGMIN_MAX_ITERATIONS 40U
 #define FLEXTDOA_ALGMIN_MIN_DISTANCE_M 1.0e-6
 #define FLEXTDOA_ALGMIN_STEP_TOLERANCE_M 1.0e-6
+#define FLEXTDOA_ALGMIN_GATE_MAX_ANCHORS 64U
 
 static const struct flextdoa_anchor_position *find_anchor(
     const struct flextdoa_anchor_position *anchors, size_t anchor_count,
@@ -18,6 +19,18 @@ static const struct flextdoa_anchor_position *find_anchor(
         }
     }
     return NULL;
+}
+
+static size_t find_anchor_index(
+    const struct flextdoa_anchor_position *anchors, size_t anchor_count,
+    uint16_t anchor_id)
+{
+    for (size_t index = 0U; index < anchor_count; ++index) {
+        if (anchors[index].anchor_id == anchor_id) {
+            return index;
+        }
+    }
+    return SIZE_MAX;
 }
 
 static bool geometry_valid(
@@ -208,4 +221,106 @@ bool flextdoa_algmin_solve_2d(
     result->residual_rms_m = rms;
     result->iterations = accepted_iterations;
     return true;
+}
+
+enum flextdoa_solution_gate_result flextdoa_algmin_gate_solution_2d(
+    const struct flextdoa_anchor_position *anchors, size_t anchor_count,
+    const struct flextdoa_range_difference *observations,
+    size_t observation_count, double x_m, double y_m,
+    size_t minimum_initiator_count, double maximum_condition_number,
+    struct flextdoa_solution_gate_metrics *metrics)
+{
+    struct flextdoa_solution_gate_metrics local_metrics = {0};
+    if (metrics == NULL) {
+        metrics = &local_metrics;
+    }
+    memset(metrics, 0, sizeof(*metrics));
+    if (!geometry_valid(anchors, anchor_count) || observations == NULL ||
+        observation_count < 3U || anchor_count >
+            FLEXTDOA_ALGMIN_GATE_MAX_ANCHORS ||
+        minimum_initiator_count == 0U ||
+        minimum_initiator_count > anchor_count || !isfinite(x_m) ||
+        !isfinite(y_m) || !isfinite(maximum_condition_number) ||
+        maximum_condition_number < 1.0) {
+        return FLEXTDOA_SOLUTION_GATE_INVALID_ARGUMENT;
+    }
+
+    uint64_t adjacency[FLEXTDOA_ALGMIN_GATE_MAX_ANCHORS] = {0};
+    uint64_t initiator_mask = 0U;
+    for (size_t index = 0U; index < observation_count; ++index) {
+        const size_t initiator_index = find_anchor_index(
+            anchors, anchor_count, observations[index].initiator_id);
+        const size_t responder_index = find_anchor_index(
+            anchors, anchor_count, observations[index].responder_id);
+        if (initiator_index == SIZE_MAX || responder_index == SIZE_MAX ||
+            initiator_index == responder_index ||
+            !isfinite(observations[index].range_difference_m)) {
+            return FLEXTDOA_SOLUTION_GATE_INVALID_ARGUMENT;
+        }
+        initiator_mask |= UINT64_C(1) << initiator_index;
+        adjacency[initiator_index] |= UINT64_C(1) << responder_index;
+        adjacency[responder_index] |= UINT64_C(1) << initiator_index;
+    }
+
+    uint64_t initiators = initiator_mask;
+    while (initiators != 0U) {
+        metrics->initiator_count += initiators & UINT64_C(1);
+        initiators >>= 1U;
+    }
+    if (metrics->initiator_count < minimum_initiator_count) {
+        return FLEXTDOA_SOLUTION_GATE_TOO_FEW_INITIATORS;
+    }
+
+    uint64_t visited = UINT64_C(1);
+    uint64_t frontier = visited;
+    while (frontier != 0U) {
+        uint64_t next = 0U;
+        for (size_t index = 0U; index < anchor_count; ++index) {
+            if ((frontier & (UINT64_C(1) << index)) != 0U) {
+                next |= adjacency[index];
+            }
+        }
+        next &= ~visited;
+        visited |= next;
+        frontier = next;
+    }
+    uint64_t connected = visited;
+    while (connected != 0U) {
+        metrics->connected_anchor_count += connected & UINT64_C(1);
+        connected >>= 1U;
+    }
+    if (metrics->connected_anchor_count != anchor_count) {
+        return FLEXTDOA_SOLUTION_GATE_DISCONNECTED;
+    }
+
+    double cost = 0.0;
+    double normal[3] = {0.0};
+    double gradient[2] = {0.0};
+    if (!evaluate(anchors, anchor_count, observations, observation_count,
+                  x_m, y_m, true, &cost, normal, gradient)) {
+        return FLEXTDOA_SOLUTION_GATE_RANK_DEFICIENT;
+    }
+    const double trace = normal[0] + normal[2];
+    const double discriminant =
+        hypot(normal[0] - normal[2], 2.0 * normal[1]);
+    const double lambda_max = 0.5 * (trace + discriminant);
+    const double determinant =
+        fma(normal[0], normal[2], -normal[1] * normal[1]);
+    const double lambda_min = lambda_max > 0.0
+                                  ? determinant / lambda_max
+                                  : 0.0;
+    metrics->normal_lambda_min = lambda_min;
+    metrics->normal_lambda_max = lambda_max;
+    metrics->normal_condition_number =
+        lambda_min > 0.0 ? lambda_max / lambda_min : INFINITY;
+    if (!isfinite(lambda_max) || !isfinite(lambda_min) ||
+        lambda_max <= DBL_EPSILON ||
+        lambda_min <= DBL_EPSILON * lambda_max) {
+        return FLEXTDOA_SOLUTION_GATE_RANK_DEFICIENT;
+    }
+    if (!isfinite(metrics->normal_condition_number) ||
+        metrics->normal_condition_number > maximum_condition_number) {
+        return FLEXTDOA_SOLUTION_GATE_ILL_CONDITIONED;
+    }
+    return FLEXTDOA_SOLUTION_GATE_OK;
 }

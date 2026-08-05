@@ -4813,7 +4813,7 @@ tr.status-stale td { color: #4f3b1d; }
           <div id="rangingProfileGrid" class="profile-grid"></div>
           <div class="profile-card" style="margin-top:12px">
             <h3>Native DS-TWR range calibration</h3>
-            <p class="muted">Static per-anchor range bias, ordered like the configured anchor IDs. Each value is measured range minus RTK truth in millimetres and is subtracted before the raw independent-frame solver. This is a hardware calibration, not a temporal filter.</p>
+            <p class="muted">Static per-anchor range bias, ordered like the configured anchor IDs. Each value is measured range minus RTK truth in millimetres and is subtracted before the raw independent-frame solver. The defaults below were validated on channel 9 with the 46 ms profile. This is a hardware/timing calibration, not a temporal filter.</p>
             <div class="form-grid">
               <label for="nativeDsCalibrationTargets">Targets</label>
               <select id="nativeDsCalibrationTargets">
@@ -4825,7 +4825,7 @@ tr.status-stale td { color: #4f3b1d; }
                 <option value="5">module 5</option>
               </select>
               <label for="nativeDsRangeBiasMm">Range bias mm</label>
-              <input id="nativeDsRangeBiasMm" value="-49,60,13,-54">
+              <input id="nativeDsRangeBiasMm" value="-13,92,39,-17">
             </div>
             <div id="nativeDsCalibrationStatus" class="profile-summary">calibration status unavailable</div>
             <div class="form-actions">
@@ -5205,7 +5205,7 @@ const rangingProfileDefaults = {
     label: "100 ms RTK-Validated Baseline",
     description: "Field-validated four-packet Native DS-TWR baseline. Each anchor has a 100 ms exchange slot; four anchors plus the 10 ms frame gap produce a 410 ms complete position frame.",
     validationClass: "good",
-    validationText: "channel 9 · raw 1.45 cm RTK RMSE · no position filter",
+    validationText: "channel 9 · 1.17 cm RTK RMSE · no position filter",
     buttonLabel: "Apply 100 ms Reference",
     dsPositionMaxAgeSec: 0.5,
     slotMs: 100,
@@ -5218,11 +5218,11 @@ const rangingProfileDefaults = {
   },
   frame64: {
     prefix: "profileFrame64",
-    label: "64 ms Four-Packet Baseline",
-    description: "Four 15 ms tag-anchor slots plus a 4 ms frame gap. The hidden geometry traffic that invalidated the old result no longer exists.",
-    validationClass: "warn",
-    validationText: "new four-packet runtime · field revalidation required",
-    buttonLabel: "Apply 64 ms Baseline",
+    label: "64 ms Validated Intermediate",
+    description: "Four 15 ms tag-anchor slots plus a 4 ms frame gap. This is the intermediate step between the conservative and high-rate profiles.",
+    validationClass: "good",
+    validationText: "channel 9 · 1.45 cm RTK RMSE · zero delayed-TX/overruns",
+    buttonLabel: "Apply 64 ms Intermediate",
     dsPositionMaxAgeSec: 0.2,
     slotMs: 15,
     roundGapMs: 4,
@@ -5232,18 +5232,18 @@ const rangingProfileDefaults = {
     finalDelayMs: 2,
     autoRxDelayUus: 500,
   },
-  frame60: {
-    prefix: "profileFrame60",
-    label: "60 ms Four-Packet Fast Candidate",
-    description: "Four 14 ms tag-anchor slots plus a 4 ms frame gap. This preserves the former fast timing but must be revalidated with the new one-shot RESULT exchange.",
-    validationClass: "warn",
-    validationText: "candidate · historical 1.64 cm was measured on the replaced runtime",
-    buttonLabel: "Apply 60 ms Candidate",
+  frame46: {
+    prefix: "profileFrame46",
+    label: "46 ms RTK-Validated Fast",
+    description: "Four 11 ms tag-anchor slots plus a 2 ms frame gap, paced by the high-resolution blocking timer. This is the recommended high-rate profile.",
+    validationClass: "good",
+    validationText: "channel 9 · 19.16 positions/s · 1.76 cm RTK RMSE · no filter",
+    buttonLabel: "Apply 46 ms Fast",
     dsPositionMaxAgeSec: 0.2,
-    slotMs: 14,
-    roundGapMs: 4,
+    slotMs: 11,
+    roundGapMs: 2,
     dsRxSliceMs: 100,
-    timeoutMs: 8,
+    timeoutMs: 5,
     respDelayMs: 2,
     finalDelayMs: 2,
     autoRxDelayUus: 500,
@@ -5399,7 +5399,7 @@ const rangingProtocolProfileFields = {
     "respDelayMs", "finalDelayMs", "autoRxDelayUus",
   ]),
 };
-const rangingProfileDefaultsVersion = "2026-07-31-native-ds-clean-v2";
+const rangingProfileDefaultsVersion = "2026-08-05-native-ds-speed-v3";
 const flexProfileDefaultsVersion = "2026-08-04-flextdoa-paper-reference-v3";
 const passiveDsProfileDefaultsVersion = "2026-08-01-passive-ds-single-star-v2";
 const BQ_REG_NAMES = {
@@ -12314,7 +12314,7 @@ function updateRangingSettingsProtocol() {
       title: "DS-TWR Settings",
       label: "Native DS-TWR",
       hint: "Selected in Position Setup. The clean baseline uses POLL, delayed RESP, delayed FINAL and a one-shot delayed RESULT for each tag-anchor range.",
-      note: "Use the 64 ms stable reference first, then compare the 60 ms precision-speed target. Applying a profile persists it and reboots the selected modules; FlexTDOA, Passive DS-TWR, distance-test and calibration timing remain untouched.",
+      note: "Use the 46 ms RTK-validated profile for high-rate operation, 64 ms as an intermediate step, and 100 ms as the conservative fallback. Applying a profile persists it and reboots the selected modules; FlexTDOA, Passive DS-TWR, distance-test and calibration timing remain untouched.",
     },
     passive_ds: {
       title: "Passive DS-TWR Settings",

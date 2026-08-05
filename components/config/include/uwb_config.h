@@ -91,28 +91,28 @@
 #endif
 
 #ifndef APP_UWB_RANGING_SLOT_MS
-#define APP_UWB_RANGING_SLOT_MS 30
+#define APP_UWB_RANGING_SLOT_MS 11
 #endif
 
 #ifndef APP_UWB_RANGING_ROUND_GAP_MS
-#define APP_UWB_RANGING_ROUND_GAP_MS 4
+#define APP_UWB_RANGING_ROUND_GAP_MS 2
 #endif
 
 #ifndef APP_UWB_RANGING_RX_SLICE_MS
-#define APP_UWB_RANGING_RX_SLICE_MS 10
+#define APP_UWB_RANGING_RX_SLICE_MS 100
 #endif
 
-/* Native three-frame DS-TWR timing used only by UWB ranging mode. */
+/* Native four-message DS-TWR timing used only by UWB ranging mode. */
 #ifndef APP_UWB_RANGING_RX_TIMEOUT_MS
-#define APP_UWB_RANGING_RX_TIMEOUT_MS 12
+#define APP_UWB_RANGING_RX_TIMEOUT_MS 5
 #endif
 
 #ifndef APP_UWB_RANGING_RESP_DELAY_MS
-#define APP_UWB_RANGING_RESP_DELAY_MS 5
+#define APP_UWB_RANGING_RESP_DELAY_MS 2
 #endif
 
 #ifndef APP_UWB_RANGING_FINAL_DELAY_MS
-#define APP_UWB_RANGING_FINAL_DELAY_MS 5
+#define APP_UWB_RANGING_FINAL_DELAY_MS 2
 #endif
 
 #ifndef APP_UWB_RANGING_AUTO_RX_DELAY_UUS

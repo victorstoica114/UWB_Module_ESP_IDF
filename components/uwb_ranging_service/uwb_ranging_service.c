@@ -13,7 +13,7 @@ esp_err_t uwb_ranging_service_start(void)
     const uint8_t runtime_role = app_identity_get_uwb_role();
     const app_runtime_config_t *config = app_runtime_config_get();
     ESP_LOGI(TAG,
-             "Native three-frame DS-TWR ranging selected: "
+             "Native four-message DS-TWR ranging selected: "
              "role=%s(%u) source_id=%u tag_id=%u anchor_count=%u "
              "anchors=[%u,%u,%u,%u] slot=%u ms frame=%lu ms "
              "timeout=%u ms resp=%u ms final=%u ms antenna_delay=0x%04x",

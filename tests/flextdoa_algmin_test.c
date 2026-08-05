@@ -21,6 +21,30 @@ static struct flextdoa_range_difference make_difference(
     };
 }
 
+static size_t build_complete_observations(
+    const struct flextdoa_anchor_position *anchors,
+    size_t anchor_count, double tag_x, double tag_y,
+    struct flextdoa_range_difference *observations, size_t capacity)
+{
+    size_t count = 0U;
+    for (size_t initiator = 0U; initiator < anchor_count; ++initiator) {
+        for (size_t responder = 0U; responder < anchor_count; ++responder) {
+            if (responder == initiator) {
+                continue;
+            }
+            assert(count < capacity);
+            observations[count++] = make_difference(
+                anchors[initiator].anchor_id,
+                anchors[responder].anchor_id,
+                distance(tag_x, tag_y, anchors[responder].x_m,
+                         anchors[responder].y_m) -
+                    distance(tag_x, tag_y, anchors[initiator].x_m,
+                             anchors[initiator].y_m));
+        }
+    }
+    return count;
+}
+
 static void test_frame_boundaries_duplicates_and_threshold(void)
 {
     uint32_t slot_ids[12] = {0};
@@ -159,6 +183,87 @@ static void test_complete_frame_produces_one_solution(
     assert(solution_count == 1U);
 }
 
+static void test_conservative_partial_frame_and_geometry_gate(
+    const struct flextdoa_anchor_position *anchors,
+    size_t anchor_count, double tag_x, double tag_y)
+{
+    struct flextdoa_range_difference complete[12] = {0};
+    assert(build_complete_observations(
+               anchors, anchor_count, tag_x, tag_y, complete, 12U) ==
+           12U);
+
+    uint32_t slot_ids[12] = {0};
+    struct flextdoa_range_difference stored[12] = {0};
+    struct flextdoa_frame_aggregator frame = {0};
+    flextdoa_frame_aggregator_init(&frame, slot_ids, stored, 12U);
+    for (size_t index = 0U; index < 12U; ++index) {
+        /* Lose one response in each of two slots, retaining all four
+         * initiators: this is the runtime 10/12 acceptance boundary. */
+        if (index == 1U || index == 4U) {
+            continue;
+        }
+        const enum flextdoa_frame_ingest_result ingest =
+            flextdoa_frame_aggregator_ingest(
+                &frame, (uint32_t)(index / 3U), 4U, 3U, 10U,
+                &complete[index]);
+        assert(ingest == FLEXTDOA_FRAME_ACCEPTED);
+    }
+    assert(frame.observation_count == 10U);
+    assert(flextdoa_frame_aggregator_solvable(&frame));
+    assert(!flextdoa_frame_aggregator_complete(&frame));
+
+    struct flextdoa_algmin_result result = {0};
+    assert(flextdoa_algmin_solve_2d(
+        anchors, anchor_count, frame.observations,
+        frame.observation_count, NULL, &result));
+    assert(fabs(result.x_m - tag_x) < 1.0e-5);
+    assert(fabs(result.y_m - tag_y) < 1.0e-5);
+    struct flextdoa_solution_gate_metrics metrics = {0};
+    assert(flextdoa_algmin_gate_solution_2d(
+               anchors, anchor_count, frame.observations,
+               frame.observation_count, result.x_m, result.y_m, 4U,
+               10.0, &metrics) == FLEXTDOA_SOLUTION_GATE_OK);
+    assert(metrics.initiator_count == 4U);
+    assert(metrics.connected_anchor_count == 4U);
+    assert(metrics.normal_condition_number < 10.0);
+
+    const struct flextdoa_range_difference next = complete[0];
+    assert(flextdoa_frame_aggregator_ingest(
+               &frame, 4U, 4U, 3U, 10U, &next) ==
+           FLEXTDOA_FRAME_BOUNDARY);
+
+    const struct flextdoa_range_difference disconnected[] = {
+        make_difference(2U, 3U, 0.0),
+        make_difference(3U, 2U, 0.0),
+        make_difference(4U, 5U, 0.0),
+        make_difference(5U, 4U, 0.0),
+    };
+    assert(flextdoa_algmin_gate_solution_2d(
+               anchors, anchor_count, disconnected, 4U, tag_x, tag_y,
+               4U, 10.0, &metrics) ==
+           FLEXTDOA_SOLUTION_GATE_DISCONNECTED);
+
+    assert(flextdoa_algmin_gate_solution_2d(
+               anchors, anchor_count, complete, 3U, tag_x, tag_y, 4U,
+               10.0, &metrics) ==
+           FLEXTDOA_SOLUTION_GATE_TOO_FEW_INITIATORS);
+
+    const struct flextdoa_anchor_position collinear[] = {
+        {.anchor_id = 2U, .x_m = 0.0, .y_m = 0.0},
+        {.anchor_id = 3U, .x_m = 1.0, .y_m = 0.0},
+        {.anchor_id = 4U, .x_m = 2.0, .y_m = 0.0},
+        {.anchor_id = 5U, .x_m = 3.0, .y_m = 0.0},
+    };
+    struct flextdoa_range_difference collinear_observations[12] = {0};
+    assert(build_complete_observations(
+               collinear, 4U, 1.5, 0.0, collinear_observations, 12U) ==
+           12U);
+    assert(flextdoa_algmin_gate_solution_2d(
+               collinear, 4U, collinear_observations, 12U, 1.5, 0.0,
+               4U, 10.0, &metrics) ==
+           FLEXTDOA_SOLUTION_GATE_RANK_DEFICIENT);
+}
+
 int main(void)
 {
     const struct flextdoa_anchor_position anchors[] = {
@@ -200,6 +305,8 @@ int main(void)
 
     test_frame_boundaries_duplicates_and_threshold();
     test_complete_frame_produces_one_solution(
+        anchors, 4U, tag_x, tag_y);
+    test_conservative_partial_frame_and_geometry_gate(
         anchors, 4U, tag_x, tag_y);
 
     puts("flextdoa_algmin_test: PASS");

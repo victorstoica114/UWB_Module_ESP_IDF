@@ -35,25 +35,73 @@ static void test_ci_cr_schedule(void)
     const uint16_t anchors[] = {2U, 3U, 4U, 5U};
     const uint16_t slots[] = {2U, 3U, 4U, 5U};
     const uint16_t masks[] = {0x0EU, 0x0DU, 0x0BU, 0x07U};
-    const uint8_t expected[][3] = {
-        {3U, 4U, 5U},
-        {4U, 5U, 2U},
-        {5U, 2U, 3U},
-        {2U, 3U, 4U},
+    const uint8_t expected[3][4][3] = {
+        {
+            {3U, 4U, 5U},
+            {4U, 5U, 2U},
+            {5U, 2U, 3U},
+            {2U, 3U, 4U},
+        },
+        {
+            {4U, 5U, 3U},
+            {5U, 2U, 4U},
+            {2U, 3U, 5U},
+            {3U, 4U, 2U},
+        },
+        {
+            {5U, 3U, 4U},
+            {2U, 4U, 5U},
+            {3U, 5U, 2U},
+            {4U, 2U, 3U},
+        },
     };
 
-    for (uint32_t slot_id = 0U; slot_id < 4U; ++slot_id) {
+    for (uint32_t slot_id = 0U; slot_id < 12U; ++slot_id) {
+        const uint8_t frame_index = (uint8_t)(slot_id / 4U);
+        const uint8_t slot_index = (uint8_t)(slot_id % 4U);
         struct flextdoa_slot_plan plan = {0};
         assert(flextdoa_build_ci_cr_slot(
             anchors, 4U, slots, 4U, masks, 3U, slot_id, &plan));
         assert(plan.slot_id == slot_id);
-        assert(plan.slot_index == slot_id);
-        assert(plan.initiator_id == anchors[slot_id]);
+        assert(plan.slot_index == slot_index);
+        assert(plan.initiator_id == anchors[slot_index]);
         assert(plan.responder_count == 3U);
-        assert(memcmp(plan.responder_ids, expected[slot_id], 3U) == 0);
-        assert(flextdoa_responder_index(
-                   &plan, expected[slot_id][1]) == 1);
+        assert(memcmp(plan.responder_ids,
+                      expected[frame_index][slot_index], 3U) == 0);
+        assert(flextdoa_responder_index(&plan,
+                   expected[frame_index][slot_index][1]) == 1);
         assert(flextdoa_responder_index(&plan, 99U) == -1);
+        for (uint8_t response_index = 0U; response_index < 3U;
+             ++response_index) {
+            const uint8_t responder_id = plan.responder_ids[response_index];
+            assert(responder_id != plan.initiator_id);
+            const uint8_t responder_anchor_index =
+                (uint8_t)(responder_id - 2U);
+            assert(responder_anchor_index < 4U);
+        }
+    }
+
+    for (uint8_t slot_index = 0U; slot_index < 4U; ++slot_index) {
+        for (uint8_t responder_anchor_index = 0U;
+             responder_anchor_index < 4U; ++responder_anchor_index) {
+            if (responder_anchor_index == slot_index) {
+                continue;
+            }
+            const uint8_t responder_id = (uint8_t)(responder_anchor_index + 2U);
+            uint8_t index_mask = 0U;
+            for (uint32_t frame_index = 0U; frame_index < 3U;
+                 ++frame_index) {
+                struct flextdoa_slot_plan plan = {0};
+                const uint32_t slot_id = frame_index * 4U + slot_index;
+                assert(flextdoa_build_ci_cr_slot(
+                    anchors, 4U, slots, 4U, masks, 3U, slot_id, &plan));
+                const int response_index =
+                    flextdoa_responder_index(&plan, responder_id);
+                assert(response_index >= 0 && response_index < 3);
+                index_mask |= (uint8_t)(1U << response_index);
+            }
+            assert(index_mask == 0x07U);
+        }
     }
 }
 

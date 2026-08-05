@@ -25,6 +25,9 @@ enum {
         (APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U),
 };
 
+#define FLEX_SOLVER_PARTIAL_MAX_CONDITION 10.0
+#define FLEX_SOLVER_PARTIAL_MAX_RESIDUAL_M 0.20
+
 enum flex_solver_item_type {
     FLEX_SOLVER_ITEM_OBSERVATION,
     FLEX_SOLVER_ITEM_RELOAD_GEOMETRY,
@@ -64,13 +67,21 @@ struct flex_solver_state {
     uint32_t frames_complete;
     uint32_t frames_incomplete;
     uint32_t positions_published;
+    uint32_t partial_positions_published;
     uint32_t solver_rejected;
+    uint32_t partial_gate_graph_rejected;
+    uint32_t partial_gate_condition_rejected;
+    uint32_t partial_gate_residual_rejected;
     uint32_t previous_observations_accepted;
     uint32_t previous_observations_rejected;
     uint32_t previous_frames_complete;
     uint32_t previous_frames_incomplete;
     uint32_t previous_positions_published;
+    uint32_t previous_partial_positions_published;
     uint32_t previous_solver_rejected;
+    uint32_t previous_partial_gate_graph_rejected;
+    uint32_t previous_partial_gate_condition_rejected;
+    uint32_t previous_partial_gate_residual_rejected;
 };
 
 static QueueHandle_t s_queue;
@@ -237,6 +248,37 @@ static void flex_solver_close_frame(struct flex_solver_state *state)
         return;
     }
 
+    if (!complete) {
+        struct flextdoa_solution_gate_metrics gate_metrics = {0};
+        const enum flextdoa_solution_gate_result gate =
+            flextdoa_algmin_gate_solution_2d(
+                state->anchors, state->anchor_count,
+                state->frame_solver_observations,
+                solver_observation_count, result.x_m, result.y_m,
+                state->anchor_count, FLEX_SOLVER_PARTIAL_MAX_CONDITION,
+                &gate_metrics);
+        if (gate != FLEXTDOA_SOLUTION_GATE_OK) {
+            if (gate == FLEXTDOA_SOLUTION_GATE_RANK_DEFICIENT ||
+                gate == FLEXTDOA_SOLUTION_GATE_ILL_CONDITIONED) {
+                state->partial_gate_condition_rejected++;
+            } else {
+                state->partial_gate_graph_rejected++;
+            }
+            state->solver_rejected++;
+            state->frame_tag_id = 0U;
+            flextdoa_frame_aggregator_reset(frame);
+            return;
+        }
+        if (result.residual_rms_m >
+            FLEX_SOLVER_PARTIAL_MAX_RESIDUAL_M) {
+            state->partial_gate_residual_rejected++;
+            state->solver_rejected++;
+            state->frame_tag_id = 0U;
+            flextdoa_frame_aggregator_reset(frame);
+            return;
+        }
+    }
+
     state->previous_position.valid = true;
     state->previous_position.x_m = result.x_m;
     state->previous_position.y_m = result.y_m;
@@ -259,6 +301,9 @@ static void flex_solver_close_frame(struct flex_solver_state *state)
             observation_count, state->anchor_count,
             state->geometry_generation)) {
         state->positions_published++;
+        if (!complete) {
+            state->partial_positions_published++;
+        }
     }
     state->frame_tag_id = 0U;
     flextdoa_frame_aggregator_reset(frame);
@@ -315,13 +360,24 @@ static void flex_solver_accept_observation(
     const uint16_t complete_frame_observations =
         (uint16_t)((uint16_t)config->flex_tdoa_slot_count *
                    config->flex_tdoa_responder_count);
+    /* With the standard 4x3 FlexTDOA frame, retain up to two missing
+     * responses but never a completely missed three-response request slot.
+     * This yields a conservative 10/12 raw profile with all four initiators;
+     * other configurations remain strict/full-frame only. */
+    const bool partial_recovery_enabled =
+        config->flex_tdoa_slot_count == 4U &&
+        config->flex_tdoa_responder_count == 3U;
+    const uint16_t minimum_frame_observations =
+        partial_recovery_enabled
+            ? (uint16_t)(complete_frame_observations - 2U)
+            : complete_frame_observations;
     for (uint8_t attempt = 0U; attempt < 2U; ++attempt) {
         const enum flextdoa_frame_ingest_result ingest =
             flextdoa_frame_aggregator_ingest(
                 &state->frame, item->slot_id,
                 config->flex_tdoa_slot_count,
                 config->flex_tdoa_responder_count,
-                complete_frame_observations, &observation);
+                minimum_frame_observations, &observation);
         if (ingest == FLEXTDOA_FRAME_BOUNDARY) {
             flex_solver_close_frame(state);
             continue;
@@ -355,7 +411,7 @@ static void flex_solver_log_summary(struct flex_solver_state *state,
     }
     (void)wireless_log_service_submit(
         'I', TAG,
-        "FLEX_TDOA raw frame AlgMin geometry=%u obs=%lu/%lu frames=%lu/%lu pos=%lu reject=%lu queue_drop=%lu",
+        "FLEX_TDOA raw frame AlgMin geometry=%u obs=%lu/%lu frames=%lu/%lu pos=%lu partial=%lu reject=%lu gate=%lu/%lu/%lu queue_drop=%lu",
         state->geometry_ready ? 1U : 0U,
         (unsigned long)(state->observations_accepted -
                         state->previous_observations_accepted),
@@ -367,15 +423,31 @@ static void flex_solver_log_summary(struct flex_solver_state *state,
                         state->previous_frames_incomplete),
         (unsigned long)(state->positions_published -
                         state->previous_positions_published),
+        (unsigned long)(state->partial_positions_published -
+                        state->previous_partial_positions_published),
         (unsigned long)(state->solver_rejected -
                         state->previous_solver_rejected),
+        (unsigned long)(state->partial_gate_graph_rejected -
+                        state->previous_partial_gate_graph_rejected),
+        (unsigned long)(state->partial_gate_condition_rejected -
+                        state->previous_partial_gate_condition_rejected),
+        (unsigned long)(state->partial_gate_residual_rejected -
+                        state->previous_partial_gate_residual_rejected),
         (unsigned long)s_dropped);
     state->previous_observations_accepted = state->observations_accepted;
     state->previous_observations_rejected = state->observations_rejected;
     state->previous_frames_complete = state->frames_complete;
     state->previous_frames_incomplete = state->frames_incomplete;
     state->previous_positions_published = state->positions_published;
+    state->previous_partial_positions_published =
+        state->partial_positions_published;
     state->previous_solver_rejected = state->solver_rejected;
+    state->previous_partial_gate_graph_rejected =
+        state->partial_gate_graph_rejected;
+    state->previous_partial_gate_condition_rejected =
+        state->partial_gate_condition_rejected;
+    state->previous_partial_gate_residual_rejected =
+        state->partial_gate_residual_rejected;
     state->summary_tick = now;
 }
 

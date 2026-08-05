@@ -130,33 +130,35 @@ bool flextdoa_build_ci_cr_slot(
     plan->responder_count = responder_count;
 
     /*
-     * CI-CR: both cursors advance with the global slot. The initiator is
-     * skipped while walking the responder pool, preserving packet order as
-     * the response-subslot order.
+     * CI-CR has two independent round-robin dimensions. slot_index selects
+     * the initiator, while frame_index rotates the response order for that
+     * same initiator across successive TDMA frames. Build a stable eligible
+     * pool first; using slot_id % anchor_count directly would repeat the same
+     * relative response order whenever slot_count == anchor_count.
      */
     size_t allowed_count = 0U;
+    uint8_t eligible[FLEXTDOA_MAX_ANCHORS] = {0};
     for (size_t index = 0U; index < anchor_count; ++index) {
         if (index != initiator_index &&
             (allowed_mask & (uint16_t)(1U << index)) != 0U) {
-            allowed_count++;
+            if (anchor_ids[index] > UINT8_MAX) {
+                return false;
+            }
+            eligible[allowed_count++] = (uint8_t)anchor_ids[index];
         }
     }
     if (allowed_count < responder_count) {
         return false;
     }
 
-    size_t candidate_index = slot_id % anchor_count;
-    uint8_t output_index = 0U;
-    while (output_index < responder_count) {
-        const uint16_t candidate_id = anchor_ids[candidate_index];
-        if (candidate_index != initiator_index &&
-            (allowed_mask & (uint16_t)(1U << candidate_index)) != 0U) {
-            if (candidate_id > UINT8_MAX) {
-                return false;
-            }
-            plan->responder_ids[output_index++] = (uint8_t)candidate_id;
-        }
-        candidate_index = (candidate_index + 1U) % anchor_count;
+    const uint32_t frame_index = slot_id / slot_count;
+    const size_t rotation =
+        ((size_t)(frame_index % allowed_count) + plan->slot_index) %
+        allowed_count;
+    for (uint8_t output_index = 0U;
+         output_index < responder_count; ++output_index) {
+        plan->responder_ids[output_index] =
+            eligible[(rotation + output_index) % allowed_count];
     }
     return true;
 }
