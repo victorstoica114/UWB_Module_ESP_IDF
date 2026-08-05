@@ -4480,7 +4480,7 @@ tr.status-stale td { color: #4f3b1d; }
           <div class="flex-timing-head">
             <div>
               <h2>Passive DS-TWR Protocol Timing</h2>
-              <div class="muted">Clean rotating full-DS: one broadcast POLL, three staggered RESP frames and one aggregate FINAL. Tags timestamp POLL/RESP, apply CFO and never transmit.</div>
+              <div class="muted">Clean rotating full-DS: one broadcast POLL, three staggered RESP frames and one aggregate FINAL. Receive-only tags use all three packets and delayed responder exchange timing; CFO is diagnostic only.</div>
             </div>
           </div>
           <div id="passiveDsTimingDiagram" class="muted">Waiting for Passive DS-TWR runtime status...</div>
@@ -4684,10 +4684,11 @@ tr.status-stale td { color: #4f3b1d; }
               <option value="5">module 5</option>
             </select>
           </div>
-          <p class="muted profile-note">The clean protocol uses one rotating full-DS star: broadcast POLL, three delayed RESP frames and one aggregate FINAL. Anchor ranges are diagnostics; tag positioning uses fixed RTK geometry and CFO-corrected POLL/RESP timestamps.</p>
+          <p class="muted profile-note">The clean protocol uses one rotating full-DS star: broadcast POLL, three delayed RESP frames and one aggregate FINAL. Anchor ranges are diagnostics; receive-only tag positioning uses the complete three-packet passive DS equation and fixed RTK geometry.</p>
           <div id="passiveDsActiveProfile" class="profile-validation">Waiting for live Passive DS-TWR timing...</div>
           <div class="form-actions">
-            <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="multi_dynamic">Apply Clean Rotating Full-DS · Field Baseline</button>
+            <button class="primary apply-passive-ds-quick-profile" data-passive-ds-profile="multi_precision">Apply Full-DS · Three-Star Precision</button>
+            <button class="apply-passive-ds-quick-profile" data-passive-ds-profile="multi_dynamic">Apply Full-DS · Single-Star Diagnostic</button>
           </div>
           <div class="profile-grid">
             <div class="profile-card passive-ds-profile-card" data-passive-ds-profile="fast" style="display:none">
@@ -4728,10 +4729,10 @@ tr.status-stale td { color: #4f3b1d; }
             </div>
             <div class="profile-card passive-ds-profile-card" data-passive-ds-profile="multi">
               <h3>Clean Rotating Full-DS · N+2</h3>
-              <p class="muted">One rotating reference broadcasts POLL, all three other anchors answer in fixed delayed-TX subslots, then the reference broadcasts FINAL. The tag emits three CFO-corrected observations immediately from POLL/RESP.</p>
-              <div class="profile-validation">clean protocol v1 · CRC protected · raw fixed-RTK solver</div>
+              <p class="muted">One rotating reference broadcasts POLL, all three other anchors answer in fixed delayed-TX subslots, then the reference broadcasts FINAL. Each responder carries its completed exchange in following packets, allowing the tag to emit three genuine passive DS observations without transmitting.</p>
+              <div class="profile-validation">clean protocol v2 · CRC protected · raw fixed-RTK solver</div>
               <div class="form-grid compact">
-                <label for="passiveDsMultiSolveMode">Position solver</label><select id="passiveDsMultiSolveMode"><option value="0">One coherent star · raw AlgMin</option></select>
+                <label for="passiveDsMultiSolveMode">Position solver</label><select id="passiveDsMultiSolveMode"><option value="0">One coherent star · raw diagnostic</option><option value="2">Three coherent stars · raw precision</option></select>
                 <label for="passiveDsMultiSlotMs">Exchange budget ms</label><input id="passiveDsMultiSlotMs" value="8" type="number" min="5" max="60000" step="1">
                 <label for="passiveDsMultiGapMs">Frame gap ms</label><input id="passiveDsMultiGapMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsMultiRxMs">Anchor RX slice ms</label><input id="passiveDsMultiRxMs" value="100" type="number" min="1" max="60000" step="1">
@@ -5154,6 +5155,8 @@ const state = {
   gpsMapTileErrors: 0,
   gpsRtkSamples: new Map(),
   gpsRtkLastTokens: new Map(),
+  gpsRtkAnchorIdsKey: "",
+  gpsRtkGeometryGenerationKey: "",
 };
 const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?) z=([-+]?\d+(?:\.\d+)?) m\/s\^2 accuracy=(\d+) reports=(\d+)/;
 const maxAccelSamples = 30000;
@@ -6113,35 +6116,70 @@ function synchronizePositionAnchorsFromRuntime(statuses) {
 function positionKnownReference(settings, anchors) {
   if (settings.referenceMode === "gps_rtk") {
     const tagId = Number(settings.tagIds?.[0] || 1);
+    const rtkGeometry = gpsRtkGeometryModel();
     const rtkAlignment = gpsRtkToUwbAlignment(
-      gpsRtkGeometryModel(), anchors, settings.anchorIds);
+      rtkGeometry, anchors, settings.anchorIds);
+    if (!rtkAlignment) {
+      return {
+        reference: null,
+        error: "GPS RTK reference blocked: waiting for enough current RTK-fixed anchor samples to validate the rigid anchor fit.",
+      };
+    }
+    const anchorFitRmsM = Number(rtkAlignment.anchorFitRmsM);
+    if (!Number.isFinite(anchorFitRmsM) ||
+        anchorFitRmsM > gpsRtkAnchorFitRmsLimitM) {
+      const measured = Number.isFinite(anchorFitRmsM)
+        ? `${(anchorFitRmsM * 100).toFixed(1)} cm`
+        : "invalid";
+      return {
+        reference: null,
+        error: `GPS RTK reference blocked: rigid anchor fit RMS ${measured} exceeds the ${(gpsRtkAnchorFitRmsLimitM * 100).toFixed(1)} cm limit. Clear and recollect RTK anchor samples before using RMSE.`,
+      };
+    }
     const track = gpsRtkTagTrack(tagId, rtkAlignment);
     const latest = track[track.length - 1];
-    if (!latest) return null;
+    if (!latest) {
+      return {
+        reference: null,
+        error: `GPS RTK reference blocked: no current RTK-fixed sample is available for tag M${tagId}.`,
+      };
+    }
     return {
-      x: latest.x,
-      y: latest.y,
-      label: `GPS RTK tag M${tagId}${rtkAlignment ? " (anchor-aligned)" : ""}`,
-      dynamicGps: true,
-      tagId,
-      capturedAt: latest.t,
-      rtkAlignment,
+      reference: {
+        x: latest.x,
+        y: latest.y,
+        label: `GPS RTK tag M${tagId} (anchor-aligned)`,
+        dynamicGps: true,
+        tagId,
+        capturedAt: latest.t,
+        rtkAlignment,
+        anchorFitRmsM,
+      },
+      error: "",
     };
   }
   if (settings.referenceMode === "centroid") {
     const points = settings.anchorIds.map(id => anchors[id]).filter(Boolean);
-    if (points.length !== settings.anchorIds.length || !points.length) return null;
+    if (points.length !== settings.anchorIds.length || !points.length) {
+      return {reference: null, error: ""};
+    }
     return {
-      x: points.reduce((sum, point) => sum + Number(point.x), 0) / points.length,
-      y: points.reduce((sum, point) => sum + Number(point.y), 0) / points.length,
-      label: "anchor centroid",
+      reference: {
+        x: points.reduce((sum, point) => sum + Number(point.x), 0) / points.length,
+        y: points.reduce((sum, point) => sum + Number(point.y), 0) / points.length,
+        label: "anchor centroid",
+      },
+      error: "",
     };
   }
   if (settings.referenceMode === "manual" &&
       Number.isFinite(settings.referenceX) && Number.isFinite(settings.referenceY)) {
-    return {x: settings.referenceX, y: settings.referenceY, label: "manual"};
+    return {
+      reference: {x: settings.referenceX, y: settings.referenceY, label: "manual"},
+      error: "",
+    };
   }
-  return null;
+  return {reference: null, error: ""};
 }
 
 function percentile(values, fraction) {
@@ -7809,6 +7847,7 @@ function computePositionModel() {
   const geometry = paperAnchorGeometry(
     settings.anchorIds, positionGeometryMaxAge(settings), settings.solver);
   const anchors = {...(geometry?.anchors || {})};
+  syncGpsRtkAnchorSampleContext(settings, geometry, anchors);
 
   if (!active && state.positionWasActive) {
     resetPositionTagTrails();
@@ -7916,7 +7955,7 @@ function computePositionModel() {
   }
 
   state.positionResults = tags;
-  const reference = positionKnownReference(settings, anchors);
+  const referenceResult = positionKnownReference(settings, anchors);
   return {
     settings,
     active,
@@ -7925,7 +7964,8 @@ function computePositionModel() {
     geometry,
     offlineModuleIds,
     switchingModuleIds,
-    reference,
+    reference: referenceResult.reference,
+    referenceError: referenceResult.error,
     observedTagIds,
     unexpectedTagIds,
     missingTagIds,
@@ -8526,9 +8566,10 @@ function renderPositionReadout(model) {
     }
     readout.innerHTML = `${renderPositionSolverStatus(model)}<div class="position-tag-card"><b>${esc(solverName)} inactive</b><span>No stored position is shown while the selected modules are not in the selected runtime.</span></div>`;
     accuracyRows.innerHTML = "";
+    referenceStatus.className = model.referenceError ? "warn" : "muted";
     referenceStatus.textContent = model.reference
       ? `${model.reference.label}: x=${fmtFixed(model.reference.x, 3)} m, y=${fmtFixed(model.reference.y, 3)} m`
-      : "Known position reference disabled.";
+      : model.referenceError || "Known position reference disabled.";
     errorRows.innerHTML = `<tr><td colspan="6"><span class="muted">position runtime inactive</span></td></tr>`;
     title.textContent = positionProtocolUsesTdoa(model.settings.solver) ? "TDOA Observations" : "Distances";
     rows.innerHTML = "";
@@ -8634,8 +8675,11 @@ function renderPositionReadout(model) {
   });
   accuracyRows.innerHTML = accuracyTableRows.join("") || `<tr><td colspan="4"><span class="muted">waiting</span></td></tr>`;
   if (model.reference) {
+    referenceStatus.className = "muted";
     referenceStatus.textContent =
-      `${model.reference.label}: x=${fmtFixed(model.reference.x, 3)} m, y=${fmtFixed(model.reference.y, 3)} m · rolling ${fmtFixed(model.settings.errorWindowSec, 0)} s`;
+      `${model.reference.label}: x=${fmtFixed(model.reference.x, 3)} m, y=${fmtFixed(model.reference.y, 3)} m` +
+      `${Number.isFinite(Number(model.reference.anchorFitRmsM)) ? ` · anchor fit RMS ${fmtPositionCm(model.reference.anchorFitRmsM, 1)}` : ""}` +
+      ` · rolling ${fmtFixed(model.settings.errorWindowSec, 0)} s`;
     errorRows.innerHTML = Object.values(model.tags).map(tag => {
       const stats = positionReferenceErrorStats(
         tag.tagId,
@@ -8652,14 +8696,21 @@ function renderPositionReadout(model) {
         <td id="positionErrorMax${esc(tag.tagId)}">${fmtPositionCm(stats.maxM, 1)}</td>
       </tr>`;
     }).join("");
+  } else if (model.referenceError) {
+    referenceStatus.className = "warn";
+    referenceStatus.textContent = model.referenceError;
+    errorRows.innerHTML = `<tr><td colspan="6"><span class="warn">RTK comparison blocked until the anchor geometry fit is valid.</span></td></tr>`;
   } else {
+    referenceStatus.className = "muted";
     referenceStatus.textContent = "Known position reference disabled.";
     errorRows.innerHTML = `<tr><td colspan="6"><span class="muted">enable a known reference in Position Setup</span></td></tr>`;
   }
 
   if (positionProtocolUsesTdoa(model.settings.solver)) {
     title.textContent = "TDOA Observations";
-    head.innerHTML = `<tr><th>Tag</th><th>Observation</th><th>diff m</th><th>raw m</th><th>age</th><th>resid.</th></tr>`;
+    head.innerHTML = model.settings.solver === "passive_ds"
+      ? `<tr><th>Tag</th><th>Observation</th><th>DS diff m</th><th>CFO cmp m</th><th>age</th><th>resid.</th></tr>`
+      : `<tr><th>Tag</th><th>Observation</th><th>diff m</th><th>raw m</th><th>age</th><th>resid.</th></tr>`;
     const tdoaRows = [];
     for (const tag of Object.values(model.tags)) {
       for (const item of tag.observations || []) {
@@ -8677,8 +8728,8 @@ function renderPositionReadout(model) {
         const cfoPpm = Number(item.clock_offset_ppm);
         const cfoCorrectionM = Number(item.cfo_correction_m);
         const passiveDiag = item.tdoa_protocol === "passive_ds"
-          ? ` · CFO ${Number.isFinite(cfoPpm) ? fmtFixed(cfoPpm, 3) + " ppm" : "-"} / ` +
-            `${Number.isFinite(cfoCorrectionM) ? fmtFixed(cfoCorrectionM * 100, 1) + " cm" : "-"} · ` +
+          ? ` · T/I drift ${Number.isFinite(cfoPpm) ? fmtFixed(cfoPpm, 3) + " ppm" : "-"} · ` +
+            `DS-CFO Δ ${Number.isFinite(cfoCorrectionM) ? fmtFixed(cfoCorrectionM * 100, 1) + " cm" : "-"} · ` +
             `reply ${Number.isFinite(Number(item.reply_delay_us)) ? esc(item.reply_delay_us) + " µs" : "-"} · ` +
             `range ${esc(item.range_source || "-")}` +
             `${Number.isFinite(Number(item.range_age_slots)) ? " age " + esc(item.range_age_slots) + " slots" : ""}`
@@ -8948,7 +8999,10 @@ function updatePositionLiveMetrics(model) {
         ? item.position_filter === "none"
           ? " · raw ESP32 solve" +
             (item.independent_frame
-              ? " · independent three-star window"
+              ? Number(item.observation_count) >
+                    Math.max(0, Number(item.anchor_count) - 1)
+                ? " · independent three-star window"
+                : " · independent single-star frame"
               : " · overlapping three-star window")
           : ` · ${item.filter_correction ? "EKF correction" : "EKF predict-only"}` +
             (item.complete_superframe
@@ -9616,6 +9670,69 @@ function gpsMapHasValidCoordinates(item) {
 const gpsRtkAnchorIds = [2, 3, 4, 5];
 const gpsRtkMinimumSamples = 5;
 const gpsRtkMaximumSamples = 120;
+const gpsRtkSampleHorizonMs = 120000;
+const gpsRtkAnchorFitRmsLimitM = 0.10;
+
+function pruneGpsRtkSamples(nowMs = Date.now()) {
+  const oldestAllowedMs = nowMs - gpsRtkSampleHorizonMs;
+  for (const [moduleId, samples] of state.gpsRtkSamples.entries()) {
+    const current = (samples || []).filter(sample =>
+      Number.isFinite(Number(sample?.capturedAt)) &&
+      Number(sample.capturedAt) >= oldestAllowedMs
+    );
+    if (current.length) {
+      if (current.length !== samples.length) {
+        state.gpsRtkSamples.set(moduleId, current);
+      }
+    } else {
+      state.gpsRtkSamples.delete(moduleId);
+      state.gpsRtkLastTokens.delete(moduleId);
+    }
+  }
+}
+
+function clearGpsRtkAnchorSamples() {
+  for (const anchorId of gpsRtkAnchorIds) {
+    state.gpsRtkSamples.delete(anchorId);
+    state.gpsRtkLastTokens.delete(anchorId);
+  }
+}
+
+function gpsRtkFixedGeometryGenerationKey(settings, geometry, anchors) {
+  if (!["persisted", "esp_fixed_rtk"].includes(String(geometry?.status || ""))) {
+    return "";
+  }
+  const generation = Number(
+    geometry?.generation ?? geometry?.frameId ?? geometry?.updates
+  );
+  const coordinates = (settings.anchorIds || []).map(anchorId => {
+    const point = anchors?.[anchorId];
+    return `${Number(anchorId)}:${Number(point?.x).toFixed(4)}:${Number(point?.y).toFixed(4)}`;
+  }).join("|");
+  return `${Number.isFinite(generation) ? generation : "unknown"}:${coordinates}`;
+}
+
+function syncGpsRtkAnchorSampleContext(settings, geometry, anchors) {
+  const anchorIdsKey = positionGeometryKey(settings.anchorIds || []);
+  const generationKey = gpsRtkFixedGeometryGenerationKey(
+    settings, geometry, anchors);
+  const anchorIdsChanged = Boolean(
+    state.gpsRtkAnchorIdsKey && state.gpsRtkAnchorIdsKey !== anchorIdsKey
+  );
+  const generationChanged = Boolean(
+    generationKey && state.gpsRtkGeometryGenerationKey &&
+    state.gpsRtkGeometryGenerationKey !== generationKey
+  );
+  if (anchorIdsChanged || generationChanged) {
+    clearGpsRtkAnchorSamples();
+  }
+  state.gpsRtkAnchorIdsKey = anchorIdsKey;
+  if (generationKey) {
+    state.gpsRtkGeometryGenerationKey = generationKey;
+  } else if (anchorIdsChanged) {
+    state.gpsRtkGeometryGenerationKey = "";
+  }
+}
 
 function medianFinite(values) {
   const sorted = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
@@ -9627,6 +9744,8 @@ function medianFinite(values) {
 }
 
 function recordGpsRtkSamples(statuses) {
+  const capturedAt = Date.now();
+  pruneGpsRtkSamples(capturedAt);
   for (const item of statuses || []) {
     const moduleId = Number(item?.module_id);
     const latitude = Number(item?.gps_latitude_deg);
@@ -9644,7 +9763,7 @@ function recordGpsRtkSamples(statuses) {
     if (state.gpsRtkLastTokens.get(moduleId) === token) continue;
     state.gpsRtkLastTokens.set(moduleId, token);
     const samples = state.gpsRtkSamples.get(moduleId) || [];
-    samples.push({latitude, longitude, altitude, capturedAt: Date.now()});
+    samples.push({latitude, longitude, altitude, capturedAt});
     if (samples.length > gpsRtkMaximumSamples) {
       samples.splice(0, samples.length - gpsRtkMaximumSamples);
     }
@@ -9684,6 +9803,7 @@ function gpsRtkEcefToEnu(point, origin, latitudeDeg, longitudeDeg) {
 }
 
 function gpsRtkGeometryModel() {
+  pruneGpsRtkSamples();
   const originSamples = state.gpsRtkSamples.get(2) || [];
   if (originSamples.length < gpsRtkMinimumSamples) return null;
   for (const anchorId of gpsRtkAnchorIds) {
@@ -9868,10 +9988,10 @@ function renderGpsRtkGeometryStatus() {
   const status = document.getElementById("gpsRtkGeometryStatus");
   const applyButton = document.getElementById("gpsApplyFlexGeometry");
   if (!status || !applyButton) return;
+  const geometry = gpsRtkGeometryModel();
   const counts = gpsRtkAnchorIds.map(
     id => `M${id}: ${(state.gpsRtkSamples.get(id) || []).length}`
   );
-  const geometry = gpsRtkGeometryModel();
   applyButton.disabled = !geometry;
   if (!geometry) {
     status.innerHTML = `${counts.map(esc).join(" · ")}<br>` +
@@ -9908,7 +10028,12 @@ async function applyGpsRtkFlexGeometry() {
     target_modules: "all",
     params: {flex_geometry: encoded, reboot: "1"},
   }, "gpsRtkGeometryToast");
-  if (apiResponseOk(data)) setTimeout(fetchSnapshot, 1800);
+  if (apiResponseOk(data)) {
+    clearGpsRtkAnchorSamples();
+    state.gpsRtkGeometryGenerationKey = "";
+    renderGpsRtkGeometryStatus();
+    setTimeout(fetchSnapshot, 1800);
+  }
 }
 
 function clearGpsRtkGeometrySamples() {
@@ -13150,12 +13275,13 @@ const passiveDsProfileDefaults = {
     finalUs: 1500,
     autoRxUus: 500,
     freshSec: 0.2,
-    solveMode: 0,
+    solveMode: 2,
   },
 };
 const passiveDsFastGeometryFrameInterval = 4;
 const passiveDsMultipointResponseSpacingUs = 750;
 const passiveDsDynamicGuardUs = 250;
+const passiveDsMaxExchangeUs = 19000;
 const passiveDsMultipointDynamicDefaults = {
   ...passiveDsProfileDefaults.multi,
   solveMode: 0,
@@ -13307,6 +13433,9 @@ function updatePassiveDsProfileSummary(key) {
       ? "response train + FINAL >= exchange budget"
       : "RESP + FINAL >= slot");
   }
+  if (exchangeUs > passiveDsMaxExchangeUs) {
+    warnings.push("POLL-to-FINAL exchange exceeds 19 ms timing limit");
+  }
   if (values.timeoutMs > values.slotMs) warnings.push("timeout > slot");
   summary.textContent =
     `${profileSummaryScheduleLabel(key)} · ` +
@@ -13365,10 +13494,12 @@ function renderPassiveDsActiveProfile() {
   }
   const frameMs = live.slotMs + live.gapMs;
   const frameHz = frameMs > 0 ? 1000 / frameMs : 0;
+  const threeStar = live.solveMode === 2;
   root.textContent =
     `Active on ${statuses.length}/${freshStatuses.length || statuses.length} modules: ` +
     `Clean Rotating Full-DS · N+2 · ${fmtFixed(frameMs, 2)} ms radio star · ` +
-    `one independent raw position/star · ${fmtFixed(frameHz, 2)} Hz · ` +
+    `${threeStar ? "raw three-star precision windows" : "one independent raw position/star"} · ` +
+    `${fmtFixed(frameHz, 2)} radio stars/s · ` +
     `RESP/FINAL ${live.respUs}+${live.finalUs} µs.`;
   root.className = "profile-validation good";
 }
@@ -13458,11 +13589,12 @@ async function applyPassiveDsProfile(key) {
       values.timeoutMs < 1 ||
       values.respUs < 100 || values.finalUs < 100 ||
       values.freshSec < 0.2 ||
+      exchangeUs > passiveDsMaxExchangeUs ||
       exchangeUs >= values.slotMs * 1000) {
     setToast(
       "passiveDsProfileToast",
       key === "multi"
-        ? "Invalid timing: all RESP slots and FINAL guard must fit inside the exchange budget."
+        ? "Invalid timing: all RESP slots and FINAL guard must fit inside the exchange budget and remain within 19 ms."
         : "Invalid timing: RESP + FINAL must fit strictly inside the slot.",
       "bad"
     );
@@ -13530,7 +13662,7 @@ function renderPassiveDsCalibration() {
     return;
   }
   if (!status.runtime_passive_ds_calibration_enabled) {
-    root.textContent = "disabled · raw piggybacked DS ranges and passive observations";
+    root.textContent = "disabled · raw anchor DS diagnostics and passive observations";
     root.className = "profile-summary";
     return;
   }
@@ -13795,17 +13927,19 @@ function renderPassiveDsMultipointTiming(root, config) {
       </div>
     </div>
     <div class="flex-packet-flow" style="margin-top:12px">
-      <div class="flex-packet-row"><b>POLL · rotating initiator → broadcast</b><code>PDS2 v1 | session | frame | initiator | CRC16</code></div>
-      <div class="flex-packet-row"><b>RESP[0..${responderCount - 1}] · delayed native TX</b><code>responder index | exact reply_dtu32 | CRC16</code></div>
+      <div class="flex-packet-row"><b>POLL · rotating initiator → broadcast</b><code>PDS2 v2 | session | frame | initiator | two completed-exchange refs | CRC16</code></div>
+      <div class="flex-packet-row"><b>RESP[0..${responderCount - 1}] · delayed native TX</b><code>responder index | exact reply_dtu32 | two completed-exchange refs | CRC16</code></div>
       <div class="flex-packet-row"><b>FINAL · initiator → broadcast</b><code>poll_tx40 | final_tx40 | responder ID + resp_rx40 | CRC16</code></div>
-      <div class="flex-packet-row"><b>Receive-only tags</b><code>POLL_RX + RESP_RX + per-response CFO + fixed RTK baseline; FINAL is not required by the tag</code></div>
+      <div class="flex-packet-row"><b>Receive-only tags</b><code>POLL_RX + RESP_RX + FINAL_RX + responder exchange timing → passive three-clock DS equation; CFO is diagnostic only</code></div>
     </div>
     <div class="flex-timing-note ${overrun ? "warn" : ""}">
       ${config.live ? "Live configuration" : "Configured fallback"} ·
       first RESP ${fmtFixed(firstResponseDelayMs, 3)} ms · response spacing ${fmtFixed(responseSpacingMs, 3)} ms ·
       FINAL delay ${fmtFixed(finalDelayMs, 3)} ms · scheduler slack ${fmtFixed(schedulerSlackMs, 3)} ms ·
       guard time ${fmtFixed(frameGuardMs, 3)} ms.
-      Every complete star is solved exactly once and reported as an independent raw position; there are no overlapping windows, predictions or temporal filters.
+      ${config.solveMode === 2
+        ? "Each raw position combines three coherent rotating stars; independent and overlapping windows are labelled separately, with no prediction or temporal filter."
+        : "Every complete star is solved exactly once and reported as an independent raw position; there are no overlapping windows, predictions or temporal filters."}
       ${overrun ? " Warning: response train and FINAL delay exceed the exchange budget." : ""}
     </div>`;
 }

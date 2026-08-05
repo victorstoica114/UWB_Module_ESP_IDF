@@ -34,12 +34,13 @@ no dependency on either receive-only protocol.
 
 - `uwb_passive_ds_protocol.c`: PDS2 packet codec, rotating star plan, timing
   helpers and full anchor DS-TWR equation.
-- `uwb_passive_ds_observation.c`: passive POLL/RESPONSE CFO correction and
-  fixed-baseline range-difference equation.
+- `uwb_passive_ds_observation.c`: three-packet passive DS range-difference
+  equation using POLL/RESPONSE/FINAL and delayed responder exchange timing.
 - `uwb_passive_ds_runtime.c`: Passive-only anchor diagnostic cache, counters
   and raw solver lifecycle.
-- `passive_ds_solver_service`: coherent-star raw AlgMin solver using fixed RTK
-  ENU geometry.
+- `passive_ds_solver_service`: raw AlgMin solver using fixed RTK ENU geometry.
+  It supports either one coherent radio star or a three-star spatial window;
+  neither mode performs temporal filtering or prediction.
 
 The driver cannot obtain a mutable pointer to Passive runtime state.  It uses
 explicit submit, record and snapshot operations instead.

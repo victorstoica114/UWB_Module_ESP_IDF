@@ -9,10 +9,11 @@
 extern "C" {
 #endif
 
-#define UWB_PASSIVE_DS_PROTOCOL_VERSION 1U
+#define UWB_PASSIVE_DS_PROTOCOL_VERSION 2U
 #define UWB_PASSIVE_DS_MAX_ANCHORS 4U
 #define UWB_PASSIVE_DS_MAX_RESPONDERS (UWB_PASSIVE_DS_MAX_ANCHORS - 1U)
-#define UWB_PASSIVE_DS_MAX_PACKET_SIZE 47U
+#define UWB_PASSIVE_DS_EXCHANGE_HISTORY 2U
+#define UWB_PASSIVE_DS_MAX_PACKET_SIZE 50U
 #define UWB_PASSIVE_DS_TIMESTAMP_MASK ((1ULL << 40U) - 1ULL)
 
 enum uwb_passive_ds_message_type {
@@ -32,12 +33,24 @@ struct uwb_passive_ds_final_entry {
     uint64_t initiator_response_rx;
 };
 
+struct uwb_passive_ds_exchange_reference {
+    uint32_t session_id;
+    uint32_t frame_id;
+    uint8_t initiator_id;
+    uint32_t responder_exchange_dtu;
+};
+
 struct uwb_passive_ds_packet {
     enum uwb_passive_ds_message_type type;
     uint32_t session_id;
     uint32_t frame_id;
     uint8_t initiator_id;
     uint8_t anchor_count;
+
+    /* POLL and RESPONSE completed-exchange references. */
+    uint8_t completed_exchange_count;
+    struct uwb_passive_ds_exchange_reference completed_exchanges[
+        UWB_PASSIVE_DS_EXCHANGE_HISTORY];
 
     /* RESPONSE fields. */
     uint8_t responder_index;

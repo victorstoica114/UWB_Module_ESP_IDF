@@ -9,6 +9,27 @@
 
 #define TEST_DTU_SECONDS 15.650040064102564e-12
 #define TEST_C_MPS 299702547.0
+#define TEST_TS_MASK ((1ULL << 40U) - 1ULL)
+
+struct test_clock {
+    double scale;
+    double offset;
+};
+
+static uint64_t test_clock_timestamp(struct test_clock clock,
+                                     double physical_dtu)
+{
+    return (uint64_t)llround(
+               physical_dtu * clock.scale + clock.offset) &
+           TEST_TS_MASK;
+}
+
+static double test_tof_dtu(double first_x, double first_y,
+                           double second_x, double second_y)
+{
+    return hypot(first_x - second_x, first_y - second_y) /
+           (TEST_C_MPS * TEST_DTU_SECONDS);
+}
 
 static void assert_near(double actual, double expected, double tolerance)
 {
@@ -30,6 +51,12 @@ static void test_rotating_plan_and_timing(void)
            3000U);
     assert(uwb_passive_ds_final_delay_from_poll_us(
                1500U, 750U, 3U, 1500U) == 4500U);
+    assert(uwb_passive_ds_protocol_packet_size(
+               UWB_PASSIVE_DS_MESSAGE_POLL, 0U) == 45U);
+    assert(uwb_passive_ds_protocol_packet_size(
+               UWB_PASSIVE_DS_MESSAGE_RESPONSE, 0U) == 50U);
+    assert(uwb_passive_ds_protocol_packet_size(
+               UWB_PASSIVE_DS_MESSAGE_FINAL, 3U) == 47U);
 }
 
 static void round_trip(const struct uwb_passive_ds_packet *packet)
@@ -49,6 +76,29 @@ static void round_trip(const struct uwb_passive_ds_packet *packet)
     assert(decoded.frame_id == packet->frame_id);
     assert(decoded.initiator_id == packet->initiator_id);
     assert(decoded.anchor_count == packet->anchor_count);
+    if (packet->type == UWB_PASSIVE_DS_MESSAGE_POLL ||
+        packet->type == UWB_PASSIVE_DS_MESSAGE_RESPONSE) {
+        if (packet->type == UWB_PASSIVE_DS_MESSAGE_RESPONSE) {
+            assert(decoded.responder_index == packet->responder_index);
+            assert(decoded.responder_reply_dtu ==
+                   packet->responder_reply_dtu);
+        }
+        assert(decoded.completed_exchange_count ==
+               packet->completed_exchange_count);
+        for (uint8_t index = 0U;
+             index < packet->completed_exchange_count; ++index) {
+            assert(decoded.completed_exchanges[index].session_id ==
+                   packet->completed_exchanges[index].session_id);
+            assert(decoded.completed_exchanges[index].frame_id ==
+                   packet->completed_exchanges[index].frame_id);
+            assert(decoded.completed_exchanges[index].initiator_id ==
+                   packet->completed_exchanges[index].initiator_id);
+            assert(decoded.completed_exchanges[index]
+                       .responder_exchange_dtu ==
+                   packet->completed_exchanges[index]
+                       .responder_exchange_dtu);
+        }
+    }
 
     for (size_t byte = 0U; byte < payload_len; ++byte) {
         uint8_t damaged[UWB_PASSIVE_DS_MAX_PACKET_SIZE] = {0};
@@ -71,6 +121,10 @@ static void test_codec_and_crc(void)
         .frame_id = 42U,
         .initiator_id = 4U,
         .anchor_count = 4U,
+        .completed_exchange_count = 1U,
+        .completed_exchanges = {
+            {0x12345678U, 41U, 3U, 287538800U},
+        },
     };
     round_trip(&poll);
 
@@ -82,6 +136,11 @@ static void test_codec_and_crc(void)
         .anchor_count = 4U,
         .responder_index = 2U,
         .responder_reply_dtu = 95846644U,
+        .completed_exchange_count = 2U,
+        .completed_exchanges = {
+            {0x12345678U, 40U, 2U, 287539000U},
+            {0x12345678U, 39U, 5U, 287538900U},
+        },
     };
     round_trip(&response);
 
@@ -103,10 +162,110 @@ static void test_codec_and_crc(void)
     round_trip(&final);
 }
 
-static void test_passive_observation_with_cfo_and_wrap(void)
+static void test_passive_double_sided_observation_with_wrap(void)
 {
-    const uint64_t mask = UWB_PASSIVE_DS_TIMESTAMP_MASK;
-    const uint64_t poll_rx = mask - 100000U;
+    const double initiator_x = 0.0;
+    const double initiator_y = 0.0;
+    const double responder_x = 4.8;
+    const double responder_y = 0.0;
+    const double listener_x = 1.2;
+    const double listener_y = 2.1;
+    const double poll_tx_physical = 1000000000.0;
+    const double anchor_tof = test_tof_dtu(
+        initiator_x, initiator_y, responder_x, responder_y);
+    const double initiator_listener_tof = test_tof_dtu(
+        initiator_x, initiator_y, listener_x, listener_y);
+    const double responder_listener_tof = test_tof_dtu(
+        responder_x, responder_y, listener_x, listener_y);
+    const double responder_poll_rx_physical =
+        poll_tx_physical + anchor_tof;
+    const double responder_reply_physical = 95846644.0;
+    const double responder_tx_physical =
+        responder_poll_rx_physical + responder_reply_physical;
+    const double initiator_response_rx_physical =
+        responder_tx_physical + anchor_tof;
+    const double initiator_reply_physical = 95846644.0;
+    const double initiator_final_tx_physical =
+        initiator_response_rx_physical + initiator_reply_physical;
+    const double responder_final_rx_physical =
+        initiator_final_tx_physical + anchor_tof;
+
+    /* Put each clock's POLL timestamp just before its independent 40-bit
+     * wrap. RESPONSE and FINAL must therefore exercise modulo deltas. */
+    const double wrap_margin_dtu = 50000000.0;
+    const struct test_clock initiator = {
+        1.000012,
+        (double)TEST_TS_MASK - wrap_margin_dtu -
+            poll_tx_physical * 1.000012};
+    const struct test_clock responder = {
+        0.999986,
+        (double)TEST_TS_MASK - wrap_margin_dtu -
+            responder_poll_rx_physical * 0.999986};
+    const struct test_clock listener = {
+        0.999991,
+        (double)TEST_TS_MASK - wrap_margin_dtu -
+            (poll_tx_physical + initiator_listener_tof) * 0.999991};
+
+    const uint64_t responder_poll_rx = test_clock_timestamp(
+        responder, responder_poll_rx_physical);
+    const uint64_t responder_tx = test_clock_timestamp(
+        responder, responder_tx_physical);
+    const uint64_t responder_final_rx = test_clock_timestamp(
+        responder, responder_final_rx_physical);
+    const uint64_t initiator_poll_tx = test_clock_timestamp(
+        initiator, poll_tx_physical);
+    const uint64_t initiator_response_rx = test_clock_timestamp(
+        initiator, initiator_response_rx_physical);
+    const uint64_t listener_poll_rx = test_clock_timestamp(
+        listener, poll_tx_physical + initiator_listener_tof);
+    const uint64_t listener_response_rx = test_clock_timestamp(
+        listener, responder_tx_physical + responder_listener_tof);
+    assert(responder_tx < responder_poll_rx);
+    assert(initiator_response_rx < initiator_poll_tx);
+    assert(listener_response_rx < listener_poll_rx);
+    const struct uwb_passive_ds_observation_input input = {
+        .listener_poll_rx = listener_poll_rx,
+        .listener_response_rx = listener_response_rx,
+        .listener_final_rx = test_clock_timestamp(
+            listener,
+            initiator_final_tx_physical + initiator_listener_tof),
+        .initiator_poll_tx = initiator_poll_tx,
+        .initiator_response_rx = initiator_response_rx,
+        .initiator_final_tx = test_clock_timestamp(
+            initiator, initiator_final_tx_physical),
+        .responder_reply_dtu = (uint32_t)(
+            (responder_tx - responder_poll_rx) & TEST_TS_MASK),
+        .responder_exchange_dtu = (uint32_t)(
+            (responder_final_rx - responder_poll_rx) & TEST_TS_MASK),
+    };
+    struct uwb_passive_ds_observation_result result = {0};
+    assert(uwb_passive_ds_compute_observation(&input, &result));
+    const double expected_difference_m =
+        hypot(listener_x - responder_x, listener_y - responder_y) -
+        hypot(listener_x - initiator_x, listener_y - initiator_y);
+    assert_near(result.difference_m, expected_difference_m, 0.005);
+    assert_near(result.listener_to_initiator_clock_ratio,
+                listener.scale / initiator.scale, 1.0e-8);
+    assert_near(result.listener_to_responder_clock_ratio,
+                listener.scale / responder.scale, 1.0e-8);
+    assert(result.responder_delay_ratio > 0.0);
+    assert(result.responder_delay_ratio < 1.0);
+    const double expected_interpolation_ratio = 0.5 * (
+        ((double)uwb_passive_ds_timestamp_delta(
+             input.initiator_response_rx, input.initiator_poll_tx) /
+         (double)uwb_passive_ds_timestamp_delta(
+             input.initiator_final_tx, input.initiator_poll_tx)) +
+        ((double)input.responder_reply_dtu /
+         (double)input.responder_exchange_dtu));
+    assert_near(result.listener_interpolation_ratio,
+                expected_interpolation_ratio, 1.0e-12);
+    assert(result.listener_interpolation_ratio > 0.0);
+    assert(result.listener_interpolation_ratio < 1.0);
+}
+
+static void test_cfo_observation_is_diagnostic_only(void)
+{
+    const uint64_t poll_rx = TEST_TS_MASK - 100000U;
     const uint32_t reply_dtu = 95846644U;
     const double cfo = 18.0e-6;
     const double baseline_m = 4.85;
@@ -117,20 +276,18 @@ static void test_passive_observation_with_cfo_and_wrap(void)
         (TEST_DTU_SECONDS * TEST_C_MPS);
     const uint64_t listener_interval = (uint64_t)llround(
         reply_dtu * (1.0 - cfo) + baseline_dtu + difference_dtu);
-    const uint64_t response_rx = (poll_rx + listener_interval) & mask;
-    const struct uwb_passive_ds_observation_input input = {
+    const struct uwb_passive_ds_cfo_observation_input input = {
         .listener_poll_rx = poll_rx,
-        .listener_response_rx = response_rx,
+        .listener_response_rx =
+            (poll_rx + listener_interval) & TEST_TS_MASK,
         .responder_reply_dtu = reply_dtu,
         .responder_to_listener_cfo_fraction = cfo,
         .initiator_responder_distance_m = baseline_m,
     };
-    struct uwb_passive_ds_observation_result result = {0};
-    assert(uwb_passive_ds_compute_observation(&input, &result));
+    struct uwb_passive_ds_cfo_observation_result result = {0};
+    assert(uwb_passive_ds_compute_cfo_observation(&input, &result));
     assert_near(result.difference_m, expected_difference_m, 0.003);
     assert(fabs(result.raw_difference_m - expected_difference_m) > 7.0);
-    assert_near(result.cfo_correction_m,
-                result.difference_m - result.raw_difference_m, 1.0e-12);
 }
 
 static void test_anchor_full_ds_math(void)
@@ -156,7 +313,8 @@ int main(void)
 {
     test_rotating_plan_and_timing();
     test_codec_and_crc();
-    test_passive_observation_with_cfo_and_wrap();
+    test_passive_double_sided_observation_with_wrap();
+    test_cfo_observation_is_diagnostic_only();
     test_anchor_full_ds_math();
     puts("uwb_passive_ds_protocol_test: PASS");
     return 0;

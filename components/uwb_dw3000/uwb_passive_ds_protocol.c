@@ -5,9 +5,17 @@
 
 #define PASSIVE_DS_HEADER_SIZE 16U
 #define PASSIVE_DS_CRC_SIZE 2U
-#define PASSIVE_DS_POLL_SIZE (PASSIVE_DS_HEADER_SIZE + PASSIVE_DS_CRC_SIZE)
-#define PASSIVE_DS_RESPONSE_SIZE \
-    (PASSIVE_DS_HEADER_SIZE + 5U + PASSIVE_DS_CRC_SIZE)
+#define PASSIVE_DS_COMPLETED_EXCHANGE_SIZE 13U
+#define PASSIVE_DS_POLL_SIZE                                          \
+    (PASSIVE_DS_HEADER_SIZE + 1U +                                   \
+     UWB_PASSIVE_DS_EXCHANGE_HISTORY *                               \
+         PASSIVE_DS_COMPLETED_EXCHANGE_SIZE +                        \
+     PASSIVE_DS_CRC_SIZE)
+#define PASSIVE_DS_RESPONSE_SIZE                                      \
+    (PASSIVE_DS_HEADER_SIZE + 6U +                                   \
+     UWB_PASSIVE_DS_EXCHANGE_HISTORY *                               \
+         PASSIVE_DS_COMPLETED_EXCHANGE_SIZE +                        \
+     PASSIVE_DS_CRC_SIZE)
 #define PASSIVE_DS_FINAL_FIXED_SIZE \
     (PASSIVE_DS_HEADER_SIZE + 11U + PASSIVE_DS_CRC_SIZE)
 #define PASSIVE_DS_FINAL_ENTRY_SIZE 6U
@@ -76,6 +84,84 @@ static uint16_t crc16_ccitt_false(const uint8_t *payload, size_t length)
     return crc;
 }
 
+static bool encode_completed_exchanges(
+    const struct uwb_passive_ds_packet *packet, uint8_t *payload,
+    size_t count_offset)
+{
+    if (packet->completed_exchange_count >
+        UWB_PASSIVE_DS_EXCHANGE_HISTORY) {
+        return false;
+    }
+    payload[count_offset] = packet->completed_exchange_count;
+    for (uint8_t index = 0U;
+         index < packet->completed_exchange_count; ++index) {
+        const struct uwb_passive_ds_exchange_reference *exchange =
+            &packet->completed_exchanges[index];
+        if (exchange->session_id == 0U ||
+            exchange->initiator_id == 0U ||
+            exchange->responder_exchange_dtu == 0U) {
+            return false;
+        }
+        for (uint8_t previous = 0U; previous < index; ++previous) {
+            const struct uwb_passive_ds_exchange_reference *other =
+                &packet->completed_exchanges[previous];
+            if (other->session_id == exchange->session_id &&
+                other->frame_id == exchange->frame_id &&
+                other->initiator_id == exchange->initiator_id) {
+                return false;
+            }
+        }
+        const size_t offset = count_offset + 1U +
+                              (size_t)index *
+                                  PASSIVE_DS_COMPLETED_EXCHANGE_SIZE;
+        put_u32(payload, offset, exchange->session_id);
+        put_u32(payload, offset + 4U, exchange->frame_id);
+        payload[offset + 8U] = exchange->initiator_id;
+        put_u32(payload, offset + 9U,
+                exchange->responder_exchange_dtu);
+    }
+    return true;
+}
+
+static bool decode_completed_exchanges(
+    const uint8_t *payload, size_t count_offset,
+    struct uwb_passive_ds_packet *packet)
+{
+    packet->completed_exchange_count = payload[count_offset];
+    if (packet->completed_exchange_count >
+        UWB_PASSIVE_DS_EXCHANGE_HISTORY) {
+        return false;
+    }
+    for (uint8_t index = 0U;
+         index < packet->completed_exchange_count; ++index) {
+        const size_t offset = count_offset + 1U +
+                              (size_t)index *
+                                  PASSIVE_DS_COMPLETED_EXCHANGE_SIZE;
+        struct uwb_passive_ds_exchange_reference *exchange =
+            &packet->completed_exchanges[index];
+        exchange->session_id = get_u32(payload, offset);
+        exchange->frame_id = get_u32(payload, offset + 4U);
+        exchange->initiator_id = payload[offset + 8U];
+        exchange->responder_exchange_dtu =
+            get_u32(payload, offset + 9U);
+        if (exchange->session_id == 0U ||
+            exchange->initiator_id == 0U ||
+            exchange->responder_exchange_dtu == 0U) {
+            return false;
+        }
+        for (uint8_t previous = 0U; previous < index; ++previous) {
+            const struct uwb_passive_ds_exchange_reference *other =
+                &packet->completed_exchanges[previous];
+            if (other->session_id == exchange->session_id &&
+                other->frame_id == exchange->frame_id &&
+                other->initiator_id == exchange->initiator_id) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 size_t uwb_passive_ds_protocol_packet_size(
     enum uwb_passive_ds_message_type type, uint8_t responder_count)
 {
@@ -117,6 +203,12 @@ bool uwb_passive_ds_protocol_encode(
     const size_t length = uwb_passive_ds_protocol_packet_size(
         packet->type, final_count);
     if (length == 0U || capacity < length ||
+        ((packet->type == UWB_PASSIVE_DS_MESSAGE_POLL ||
+          packet->type == UWB_PASSIVE_DS_MESSAGE_RESPONSE) &&
+         packet->completed_exchange_count >
+             UWB_PASSIVE_DS_EXCHANGE_HISTORY) ||
+        (packet->type == UWB_PASSIVE_DS_MESSAGE_FINAL &&
+         packet->completed_exchange_count != 0U) ||
         (packet->type == UWB_PASSIVE_DS_MESSAGE_RESPONSE &&
          (packet->responder_index >= packet->anchor_count - 1U ||
           packet->responder_reply_dtu == 0U)) ||
@@ -134,9 +226,16 @@ bool uwb_passive_ds_protocol_encode(
     payload[14] = packet->initiator_id;
     payload[15] = packet->anchor_count;
 
-    if (packet->type == UWB_PASSIVE_DS_MESSAGE_RESPONSE) {
+    if (packet->type == UWB_PASSIVE_DS_MESSAGE_POLL) {
+        if (!encode_completed_exchanges(packet, payload, 16U)) {
+            return false;
+        }
+    } else if (packet->type == UWB_PASSIVE_DS_MESSAGE_RESPONSE) {
         payload[16] = packet->responder_index;
         put_u32(payload, 17U, packet->responder_reply_dtu);
+        if (!encode_completed_exchanges(packet, payload, 21U)) {
+            return false;
+        }
     } else if (packet->type == UWB_PASSIVE_DS_MESSAGE_FINAL) {
         payload[16] = packet->responder_count;
         put_ts40(payload, 17U, packet->initiator_poll_tx);
@@ -174,7 +273,7 @@ enum uwb_passive_ds_decode_result uwb_passive_ds_protocol_decode(
     struct uwb_passive_ds_packet *packet)
 {
     if (payload == NULL || packet == NULL ||
-        payload_len < PASSIVE_DS_POLL_SIZE ||
+        payload_len < PASSIVE_DS_HEADER_SIZE + PASSIVE_DS_CRC_SIZE ||
         memcmp(payload, s_magic, sizeof(s_magic)) != 0 ||
         payload[4] != UWB_PASSIVE_DS_PROTOCOL_VERSION) {
         return UWB_PASSIVE_DS_DECODE_INVALID;
@@ -204,11 +303,16 @@ enum uwb_passive_ds_decode_result uwb_passive_ds_protocol_decode(
     if (!common_fields_valid(packet)) {
         return UWB_PASSIVE_DS_DECODE_INVALID;
     }
-    if (type == UWB_PASSIVE_DS_MESSAGE_RESPONSE) {
+    if (type == UWB_PASSIVE_DS_MESSAGE_POLL) {
+        if (!decode_completed_exchanges(payload, 16U, packet)) {
+            return UWB_PASSIVE_DS_DECODE_INVALID;
+        }
+    } else if (type == UWB_PASSIVE_DS_MESSAGE_RESPONSE) {
         packet->responder_index = payload[16];
         packet->responder_reply_dtu = get_u32(payload, 17U);
         if (packet->responder_index >= packet->anchor_count - 1U ||
-            packet->responder_reply_dtu == 0U) {
+            packet->responder_reply_dtu == 0U ||
+            !decode_completed_exchanges(payload, 21U, packet)) {
             return UWB_PASSIVE_DS_DECODE_INVALID;
         }
     } else if (type == UWB_PASSIVE_DS_MESSAGE_FINAL) {

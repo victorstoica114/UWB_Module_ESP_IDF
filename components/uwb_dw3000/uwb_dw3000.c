@@ -272,6 +272,7 @@ _Static_assert(UWB_DW3000_SPI_OPERATION_REQUEST_HZ <=
 #define DW3000_DOUBLE_BUFFER_1_RX_FINFO_OFFSET 0x00U
 #define DW3000_DOUBLE_BUFFER_1_RX_TIME_OFFSET 0x04U
 #define DW3000_DOUBLE_BUFFER_1_CIA_DIAG_0_OFFSET 0x0CU
+#define DW3000_DOUBLE_BUFFER_RX_META_LEN 8U
 #define DW3000_DOUBLE_BUFFER_FLEX_META_LEN 14U
 #define DW3000_DOUBLE_BUFFER_1_DIAG_BASE 0x18U
 #define DW3000_DOUBLE_BUFFER_1_DIAG_OFFSET 0x00E8U
@@ -1096,6 +1097,8 @@ static volatile uint32_t s_native_ds_rx_fcs_error_count;
 static volatile uint32_t s_native_ds_rx_overrun_count;
 static volatile uint32_t s_native_ds_rx_cia_error_count;
 static volatile uint32_t s_native_ds_rx_filter_rejection_count;
+static uint32_t s_passive_ds_rx_errors_since_summary;
+static uint32_t s_passive_ds_rx_error_status_since_summary;
 static volatile uint32_t s_native_ds_rx_cp_error_count;
 static volatile uint8_t s_last_rx_source_id;
 static volatile uint32_t s_last_rx_sequence;
@@ -3024,9 +3027,10 @@ static esp_err_t uwb_flex_tdoa_extend_rx_timestamp32(
     return ESP_OK;
 }
 
-// The minimum double-buffer diagnostic set is contiguous: RX_FINFO starts at
-// byte 0, RX_TIME at byte 4, and CIA_DIAG_0 at byte 12. Payload and metadata
-// are read in two compact SPI bursts.
+// Double-buffer timing metadata is contiguous: RX_FINFO starts at byte 0 and
+// RX_TIME at byte 4. FlexTDOA additionally reads CIA_DIAG_0 at byte 12; PDS2
+// stops after RX_TIME because Eq19 does not use per-packet CFO. Payload and
+// metadata are read in two compact SPI bursts.
 
 static esp_err_t uwb_dw3000_read_flex_buffered_metadata(
     struct uwb_dw3000_rx_frame *frame, uint16_t *frame_len)
@@ -3039,8 +3043,12 @@ static esp_err_t uwb_dw3000_read_flex_buffered_metadata(
                                   ? DW3000_REG_DOUBLE_BUFFER_DIAG
                                   : DW3000_REG_INDIRECT_POINTER_B;
     uint8_t metadata[DW3000_DOUBLE_BUFFER_FLEX_META_LEN] = {0};
+    const size_t metadata_len =
+        s_runtime_mode == UWB_DW3000_RUNTIME_PASSIVE_DS_TWR
+            ? DW3000_DOUBLE_BUFFER_RX_META_LEN
+            : sizeof(metadata);
     ESP_RETURN_ON_ERROR(
-        uwb_dw3000_read_bytes(diag_base, 0, metadata, sizeof(metadata)), TAG,
+        uwb_dw3000_read_bytes(diag_base, 0, metadata, metadata_len), TAG,
         "FlexTDOA buffered metadata read failed");
 
     const uint32_t rx_finfo = ((uint32_t)metadata[0]) |
@@ -3058,12 +3066,17 @@ static esp_err_t uwb_dw3000_read_flex_buffered_metadata(
                                             &frame->rx_timestamp),
         TAG, "FlexTDOA buffered RX timestamp extension failed");
 
-    const uint16_t raw =
-        (uint16_t)(((uint16_t)metadata[12]) |
-                   ((uint16_t)metadata[13] << 8U));
-    frame->clock_offset_raw =
-        uwb_dw3000_sign_extend(raw & 0x1FFFU, 13U);
-    frame->clock_offset_from_cia = true;
+    if (metadata_len == sizeof(metadata)) {
+        const uint16_t raw =
+            (uint16_t)(((uint16_t)metadata[12]) |
+                       ((uint16_t)metadata[13] << 8U));
+        frame->clock_offset_raw =
+            uwb_dw3000_sign_extend(raw & 0x1FFFU, 13U);
+        frame->clock_offset_from_cia = true;
+    } else {
+        frame->clock_offset_raw = 0;
+        frame->clock_offset_from_cia = false;
+    }
     frame->clock_offset_valid = false;
     return ESP_OK;
 }
@@ -4152,12 +4165,14 @@ static esp_err_t uwb_dw3000_receive_frame_until(
                 spi_bus_acquired = true;
 
                 // DW3000 does not support RXAUTR in double-buffer mode. In
-                // FlexTDOA, restart RX before copying the occupied buffer so
-                // the radio can receive into the other buffer concurrently.
+                // high-rate receive-only paths, restart RX before copying the
+                // occupied buffer so the radio can receive into the other
+                // buffer concurrently.
                 // CMD_DB_TOGGLE still releases this buffer only after its
                 // metadata and payload have been copied completely.
                 s_rx_armed = false;
-                if (s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
+                if (s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA ||
+                    uwb_passive_ds_multi_local_is_receive_only_tag()) {
                     const esp_err_t rearm_err =
                         uwb_dw3000_fast_command(DW3000_CMD_RX);
                     if (rearm_err != ESP_OK) {
@@ -4221,20 +4236,12 @@ static esp_err_t uwb_dw3000_receive_frame_until(
                 uwb_dw3000_payload_is_flextdoa_localization(
                     frame->payload, frame->payload_len,
                     FLEXTDOA_MESSAGE_RESPONSE);
-            const bool clean_passive_response =
-                buffered_fast_path && read_err == ESP_OK &&
-                s_runtime_mode == UWB_DW3000_RUNTIME_PASSIVE_DS_TWR &&
-                uwb_dw3000_payload_is_distance_frame(
-                    frame->payload, frame->payload_len) &&
-                frame->payload[5] ==
-                    UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_RESP;
             const bool common_frame_needs_cfo =
                 read_err == ESP_OK &&
                 uwb_dw3000_payload_is_distance_frame(
                     frame->payload, frame->payload_len) &&
                 frame->payload[5] != UWB_DISTANCE_FRAME_FLEX_TDOA_REQ;
-            if (buffered_fast_path &&
-                (clean_flex_response || clean_passive_response)) {
+            if (buffered_fast_path && clean_flex_response) {
                 const uint8_t cia_done_mask =
                     uwb_dw3000_current_rdb_cia_done_mask();
                 bool cia_ready =
@@ -4301,8 +4308,8 @@ static esp_err_t uwb_dw3000_receive_frame_until(
                     FLEXTDOA_MESSAGE_REQUEST);
             if (buffered_fast_path && !flex_anchor_request &&
                 !double_buffer_early_rearmed) {
-                // Non-Flex high-rate users retain the historical late re-arm.
-                // FlexTDOA already restarted RX before reading this buffer.
+                // Any future double-buffered mode that does not opt into the
+                // high-rate early re-arm retains the historical late re-arm.
                 const esp_err_t rearm_err =
                     uwb_dw3000_fast_command(DW3000_CMD_RX);
                 if (rearm_err != ESP_OK) {
@@ -4394,6 +4401,10 @@ static esp_err_t uwb_dw3000_receive_frame_until(
                 s_flex_tdoa_rx_error_status_since_summary |= status;
             } else if (s_runtime_mode == UWB_DW3000_RUNTIME_RANGING) {
                 uwb_native_ds_record_rx_error_status(status);
+            } else if (s_runtime_mode ==
+                       UWB_DW3000_RUNTIME_PASSIVE_DS_TWR) {
+                s_passive_ds_rx_errors_since_summary++;
+                s_passive_ds_rx_error_status_since_summary |= status;
             } else {
                 ESP_LOGW(TAG, "UWB distance RX error SYS_STATUS=0x%08lx",
                          (unsigned long)status);
@@ -4405,7 +4416,8 @@ static esp_err_t uwb_dw3000_receive_frame_until(
                                 "clear after distance RX error failed");
             s_rx_armed = false;
             return (s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA ||
-                    s_runtime_mode == UWB_DW3000_RUNTIME_RANGING)
+                    s_runtime_mode == UWB_DW3000_RUNTIME_RANGING ||
+                    s_runtime_mode == UWB_DW3000_RUNTIME_PASSIVE_DS_TWR)
                        ? ESP_ERR_INVALID_RESPONSE
                        : ESP_FAIL;
         }
@@ -9839,17 +9851,21 @@ static void uwb_passive_ds_arm_schedule_alarm(int64_t due_host_us,
 }
 
 /*
- * Clean passive DS-TWR runtime (PDS2 wire protocol v1).
+ * Clean passive DS-TWR runtime (PDS2 wire protocol v2).
  *
  * One rotating initiator broadcasts POLL, every other anchor transmits one
  * delayed RESPONSE, and the initiator broadcasts a timestamp aggregate in
- * FINAL.  Anchors use all three legs for genuine DS-TWR.  A receive-only tag
- * intentionally consumes only POLL + RESPONSE: the exact responder
- * turnaround and its per-packet CFO are sufficient to form the same raw
- * range-difference equation used by FlexTDOA.  Fixed RTK ENU geometry is the
- * baseline; no measured anchor range or future piggyback is required by the
- * tag position path.
+ * FINAL.  Every anchor retains its two latest completed responder intervals
+ * and carries them in its next POLL or RESPONSE.  A receive-only tag combines
+ * POLL + RESPONSE + FINAL + the delayed exchange reference with the genuine
+ * double-sided passive TDOA equation.  CFO remains diagnostic only.
  */
+#define UWB_PASSIVE_DS_CLEAN_TAG_FRAME_BUCKETS 16U
+
+_Static_assert(UWB_DISTANCE_FRAME_HEADER_LEN +
+                       UWB_PASSIVE_DS_MAX_PACKET_SIZE <=
+                   UWB_DW3000_PAYLOAD_LEN,
+               "PDS2 packet exceeds DW3000 payload buffer");
 struct uwb_passive_ds_clean_schedule {
     bool synced;
     uint32_t session_id;
@@ -9860,14 +9876,46 @@ struct uwb_passive_ds_clean_schedule {
     uint32_t late_count;
 };
 
+struct uwb_passive_ds_clean_completed_history {
+    uint8_t count;
+    struct uwb_passive_ds_exchange_reference entries[
+        UWB_PASSIVE_DS_EXCHANGE_HISTORY];
+};
+
+struct uwb_passive_ds_clean_tag_response {
+    bool have_response;
+    bool have_final_entry;
+    bool have_exchange;
+    bool emitted;
+    bool cfo_comparison_valid;
+    uint8_t responder_id;
+    uint8_t responder_index;
+    uint16_t sequence;
+    uint64_t response_rx_timestamp;
+    uint64_t initiator_response_rx;
+    uint32_t responder_reply_dtu;
+    uint32_t responder_exchange_dtu;
+    int32_t cfo_comparison_mm;
+};
+
 struct uwb_passive_ds_clean_tag_frame {
-    bool active;
+    bool in_use;
+    bool have_final;
     uint32_t session_id;
     uint32_t frame_id;
     uint8_t initiator_id;
     uint8_t expected_mask;
     uint8_t response_mask;
+    uint8_t final_mask;
+    uint8_t exchange_mask;
+    uint8_t emitted_mask;
     uint64_t poll_rx_timestamp;
+    uint64_t final_rx_timestamp;
+    uint64_t initiator_poll_tx;
+    uint64_t initiator_final_tx;
+    int64_t created_host_us;
+    struct uwb_passive_ds_clean_tag_response responses[
+        UWB_PASSIVE_DS_MAX_RESPONDERS];
 };
 
 struct uwb_passive_ds_clean_tag_stats {
@@ -9878,6 +9926,10 @@ struct uwb_passive_ds_clean_tag_stats {
     uint32_t incomplete;
     uint32_t invalid;
     uint32_t missing_cfo;
+    uint32_t missing_response;
+    uint32_t missing_final;
+    uint32_t missing_final_entry;
+    uint32_t missing_exchange;
     uint32_t observations;
     uint32_t queue_drops;
     uint32_t last_frame_id;
@@ -9959,6 +10011,68 @@ static int32_t uwb_passive_ds_fixed_anchor_distance_mm(
     return uwb_distance_meters_to_mm(hypot(dx_m, dy_m));
 }
 
+static void uwb_passive_ds_clean_history_attach(
+    struct uwb_passive_ds_packet *packet,
+    const struct uwb_passive_ds_clean_completed_history *history)
+{
+    if (packet == NULL || history == NULL) {
+        return;
+    }
+    packet->completed_exchange_count = 0U;
+    memset(packet->completed_exchanges, 0,
+           sizeof(packet->completed_exchanges));
+    for (uint8_t index = 0U;
+         index < history->count &&
+         packet->completed_exchange_count <
+             UWB_PASSIVE_DS_EXCHANGE_HISTORY;
+         ++index) {
+        if (history->entries[index].session_id != packet->session_id) {
+            continue;
+        }
+        packet->completed_exchanges[
+            packet->completed_exchange_count++] = history->entries[index];
+    }
+}
+
+static void uwb_passive_ds_clean_history_note(
+    struct uwb_passive_ds_clean_completed_history *history,
+    uint32_t session_id, uint32_t frame_id, uint8_t initiator_id,
+    uint32_t responder_exchange_dtu)
+{
+    if (history == NULL || session_id == 0U || initiator_id == 0U ||
+        responder_exchange_dtu == 0U) {
+        return;
+    }
+    const struct uwb_passive_ds_exchange_reference next = {
+        .session_id = session_id,
+        .frame_id = frame_id,
+        .initiator_id = initiator_id,
+        .responder_exchange_dtu = responder_exchange_dtu,
+    };
+    size_t output = 1U;
+    struct uwb_passive_ds_exchange_reference retained[
+        UWB_PASSIVE_DS_EXCHANGE_HISTORY] = {next};
+    for (uint8_t index = 0U;
+         index < history->count &&
+         output < UWB_PASSIVE_DS_EXCHANGE_HISTORY;
+         ++index) {
+        const struct uwb_passive_ds_exchange_reference *entry =
+            &history->entries[index];
+        if (entry->session_id != session_id) {
+            continue;
+        }
+        if (entry->session_id == session_id &&
+            entry->frame_id == frame_id &&
+            entry->initiator_id == initiator_id) {
+            continue;
+        }
+        retained[output++] = *entry;
+    }
+    memset(history, 0, sizeof(*history));
+    history->count = (uint8_t)output;
+    memcpy(history->entries, retained, sizeof(retained));
+}
+
 static void uwb_passive_ds_clean_schedule_from_poll(
     struct uwb_passive_ds_clean_schedule *schedule,
     const struct uwb_passive_ds_packet *poll, uint64_t poll_radio_ts,
@@ -9990,6 +10104,7 @@ static void uwb_passive_ds_clean_schedule_from_poll(
 static esp_err_t uwb_passive_ds_clean_initiate(
     const uint8_t *anchor_ids, size_t anchor_count, uint32_t session_id,
     uint32_t frame_id, uint64_t scheduled_poll_ts,
+    const struct uwb_passive_ds_clean_completed_history *history,
     uint64_t *poll_tx_out, int64_t *poll_host_out,
     uint8_t *responses_out)
 {
@@ -10003,13 +10118,14 @@ static esp_err_t uwb_passive_ds_clean_initiate(
     }
 
     const uint16_t sequence = (uint16_t)frame_id;
-    const struct uwb_passive_ds_packet poll = {
+    struct uwb_passive_ds_packet poll = {
         .type = UWB_PASSIVE_DS_MESSAGE_POLL,
         .session_id = session_id,
         .frame_id = frame_id,
         .initiator_id = plan.initiator_id,
         .anchor_count = (uint8_t)anchor_count,
     };
+    uwb_passive_ds_clean_history_attach(&poll, history);
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
     size_t payload_length = uwb_passive_ds_clean_encode_frame(
         UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_POLL,
@@ -10180,7 +10296,8 @@ static esp_err_t uwb_passive_ds_clean_respond(
     const struct uwb_distance_frame *poll_frame,
     const struct uwb_passive_ds_packet *poll,
     const struct uwb_passive_ds_plan *plan, uint8_t responder_index,
-    const uint8_t *anchor_ids, size_t anchor_count)
+    const uint8_t *anchor_ids, size_t anchor_count,
+    struct uwb_passive_ds_clean_completed_history *history)
 {
     if (poll_frame == NULL || poll == NULL || plan == NULL ||
         responder_index >= plan->responder_count ||
@@ -10213,7 +10330,7 @@ static esp_err_t uwb_passive_ds_clean_respond(
         return ESP_ERR_INVALID_SIZE;
     }
 
-    const struct uwb_passive_ds_packet response = {
+    struct uwb_passive_ds_packet response = {
         .type = UWB_PASSIVE_DS_MESSAGE_RESPONSE,
         .session_id = poll->session_id,
         .frame_id = poll->frame_id,
@@ -10222,6 +10339,7 @@ static esp_err_t uwb_passive_ds_clean_respond(
         .responder_index = responder_index,
         .responder_reply_dtu = (uint32_t)reply_dtu,
     };
+    uwb_passive_ds_clean_history_attach(&response, history);
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
     const size_t payload_length = uwb_passive_ds_clean_encode_frame(
         UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_RESP, poll->initiator_id,
@@ -10281,6 +10399,16 @@ static esp_err_t uwb_passive_ds_clean_respond(
         return ESP_ERR_NOT_FOUND;
     }
 
+    const uint64_t responder_exchange = uwb_distance_delta_ts(
+        final_frame.rx_timestamp, poll_frame->rx_timestamp);
+    if (responder_exchange == 0U || responder_exchange > UINT32_MAX) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    /* Timing transport is independent of range validity/calibration. */
+    uwb_passive_ds_clean_history_note(
+        history, poll->session_id, poll->frame_id,
+        poll->initiator_id, (uint32_t)responder_exchange);
+
     struct uwb_distance_measurement measurement = {0};
     uwb_distance_fill_measurement_from_timestamps(
         poll->initiator_id, s_source_id, poll_frame->sequence,
@@ -10313,128 +10441,401 @@ static esp_err_t uwb_passive_ds_clean_respond(
     return ESP_OK;
 }
 
-static void uwb_passive_ds_clean_tag_process_response(
-    const struct uwb_distance_frame *frame,
-    const struct uwb_passive_ds_packet *response,
-    struct uwb_passive_ds_clean_tag_frame *active,
+static struct uwb_passive_ds_clean_tag_frame *
+uwb_passive_ds_clean_tag_find_frame(
+    struct uwb_passive_ds_clean_tag_frame *frames,
+    uint32_t session_id, uint32_t frame_id)
+{
+    for (size_t index = 0U;
+         index < UWB_PASSIVE_DS_CLEAN_TAG_FRAME_BUCKETS; ++index) {
+        if (frames[index].in_use &&
+            frames[index].session_id == session_id &&
+            frames[index].frame_id == frame_id) {
+            return &frames[index];
+        }
+    }
+    return NULL;
+}
+
+static void uwb_passive_ds_clean_tag_count_incomplete(
+    const struct uwb_passive_ds_clean_tag_frame *frame,
+    struct uwb_passive_ds_clean_tag_stats *stats)
+{
+    if (frame == NULL || stats == NULL || !frame->in_use) {
+        return;
+    }
+    stats->incomplete++;
+    const uint8_t missing_response =
+        (uint8_t)(frame->expected_mask &
+                  (uint8_t)~frame->response_mask);
+    const uint8_t missing_final_entry =
+        (uint8_t)(frame->response_mask &
+                  (uint8_t)~frame->final_mask &
+                  frame->expected_mask);
+    if (!frame->have_final) {
+        stats->missing_final++;
+    }
+    const uint8_t missing_exchange =
+        (uint8_t)(frame->response_mask &
+                  (uint8_t)~frame->exchange_mask &
+                  frame->expected_mask);
+    for (uint8_t index = 0U; index < UWB_PASSIVE_DS_MAX_RESPONDERS;
+         ++index) {
+        if ((missing_response & (uint8_t)(1U << index)) != 0U) {
+            stats->missing_response++;
+        }
+        if ((missing_final_entry & (uint8_t)(1U << index)) != 0U) {
+            stats->missing_final_entry++;
+        }
+        if ((missing_exchange & (uint8_t)(1U << index)) != 0U) {
+            stats->missing_exchange++;
+        }
+    }
+}
+
+static void uwb_passive_ds_clean_tag_invalidate_frame(
+    struct uwb_passive_ds_clean_tag_frame *frame,
+    struct uwb_passive_ds_clean_tag_stats *stats)
+{
+    if (stats != NULL) {
+        stats->invalid++;
+    }
+    if (frame == NULL) {
+        return;
+    }
+    uwb_passive_ds_clean_tag_count_incomplete(frame, stats);
+    memset(frame, 0, sizeof(*frame));
+}
+
+static struct uwb_passive_ds_clean_tag_frame *
+uwb_passive_ds_clean_tag_begin_frame(
+    struct uwb_passive_ds_clean_tag_frame *frames,
+    const struct uwb_passive_ds_packet *poll,
+    const struct uwb_passive_ds_plan *plan, uint64_t poll_rx_timestamp,
+    struct uwb_passive_ds_clean_tag_stats *stats)
+{
+    struct uwb_passive_ds_clean_tag_frame *existing =
+        uwb_passive_ds_clean_tag_find_frame(
+            frames, poll->session_id, poll->frame_id);
+    if (existing != NULL) {
+        if (existing->poll_rx_timestamp != poll_rx_timestamp ||
+            existing->initiator_id != poll->initiator_id) {
+            uwb_passive_ds_clean_tag_invalidate_frame(existing, stats);
+            return NULL;
+        }
+        return existing;
+    }
+    struct uwb_passive_ds_clean_tag_frame *frame =
+        &frames[poll->frame_id %
+                UWB_PASSIVE_DS_CLEAN_TAG_FRAME_BUCKETS];
+    uwb_passive_ds_clean_tag_count_incomplete(frame, stats);
+    memset(frame, 0, sizeof(*frame));
+    frame->in_use = true;
+    frame->session_id = poll->session_id;
+    frame->frame_id = poll->frame_id;
+    frame->initiator_id = poll->initiator_id;
+    frame->expected_mask =
+        (uint8_t)((1U << plan->responder_count) - 1U);
+    frame->poll_rx_timestamp = poll_rx_timestamp;
+    frame->created_host_us = esp_timer_get_time();
+    for (uint8_t index = 0U; index < plan->responder_count; ++index) {
+        frame->responses[index].responder_id =
+            plan->responder_ids[index];
+        frame->responses[index].responder_index = index;
+    }
+    return frame;
+}
+
+static bool uwb_passive_ds_clean_tag_try_emit(
+    struct uwb_passive_ds_clean_tag_frame *frame, uint8_t responder_index,
     struct uwb_passive_ds_clean_tag_stats *stats,
     const uint8_t *anchor_ids, size_t anchor_count)
 {
-    if (frame == NULL || response == NULL || active == NULL ||
-        stats == NULL || !active->active ||
-        response->session_id != active->session_id ||
-        response->frame_id != active->frame_id ||
-        response->initiator_id != active->initiator_id ||
-        response->anchor_count != anchor_count) {
-        if (stats != NULL) {
-            stats->invalid++;
-        }
-        return;
+    if (frame == NULL || responder_index >=
+                             UWB_PASSIVE_DS_MAX_RESPONDERS) {
+        return false;
     }
-    struct uwb_passive_ds_plan plan = {0};
-    if (!uwb_passive_ds_build_plan(
-            anchor_ids, anchor_count, response->frame_id, &plan) ||
-        response->responder_index >= plan.responder_count ||
-        frame->source_id !=
-            plan.responder_ids[response->responder_index]) {
-        stats->invalid++;
-        return;
-    }
-    const uint8_t bit =
-        (uint8_t)(1U << response->responder_index);
-    if ((active->response_mask & bit) != 0U) {
-        return;
-    }
-    stats->responses[response->responder_index]++;
-    if (!frame->clock_offset_valid) {
-        stats->missing_cfo++;
-        return;
-    }
-
-    const double driver_ratio = frame->clock_offset_from_cia
-        ? uwb_dw3000_cia_clock_offset_ratio(frame->clock_offset_raw)
-        : uwb_dw3000_clock_offset_ratio(frame->clock_offset_raw);
-    const double raw_cfo_fraction = -driver_ratio;
-    flextdoa_cfo_estimator_note_slot(
-        &s_flex_tdoa_cfo_estimator, response->frame_id);
-    struct flextdoa_cfo_result cfo = {0};
-    if (!flextdoa_cfo_estimator_update(
-            &s_flex_tdoa_cfo_estimator, frame->source_id,
-            raw_cfo_fraction, &cfo)) {
-        stats->missing_cfo++;
-        return;
-    }
-
-    const int32_t baseline_mm =
-        uwb_passive_ds_fixed_anchor_distance_mm(
-            response->initiator_id, frame->source_id);
-    if (baseline_mm <= 0) {
-        stats->invalid++;
-        return;
+    struct uwb_passive_ds_clean_tag_response *response =
+        &frame->responses[responder_index];
+    if (!frame->in_use || response->emitted || !frame->have_final ||
+        !response->have_response || !response->have_final_entry ||
+        !response->have_exchange) {
+        return false;
     }
     const struct uwb_passive_ds_observation_input input = {
-        .listener_poll_rx = active->poll_rx_timestamp,
-        .listener_response_rx = frame->rx_timestamp,
+        .listener_poll_rx = frame->poll_rx_timestamp,
+        .listener_response_rx = response->response_rx_timestamp,
+        .listener_final_rx = frame->final_rx_timestamp,
+        .initiator_poll_tx = frame->initiator_poll_tx,
+        .initiator_response_rx = response->initiator_response_rx,
+        .initiator_final_tx = frame->initiator_final_tx,
         .responder_reply_dtu = response->responder_reply_dtu,
-        .responder_to_listener_cfo_fraction = cfo.applied_fraction,
-        .initiator_responder_distance_m = baseline_mm / 1000.0,
+        .responder_exchange_dtu = response->responder_exchange_dtu,
     };
     struct uwb_passive_ds_observation_result result = {0};
     if (!uwb_passive_ds_compute_observation(&input, &result)) {
         stats->invalid++;
-        return;
+        return false;
     }
 
     int32_t difference_mm =
         uwb_distance_meters_to_mm(result.difference_m);
-    int32_t raw_difference_mm =
-        uwb_distance_meters_to_mm(result.raw_difference_m);
+    int32_t comparison_mm = response->cfo_comparison_valid
+                                ? response->cfo_comparison_mm
+                                : difference_mm;
     const app_runtime_config_t *config = app_runtime_config_get();
     if (config->passive_ds_calibration_enabled) {
         const size_t initiator_index = uwb_anchor_survey_id_index(
-            anchor_ids, anchor_count, response->initiator_id);
-        const size_t responder_anchor_index =
-            uwb_anchor_survey_id_index(
-                anchor_ids, anchor_count, frame->source_id);
+            anchor_ids, anchor_count, frame->initiator_id);
+        const size_t responder_anchor_index = uwb_anchor_survey_id_index(
+            anchor_ids, anchor_count, response->responder_id);
         if (initiator_index == SIZE_MAX ||
             responder_anchor_index == SIZE_MAX) {
             stats->invalid++;
-            return;
+            return false;
         }
         const int32_t correction =
             config->passive_ds_anchor_bias_mm[responder_anchor_index] -
             config->passive_ds_anchor_bias_mm[initiator_index];
         difference_mm -= correction;
-        raw_difference_mm -= correction;
+        comparison_mm -= correction;
     }
+
+    const int32_t baseline_mm =
+        uwb_passive_ds_fixed_anchor_distance_mm(
+            frame->initiator_id, response->responder_id);
     const int64_t reply_us =
         uwb_dw3000_dtu_to_us(response->responder_reply_dtu);
+    const int32_t clock_ratio_ppb = (int32_t)lround(
+        (result.listener_to_initiator_clock_ratio - 1.0) *
+        1000000000.0);
+    const uint16_t delay_ratio_q15 = (uint16_t)lround(
+        fmin(32767.0,
+             fmax(1.0,
+                  result.listener_interpolation_ratio * 32768.0)));
     const bool telemetry_ok =
         wireless_telemetry_service_submit_passive_ds_observation(
-            s_source_id, response->initiator_id, frame->source_id,
-            response->responder_index, frame->sequence,
-            response->frame_id, difference_mm, raw_difference_mm,
-            baseline_mm,
-            uwb_distance_meters_to_mm(result.cfo_correction_m),
-            (int32_t)lround(cfo.applied_fraction * 1000000000.0),
+            s_source_id, frame->initiator_id, response->responder_id,
+            responder_index, response->sequence, frame->frame_id,
+            difference_mm, comparison_mm, baseline_mm,
+            difference_mm - comparison_mm, clock_ratio_ppb,
             reply_us > 0 ? (uint32_t)reply_us : 0U,
-            2U, 0U);
+            1U, 0U);
     const bool solver_ok = uwb_passive_ds_runtime_submit_observation(
-        s_source_id, response->initiator_id, frame->source_id,
-        response->session_id, response->frame_id, difference_mm, 0U);
+        s_source_id, frame->initiator_id, response->responder_id,
+        frame->session_id, frame->frame_id, difference_mm,
+        delay_ratio_q15);
     stats->observations++;
     if (!telemetry_ok || !solver_ok) {
         stats->queue_drops++;
     }
     if (!solver_ok) {
+        return false;
+    }
+    response->emitted = true;
+    const uint8_t bit = (uint8_t)(1U << responder_index);
+    frame->emitted_mask |= bit;
+    if ((frame->emitted_mask & frame->expected_mask) ==
+        frame->expected_mask) {
+        stats->complete++;
+        frame->in_use = false;
+    }
+    return true;
+}
+
+static void uwb_passive_ds_clean_tag_process_exchanges(
+    const struct uwb_distance_frame *carrier,
+    const struct uwb_passive_ds_packet *packet,
+    struct uwb_passive_ds_clean_tag_frame *frames,
+    struct uwb_passive_ds_clean_tag_stats *stats,
+    const uint8_t *anchor_ids, size_t anchor_count)
+{
+    for (uint8_t entry_index = 0U;
+         entry_index < packet->completed_exchange_count;
+         ++entry_index) {
+        const struct uwb_passive_ds_exchange_reference *exchange =
+            &packet->completed_exchanges[entry_index];
+        const int32_t lag =
+            (int32_t)(packet->frame_id - exchange->frame_id);
+        struct uwb_passive_ds_plan plan = {0};
+        if (lag <= 0 || lag >
+                            (int32_t)UWB_PASSIVE_DS_CLEAN_TAG_FRAME_BUCKETS ||
+            !uwb_passive_ds_build_plan(
+                anchor_ids, anchor_count, exchange->frame_id, &plan) ||
+            plan.initiator_id != exchange->initiator_id) {
+            stats->invalid++;
+            continue;
+        }
+        const int responder_index = uwb_passive_ds_responder_index(
+            &plan, carrier->source_id);
+        if (responder_index < 0) {
+            stats->invalid++;
+            continue;
+        }
+        struct uwb_passive_ds_clean_tag_frame *frame =
+            uwb_passive_ds_clean_tag_find_frame(
+                frames, exchange->session_id, exchange->frame_id);
+        if (frame == NULL ||
+            frame->initiator_id != exchange->initiator_id) {
+            continue;
+        }
+        struct uwb_passive_ds_clean_tag_response *response =
+            &frame->responses[responder_index];
+        if (response->have_exchange &&
+            response->responder_exchange_dtu !=
+                exchange->responder_exchange_dtu) {
+            uwb_passive_ds_clean_tag_invalidate_frame(frame, stats);
+            continue;
+        }
+        response->have_exchange = true;
+        response->responder_exchange_dtu =
+            exchange->responder_exchange_dtu;
+        frame->exchange_mask |=
+            (uint8_t)(1U << (uint8_t)responder_index);
+        (void)uwb_passive_ds_clean_tag_try_emit(
+            frame, (uint8_t)responder_index, stats,
+            anchor_ids, anchor_count);
+    }
+}
+
+static void uwb_passive_ds_clean_tag_process_response(
+    const struct uwb_distance_frame *radio_frame,
+    const struct uwb_passive_ds_packet *packet,
+    struct uwb_passive_ds_clean_tag_frame *frames,
+    struct uwb_passive_ds_clean_tag_stats *stats,
+    const uint8_t *anchor_ids, size_t anchor_count)
+{
+    struct uwb_passive_ds_plan plan = {0};
+    if (packet->anchor_count != anchor_count ||
+        !uwb_passive_ds_build_plan(
+            anchor_ids, anchor_count, packet->frame_id, &plan) ||
+        plan.initiator_id != packet->initiator_id ||
+        packet->responder_index >= plan.responder_count ||
+        radio_frame->source_id !=
+            plan.responder_ids[packet->responder_index]) {
+        stats->invalid++;
         return;
     }
-    active->response_mask |= bit;
-    if ((active->response_mask & active->expected_mask) ==
-        active->expected_mask) {
-        stats->complete++;
-        active->active = false;
+    uwb_passive_ds_clean_tag_process_exchanges(
+        radio_frame, packet, frames, stats, anchor_ids, anchor_count);
+    struct uwb_passive_ds_clean_tag_frame *frame =
+        uwb_passive_ds_clean_tag_find_frame(
+            frames, packet->session_id, packet->frame_id);
+    if (frame == NULL ||
+        frame->initiator_id != packet->initiator_id) {
+        return;
     }
+    const uint8_t index = packet->responder_index;
+    const uint8_t bit = (uint8_t)(1U << index);
+    struct uwb_passive_ds_clean_tag_response *response =
+        &frame->responses[index];
+    if (response->have_response) {
+        if (response->response_rx_timestamp != radio_frame->rx_timestamp ||
+            response->responder_reply_dtu !=
+                packet->responder_reply_dtu) {
+            uwb_passive_ds_clean_tag_invalidate_frame(frame, stats);
+        }
+        return;
+    }
+    response->have_response = true;
+    response->sequence = radio_frame->sequence;
+    response->response_rx_timestamp = radio_frame->rx_timestamp;
+    response->responder_reply_dtu = packet->responder_reply_dtu;
+    frame->response_mask |= bit;
+    stats->responses[index]++;
+
+    if (!radio_frame->clock_offset_valid) {
+        stats->missing_cfo++;
+    } else {
+        const double driver_ratio = radio_frame->clock_offset_from_cia
+            ? uwb_dw3000_cia_clock_offset_ratio(
+                  radio_frame->clock_offset_raw)
+            : uwb_dw3000_clock_offset_ratio(
+                  radio_frame->clock_offset_raw);
+        flextdoa_cfo_estimator_note_slot(
+            &s_flex_tdoa_cfo_estimator, packet->frame_id);
+        struct flextdoa_cfo_result cfo = {0};
+        const int32_t baseline_mm =
+            uwb_passive_ds_fixed_anchor_distance_mm(
+                packet->initiator_id, radio_frame->source_id);
+        if (baseline_mm <= 0 ||
+            !flextdoa_cfo_estimator_update(
+                &s_flex_tdoa_cfo_estimator, radio_frame->source_id,
+                -driver_ratio, &cfo)) {
+            stats->missing_cfo++;
+        } else {
+            const struct uwb_passive_ds_cfo_observation_input cfo_input = {
+                .listener_poll_rx = frame->poll_rx_timestamp,
+                .listener_response_rx = radio_frame->rx_timestamp,
+                .responder_reply_dtu = packet->responder_reply_dtu,
+                .responder_to_listener_cfo_fraction =
+                    cfo.applied_fraction,
+                .initiator_responder_distance_m = baseline_mm / 1000.0,
+            };
+            struct uwb_passive_ds_cfo_observation_result cfo_result = {0};
+            if (uwb_passive_ds_compute_cfo_observation(
+                    &cfo_input, &cfo_result)) {
+                response->cfo_comparison_valid = true;
+                response->cfo_comparison_mm =
+                    uwb_distance_meters_to_mm(cfo_result.difference_m);
+            }
+        }
+    }
+    (void)uwb_passive_ds_clean_tag_try_emit(
+        frame, index, stats, anchor_ids, anchor_count);
+}
+
+static void uwb_passive_ds_clean_tag_process_final(
+    const struct uwb_distance_frame *radio_frame,
+    const struct uwb_passive_ds_packet *packet,
+    struct uwb_passive_ds_clean_tag_frame *frames,
+    struct uwb_passive_ds_clean_tag_stats *stats,
+    const uint8_t *anchor_ids, size_t anchor_count)
+{
+    struct uwb_passive_ds_clean_tag_frame *frame =
+        uwb_passive_ds_clean_tag_find_frame(
+            frames, packet->session_id, packet->frame_id);
+    struct uwb_passive_ds_plan plan = {0};
+    if (frame == NULL || packet->anchor_count != anchor_count ||
+        frame->initiator_id != packet->initiator_id ||
+        !uwb_passive_ds_build_plan(
+            anchor_ids, anchor_count, packet->frame_id, &plan)) {
+        return;
+    }
+    if (frame->have_final) {
+        if (frame->final_rx_timestamp != radio_frame->rx_timestamp ||
+            frame->initiator_poll_tx != packet->initiator_poll_tx ||
+            frame->initiator_final_tx != packet->initiator_final_tx) {
+            uwb_passive_ds_clean_tag_invalidate_frame(frame, stats);
+        }
+        return;
+    }
+    frame->have_final = true;
+    frame->final_rx_timestamp = radio_frame->rx_timestamp;
+    frame->initiator_poll_tx = packet->initiator_poll_tx;
+    frame->initiator_final_tx = packet->initiator_final_tx;
+    for (uint8_t entry_index = 0U;
+         entry_index < packet->responder_count; ++entry_index) {
+        const struct uwb_passive_ds_final_entry *entry =
+            &packet->responders[entry_index];
+        const int responder_index = uwb_passive_ds_responder_index(
+            &plan, entry->responder_id);
+        if (responder_index < 0) {
+            stats->invalid++;
+            continue;
+        }
+        struct uwb_passive_ds_clean_tag_response *response =
+            &frame->responses[responder_index];
+        response->have_final_entry = true;
+        response->initiator_response_rx =
+            entry->initiator_response_rx;
+        frame->final_mask |=
+            (uint8_t)(1U << (uint8_t)responder_index);
+        (void)uwb_passive_ds_clean_tag_try_emit(
+            frame, (uint8_t)responder_index, stats,
+            anchor_ids, anchor_count);
+    }
+    stats->finals++;
 }
 
 static void uwb_passive_ds_clean_tag_loop(
@@ -10458,14 +10859,18 @@ static void uwb_passive_ds_clean_tag_loop(
     flextdoa_cfo_estimator_configure(
         &s_flex_tdoa_cfo_estimator,
         config->flex_tdoa_config_generation);
-    struct uwb_passive_ds_clean_tag_frame active = {0};
+    static struct uwb_passive_ds_clean_tag_frame
+        frames[UWB_PASSIVE_DS_CLEAN_TAG_FRAME_BUCKETS];
+    memset(frames, 0, sizeof(frames));
     struct uwb_passive_ds_clean_tag_stats stats = {
         .summary_started_us = esp_timer_get_time(),
     };
+    uint32_t current_session_id = 0U;
+    bool have_current_session = false;
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
              "PASSIVE_DS clean receive-only tag=%u geometry=fixed_rtk "
-             "observation=poll_resp_cfo solver=raw",
+             "observation=three_packet_eq19 cfo=diagnostic solver=raw",
              (unsigned)s_source_id);
 
     while (!uwb_dw3000_runtime_switch_pending()) {
@@ -10488,9 +10893,20 @@ static void uwb_passive_ds_clean_tag_loop(
                         plan.initiator_id != poll.initiator_id) {
                         stats.invalid++;
                     } else {
-                        if (active.active) {
-                            stats.incomplete++;
+                        if (have_current_session &&
+                            poll.session_id != current_session_id) {
+                            for (size_t index = 0U;
+                                 index <
+                                     UWB_PASSIVE_DS_CLEAN_TAG_FRAME_BUCKETS;
+                                 ++index) {
+                                uwb_passive_ds_clean_tag_count_incomplete(
+                                    &frames[index], &stats);
+                            }
+                            memset(frames, 0, sizeof(frames));
+                            stats.have_last_frame = false;
                         }
+                        current_session_id = poll.session_id;
+                        have_current_session = true;
                         if (stats.have_last_frame) {
                             const int32_t gap = (int32_t)(
                                 poll.frame_id - stats.last_frame_id);
@@ -10500,19 +10916,12 @@ static void uwb_passive_ds_clean_tag_loop(
                         }
                         stats.have_last_frame = true;
                         stats.last_frame_id = poll.frame_id;
-                        active =
-                            (struct uwb_passive_ds_clean_tag_frame){
-                                .active = true,
-                                .session_id = poll.session_id,
-                                .frame_id = poll.frame_id,
-                                .initiator_id = poll.initiator_id,
-                                .expected_mask =
-                                    (uint8_t)((1U <<
-                                               plan.responder_count) -
-                                              1U),
-                                .poll_rx_timestamp =
-                                    frame.rx_timestamp,
-                            };
+                        uwb_passive_ds_clean_tag_process_exchanges(
+                            &frame, &poll, frames, &stats,
+                            anchor_ids, anchor_count);
+                        (void)uwb_passive_ds_clean_tag_begin_frame(
+                            frames, &poll, &plan, frame.rx_timestamp,
+                            &stats);
                         stats.polls++;
                     }
                 }
@@ -10523,7 +10932,7 @@ static void uwb_passive_ds_clean_tag_loop(
                         &frame, UWB_PASSIVE_DS_MESSAGE_RESPONSE,
                         &response)) {
                     uwb_passive_ds_clean_tag_process_response(
-                        &frame, &response, &active, &stats,
+                        &frame, &response, frames, &stats,
                         anchor_ids, anchor_count);
                 } else {
                     stats.invalid++;
@@ -10533,25 +10942,39 @@ static void uwb_passive_ds_clean_tag_loop(
                 struct uwb_passive_ds_packet final = {0};
                 if (uwb_passive_ds_clean_decode_frame(
                         &frame, UWB_PASSIVE_DS_MESSAGE_FINAL, &final)) {
-                    stats.finals++;
+                    uwb_passive_ds_clean_tag_process_final(
+                        &frame, &final, frames, &stats,
+                        anchor_ids, anchor_count);
                 } else {
                     stats.invalid++;
                 }
             }
         } else if (err != ESP_ERR_TIMEOUT &&
                    err != ESP_ERR_NOT_FINISHED &&
+                   err != ESP_ERR_INVALID_RESPONSE &&
                    !uwb_dw3000_runtime_switch_pending()) {
             ESP_LOGW(TAG, "PASSIVE_DS tag RX failed: %s",
                      esp_err_to_name(err));
         }
 
         const int64_t now_us = esp_timer_get_time();
+        for (size_t index = 0U;
+             index < UWB_PASSIVE_DS_CLEAN_TAG_FRAME_BUCKETS; ++index) {
+            if (frames[index].in_use &&
+                now_us - frames[index].created_host_us > 250000LL) {
+                uwb_passive_ds_clean_tag_count_incomplete(
+                    &frames[index], &stats);
+                memset(&frames[index], 0, sizeof(frames[index]));
+            }
+        }
         if (now_us - stats.summary_started_us >= 1000000LL) {
             ESP_LOGI(
                 TAG,
-                "PASSIVE_DS tag raw poll=%lu resp=%lu/%lu/%lu "
+                "PASSIVE_DS tag ds19 poll=%lu resp=%lu/%lu/%lu "
                 "final=%lu frames=%lu incomplete=%lu obs=%lu "
-                "invalid=%lu no_cfo=%lu drop=%lu",
+                "invalid=%lu miss_resp=%lu miss_final=%lu/%lu "
+                "miss_exchange=%lu cfo_diag_miss=%lu drop=%lu "
+                "rx_err=%lu rx_status=0x%08lx",
                 (unsigned long)stats.polls,
                 (unsigned long)stats.responses[0],
                 (unsigned long)stats.responses[1],
@@ -10561,14 +10984,22 @@ static void uwb_passive_ds_clean_tag_loop(
                 (unsigned long)stats.incomplete,
                 (unsigned long)stats.observations,
                 (unsigned long)stats.invalid,
+                (unsigned long)stats.missing_response,
+                (unsigned long)stats.missing_final,
+                (unsigned long)stats.missing_final_entry,
+                (unsigned long)stats.missing_exchange,
                 (unsigned long)stats.missing_cfo,
-                (unsigned long)stats.queue_drops);
+                (unsigned long)stats.queue_drops,
+                (unsigned long)s_passive_ds_rx_errors_since_summary,
+                (unsigned long)s_passive_ds_rx_error_status_since_summary);
             const uint32_t last_frame = stats.last_frame_id;
             const bool have_last = stats.have_last_frame;
             memset(&stats, 0, sizeof(stats));
             stats.last_frame_id = last_frame;
             stats.have_last_frame = have_last;
             stats.summary_started_us = now_us;
+            s_passive_ds_rx_errors_since_summary = 0U;
+            s_passive_ds_rx_error_status_since_summary = 0U;
         }
     }
 }
@@ -10588,6 +11019,7 @@ static void uwb_passive_ds_clean_anchor_loop(
                        UWB_HOT_SWITCH_BOOTSTRAP_GUARD_US
                  : 0),
     };
+    struct uwb_passive_ds_clean_completed_history history = {0};
     uint32_t session_id = 0U;
     uint32_t full_frames = 0U;
     uint32_t partial_frames = 0U;
@@ -10644,6 +11076,7 @@ static void uwb_passive_ds_clean_anchor_loop(
             const esp_err_t err = uwb_passive_ds_clean_initiate(
                 anchor_ids, anchor_count, session_id, frame_id,
                 immediate ? 0U : schedule.next_poll_radio_ts,
+                &history,
                 &poll_tx, &poll_host, &responses);
             schedule.synced = false;
             schedule.last_poll_host_us = poll_host;
@@ -10733,7 +11166,7 @@ static void uwb_passive_ds_clean_anchor_loop(
                 uwb_passive_ds_clean_respond(
                     &poll_frame, &poll, &plan,
                     (uint8_t)responder_index, anchor_ids,
-                    anchor_count);
+                    anchor_count, &history);
             if (response_err != ESP_OK) {
                 failed_frames++;
             }
@@ -10743,16 +11176,21 @@ static void uwb_passive_ds_clean_anchor_loop(
         if (summary_now_us - summary_started_us >= 1000000LL) {
             ESP_LOGI(TAG,
                      "PASSIVE_DS anchors raw full=%lu partial=%lu "
-                     "fail=%lu late=%lu period=%lldus packets=5",
+                     "fail=%lu late=%lu period=%lldus packets=5 "
+                     "rx_err=%lu rx_status=0x%08lx",
                      (unsigned long)full_frames,
                      (unsigned long)partial_frames,
                      (unsigned long)failed_frames,
                      (unsigned long)schedule.late_count,
-                     (long long)period_us);
+                     (long long)period_us,
+                     (unsigned long)s_passive_ds_rx_errors_since_summary,
+                     (unsigned long)s_passive_ds_rx_error_status_since_summary);
             full_frames = 0U;
             partial_frames = 0U;
             failed_frames = 0U;
             schedule.late_count = 0U;
+            s_passive_ds_rx_errors_since_summary = 0U;
+            s_passive_ds_rx_error_status_since_summary = 0U;
             summary_started_us = summary_now_us;
         }
     }
@@ -10767,6 +11205,8 @@ static void uwb_dw3000_passive_ds_twr_loop(void)
         uwb_anchor_survey_anchor_ids(anchor_ids);
     const app_runtime_config_t *config = app_runtime_config_get();
     uwb_passive_ds_runtime_reset(false);
+    s_passive_ds_rx_errors_since_summary = 0U;
+    s_passive_ds_rx_error_status_since_summary = 0U;
     if (anchor_count < 3U ||
         !uwb_anchor_survey_ids_valid(anchor_ids, anchor_count,
                                      anchor_ids[0])) {

@@ -645,21 +645,20 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
                  (config->anchor_count - 2U) +
              config->passive_ds_final_delay_us >=
          config->passive_ds_slot_ms * 1000U) ||
+        (config->passive_ds_resp_delay_us +
+             APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US *
+                 (config->anchor_count - 2U) +
+             config->passive_ds_final_delay_us >
+         APP_UWB_PASSIVE_DS_MAX_EXCHANGE_US) ||
         config->passive_ds_auto_rx_delay_uus == 0 ||
         (config->passive_ds_pipeline_mode !=
              APP_RUNTIME_PASSIVE_DS_PIPELINE_LEGACY &&
          config->passive_ds_pipeline_mode !=
              APP_RUNTIME_PASSIVE_DS_PIPELINE_DEADLINE) ||
         (config->passive_ds_solve_mode !=
-             APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME &&
+             APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR &&
          config->passive_ds_solve_mode !=
-             APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_ALL &&
-         config->passive_ds_solve_mode !=
-             APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_INDEPENDENT &&
-         config->passive_ds_solve_mode !=
-             APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_SUPERFRAME &&
-         config->passive_ds_solve_mode !=
-             APP_RUNTIME_PASSIVE_DS_SOLVE_ROLLING_MOTION) ||
+             APP_RUNTIME_PASSIVE_DS_SOLVE_PRECISION_THREE_STAR) ||
         config->passive_ds_rolling_max_hz == 0U ||
         config->passive_ds_rolling_max_hz > 500U ||
         !passive_ds_calibration_valid(config) ||
@@ -1037,20 +1036,27 @@ esp_err_t app_runtime_config_reload(void)
     read_config_from_nvs(&loaded);
 
     /*
-     * Passive DS-TWR v2 has one wire schedule and one raw solve policy. Keep
-     * surveyed geometry and calibration from older NVS records, but migrate
-     * the retired schedule/pipeline/rolling selectors in RAM.
+     * Passive DS-TWR v2 has one wire schedule and two raw solve policies.
+     * Keep surveyed geometry, calibration and either supported solve policy
+     * from NVS, but migrate retired schedule/pipeline/rolling selectors.
      */
+    const bool valid_passive_ds_solve_mode =
+        loaded.passive_ds_solve_mode ==
+            APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR ||
+        loaded.passive_ds_solve_mode ==
+            APP_RUNTIME_PASSIVE_DS_SOLVE_PRECISION_THREE_STAR;
     const bool legacy_passive_ds_profile =
         loaded.passive_ds_schedule !=
             APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS ||
         loaded.passive_ds_pipeline_mode !=
             APP_RUNTIME_PASSIVE_DS_PIPELINE_LEGACY ||
-        loaded.passive_ds_solve_mode !=
-            APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME;
+        !valid_passive_ds_solve_mode;
     loaded.passive_ds_schedule = APP_RUNTIME_PASSIVE_DS_MULTIPOINT_FULL_DS;
     loaded.passive_ds_pipeline_mode = APP_RUNTIME_PASSIVE_DS_PIPELINE_LEGACY;
-    loaded.passive_ds_solve_mode = APP_RUNTIME_PASSIVE_DS_SOLVE_FRAME;
+    if (!valid_passive_ds_solve_mode) {
+        loaded.passive_ds_solve_mode =
+            APP_RUNTIME_PASSIVE_DS_SOLVE_SINGLE_STAR;
+    }
     if (legacy_passive_ds_profile) {
         loaded.passive_ds_slot_ms = APP_UWB_PASSIVE_DS_SLOT_MS;
         loaded.passive_ds_round_gap_ms =

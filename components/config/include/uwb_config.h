@@ -161,6 +161,12 @@
 #define APP_UWB_PASSIVE_DS_MULTI_RESPONSE_SPACING_US 750
 #endif
 
+/* Keep every complete POLL..FINAL interval below the 20 ms observation
+ * validity bound, including practical oscillator and scheduling margin. */
+#ifndef APP_UWB_PASSIVE_DS_MAX_EXCHANGE_US
+#define APP_UWB_PASSIVE_DS_MAX_EXCHANGE_US 19000
+#endif
+
 /* Retained for runtime-config ABI compatibility; v2 uses ROUND_GAP_MS. */
 #ifndef APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US
 #define APP_UWB_PASSIVE_DS_DYNAMIC_GUARD_US 250
@@ -170,13 +176,13 @@
 #define APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS 500
 #endif
 
-/* Retained for runtime-config ABI compatibility; v2 always uses raw frames. */
+/* Retained for runtime-config ABI compatibility; v2 always uses raw solves. */
 #ifndef APP_UWB_PASSIVE_DS_PIPELINE_MODE
 #define APP_UWB_PASSIVE_DS_PIPELINE_MODE 0
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_SOLVE_MODE
-#define APP_UWB_PASSIVE_DS_SOLVE_MODE 0
+#define APP_UWB_PASSIVE_DS_SOLVE_MODE 2
 #endif
 
 #ifndef APP_UWB_PASSIVE_DS_ROLLING_MAX_HZ
