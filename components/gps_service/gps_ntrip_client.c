@@ -1,11 +1,14 @@
 #include "gps_ntrip_client.h"
+#include "gps_ntrip_stream_decoder.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
@@ -14,6 +17,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lwip/netdb.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/ssl.h"
 #include "secrets.h"
@@ -24,6 +28,9 @@
 #endif
 #ifndef NTRIP_MODULE_ID
 #define NTRIP_MODULE_ID 1
+#endif
+#ifndef NTRIP_USE_TLS
+#define NTRIP_USE_TLS 1
 #endif
 #ifndef NTRIP_GGA_INTERVAL_MS
 #define NTRIP_GGA_INTERVAL_MS 10000
@@ -56,12 +63,15 @@ typedef struct {
     char credentials[768];
     char authorization[1024];
     char gga_line[GPS_NTRIP_GGA_SIZE + 2];
+    gps_ntrip_chunk_decoder_t chunk_decoder;
 } ntrip_workspace_t;
 
 static SemaphoreHandle_t s_mutex;
 static TaskHandle_t s_task;
 static volatile bool s_stop_requested;
+#if NTRIP_USE_TLS
 static esp_tls_t *s_tls;
+#endif
 static int s_socket = -1;
 static uint8_t s_module_id;
 static gps_ntrip_write_fn_t s_write_fn;
@@ -156,19 +166,24 @@ static void count_rtcm_bytes(const uint8_t *data, size_t length)
     }
 }
 
-static bool tls_write_all(const void *data, size_t length)
+static bool transport_write_all(const void *data, size_t length)
 {
     const uint8_t *cursor = data;
     size_t remaining = length;
     while (!s_stop_requested && remaining > 0) {
+#if NTRIP_USE_TLS
         const ssize_t written = esp_tls_conn_write(s_tls, cursor, remaining);
+#else
+        const ssize_t written = send(s_socket, cursor, remaining, 0);
+#endif
         if (written > 0) {
             cursor += written;
             remaining -= (size_t)written;
             continue;
         }
         if (written == MBEDTLS_ERR_SSL_WANT_READ ||
-            written == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            written == MBEDTLS_ERR_SSL_WANT_WRITE ||
+            errno == EAGAIN || errno == EWOULDBLOCK) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
@@ -176,6 +191,88 @@ static bool tls_write_all(const void *data, size_t length)
     }
     return remaining == 0;
 }
+
+static ssize_t transport_read(void *data, size_t length)
+{
+#if NTRIP_USE_TLS
+    return esp_tls_conn_read(s_tls, data, length);
+#else
+    return recv(s_socket, data, length, 0);
+#endif
+}
+
+#if !NTRIP_USE_TLS
+static bool open_plain_socket(void)
+{
+    char port[8];
+    snprintf(port, sizeof(port), "%u", (unsigned)NTRIP_PORT);
+    const struct addrinfo hints = {
+        .ai_family = AF_INET,
+        .ai_socktype = SOCK_STREAM,
+        .ai_protocol = IPPROTO_TCP,
+    };
+    struct addrinfo *addresses = NULL;
+    if (getaddrinfo(NTRIP_SERVER, port, &hints, &addresses) != 0 ||
+        addresses == NULL) {
+        return false;
+    }
+
+    bool connected = false;
+    for (const struct addrinfo *address = addresses; address != NULL;
+         address = address->ai_next) {
+        const int socket_fd = socket(address->ai_family,
+                                     address->ai_socktype,
+                                     address->ai_protocol);
+        if (socket_fd < 0) {
+            continue;
+        }
+
+        const int original_flags = fcntl(socket_fd, F_GETFL, 0);
+        if (original_flags < 0 ||
+            fcntl(socket_fd, F_SETFL, original_flags | O_NONBLOCK) < 0) {
+            close(socket_fd);
+            continue;
+        }
+
+        int result = connect(socket_fd, address->ai_addr,
+                             address->ai_addrlen);
+        if (result < 0 && errno == EINPROGRESS) {
+            fd_set write_set;
+            FD_ZERO(&write_set);
+            FD_SET(socket_fd, &write_set);
+            struct timeval timeout = {
+                .tv_sec = GPS_NTRIP_CONNECT_TIMEOUT_MS / 1000,
+                .tv_usec =
+                    (GPS_NTRIP_CONNECT_TIMEOUT_MS % 1000) * 1000,
+            };
+            result = select(socket_fd + 1, NULL, &write_set, NULL,
+                            &timeout);
+            if (result > 0 && FD_ISSET(socket_fd, &write_set)) {
+                int socket_error = 0;
+                socklen_t error_length = sizeof(socket_error);
+                result = getsockopt(socket_fd, SOL_SOCKET, SO_ERROR,
+                                    &socket_error, &error_length);
+                if (result == 0 && socket_error != 0) {
+                    errno = socket_error;
+                    result = -1;
+                }
+            } else {
+                result = -1;
+            }
+        }
+
+        if (result == 0 &&
+            fcntl(socket_fd, F_SETFL, original_flags) == 0) {
+            s_socket = socket_fd;
+            connected = true;
+            break;
+        }
+        close(socket_fd);
+    }
+    freeaddrinfo(addresses);
+    return connected;
+}
+#endif
 
 static bool build_request(ntrip_workspace_t *workspace, const char *gga)
 {
@@ -249,6 +346,23 @@ static bool forward_stream_bytes(const uint8_t *data, size_t length)
     return true;
 }
 
+static bool emit_chunk_data(const uint8_t *data, size_t length,
+                            void *context)
+{
+    (void)context;
+    return forward_stream_bytes(data, length);
+}
+
+static bool process_stream_bytes(ntrip_workspace_t *workspace, bool chunked,
+                                 const uint8_t *data, size_t length)
+{
+    if (!chunked) {
+        return forward_stream_bytes(data, length);
+    }
+    return gps_ntrip_chunk_decoder_feed(&workspace->chunk_decoder, data,
+                                        length, emit_chunk_data, NULL);
+}
+
 static bool open_stream(void)
 {
     ntrip_workspace_t *workspace = heap_caps_calloc(
@@ -268,22 +382,34 @@ static bool open_stream(void)
     }
 
     set_state("connecting");
+#if NTRIP_USE_TLS
     s_tls = esp_tls_init();
     if (s_tls == NULL) {
-        note_error("tls_init_failed");
+        note_error("transport_init_failed");
         goto done;
     }
     const esp_tls_cfg_t config = {
         .timeout_ms = GPS_NTRIP_CONNECT_TIMEOUT_MS,
+#if NTRIP_USE_TLS
         .crt_bundle_attach = esp_crt_bundle_attach,
         .tls_version = ESP_TLS_VER_TLS_1_2,
+#else
+        .is_plain_tcp = true,
+#endif
     };
     if (esp_tls_conn_new_sync(NTRIP_SERVER, strlen(NTRIP_SERVER),
                               NTRIP_PORT, &config, s_tls) != 1) {
-        note_error("tls_failed");
+        note_error("connect_failed");
         goto done;
     }
     if (esp_tls_get_conn_sockfd(s_tls, &s_socket) == ESP_OK) {
+#else
+    if (!open_plain_socket()) {
+        note_error("connect_failed");
+        goto done;
+    }
+    {
+#endif
         const struct timeval timeout = {
             .tv_sec = GPS_NTRIP_READ_TIMEOUT_MS / 1000,
             .tv_usec = (GPS_NTRIP_READ_TIMEOUT_MS % 1000) * 1000,
@@ -292,24 +418,26 @@ static bool open_stream(void)
                          sizeof(timeout));
     }
     if (lock_state(pdMS_TO_TICKS(50))) {
-        s_snapshot.tls_connected = true;
+        s_snapshot.tls_connected = NTRIP_USE_TLS != 0;
         s_snapshot.connect_count++;
         snprintf(s_snapshot.state, sizeof(s_snapshot.state), "requesting");
         unlock_state();
     }
 
     if (!build_request(workspace, gga) ||
-        !tls_write_all(workspace->request, strlen(workspace->request))) {
+        !transport_write_all(workspace->request,
+                             strlen(workspace->request))) {
         note_error("request_failed");
         goto done;
     }
     memset(workspace->request, 0, sizeof(workspace->request));
 
     size_t header_length = 0;
+    bool response_is_chunked = false;
     while (!s_stop_requested &&
            header_length < sizeof(workspace->header) - 1U) {
-        const ssize_t received = esp_tls_conn_read(
-            s_tls, workspace->buffer, sizeof(workspace->buffer));
+        const ssize_t received = transport_read(
+            workspace->buffer, sizeof(workspace->buffer));
         if (received > 0) {
             if (header_length + (size_t)received >=
                 sizeof(workspace->header)) {
@@ -335,11 +463,16 @@ static bool open_stream(void)
                 note_error("caster_rejected");
                 goto done;
             }
+            response_is_chunked =
+                gps_ntrip_http_response_is_chunked(workspace->header);
+            gps_ntrip_chunk_decoder_init(&workspace->chunk_decoder);
             if (header_length > body_offset &&
-                !forward_stream_bytes(
+                !process_stream_bytes(
+                    workspace, response_is_chunked,
                     (const uint8_t *)workspace->header + body_offset,
                     header_length - body_offset)) {
-                note_error("uart_failed");
+                note_error(response_is_chunked ? "chunk_decode_failed"
+                                               : "uart_failed");
                 goto done;
             }
             goto stream_ready;
@@ -359,12 +492,14 @@ static bool open_stream(void)
 stream_ready:
     uint32_t last_gga_sent_ms = ticks_to_ms();
     while (!s_stop_requested && wifi_service_is_connected()) {
-        const ssize_t received = esp_tls_conn_read(
-            s_tls, workspace->buffer, sizeof(workspace->buffer));
+        const ssize_t received = transport_read(
+            workspace->buffer, sizeof(workspace->buffer));
         if (received > 0) {
-            if (!forward_stream_bytes(workspace->buffer,
+            if (!process_stream_bytes(workspace, response_is_chunked,
+                                      workspace->buffer,
                                       (size_t)received)) {
-                note_error("uart_failed");
+                note_error(response_is_chunked ? "chunk_decode_failed"
+                                               : "uart_failed");
                 goto done;
             }
         } else if (received == 0) {
@@ -386,8 +521,8 @@ stream_ready:
                                              "%s\r\n", gga);
             if (line_length <= 0 ||
                 line_length >= (int)sizeof(workspace->gga_line) ||
-                !tls_write_all(workspace->gga_line,
-                               (size_t)line_length)) {
+                !transport_write_all(workspace->gga_line,
+                                     (size_t)line_length)) {
                 note_error("gga_send_failed");
                 goto done;
             }
@@ -403,11 +538,18 @@ done:
 
 static void close_stream(void)
 {
-    s_socket = -1;
+#if NTRIP_USE_TLS
     if (s_tls != NULL) {
         esp_tls_conn_destroy(s_tls);
         s_tls = NULL;
     }
+#else
+    if (s_socket >= 0) {
+        (void)shutdown(s_socket, SHUT_RDWR);
+        close(s_socket);
+    }
+#endif
+    s_socket = -1;
     if (lock_state(pdMS_TO_TICKS(50))) {
         s_snapshot.tls_connected = false;
         s_snapshot.stream_active = false;
@@ -490,7 +632,8 @@ esp_err_t gps_ntrip_client_start(uint8_t module_id,
         note_error("task_failed");
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "NTRIP TLS client enabled on module %u", (unsigned)module_id);
+    ESP_LOGI(TAG, "NTRIP %s client enabled on module %u",
+             NTRIP_USE_TLS ? "TLS" : "TCP", (unsigned)module_id);
     return ESP_OK;
 }
 

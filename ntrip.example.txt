@@ -1,0 +1,8 @@
+enabled=1
+module_id=1
+use_tls=0
+host=www.euref-ip.net
+port=2101
+mountpoint=BUCU00ROU0
+username=your-ntrip-username
+password=your-ntrip-password

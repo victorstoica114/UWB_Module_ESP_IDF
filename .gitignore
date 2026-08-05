@@ -6,6 +6,9 @@ sdkconfig
 sdkconfig.old
 dependencies.lock
 tools/ota_targets.local.txt
+secrets.h
+pointperfect_ntrip.txt
+*.rtcm
 UWB_Module/
 reference/external/
 .agents/

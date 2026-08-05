@@ -2153,13 +2153,16 @@ does not waste current through idle-high UART lines. When enabled, the
 quality, mode, satellites used/in view, HDOP, position, altitude, RTK age/ratio
 when present, and parser counters. The dashboard Info tab shows the same GPS
 status per module. The production RTK path uses the isolated
-`gps_ntrip_client` on module 1: it opens an NTRIP v2 TLS 1.2 connection using
-the ESP certificate bundle, sends the current GGA to the NEAR mountpoint,
-periodically refreshes that GGA, and writes the received RTCM3 stream to the
-receiver's RXD2 input through UART2/GPIO1. Connection, HTTP, RTCM frame/byte,
-reconnect, error, and freshness counters are exported in `/status` and shown in
-the GPS dashboard. The caster configuration is supplied by `NTRIP_*`
-definitions in `secrets.h`; no credential is emitted to logs. When NTRIP is
+`gps_ntrip_client` on module 1. It opens an NTRIP v2 connection, sends the
+current GGA to the configured mountpoint, periodically refreshes that GGA, and
+writes the received RTCM3 stream to the receiver's RXD2 input through
+UART2/GPIO1. `NTRIP_USE_TLS=1` enables TLS 1.2 with the ESP certificate bundle;
+`NTRIP_USE_TLS=0` selects plain TCP for HTTP casters such as EUREF port 2101.
+Connection, HTTP, RTCM frame/byte, reconnect, error, and freshness counters are
+exported in `/status` and shown in the GPS dashboard. The caster configuration
+is supplied by `NTRIP_*` definitions in the Git-ignored `secrets.h`; no
+credential is emitted to logs. `ntrip.example.txt` documents the equivalent
+non-C-header fields without real credentials. When NTRIP is
 enabled, all five receivers run as independent normal RTK rovers. Module 1 owns
 the only caster session, injects the stream into its local RXD2, and sends the
 same ordered RTCM bytes to the Raspberry Pi relay. The relay fans those bytes

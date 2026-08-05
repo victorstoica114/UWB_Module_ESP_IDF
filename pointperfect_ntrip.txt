@@ -1,7 +1,0 @@
-host=ppntrip.services.u-blox.com
-port=2102
-mountpoint=NEAR-RTCM
-username=zi8YbJyULQ36
-password=D5!qKfmy9^
-latitude=44.3362
-longitude=25.9476

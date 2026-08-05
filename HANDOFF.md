@@ -31,6 +31,9 @@ another PC or in a fresh Codex session.
 
 - `secrets.h` is intentionally ignored by Git. Recreate it from
   `secrets.example.h` on the new PC.
+- NTRIP caster credentials also stay only in `secrets.h`. Set
+  `NTRIP_USE_TLS=0` for plain HTTP casters on port 2101 and `1` for TLS
+  casters; `ntrip.example.txt` contains a credential-free BUCU00ROU0 example.
 - `components/config/include/app_config.h` owns runtime selection, Wi-Fi
   behavior defaults, provisioning flags, wireless log target, and stability-test
   knobs. Wi-Fi SSID/password stay in `secrets.h`.
