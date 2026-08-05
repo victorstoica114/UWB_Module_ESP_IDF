@@ -4,7 +4,6 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <string.h>
 
 #include "board_config.h"
@@ -132,10 +131,8 @@ _Static_assert(UWB_DW3000_SPI_OPERATION_REQUEST_HZ <=
 #define DW3000_CMD_TX 0x01
 #define DW3000_CMD_RX 0x02
 #define DW3000_CMD_DTX 0x03
-#define DW3000_CMD_DTX_RS 0x07
 #define DW3000_CMD_TX_W4R 0x0C
 #define DW3000_CMD_DTX_W4R 0x0D
-#define DW3000_CMD_CLR_IRQS 0x12
 #define DW3000_CMD_DB_TOGGLE 0x13
 
 #define DW3000_SYS_CFG_SUB 0x10
@@ -152,12 +149,10 @@ _Static_assert(UWB_DW3000_SPI_OPERATION_REQUEST_HZ <=
 #define DW3000_INDIRECT_ADDR_B_SUB 0x0C
 #define DW3000_ADDR_OFFSET_B_SUB 0x10
 #define DW3000_RX_TIME_SUB 0x00
-#define DW3000_TX_ANTD_SUB 0x04
 #define DW3000_ACK_RESP_SUB 0x08
 #define DW3000_CHAN_CTRL_SUB 0x14
 #define DW3000_DRX_CAR_INT_SUB 0x29
 #define DW3000_TX_TIME_SUB 0x74
-#define DW3000_STS_CONFIG_LO_SUB 0x12
 #define DW3000_STS_CONFIG_HI_SUB 0x16
 
 #define DW3000_CIA_DIAG_0_SUB 0x20
@@ -203,7 +198,6 @@ _Static_assert(UWB_DW3000_SPI_OPERATION_REQUEST_HZ <=
 
 #define DW3000_STATUS_TXFRS 0x00000080UL
 #define DW3000_STATUS_RX_GOOD_CLEAR_MASK 0x00006F00UL
-#define DW3000_STATUS_RXFR 0x00002000UL
 #define DW3000_STATUS_RXFCG 0x00004000UL
 #define DW3000_STATUS_RXPHE 0x00001000UL
 #define DW3000_STATUS_RXFCE 0x00008000UL
@@ -500,7 +494,6 @@ struct uwb_dw3000_rx_frame {
     uint16_t payload_len;
     uint64_t rx_timestamp;
     int64_t rx_host_time_us;
-    uint32_t rx_gptimer_time_us;
     uint8_t rx_buffer_index;
     uint8_t rx_buffer_status;
     bool clock_offset_valid;
@@ -516,7 +509,6 @@ struct uwb_distance_frame {
     uint16_t sequence;
     uint64_t rx_timestamp;
     int64_t rx_host_time_us;
-    uint32_t rx_gptimer_time_us;
     uint8_t rx_buffer_index;
     uint8_t rx_buffer_status;
     bool clock_offset_valid;
@@ -1051,11 +1043,7 @@ static esp_err_t uwb_flex_tdoa_extend_rx_timestamp32(
     uint32_t low32, uint64_t *timestamp);
 static void uwb_flex_tdoa_log_anchor_result(
     uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
-    uint32_t slot_id,
-    double distance_m, double raw_distance_m, bool clock_offset_valid,
-    double clock_offset_ratio);
-static void uwb_flex_tdoa_record_response_path(
-    const struct uwb_distance_frame *request, size_t responder_index);
+    uint32_t slot_id, double distance_m, double raw_distance_m);
 static void uwb_distance_fill_tag_measurement(
     uint8_t peer_id, uint16_t sequence, uint64_t poll_tx_ts,
     const struct uwb_distance_frame *response, uint64_t final_tx_ts,
@@ -1076,10 +1064,6 @@ static bool s_rx_double_buffer_enabled;
 static uint8_t s_rx_double_buffer_index;
 static bool s_flex_tdoa_anchor_request_buffer_pending;
 static uint32_t s_rx_double_buffer_resync_count;
-static uint32_t s_rx_double_buffer_cia_not_ready_count;
-static uint32_t s_rx_double_buffer_cia_ready_after_retry_count;
-static uint32_t s_rx_double_buffer_release_max_us;
-static uint32_t s_rx_double_buffer_good_to_rearm_max_us;
 static bool s_flex_tdoa_rx_timestamp_reference_valid;
 static uint64_t s_flex_tdoa_rx_timestamp_reference;
 static int64_t s_flex_tdoa_rx_timestamp_reference_host_us;
@@ -1087,7 +1071,6 @@ static bool s_started;
 static bool s_rx_armed;
 static bool s_irq_enabled;
 static TaskHandle_t s_task_handle;
-static volatile uint32_t s_last_dw3000_irq_gptimer_us;
 static uint8_t s_source_id;
 static uint32_t s_device_id;
 static enum uwb_dw3000_runtime_mode s_runtime_mode =
@@ -1138,45 +1121,6 @@ static uint32_t s_flex_tdoa_incomplete_slots_since_summary;
 static bool s_flex_tdoa_tag_request_slot_valid;
 static uint32_t s_flex_tdoa_tag_last_request_slot_id;
 static uint32_t s_flex_tdoa_missed_requests_since_summary;
-static uint32_t s_flex_tdoa_deferred_requests_since_summary;
-static uint32_t s_flex_tdoa_burst_deadline_exits_since_summary;
-static uint32_t s_flex_tdoa_burst_deadline_overshoot_max_us;
-enum uwb_flex_tdoa_tag_rx_phase {
-    UWB_FLEX_TDOA_TAG_RX_INACTIVE = 0,
-    UWB_FLEX_TDOA_TAG_RX_SEEK_REQUEST,
-    UWB_FLEX_TDOA_TAG_RX_RESPONSE_BURST,
-};
-static enum uwb_flex_tdoa_tag_rx_phase s_flex_tdoa_tag_rx_phase;
-static uint32_t s_flex_tdoa_tag_burst_request_gptimer_us;
-static uint32_t s_flex_tdoa_tag_burst_response_start_us;
-static uint32_t s_flex_tdoa_tag_burst_response_subslot_us;
-static uint8_t s_flex_tdoa_tag_burst_responder_count;
-static uint8_t s_flex_tdoa_tag_burst_responder_anchor_index[
-    UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
-static uint32_t s_flex_tdoa_rx_seek_errors_since_summary;
-static uint32_t s_flex_tdoa_rx_burst_errors_since_summary[
-    UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
-static uint32_t s_flex_tdoa_rx_burst_other_errors_since_summary;
-static uint32_t s_flex_tdoa_rx_burst_before_errors_since_summary;
-static uint32_t s_flex_tdoa_rx_burst_after_errors_since_summary;
-static uint32_t s_flex_tdoa_rx_burst_errors_by_anchor[
-    UWB_ANCHOR_SURVEY_MAX_ANCHORS];
-static uint32_t s_flex_tdoa_rx_error_rdb_status_or_since_summary;
-static uint32_t s_flex_tdoa_irq_to_poll_max_us;
-static uint32_t s_flex_tdoa_irq_events_since_summary;
-static uint32_t s_flex_tdoa_irq_fallbacks_since_summary;
-static uint32_t s_flex_tdoa_last_accounted_irq_gptimer_us;
-static uint32_t s_flex_tdoa_rdb_resync_since_summary;
-static uint32_t s_flex_tdoa_rdb_both_good_since_summary;
-static uint32_t s_flex_tdoa_irq_gt_100us_since_summary;
-static uint32_t s_flex_tdoa_irq_gt_200us_since_summary;
-static bool s_flex_tdoa_evc_summary_pending;
-static uint32_t s_flex_tdoa_orphan_responses_by_anchor[
-    UWB_ANCHOR_SURVEY_MAX_ANCHORS];
-static uint32_t s_flex_tdoa_missed_requests_by_anchor[
-    UWB_ANCHOR_SURVEY_MAX_ANCHORS];
-static uint32_t s_flex_tdoa_missing_mask_since_summary[
-    1U << (UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U)];
 static uint32_t s_flex_tdoa_observation_invalid_age_index_since_summary[
     UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
 static TickType_t s_flex_tdoa_observation_summary_tick;
@@ -1194,20 +1138,6 @@ static uint32_t s_flex_tdoa_response_tx_by_initiator[
 static TickType_t s_flex_tdoa_anchor_summary_tick;
 static uint32_t s_flex_tdoa_rx_errors_since_summary;
 static uint32_t s_flex_tdoa_rx_error_status_since_summary;
-static uint32_t s_flex_tdoa_rx_phe_since_summary;
-static uint32_t s_flex_tdoa_rx_fce_since_summary;
-static uint32_t s_flex_tdoa_rx_fsl_since_summary;
-static uint32_t s_flex_tdoa_rx_ciaerr_since_summary;
-static uint32_t s_flex_tdoa_rx_arfe_since_summary;
-static uint32_t s_flex_tdoa_req_to_dtx_count[
-    UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
-static uint64_t s_flex_tdoa_req_to_dtx_sum_us[
-    UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
-static uint32_t s_flex_tdoa_req_to_dtx_max_us[
-    UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U];
-static uint32_t s_flex_tdoa_dtx_arm_max_us;
-static uint32_t s_flex_tdoa_request_arm_max_us;
-static int64_t s_last_delayed_command_host_us;
 static uint32_t s_last_delayed_arm_us;
 
 static bool uwb_dw3000_runtime_from_app_mode(
@@ -1745,11 +1675,6 @@ static void IRAM_ATTR uwb_dw3000_irq_isr_handler(void *arg)
 {
     (void)arg;
     uwb_calibration_timer_start_from_isr();
-    uint64_t irq_gptimer_us = 0;
-    if (s_calibration_timer_running && s_calibration_timer != NULL &&
-        gptimer_get_raw_count(s_calibration_timer, &irq_gptimer_us) == ESP_OK) {
-        s_last_dw3000_irq_gptimer_us = (uint32_t)irq_gptimer_us;
-    }
     BaseType_t higher_priority_task_woken = pdFALSE;
     if (s_task_handle != NULL) {
         vTaskNotifyGiveFromISR(s_task_handle, &higher_priority_task_woken);
@@ -2709,10 +2634,6 @@ static esp_err_t uwb_dw3000_configure_high_rate_rx_double_buffer(void)
     s_rx_double_buffer_index = 0;
     s_flex_tdoa_anchor_request_buffer_pending = false;
     s_rx_double_buffer_resync_count = 0;
-    s_rx_double_buffer_cia_not_ready_count = 0;
-    s_rx_double_buffer_cia_ready_after_retry_count = 0;
-    s_rx_double_buffer_release_max_us = 0;
-    s_rx_double_buffer_good_to_rearm_max_us = 0;
     s_rx_double_buffer_enabled = true;
     ESP_LOGI(TAG,
              "DW3000 high-rate RX double buffer enabled with manual early re-arm mode=%u",
@@ -3206,79 +3127,6 @@ static esp_err_t uwb_dw3000_clear_status(void)
 {
     return uwb_dw3000_write_u32_len(DW3000_REG_GEN_CFG_AES_LOW, 0x44,
                                     DW3000_STATUS_CLEAR_MASK, 4);
-}
-
-static uint32_t uwb_flex_tdoa_note_irq_to_poll(void)
-{
-    uint64_t poll_gptimer_us_64 = 0;
-    const bool poll_time_valid = s_calibration_timer_running &&
-        s_calibration_timer != NULL &&
-        gptimer_get_raw_count(s_calibration_timer,
-                              &poll_gptimer_us_64) == ESP_OK;
-    const uint32_t poll_gptimer_us = (uint32_t)poll_gptimer_us_64;
-    if (s_flex_tdoa_tag_rx_phase == UWB_FLEX_TDOA_TAG_RX_INACTIVE) {
-        return poll_time_valid ? poll_gptimer_us : 0U;
-    }
-    const uint32_t irq_us = s_last_dw3000_irq_gptimer_us;
-    const uint32_t elapsed_us = poll_gptimer_us - irq_us;
-    if (poll_time_valid && irq_us != 0U &&
-        irq_us != s_flex_tdoa_last_accounted_irq_gptimer_us &&
-        elapsed_us < 100000U) {
-        s_flex_tdoa_last_accounted_irq_gptimer_us = irq_us;
-        s_flex_tdoa_irq_events_since_summary++;
-        if (elapsed_us > s_flex_tdoa_irq_to_poll_max_us) {
-            s_flex_tdoa_irq_to_poll_max_us = elapsed_us;
-        }
-        if (elapsed_us > 100U) {
-            s_flex_tdoa_irq_gt_100us_since_summary++;
-        }
-        if (elapsed_us > 200U) {
-            s_flex_tdoa_irq_gt_200us_since_summary++;
-        }
-        return irq_us;
-    }
-    s_flex_tdoa_irq_fallbacks_since_summary++;
-    return poll_time_valid ? poll_gptimer_us : 0U;
-}
-
-static void uwb_flex_tdoa_note_rx_error_phase(uint8_t rdb_status,
-                                               uint32_t error_gptimer_us)
-{
-    if (s_flex_tdoa_tag_rx_phase == UWB_FLEX_TDOA_TAG_RX_INACTIVE) {
-        return;
-    }
-    s_flex_tdoa_rx_error_rdb_status_or_since_summary |= rdb_status;
-    if (s_flex_tdoa_tag_rx_phase !=
-        UWB_FLEX_TDOA_TAG_RX_RESPONSE_BURST) {
-        s_flex_tdoa_rx_seek_errors_since_summary++;
-        return;
-    }
-
-    const uint32_t request_elapsed_us =
-        error_gptimer_us - s_flex_tdoa_tag_burst_request_gptimer_us;
-    if (request_elapsed_us < s_flex_tdoa_tag_burst_response_start_us ||
-        s_flex_tdoa_tag_burst_response_subslot_us == 0U) {
-        s_flex_tdoa_rx_burst_other_errors_since_summary++;
-        s_flex_tdoa_rx_burst_before_errors_since_summary++;
-        return;
-    }
-    const uint32_t response_elapsed_us =
-        request_elapsed_us - s_flex_tdoa_tag_burst_response_start_us;
-    const uint32_t response_index =
-        (uint32_t)response_elapsed_us /
-        s_flex_tdoa_tag_burst_response_subslot_us;
-    if (response_index < s_flex_tdoa_tag_burst_responder_count &&
-        response_index < UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U) {
-        s_flex_tdoa_rx_burst_errors_since_summary[response_index]++;
-        const uint8_t anchor_index =
-            s_flex_tdoa_tag_burst_responder_anchor_index[response_index];
-        if (anchor_index < UWB_ANCHOR_SURVEY_MAX_ANCHORS) {
-            s_flex_tdoa_rx_burst_errors_by_anchor[anchor_index]++;
-        }
-    } else {
-        s_flex_tdoa_rx_burst_other_errors_since_summary++;
-        s_flex_tdoa_rx_burst_after_errors_since_summary++;
-    }
 }
 
 static void uwb_micro_timer_wait_for_event_until(int64_t deadline_us)
@@ -4200,12 +4048,6 @@ static esp_err_t uwb_dw3000_receive_frame_until(
                     ? DW3000_RDB_BUFFER_1_GOOD_MASK
                     : DW3000_RDB_BUFFER_0_GOOD_MASK;
             rx_good = (rdb_status & current_good) != 0U;
-            if (s_flex_tdoa_tag_rx_phase !=
-                    UWB_FLEX_TDOA_TAG_RX_INACTIVE &&
-                (rdb_status & current_good) != 0U &&
-                (rdb_status & other_good) != 0U) {
-                s_flex_tdoa_rdb_both_good_since_summary++;
-            }
             if (!rx_good && (rdb_status & other_good) != 0U) {
                 // Keep the host and DW3000 buffer pointers aligned. A local
                 // index flip alone would read the other buffer without
@@ -4215,10 +4057,6 @@ static esp_err_t uwb_dw3000_receive_frame_until(
                     "double-buffer pointer recovery toggle failed");
                 s_rx_double_buffer_index ^= 1U;
                 s_rx_double_buffer_resync_count++;
-                if (s_flex_tdoa_tag_rx_phase !=
-                    UWB_FLEX_TDOA_TAG_RX_INACTIVE) {
-                    s_flex_tdoa_rdb_resync_since_summary++;
-                }
                 rx_good = true;
                 if (s_rx_double_buffer_resync_count <= 4U ||
                     (s_rx_double_buffer_resync_count % 100U) == 0U) {
@@ -4242,21 +4080,8 @@ static esp_err_t uwb_dw3000_receive_frame_until(
             rx_good = (status & DW3000_RX_GOOD_MASK) != 0;
         }
 
-        uint32_t rx_event_gptimer_us = 0U;
-        if (rx_good ||
-            (status & (DW3000_RX_ERROR_MASK |
-                       DW3000_RX_TIMEOUT_MASK)) != 0U) {
-            rx_event_gptimer_us = uwb_flex_tdoa_note_irq_to_poll();
-        }
-
         if (rx_good) {
-            uint64_t double_buffer_start_us = 0U;
-            if (s_rx_double_buffer_enabled) {
-                (void)uwb_calibration_timer_get_us(
-                    &double_buffer_start_us);
-            }
             frame->rx_host_time_us = esp_timer_get_time();
-            frame->rx_gptimer_time_us = rx_event_gptimer_us;
             frame->rx_buffer_index = s_rx_double_buffer_index;
             frame->rx_buffer_status = rdb_status;
             bool spi_bus_acquired = false;
@@ -4285,20 +4110,6 @@ static esp_err_t uwb_dw3000_receive_frame_until(
                     }
                     s_rx_armed = true;
                     double_buffer_early_rearmed = true;
-                    uint64_t rearmed_us = 0U;
-                    (void)uwb_calibration_timer_get_us(&rearmed_us);
-                    const uint32_t good_to_rearm_us =
-                        rearmed_us >= double_buffer_start_us &&
-                                rearmed_us - double_buffer_start_us <=
-                                    UINT32_MAX
-                            ? (uint32_t)(rearmed_us -
-                                         double_buffer_start_us)
-                            : 0U;
-                    if (good_to_rearm_us >
-                        s_rx_double_buffer_good_to_rearm_max_us) {
-                        s_rx_double_buffer_good_to_rearm_max_us =
-                            good_to_rearm_us;
-                    }
                 }
             }
             // RX_FINFO, RX_TIME and the payload are valid as soon as the
@@ -4371,7 +4182,6 @@ static esp_err_t uwb_dw3000_receive_frame_until(
                     cia_ready = clock_err == ESP_OK &&
                                 (updated_rdb_status & cia_done_mask) != 0U;
                     if (cia_ready) {
-                        s_rx_double_buffer_cia_ready_after_retry_count++;
                         /* The metadata copy preceded CIADONE and may be stale. */
                         clock_err = uwb_dw3000_read_clock_offset_raw(
                             &frame->clock_offset_raw,
@@ -4381,7 +4191,6 @@ static esp_err_t uwb_dw3000_receive_frame_until(
                 frame->clock_offset_valid =
                     cia_ready && clock_err == ESP_OK;
                 if (!frame->clock_offset_valid) {
-                    s_rx_double_buffer_cia_not_ready_count++;
                     if (clock_err == ESP_OK) {
                         clock_err = ESP_ERR_NOT_FINISHED;
                     }
@@ -4403,7 +4212,6 @@ static esp_err_t uwb_dw3000_receive_frame_until(
                         frame->rx_buffer_status |= updated_rdb_status;
                     }
                     if (!cia_ready) {
-                        s_rx_double_buffer_cia_not_ready_count++;
                         clock_err = ESP_ERR_NOT_FINISHED;
                     }
                 }
@@ -4468,17 +4276,6 @@ static esp_err_t uwb_dw3000_receive_frame_until(
                              esp_err_to_name(release_err));
                     return release_err;
                 }
-                uint64_t released_us = 0U;
-                (void)uwb_calibration_timer_get_us(&released_us);
-                const uint32_t release_us =
-                    released_us >= double_buffer_start_us &&
-                            released_us - double_buffer_start_us <= UINT32_MAX
-                        ? (uint32_t)(released_us -
-                                     double_buffer_start_us)
-                        : 0U;
-                if (release_us > s_rx_double_buffer_release_max_us) {
-                    s_rx_double_buffer_release_max_us = release_us;
-                }
             } else {
                 ESP_RETURN_ON_ERROR(uwb_dw3000_clear_status(), TAG,
                                     "clear after distance RX good failed");
@@ -4528,25 +4325,8 @@ static esp_err_t uwb_dw3000_receive_frame_until(
         if ((status & DW3000_RX_ERROR_MASK) != 0) {
             s_rx_error_count++;
             if (s_runtime_mode == UWB_DW3000_RUNTIME_FLEX_TDOA) {
-                uwb_flex_tdoa_note_rx_error_phase(rdb_status,
-                                                   rx_event_gptimer_us);
                 s_flex_tdoa_rx_errors_since_summary++;
                 s_flex_tdoa_rx_error_status_since_summary |= status;
-                if ((status & DW3000_STATUS_RXPHE) != 0U) {
-                    s_flex_tdoa_rx_phe_since_summary++;
-                }
-                if ((status & DW3000_STATUS_RXFCE) != 0U) {
-                    s_flex_tdoa_rx_fce_since_summary++;
-                }
-                if ((status & DW3000_STATUS_RXFSL) != 0U) {
-                    s_flex_tdoa_rx_fsl_since_summary++;
-                }
-                if ((status & DW3000_STATUS_CIAERR) != 0U) {
-                    s_flex_tdoa_rx_ciaerr_since_summary++;
-                }
-                if ((status & DW3000_STATUS_ARFE) != 0U) {
-                    s_flex_tdoa_rx_arfe_since_summary++;
-                }
             } else {
                 ESP_LOGW(TAG, "UWB distance RX error SYS_STATUS=0x%08lx",
                          (unsigned long)status);
@@ -4724,7 +4504,6 @@ static bool uwb_distance_parse_frame(const struct uwb_dw3000_rx_frame *rx_frame,
         frame->sequence = (uint16_t)packet.slot_id;
         frame->rx_timestamp = rx_frame->rx_timestamp;
         frame->rx_host_time_us = rx_frame->rx_host_time_us;
-        frame->rx_gptimer_time_us = rx_frame->rx_gptimer_time_us;
         frame->rx_buffer_index = rx_frame->rx_buffer_index;
         frame->rx_buffer_status = rx_frame->rx_buffer_status;
         frame->clock_offset_valid = rx_frame->clock_offset_valid;
@@ -4751,7 +4530,6 @@ static bool uwb_distance_parse_frame(const struct uwb_dw3000_rx_frame *rx_frame,
     frame->sequence = uwb_distance_get_u16(payload, 8);
     frame->rx_timestamp = rx_frame->rx_timestamp;
     frame->rx_host_time_us = rx_frame->rx_host_time_us;
-    frame->rx_gptimer_time_us = rx_frame->rx_gptimer_time_us;
     frame->rx_buffer_index = rx_frame->rx_buffer_index;
     frame->rx_buffer_status = rx_frame->rx_buffer_status;
     frame->clock_offset_valid = rx_frame->clock_offset_valid;
@@ -6170,8 +5948,8 @@ static size_t uwb_flex_tdoa_responder_index(const uint8_t *responders,
 
 static size_t uwb_flex_tdoa_build_message(
     enum uwb_distance_frame_type type, const uint8_t *destinations,
-    size_t destination_count, uint32_t slot_id, uint16_t sequence,
-    uint32_t processing_dtu, uint8_t payload[UWB_DW3000_PAYLOAD_LEN])
+    size_t destination_count, uint32_t slot_id, uint32_t processing_dtu,
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN])
 {
     if (destination_count > UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U ||
         (destination_count > 0U && destinations == NULL)) {
@@ -6208,7 +5986,6 @@ static size_t uwb_flex_tdoa_build_message(
         packet.previous_slot_id = (uint16_t)previous.slot_id;
     }
     memset(payload, 0, UWB_DW3000_PAYLOAD_LEN);
-    (void)sequence;
     return flextdoa_encode_packet(&packet, payload,
                                   UWB_DW3000_PAYLOAD_LEN);
 }
@@ -6251,14 +6028,14 @@ static bool uwb_flex_tdoa_parse_message(
 
 static size_t uwb_flex_tdoa_build_request(
     const uint8_t *responders, size_t responder_count, uint32_t slot_id,
-    uint16_t sequence, uint8_t payload[UWB_DW3000_PAYLOAD_LEN])
+    uint8_t payload[UWB_DW3000_PAYLOAD_LEN])
 {
     if (responders == NULL || responder_count == 0U) {
         return 0;
     }
     return uwb_flex_tdoa_build_message(
         UWB_DISTANCE_FRAME_FLEX_TDOA_REQ, responders, responder_count,
-        slot_id, sequence, 0U, payload);
+        slot_id, 0U, payload);
 }
 
 static bool uwb_flex_tdoa_parse_request(
@@ -6339,13 +6116,12 @@ static bool uwb_flex_tdoa_parse_local_response_request(
 }
 
 static size_t uwb_flex_tdoa_build_response(
-    const struct uwb_distance_frame *request, uint32_t slot_id,
-    uint32_t reply_dtu,
+    uint32_t slot_id, uint32_t reply_dtu,
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN])
 {
     return uwb_flex_tdoa_build_message(
         UWB_DISTANCE_FRAME_FLEX_TDOA_RESP, NULL, 0U, slot_id,
-        request->sequence, reply_dtu, payload);
+        reply_dtu, payload);
 }
 
 static bool uwb_flex_tdoa_parse_response(
@@ -6406,15 +6182,9 @@ static void uwb_flex_tdoa_accept_piggyback(
             previous_responder_id)) {
         return;
     }
-    const int32_t stored = uwb_flex_tdoa_store_anchor_distance(
+    (void)uwb_flex_tdoa_store_anchor_distance(
         frame->source_id, previous_responder_id, frame->sequence,
         previous_slot_id, previous_distance_mm, previous_distance_mm);
-    if (stored > 0 &&
-        !uwb_anchor_survey_id_in_set(anchor_ids, anchor_count, s_source_id)) {
-        (void)uwb_flex_tdoa_runtime_submit_anchor_range(
-            frame->source_id, previous_responder_id, previous_slot_id,
-            stored);
-    }
 }
 
 static void uwb_flex_tdoa_log_paper_observation(
@@ -6515,10 +6285,6 @@ static void uwb_flex_tdoa_log_paper_observation(
             raw_cfo_ppb, estimated_cfo_ppb, applied_cfo_ppb,
             (uint32_t)observation->responder_reply_dtu,
             cfo_result.sample_count, cfo_result.flags);
-    (void)uwb_flex_tdoa_runtime_submit_anchor_range(
-        observation->initiator_id, observation->responder_id,
-        observation->anchor_distance_slot_id,
-        observation->anchor_distance_mm);
     (void)uwb_flex_tdoa_runtime_submit_observation(
         tag_id, observation->initiator_id, observation->responder_id,
         observation->slot_id, uwb_distance_meters_to_mm(diff_m));
@@ -6533,10 +6299,9 @@ static void uwb_flex_tdoa_log_paper_observation(
         (void)wireless_log_service_submit('I', TAG,
                  "FLEX_TDOA tag n=%lu drop=%lu slots=%lu/%lu "
                  "inv=%lu(age=%lu idx=%lu/%lu/%lu cfo=%lu ord=%lu) "
-                 "req_gap=%lu defer_req=%lu deadline=%lu/%luus "
+                 "req_gap=%lu "
                  "req=%lu/%lu/%lu/%lu resp=%lu/%lu/%lu/%lu "
-                 "rxerr=%lu/0x%08lx(phe=%lu fce=%lu fsl=%lu cia=%lu arfe=%lu) "
-                 "rdb_release_gpt_us=%lu cia=%lu",
+                 "rxerr=%lu/0x%08lx",
                  (unsigned long)s_flex_tdoa_observations_since_summary,
                  (unsigned long)s_flex_tdoa_observation_drops_since_summary,
                  (unsigned long)s_flex_tdoa_complete_slots_since_summary,
@@ -6549,9 +6314,6 @@ static void uwb_flex_tdoa_log_paper_observation(
                  (unsigned long)s_flex_tdoa_observation_invalid_cfo_since_summary,
                  (unsigned long)s_flex_tdoa_observation_invalid_order_since_summary,
                  (unsigned long)s_flex_tdoa_missed_requests_since_summary,
-                 (unsigned long)s_flex_tdoa_deferred_requests_since_summary,
-                 (unsigned long)s_flex_tdoa_burst_deadline_exits_since_summary,
-                 (unsigned long)s_flex_tdoa_burst_deadline_overshoot_max_us,
                  (unsigned long)s_flex_tdoa_tag_requests_by_anchor[0],
                  (unsigned long)s_flex_tdoa_tag_requests_by_anchor[1],
                  (unsigned long)s_flex_tdoa_tag_requests_by_anchor[2],
@@ -6561,102 +6323,12 @@ static void uwb_flex_tdoa_log_paper_observation(
                  (unsigned long)s_flex_tdoa_tag_responses_by_anchor[2],
                  (unsigned long)s_flex_tdoa_tag_responses_by_anchor[3],
                  (unsigned long)s_flex_tdoa_rx_errors_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_error_status_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_phe_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_fce_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_fsl_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_ciaerr_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_arfe_since_summary,
-                 (unsigned long)s_rx_double_buffer_release_max_us,
-                 (unsigned long)s_rx_double_buffer_cia_not_ready_count);
-        (void)wireless_log_service_submit(
-                 'I', TAG,
-                 "FLEX_TDOA RX metric good_to_rearm_gpt_us=%lu "
-                 "cia_ready_after_retry=%lu "
-                 "missing_mask[1..7]=%lu/%lu/%lu/%lu/%lu/%lu/%lu",
-                 (unsigned long)s_rx_double_buffer_good_to_rearm_max_us,
-                 (unsigned long)
-                     s_rx_double_buffer_cia_ready_after_retry_count,
-                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[1],
-                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[2],
-                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[3],
-                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[4],
-                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[5],
-                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[6],
-                 (unsigned long)s_flex_tdoa_missing_mask_since_summary[7]);
-        (void)wireless_log_service_submit(
-                 'I', TAG,
-                 "FLEX_TDOA RX phase seek_err=%lu rxerr_window=%lu/%lu/%lu "
-                 "before=%lu after=%lu burst_anchor=%lu/%lu/%lu/%lu",
-                 (unsigned long)s_flex_tdoa_rx_seek_errors_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_burst_errors_since_summary[0],
-                 (unsigned long)s_flex_tdoa_rx_burst_errors_since_summary[1],
-                 (unsigned long)s_flex_tdoa_rx_burst_errors_since_summary[2],
-                 (unsigned long)s_flex_tdoa_rx_burst_before_errors_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_burst_after_errors_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_burst_errors_by_anchor[0],
-                 (unsigned long)s_flex_tdoa_rx_burst_errors_by_anchor[1],
-                 (unsigned long)s_flex_tdoa_rx_burst_errors_by_anchor[2],
-                 (unsigned long)s_flex_tdoa_rx_burst_errors_by_anchor[3]);
-        (void)wireless_log_service_submit(
-                 'I', TAG,
-                 "FLEX_TDOA RX link orphan_resp=%lu/%lu/%lu/%lu "
-                 "miss_req=%lu/%lu/%lu/%lu",
-                 (unsigned long)s_flex_tdoa_orphan_responses_by_anchor[0],
-                 (unsigned long)s_flex_tdoa_orphan_responses_by_anchor[1],
-                 (unsigned long)s_flex_tdoa_orphan_responses_by_anchor[2],
-                 (unsigned long)s_flex_tdoa_orphan_responses_by_anchor[3],
-                 (unsigned long)s_flex_tdoa_missed_requests_by_anchor[0],
-                 (unsigned long)s_flex_tdoa_missed_requests_by_anchor[1],
-                 (unsigned long)s_flex_tdoa_missed_requests_by_anchor[2],
-                 (unsigned long)s_flex_tdoa_missed_requests_by_anchor[3]);
-        (void)wireless_log_service_submit(
-                 'I', TAG,
-                 "FLEX_TDOA RX buffer irq_gpt=%lu/%lu "
-                 "irq_poll_max_gpt_us=%lu irq_gt100=%lu irq_gt200=%lu "
-                 "rdb_err_or=0x%02lx rdb_resync=%lu rdb_both_good=%lu",
-                 (unsigned long)s_flex_tdoa_irq_events_since_summary,
-                 (unsigned long)s_flex_tdoa_irq_fallbacks_since_summary,
-                 (unsigned long)s_flex_tdoa_irq_to_poll_max_us,
-                 (unsigned long)s_flex_tdoa_irq_gt_100us_since_summary,
-                 (unsigned long)s_flex_tdoa_irq_gt_200us_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_error_rdb_status_or_since_summary,
-                 (unsigned long)s_flex_tdoa_rdb_resync_since_summary,
-                 (unsigned long)s_flex_tdoa_rdb_both_good_since_summary);
-        /* Snapshot only after all frames already copied for this burst have
-         * been processed. The single-span SPI read is deliberately kept out
-         * of the response collection path. */
-        s_flex_tdoa_evc_summary_pending = true;
+                 (unsigned long)s_flex_tdoa_rx_error_status_since_summary);
         s_flex_tdoa_observations_since_summary = 0;
         s_flex_tdoa_observation_drops_since_summary = 0;
         s_flex_tdoa_complete_slots_since_summary = 0;
         s_flex_tdoa_incomplete_slots_since_summary = 0;
         s_flex_tdoa_missed_requests_since_summary = 0;
-        s_flex_tdoa_deferred_requests_since_summary = 0;
-        s_flex_tdoa_burst_deadline_exits_since_summary = 0;
-        s_flex_tdoa_burst_deadline_overshoot_max_us = 0;
-        s_flex_tdoa_rx_seek_errors_since_summary = 0;
-        memset(s_flex_tdoa_rx_burst_errors_since_summary, 0,
-               sizeof(s_flex_tdoa_rx_burst_errors_since_summary));
-        s_flex_tdoa_rx_burst_other_errors_since_summary = 0;
-        s_flex_tdoa_rx_burst_before_errors_since_summary = 0;
-        s_flex_tdoa_rx_burst_after_errors_since_summary = 0;
-        memset(s_flex_tdoa_rx_burst_errors_by_anchor, 0,
-               sizeof(s_flex_tdoa_rx_burst_errors_by_anchor));
-        s_flex_tdoa_rx_error_rdb_status_or_since_summary = 0;
-        s_flex_tdoa_irq_to_poll_max_us = 0;
-        s_flex_tdoa_irq_events_since_summary = 0;
-        s_flex_tdoa_irq_fallbacks_since_summary = 0;
-        s_flex_tdoa_irq_gt_100us_since_summary = 0;
-        s_flex_tdoa_irq_gt_200us_since_summary = 0;
-        s_flex_tdoa_rdb_resync_since_summary = 0;
-        s_flex_tdoa_rdb_both_good_since_summary = 0;
-        memset(s_flex_tdoa_orphan_responses_by_anchor, 0,
-               sizeof(s_flex_tdoa_orphan_responses_by_anchor));
-        memset(s_flex_tdoa_missed_requests_by_anchor, 0,
-               sizeof(s_flex_tdoa_missed_requests_by_anchor));
-        memset(s_flex_tdoa_missing_mask_since_summary, 0,
-               sizeof(s_flex_tdoa_missing_mask_since_summary));
         s_flex_tdoa_observation_invalid_since_summary = 0;
         s_flex_tdoa_observation_invalid_age_since_summary = 0;
         s_flex_tdoa_observation_invalid_cfo_since_summary = 0;
@@ -6669,15 +6341,6 @@ static void uwb_flex_tdoa_log_paper_observation(
                sizeof(s_flex_tdoa_tag_responses_by_anchor));
         s_flex_tdoa_rx_errors_since_summary = 0;
         s_flex_tdoa_rx_error_status_since_summary = 0;
-        s_flex_tdoa_rx_phe_since_summary = 0;
-        s_flex_tdoa_rx_fce_since_summary = 0;
-        s_flex_tdoa_rx_fsl_since_summary = 0;
-        s_flex_tdoa_rx_ciaerr_since_summary = 0;
-        s_flex_tdoa_rx_arfe_since_summary = 0;
-        s_rx_double_buffer_release_max_us = 0;
-        s_rx_double_buffer_good_to_rearm_max_us = 0;
-        s_rx_double_buffer_cia_not_ready_count = 0;
-        s_rx_double_buffer_cia_ready_after_retry_count = 0;
         s_flex_tdoa_observation_summary_tick = now;
     }
     ESP_LOGD(TAG,
@@ -6692,70 +6355,10 @@ static void uwb_flex_tdoa_log_paper_observation(
     memset(observation, 0, sizeof(*observation));
 }
 
-static void uwb_flex_tdoa_maybe_log_evc(void)
-{
-    if (!s_flex_tdoa_evc_summary_pending) {
-        return;
-    }
-    s_flex_tdoa_evc_summary_pending = false;
-
-#if APP_UWB_EVENT_COUNTERS_ENABLED
-    uint64_t started_us = 0;
-    uint64_t finished_us = 0;
-    (void)uwb_calibration_timer_get_us(&started_us);
-    struct uwb_event_counters event_counters = {0};
-    const esp_err_t read_err =
-        uwb_dw3000_read_event_counters(&event_counters);
-    const esp_err_t clear_err = read_err == ESP_OK
-        ? uwb_dw3000_write_u32_len(
-              DW3000_REG_DIG_DIAG, DW3000_EVC_CTRL_SUB,
-              DW3000_EVC_CTRL_CLR_BIT_MASK, 1U)
-        : read_err;
-    const esp_err_t enable_err = clear_err == ESP_OK
-        ? uwb_dw3000_write_u32_len(
-              DW3000_REG_DIG_DIAG, DW3000_EVC_CTRL_SUB,
-              DW3000_EVC_CTRL_EN_BIT_MASK, 1U)
-        : clear_err;
-    (void)uwb_calibration_timer_get_us(&finished_us);
-    if (read_err != ESP_OK || clear_err != ESP_OK || enable_err != ESP_OK) {
-        ESP_LOGW(TAG,
-                 "FLEX_TDOA EVC snapshot failed read=%s clear=%s enable=%s",
-                 esp_err_to_name(read_err), esp_err_to_name(clear_err),
-                 esp_err_to_name(enable_err));
-        return;
-    }
-    const uint32_t snapshot_us =
-        finished_us >= started_us && finished_us - started_us <= UINT32_MAX
-            ? (uint32_t)(finished_us - started_us)
-            : 0U;
-    (void)wireless_log_service_submit(
-             'I', TAG,
-             "FLEX_TDOA EVC fcg=%u fce=%u phe=%u rse=%u sfdt=%u "
-             "pto=%u fwto=%u ffr=%u ovr=%u prej=%u cpqe=%u "
-             "vwarn=%u snapshot_gpt_us=%lu",
-             (unsigned)event_counters.fcg,
-             (unsigned)event_counters.fce,
-             (unsigned)event_counters.phe,
-             (unsigned)event_counters.rse,
-             (unsigned)event_counters.sfdt,
-             (unsigned)event_counters.pto,
-             (unsigned)event_counters.fwto,
-             (unsigned)event_counters.ffr,
-             (unsigned)event_counters.ovr,
-             (unsigned)event_counters.prej,
-             (unsigned)event_counters.cpqe,
-             (unsigned)event_counters.vwarn,
-             (unsigned long)snapshot_us);
-#endif
-}
-
 static void uwb_flex_tdoa_record_incomplete_mask(uint16_t missing_mask)
 {
-    s_flex_tdoa_incomplete_slots_since_summary++;
-    if (missing_mask <
-        (sizeof(s_flex_tdoa_missing_mask_since_summary) /
-         sizeof(s_flex_tdoa_missing_mask_since_summary[0]))) {
-        s_flex_tdoa_missing_mask_since_summary[missing_mask]++;
+    if (missing_mask != 0U) {
+        s_flex_tdoa_incomplete_slots_since_summary++;
     }
 }
 
@@ -6806,46 +6409,6 @@ static void uwb_flex_tdoa_tag_note_request_slot(uint32_t slot_id)
         if (delta > 1 && delta <= 4096) {
             s_flex_tdoa_missed_requests_since_summary +=
                 (uint32_t)(delta - 1);
-            const app_runtime_config_t *config = app_runtime_config_get();
-            if (config != NULL && config->flex_tdoa_slot_count > 0U) {
-                const uint32_t missing_count = (uint32_t)(delta - 1);
-                const uint32_t complete_cycles =
-                    missing_count / config->flex_tdoa_slot_count;
-                const uint32_t remainder =
-                    missing_count % config->flex_tdoa_slot_count;
-                for (uint32_t schedule_index = 0U;
-                     schedule_index < config->flex_tdoa_slot_count;
-                     ++schedule_index) {
-                    uint32_t occurrences = complete_cycles;
-                    for (uint32_t remainder_index = 0U;
-                         remainder_index < remainder;
-                         ++remainder_index) {
-                        const uint32_t missing_schedule_index =
-                            (s_flex_tdoa_tag_last_request_slot_id + 1U +
-                             remainder_index) %
-                            config->flex_tdoa_slot_count;
-                        if (missing_schedule_index == schedule_index) {
-                            occurrences++;
-                        }
-                    }
-                    if (occurrences == 0U) {
-                        continue;
-                    }
-                    const uint8_t initiator_id =
-                        config->flex_tdoa_slot_initiator_ids[
-                            schedule_index];
-                    for (size_t anchor_index = 0U;
-                         anchor_index < config->anchor_count;
-                         ++anchor_index) {
-                        if (config->anchor_ids[anchor_index] ==
-                            initiator_id) {
-                            s_flex_tdoa_missed_requests_by_anchor[
-                                anchor_index] += occurrences;
-                            break;
-                        }
-                    }
-                }
-            }
         }
     }
     s_flex_tdoa_tag_last_request_slot_id = slot_id;
@@ -7064,22 +6627,6 @@ static size_t uwb_flex_tdoa_tag_collect_response_burst(
     if (collection_us == 0U) {
         return 0U;
     }
-    s_flex_tdoa_tag_rx_phase = UWB_FLEX_TDOA_TAG_RX_RESPONSE_BURST;
-    s_flex_tdoa_tag_burst_request_gptimer_us =
-        request->rx_gptimer_time_us;
-    s_flex_tdoa_tag_burst_response_start_us =
-        timing.request_subslot_us + timing.request_process_us;
-    s_flex_tdoa_tag_burst_response_subslot_us =
-        timing.response_subslot_us;
-    s_flex_tdoa_tag_burst_responder_count = responder_count;
-    for (uint8_t index = 0U; index < responder_count; ++index) {
-        const size_t anchor_index = uwb_anchor_survey_id_index(
-            anchor_ids, anchor_count, responder_ids[index]);
-        s_flex_tdoa_tag_burst_responder_anchor_index[index] =
-            anchor_index < UWB_ANCHOR_SURVEY_MAX_ANCHORS
-                ? (uint8_t)anchor_index
-                : UINT8_MAX;
-    }
     /* Stop exactly at the end of the response train. The receive path uses
      * the existing 1 MHz GPTimer because a FreeRTOS tick is 10 ms in this
      * build. A deferred-request guard remains as a lossless safety net if a
@@ -7096,16 +6643,6 @@ static size_t uwb_flex_tdoa_tag_collect_response_burst(
         const esp_err_t err =
             uwb_distance_receive_next_until(&candidate, deadline_us);
         if (err == ESP_ERR_TIMEOUT || err == ESP_ERR_NOT_FINISHED) {
-            const int64_t overshoot_us = esp_timer_get_time() - deadline_us;
-            s_flex_tdoa_burst_deadline_exits_since_summary++;
-            if (overshoot_us > 0 &&
-                (uint64_t)overshoot_us >
-                    s_flex_tdoa_burst_deadline_overshoot_max_us) {
-                s_flex_tdoa_burst_deadline_overshoot_max_us =
-                    overshoot_us > UINT32_MAX
-                        ? UINT32_MAX
-                        : (uint32_t)overshoot_us;
-            }
             break;
         }
         if (err != ESP_OK) {
@@ -7121,7 +6658,6 @@ static size_t uwb_flex_tdoa_tag_collect_response_burst(
              */
             *deferred_request = candidate;
             *deferred_request_valid = true;
-            s_flex_tdoa_deferred_requests_since_summary++;
             break;
         }
         if (candidate.type != UWB_DISTANCE_FRAME_FLEX_TDOA_RESP) {
@@ -7144,7 +6680,6 @@ static size_t uwb_flex_tdoa_tag_collect_response_burst(
             }
         }
     }
-    s_flex_tdoa_tag_rx_phase = UWB_FLEX_TDOA_TAG_RX_SEEK_REQUEST;
     return collected;
 }
 
@@ -7157,39 +6692,6 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
     s_flex_tdoa_tag_request_slot_valid = false;
     s_flex_tdoa_tag_last_request_slot_id = 0U;
     s_flex_tdoa_missed_requests_since_summary = 0U;
-    s_flex_tdoa_deferred_requests_since_summary = 0U;
-    s_flex_tdoa_burst_deadline_exits_since_summary = 0U;
-    s_flex_tdoa_burst_deadline_overshoot_max_us = 0U;
-    s_flex_tdoa_tag_rx_phase = UWB_FLEX_TDOA_TAG_RX_SEEK_REQUEST;
-    s_flex_tdoa_tag_burst_request_gptimer_us = 0U;
-    s_flex_tdoa_tag_burst_response_start_us = 0U;
-    s_flex_tdoa_tag_burst_response_subslot_us = 0U;
-    s_flex_tdoa_tag_burst_responder_count = 0U;
-    memset(s_flex_tdoa_tag_burst_responder_anchor_index, UINT8_MAX,
-           sizeof(s_flex_tdoa_tag_burst_responder_anchor_index));
-    s_flex_tdoa_rx_seek_errors_since_summary = 0U;
-    memset(s_flex_tdoa_rx_burst_errors_since_summary, 0,
-           sizeof(s_flex_tdoa_rx_burst_errors_since_summary));
-    s_flex_tdoa_rx_burst_other_errors_since_summary = 0U;
-    s_flex_tdoa_rx_burst_before_errors_since_summary = 0U;
-    s_flex_tdoa_rx_burst_after_errors_since_summary = 0U;
-    memset(s_flex_tdoa_rx_burst_errors_by_anchor, 0,
-           sizeof(s_flex_tdoa_rx_burst_errors_by_anchor));
-    s_flex_tdoa_rx_error_rdb_status_or_since_summary = 0U;
-    s_flex_tdoa_irq_to_poll_max_us = 0U;
-    s_flex_tdoa_irq_events_since_summary = 0U;
-    s_flex_tdoa_irq_fallbacks_since_summary = 0U;
-    s_flex_tdoa_last_accounted_irq_gptimer_us =
-        s_last_dw3000_irq_gptimer_us;
-    s_flex_tdoa_rdb_resync_since_summary = 0U;
-    s_flex_tdoa_rdb_both_good_since_summary = 0U;
-    s_flex_tdoa_irq_gt_100us_since_summary = 0U;
-    s_flex_tdoa_irq_gt_200us_since_summary = 0U;
-    s_flex_tdoa_evc_summary_pending = false;
-    memset(s_flex_tdoa_orphan_responses_by_anchor, 0,
-           sizeof(s_flex_tdoa_orphan_responses_by_anchor));
-    memset(s_flex_tdoa_missed_requests_by_anchor, 0,
-           sizeof(s_flex_tdoa_missed_requests_by_anchor));
     const app_runtime_config_t *config = app_runtime_config_get();
     flextdoa_cfo_estimator_reset(&s_flex_tdoa_cfo_estimator);
     if (config != NULL) {
@@ -7208,14 +6710,6 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
         ESP_LOGW(TAG, "FlexTDOA 1 MHz deadline timer unavailable: %s",
                  esp_err_to_name(timer_err));
     }
-#if APP_UWB_EVENT_COUNTERS_ENABLED
-    const esp_err_t event_counter_err =
-        uwb_dw3000_configure_event_counters();
-    if (event_counter_err != ESP_OK) {
-        ESP_LOGW(TAG, "FlexTDOA EVC reset failed: %s",
-                 esp_err_to_name(event_counter_err));
-    }
-#endif
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
              "FlexTDOA radio-passive tag active: tag_id=%u anchors=[%u,%u,%u,%u] rx_slice=%u ms",
@@ -7278,18 +6772,7 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
                     memset(s_flex_tdoa_tag_observations, 0,
                            sizeof(s_flex_tdoa_tag_observations));
                 }
-                uwb_flex_tdoa_maybe_log_evc();
             } else {
-                if (frame.type == UWB_DISTANCE_FRAME_FLEX_TDOA_RESP) {
-                    const size_t anchor_index =
-                        uwb_anchor_survey_id_index(
-                            anchor_ids, anchor_count, frame.source_id);
-                    if (anchor_index <
-                        UWB_ANCHOR_SURVEY_MAX_ANCHORS) {
-                        s_flex_tdoa_orphan_responses_by_anchor[
-                            anchor_index]++;
-                    }
-                }
                 uwb_flex_tdoa_tag_process_frame(
                     &frame, s_flex_tdoa_tag_observations, tag_id,
                     anchor_ids, anchor_count);
@@ -7301,7 +6784,6 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
                      esp_err_to_name(err));
         }
     }
-    s_flex_tdoa_tag_rx_phase = UWB_FLEX_TDOA_TAG_RX_INACTIVE;
 }
 
 static esp_err_t uwb_flex_tdoa_send_response_preparsed(
@@ -7336,16 +6818,14 @@ static esp_err_t uwb_flex_tdoa_send_response_preparsed(
 
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
     const size_t payload_len = uwb_flex_tdoa_build_response(
-        request, slot_id, (uint32_t)reply_dtu, payload);
+        slot_id, (uint32_t)reply_dtu, payload);
     if (payload_len == 0U) {
         return ESP_ERR_INVALID_SIZE;
     }
 
-    uint64_t actual_tx_ts = 0;
     const esp_err_t err = uwb_dw3000_send_payload_delayed_timeout(
         payload, payload_len, response_due, UWB_FLEX_TDOA_TX_TIMEOUT_MS,
-        NULL, &actual_tx_ts);
-    uwb_flex_tdoa_record_response_path(request, responder_index);
+        NULL, NULL);
     if (err != ESP_OK) {
         ESP_LOGW(TAG,
                  "FLEX_TDOA response failed pair=%u-%u seq=%u slot=%lu index=%u delay=%lu us: %s",
@@ -7362,25 +6842,11 @@ static esp_err_t uwb_flex_tdoa_send_response_preparsed(
         s_flex_tdoa_response_tx_by_initiator[initiator_index]++;
     }
 
-    const uint64_t actual_reply_dtu =
-        request->rx_timestamp != 0U
-            ? uwb_distance_delta_ts(actual_tx_ts, request->rx_timestamp)
-            : reply_dtu;
-    if (request->rx_timestamp != 0U && actual_reply_dtu != reply_dtu) {
-        ESP_LOGW(TAG,
-                 "FLEX_TDOA relative TX mismatch pair=%u-%u seq=%u expected=0x%010llx actual=0x%010llx",
-                 (unsigned)request->source_id, (unsigned)s_source_id,
-                 (unsigned)request->sequence,
-                 (unsigned long long)reply_dtu,
-                 (unsigned long long)actual_reply_dtu);
-    }
-
     ESP_LOGD(TAG,
-             "FLEX_TDOA response pair=%u-%u seq=%u slot=%lu index=%u reply=0x%010llx tx=0x%010llx",
+             "FLEX_TDOA response pair=%u-%u seq=%u slot=%lu index=%u reply=0x%010llx",
              (unsigned)request->source_id, (unsigned)s_source_id,
              (unsigned)request->sequence, (unsigned long)slot_id,
-             (unsigned)responder_index, (unsigned long long)reply_dtu,
-             (unsigned long long)actual_tx_ts);
+             (unsigned)responder_index, (unsigned long long)reply_dtu);
     return ESP_OK;
 }
 
@@ -7505,8 +6971,7 @@ static void uwb_flex_tdoa_handle_response_measurement(
         }
         uwb_flex_tdoa_log_anchor_result(
             initiator_id, responder_id, frame->sequence, slot_id,
-            distance_m, raw_distance_m, frame->clock_offset_valid,
-            clock_offset_ratio);
+            distance_m, raw_distance_m);
     }
 
     if (s_flex_tdoa_local_request.responses_seen < UINT8_MAX) {
@@ -7516,14 +6981,11 @@ static void uwb_flex_tdoa_handle_response_measurement(
         s_flex_tdoa_local_request.responder_count) {
         s_flex_tdoa_local_request.active = false;
     }
-    (void)responder_index;
 }
 
 static void uwb_flex_tdoa_log_anchor_result(
     uint8_t initiator_id, uint8_t responder_id, uint16_t sequence,
-    uint32_t slot_id,
-    double distance_m, double raw_distance_m, bool clock_offset_valid,
-    double clock_offset_ratio)
+    uint32_t slot_id, double distance_m, double raw_distance_m)
 {
     const bool queued = wireless_telemetry_service_submit_flex_anchor_range(
         initiator_id, responder_id, sequence, slot_id,
@@ -7537,24 +6999,10 @@ static void uwb_flex_tdoa_log_anchor_result(
     const TickType_t now = xTaskGetTickCount();
     if (s_flex_tdoa_anchor_summary_tick == 0 ||
         now - s_flex_tdoa_anchor_summary_tick >= pdMS_TO_TICKS(1000)) {
-        const uint32_t path_avg_0 = s_flex_tdoa_req_to_dtx_count[0] != 0U
-                                        ? (uint32_t)(s_flex_tdoa_req_to_dtx_sum_us[0] /
-                                                     s_flex_tdoa_req_to_dtx_count[0])
-                                        : 0U;
-        const uint32_t path_avg_1 = s_flex_tdoa_req_to_dtx_count[1] != 0U
-                                        ? (uint32_t)(s_flex_tdoa_req_to_dtx_sum_us[1] /
-                                                     s_flex_tdoa_req_to_dtx_count[1])
-                                        : 0U;
-        const uint32_t path_avg_2 = s_flex_tdoa_req_to_dtx_count[2] != 0U
-                                        ? (uint32_t)(s_flex_tdoa_req_to_dtx_sum_us[2] /
-                                                     s_flex_tdoa_req_to_dtx_count[2])
-                                        : 0U;
         (void)wireless_log_service_submit('I', TAG,
                  "FLEX_TDOA anchor n=%lu drop=%lu incoh=%lu idx=%lu/%lu/%lu "
                  "txresp=%lu/%lu/%lu/%lu "
-                 "rxerr=%lu/0x%08lx(phe=%lu fce=%lu fsl=%lu cia=%lu arfe=%lu) "
-                 "rdb=%lu cia=%lu "
-                 "path_us=%lu/%lu,%lu/%lu,%lu/%lu arm_max=%lu req_arm_max=%lu",
+                 "rxerr=%lu/0x%08lx",
                  (unsigned long)s_flex_tdoa_anchor_results_since_summary,
                  (unsigned long)s_flex_tdoa_anchor_drops_since_summary,
                  (unsigned long)s_flex_tdoa_anchor_incoherent_since_summary,
@@ -7566,29 +7014,7 @@ static void uwb_flex_tdoa_log_anchor_result(
                  (unsigned long)s_flex_tdoa_response_tx_by_initiator[2],
                  (unsigned long)s_flex_tdoa_response_tx_by_initiator[3],
                  (unsigned long)s_flex_tdoa_rx_errors_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_error_status_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_phe_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_fce_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_fsl_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_ciaerr_since_summary,
-                 (unsigned long)s_flex_tdoa_rx_arfe_since_summary,
-                 (unsigned long)s_rx_double_buffer_release_max_us,
-                 (unsigned long)s_rx_double_buffer_cia_not_ready_count,
-                 (unsigned long)path_avg_0,
-                 (unsigned long)s_flex_tdoa_req_to_dtx_max_us[0],
-                 (unsigned long)path_avg_1,
-                 (unsigned long)s_flex_tdoa_req_to_dtx_max_us[1],
-                 (unsigned long)path_avg_2,
-                 (unsigned long)s_flex_tdoa_req_to_dtx_max_us[2],
-                 (unsigned long)s_flex_tdoa_dtx_arm_max_us,
-                 (unsigned long)s_flex_tdoa_request_arm_max_us);
-        (void)wireless_log_service_submit(
-                 'I', TAG,
-                 "FLEX_TDOA RX metric good_to_rearm_us=%lu "
-                 "cia_ready_after_retry=%lu",
-                 (unsigned long)s_rx_double_buffer_good_to_rearm_max_us,
-                 (unsigned long)
-                     s_rx_double_buffer_cia_ready_after_retry_count);
+                 (unsigned long)s_flex_tdoa_rx_error_status_since_summary);
         s_flex_tdoa_anchor_results_since_summary = 0;
         s_flex_tdoa_anchor_drops_since_summary = 0;
         s_flex_tdoa_anchor_incoherent_since_summary = 0;
@@ -7598,53 +7024,7 @@ static void uwb_flex_tdoa_log_anchor_result(
                sizeof(s_flex_tdoa_response_tx_by_initiator));
         s_flex_tdoa_rx_errors_since_summary = 0;
         s_flex_tdoa_rx_error_status_since_summary = 0;
-        s_flex_tdoa_rx_phe_since_summary = 0;
-        s_flex_tdoa_rx_fce_since_summary = 0;
-        s_flex_tdoa_rx_fsl_since_summary = 0;
-        s_flex_tdoa_rx_ciaerr_since_summary = 0;
-        s_flex_tdoa_rx_arfe_since_summary = 0;
-        s_rx_double_buffer_release_max_us = 0;
-        s_rx_double_buffer_good_to_rearm_max_us = 0;
-        s_rx_double_buffer_cia_not_ready_count = 0;
-        s_rx_double_buffer_cia_ready_after_retry_count = 0;
-        memset(s_flex_tdoa_req_to_dtx_count, 0,
-               sizeof(s_flex_tdoa_req_to_dtx_count));
-        memset(s_flex_tdoa_req_to_dtx_sum_us, 0,
-               sizeof(s_flex_tdoa_req_to_dtx_sum_us));
-        memset(s_flex_tdoa_req_to_dtx_max_us, 0,
-               sizeof(s_flex_tdoa_req_to_dtx_max_us));
-        s_flex_tdoa_dtx_arm_max_us = 0;
-        s_flex_tdoa_request_arm_max_us = 0;
         s_flex_tdoa_anchor_summary_tick = now;
-    }
-    (void)clock_offset_valid;
-}
-
-static void uwb_flex_tdoa_record_response_path(
-    const struct uwb_distance_frame *request, size_t responder_index)
-{
-    if (request == NULL ||
-        responder_index >= UWB_ANCHOR_SURVEY_MAX_ANCHORS - 1U ||
-        request->rx_host_time_us <= 0 ||
-        s_last_delayed_command_host_us < request->rx_host_time_us) {
-        return;
-    }
-
-    const uint64_t elapsed_us =
-        (uint64_t)(s_last_delayed_command_host_us -
-                   request->rx_host_time_us);
-    if (elapsed_us > UINT32_MAX) {
-        return;
-    }
-
-    s_flex_tdoa_req_to_dtx_count[responder_index]++;
-    s_flex_tdoa_req_to_dtx_sum_us[responder_index] += elapsed_us;
-    if (elapsed_us > s_flex_tdoa_req_to_dtx_max_us[responder_index]) {
-        s_flex_tdoa_req_to_dtx_max_us[responder_index] =
-            (uint32_t)elapsed_us;
-    }
-    if (s_last_delayed_arm_us > s_flex_tdoa_dtx_arm_max_us) {
-        s_flex_tdoa_dtx_arm_max_us = s_last_delayed_arm_us;
     }
 }
 
@@ -7659,7 +7039,7 @@ static esp_err_t uwb_flex_tdoa_send_request(
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
     const size_t payload_len =
         uwb_flex_tdoa_build_request(responders, responder_count, slot_id,
-                                    sequence, payload);
+                                    payload);
     if (payload_len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -7911,10 +7291,6 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
                                        const uint8_t *anchor_ids,
                                        size_t anchor_count)
 {
-    /* Diagnostic counters below are meaningful only while the passive tag is
-     * receiving.  A hot protocol/role switch must not leave the ISR path
-     * attributed to the tag's last receive phase. */
-    s_flex_tdoa_tag_rx_phase = UWB_FLEX_TDOA_TAG_RX_INACTIVE;
     const app_runtime_config_t *config = app_runtime_config_get();
     struct uwb_flex_tdoa_schedule schedule = {0};
     bool owns_slot = false;
@@ -7978,9 +7354,6 @@ static void uwb_flex_tdoa_anchor_loop(uint8_t bootstrap_id,
                 anchor_ids, anchor_count, slot_id,
                 (uint16_t)(slot_id & 0xFFFFU), schedule.next_request_radio_ts,
                 &actual_tx_ts);
-            if (s_last_delayed_arm_us > s_flex_tdoa_request_arm_max_us) {
-                s_flex_tdoa_request_arm_max_us = s_last_delayed_arm_us;
-            }
             if (err != ESP_OK) {
                 schedule.synced = false;
                 schedule.missed_slots++;
@@ -10924,7 +10297,6 @@ static esp_err_t uwb_dw3000_send_payload_delayed_timeout(
     }
 
     const int64_t arm_start_us = esp_timer_get_time();
-    s_last_delayed_command_host_us = 0;
     s_last_delayed_arm_us = 0;
     const uint32_t delayed_time_word =
         uwb_dw3000_delayed_time_word(tx_timestamp);
@@ -10966,9 +10338,7 @@ static esp_err_t uwb_dw3000_send_payload_delayed_timeout(
     if (err != ESP_OK) {
         goto release_bus;
     }
-    s_last_delayed_command_host_us = esp_timer_get_time();
-    s_last_delayed_arm_us = (uint32_t)(
-        s_last_delayed_command_host_us - arm_start_us);
+    s_last_delayed_arm_us = (uint32_t)(esp_timer_get_time() - arm_start_us);
 
     uint32_t status = 0;
     failed_step = "SYS_STATUS after delayed TX";

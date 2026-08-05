@@ -23,8 +23,10 @@ incomplete.
 - CI-CR now rotates the physical responder order independently across frames.
   Missing response indices are consequently balanced instead of repeatedly
   assigning one anchor to the final response position.
-- RX summaries report PHE, FCE, FSL, CIAERR and ARFE separately, plus exact
-  request gaps inferred from the FlexTDOA slot sequence.
+- The campaign firmware reported PHE, FCE, FSL, CIAERR and ARFE separately,
+  plus exact request gaps inferred from the FlexTDOA slot sequence. Those
+  deep diagnostics were removed after the fault-isolation campaign; the
+  compact production summary retains aggregate RX errors and request gaps.
 - An incomplete slot publishes every valid raw observation it contains. The
   local solver accepts only 10/12 or 11/12 frames; 9/12 frames remain rejected
   because they can represent a completely missed request/initiator slot.
@@ -170,15 +172,27 @@ regression.
   a much more relaxed 1000/1000 us response/processing pair while diagnosing
   the residual PHY loss.
 
-## Build and live state
+## Campaign build and current live state
 
-Deployed binary on the RPi:
+The diagnostic binary used to produce this report remains on the RPi as:
 
 `/home/pi/Documents/UWB/build-ds-rewrite/uwb_esp_idf_flex_loss_diag_gpt_v4.bin`
 
 SHA-256:
 
 `be360ae75507a3a8e3a551955fcb7c6ee3c5a55cf36628cfb5fb0c95ed7b895c`
+
+After the campaign, the temporary IRQ-to-poll, RX-phase, subslot, EVC,
+double-buffer timing and missing-mask instrumentation was removed. The
+protocol timing, CFO correction, partial-frame recovery, precise GPTimer
+deadlines, deferred REQUEST handling, RDB recovery and solver gates were kept.
+The cleanup binary deployed on all five modules is:
+
+`/home/pi/Documents/UWB/build-ds-rewrite/uwb_esp_idf_flextdoa_cleanup_canary.bin`
+
+SHA-256:
+
+`06497720d2d86a3c0ce4adaaf7794e7c3d1087828c33ba2f86f39abe1e44eb54`
 
 Expected live state on all five modules:
 

@@ -21,14 +21,6 @@ bool uwb_flex_tdoa_runtime_reload_geometry(void)
     return flextdoa_solver_service_reload_geometry();
 }
 
-bool uwb_flex_tdoa_runtime_submit_anchor_range(
-    uint8_t anchor_a_id, uint8_t anchor_b_id, uint32_t slot_id,
-    int32_t distance_mm)
-{
-    return flextdoa_solver_service_submit_anchor_range(
-        anchor_a_id, anchor_b_id, slot_id, distance_mm);
-}
-
 bool uwb_flex_tdoa_runtime_submit_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
     uint32_t slot_id, int32_t difference_mm)

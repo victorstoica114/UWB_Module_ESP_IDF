@@ -249,14 +249,13 @@ static void flex_solver_close_frame(struct flex_solver_state *state)
     }
 
     if (!complete) {
-        struct flextdoa_solution_gate_metrics gate_metrics = {0};
         const enum flextdoa_solution_gate_result gate =
             flextdoa_algmin_gate_solution_2d(
                 state->anchors, state->anchor_count,
                 state->frame_solver_observations,
                 solver_observation_count, result.x_m, result.y_m,
                 state->anchor_count, FLEX_SOLVER_PARTIAL_MAX_CONDITION,
-                &gate_metrics);
+                NULL);
         if (gate != FLEXTDOA_SOLUTION_GATE_OK) {
             if (gate == FLEXTDOA_SOLUTION_GATE_RANK_DEFICIENT ||
                 gate == FLEXTDOA_SOLUTION_GATE_ILL_CONDITIONED) {
@@ -510,18 +509,6 @@ static bool flex_solver_submit(const struct flex_solver_item *item)
         return false;
     }
     return true;
-}
-
-bool flextdoa_solver_service_submit_anchor_range(
-    uint8_t anchor_a_id, uint8_t anchor_b_id, uint32_t slot_id,
-    int32_t distance_mm)
-{
-    (void)anchor_a_id;
-    (void)anchor_b_id;
-    (void)slot_id;
-    /* Anchor-to-anchor ranging remains available for diagnostics and packet
-     * piggybacking, but paper AlgMin uses only fixed configured geometry. */
-    return distance_mm > 0;
 }
 
 bool flextdoa_solver_service_reload_geometry(void)

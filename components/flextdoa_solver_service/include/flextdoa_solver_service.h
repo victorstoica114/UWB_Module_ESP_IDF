@@ -13,9 +13,6 @@ extern "C" {
 esp_err_t flextdoa_solver_service_start(void);
 bool flextdoa_solver_service_reload_geometry(void);
 bool flextdoa_solver_service_reset(void);
-bool flextdoa_solver_service_submit_anchor_range(
-    uint8_t anchor_a_id, uint8_t anchor_b_id, uint32_t slot_id,
-    int32_t distance_mm);
 bool flextdoa_solver_service_submit_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
     uint32_t slot_id, int32_t difference_mm);
