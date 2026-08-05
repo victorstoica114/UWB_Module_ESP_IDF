@@ -338,6 +338,10 @@ publishes the range and raw independent-frame position over Wi-Fi. The
 dashboard displays that result and the host tools can independently replay it
 for RTK comparison; no temporal position filter is applied.
 
+Native DS protocol version 2 protects every packet with CRC-16/CCITT-FALSE.
+This application-level CRC also detects payload corruption on the DW3000-to-ESP
+SPI path after the radio has already accepted the over-the-air frame check.
+
 The tag schedules anchors sequentially:
 
 ```text

@@ -799,8 +799,10 @@ static void format_native_ds_pipeline_stats_json(
         "\"final_tx_errors\":%lu,"
         "\"result_timeouts\":%lu,\"result_rx_errors\":%lu,"
         "\"result_tx_errors\":%lu,"
-        "\"invalid_frames\":%lu,\"delayed_tx_errors\":%lu,"
+        "\"invalid_frames\":%lu,\"crc_errors\":%lu,"
+        "\"delayed_tx_errors\":%lu,"
         "\"rejected_ranges\":%lu,\"slot_overruns\":%lu,"
+        "\"rx_timestamp_cia_invalid\":%lu,"
         "\"last_distance_mm\":%ld,\"tag_anchor_count\":%u,"
         "\"tag_anchors\":[",
         (unsigned long)stats->poll_tx_count,
@@ -824,9 +826,11 @@ static void format_native_ds_pipeline_stats_json(
         (unsigned long)stats->result_rx_error_count,
         (unsigned long)stats->result_tx_error_count,
         (unsigned long)stats->invalid_frame_count,
+        (unsigned long)stats->crc_error_count,
         (unsigned long)stats->delayed_tx_error_count,
         (unsigned long)stats->rejected_range_count,
         (unsigned long)stats->slot_overrun_count,
+        (unsigned long)stats->rx_timestamp_cia_invalid_count,
         (long)stats->last_distance_mm,
         (unsigned)anchor_count);
     if (prefix_len < 0 || (size_t)prefix_len >= buffer_size) {

@@ -4,8 +4,12 @@
 #include <string.h>
 
 #define NATIVE_DS_HEADER_SIZE 18U
-#define NATIVE_DS_FINAL_SIZE (NATIVE_DS_HEADER_SIZE + 15U)
-#define NATIVE_DS_RESULT_SIZE (NATIVE_DS_HEADER_SIZE + 4U)
+#define NATIVE_DS_CRC_SIZE 2U
+#define NATIVE_DS_BASIC_SIZE (NATIVE_DS_HEADER_SIZE + NATIVE_DS_CRC_SIZE)
+#define NATIVE_DS_FINAL_SIZE \
+    (NATIVE_DS_HEADER_SIZE + 15U + NATIVE_DS_CRC_SIZE)
+#define NATIVE_DS_RESULT_SIZE \
+    (NATIVE_DS_HEADER_SIZE + 4U + NATIVE_DS_CRC_SIZE)
 #define NATIVE_DS_TIME_UNIT_SECONDS 15.650040064102564e-12
 #define NATIVE_DS_SPEED_OF_LIGHT_MPS 299702547.0
 
@@ -25,6 +29,32 @@ static uint32_t get_u32(const uint8_t *payload, size_t offset)
            ((uint32_t)payload[offset + 1U] << 8U) |
            ((uint32_t)payload[offset + 2U] << 16U) |
            ((uint32_t)payload[offset + 3U] << 24U);
+}
+
+static void put_u16(uint8_t *payload, size_t offset, uint16_t value)
+{
+    payload[offset] = (uint8_t)(value & 0xffU);
+    payload[offset + 1U] = (uint8_t)(value >> 8U);
+}
+
+static uint16_t get_u16(const uint8_t *payload, size_t offset)
+{
+    return (uint16_t)payload[offset] |
+           (uint16_t)((uint16_t)payload[offset + 1U] << 8U);
+}
+
+static uint16_t crc16_ccitt_false(const uint8_t *payload, size_t length)
+{
+    uint16_t crc = 0xffffU;
+    for (size_t index = 0U; index < length; ++index) {
+        crc ^= (uint16_t)payload[index] << 8U;
+        for (uint8_t bit = 0U; bit < 8U; ++bit) {
+            crc = (crc & 0x8000U) != 0U
+                      ? (uint16_t)((crc << 1U) ^ 0x1021U)
+                      : (uint16_t)(crc << 1U);
+        }
+    }
+    return crc;
 }
 
 static void put_ts40(uint8_t *payload, size_t offset, uint64_t timestamp)
@@ -51,7 +81,7 @@ size_t uwb_native_ds_protocol_packet_size(
     switch (type) {
     case UWB_NATIVE_DS_MESSAGE_POLL:
     case UWB_NATIVE_DS_MESSAGE_RESPONSE:
-        return NATIVE_DS_HEADER_SIZE;
+        return NATIVE_DS_BASIC_SIZE;
     case UWB_NATIVE_DS_MESSAGE_FINAL:
         return NATIVE_DS_FINAL_SIZE;
     case UWB_NATIVE_DS_MESSAGE_RESULT:
@@ -101,11 +131,13 @@ bool uwb_native_ds_protocol_encode(
     } else if (packet->type == UWB_NATIVE_DS_MESSAGE_RESULT) {
         put_u32(payload, NATIVE_DS_HEADER_SIZE, packet->distance_mm);
     }
+    put_u16(payload, size - NATIVE_DS_CRC_SIZE,
+            crc16_ccitt_false(payload, size - NATIVE_DS_CRC_SIZE));
     *payload_len = size;
     return true;
 }
 
-bool uwb_native_ds_protocol_decode(
+enum uwb_native_ds_decode_result uwb_native_ds_protocol_decode_ex(
     const uint8_t *payload, size_t payload_len,
     struct uwb_native_ds_packet *packet)
 {
@@ -113,12 +145,17 @@ bool uwb_native_ds_protocol_decode(
         payload_len < NATIVE_DS_HEADER_SIZE ||
         memcmp(payload, s_magic, sizeof(s_magic)) != 0 ||
         payload[4] != UWB_NATIVE_DS_PROTOCOL_VERSION) {
-        return false;
+        return UWB_NATIVE_DS_DECODE_INVALID;
     }
     const enum uwb_native_ds_message_type type =
         (enum uwb_native_ds_message_type)payload[5];
-    if (payload_len != uwb_native_ds_protocol_packet_size(type)) {
-        return false;
+    const size_t expected_size = uwb_native_ds_protocol_packet_size(type);
+    if (payload_len != expected_size) {
+        return UWB_NATIVE_DS_DECODE_INVALID;
+    }
+    if (get_u16(payload, expected_size - NATIVE_DS_CRC_SIZE) !=
+        crc16_ccitt_false(payload, expected_size - NATIVE_DS_CRC_SIZE)) {
+        return UWB_NATIVE_DS_DECODE_CRC_ERROR;
     }
     memset(packet, 0, sizeof(*packet));
     packet->type = type;
@@ -129,7 +166,7 @@ bool uwb_native_ds_protocol_decode(
     packet->session_id = get_u32(payload, 10U);
     packet->frame_id = get_u32(payload, 14U);
     if (!packet_header_valid(packet)) {
-        return false;
+        return UWB_NATIVE_DS_DECODE_INVALID;
     }
     if (type == UWB_NATIVE_DS_MESSAGE_FINAL) {
         packet->poll_tx_timestamp = get_ts40(payload, NATIVE_DS_HEADER_SIZE);
@@ -140,7 +177,15 @@ bool uwb_native_ds_protocol_decode(
     } else if (type == UWB_NATIVE_DS_MESSAGE_RESULT) {
         packet->distance_mm = get_u32(payload, NATIVE_DS_HEADER_SIZE);
     }
-    return true;
+    return UWB_NATIVE_DS_DECODE_OK;
+}
+
+bool uwb_native_ds_protocol_decode(
+    const uint8_t *payload, size_t payload_len,
+    struct uwb_native_ds_packet *packet)
+{
+    return uwb_native_ds_protocol_decode_ex(payload, payload_len, packet) ==
+           UWB_NATIVE_DS_DECODE_OK;
 }
 
 uint64_t uwb_native_ds_protocol_timestamp_delta(uint64_t later,

@@ -53,8 +53,13 @@ static esp_err_t receive_matching(
             return err;
         }
         struct uwb_native_ds_packet packet = {0};
-        if (!uwb_native_ds_protocol_decode(
-                received.payload, received.payload_len, &packet)) {
+        const enum uwb_native_ds_decode_result decode_result =
+            uwb_native_ds_protocol_decode_ex(
+                received.payload, received.payload_len, &packet);
+        if (decode_result != UWB_NATIVE_DS_DECODE_OK) {
+            if (decode_result == UWB_NATIVE_DS_DECODE_CRC_ERROR) {
+                s_stats.crc_error_count++;
+            }
             continue;
         }
         if (packet.type == expected_type &&
@@ -403,8 +408,13 @@ static void run_anchor(const struct uwb_native_ds_config *config,
             .rx_timestamp =
                 received.rx_timestamp & UWB_NATIVE_DS_TIMESTAMP_MASK,
         };
-        if (!uwb_native_ds_protocol_decode(
-                received.payload, received.payload_len, &poll.packet)) {
+        const enum uwb_native_ds_decode_result decode_result =
+            uwb_native_ds_protocol_decode_ex(
+                received.payload, received.payload_len, &poll.packet);
+        if (decode_result != UWB_NATIVE_DS_DECODE_OK) {
+            if (decode_result == UWB_NATIVE_DS_DECODE_CRC_ERROR) {
+                s_stats.crc_error_count++;
+            }
             continue;
         }
         if (poll.packet.type != UWB_NATIVE_DS_MESSAGE_POLL ||

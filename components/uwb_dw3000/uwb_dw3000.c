@@ -198,6 +198,7 @@ _Static_assert(UWB_DW3000_SPI_OPERATION_REQUEST_HZ <=
 
 #define DW3000_STATUS_TXFRS 0x00000080UL
 #define DW3000_STATUS_RX_GOOD_CLEAR_MASK 0x00006F00UL
+#define DW3000_STATUS_CIADONE 0x00000400UL
 #define DW3000_STATUS_RXFCG 0x00004000UL
 #define DW3000_STATUS_RXPHE 0x00001000UL
 #define DW3000_STATUS_RXFCE 0x00008000UL
@@ -1089,6 +1090,7 @@ static volatile uint32_t s_tx_error_count;
 static volatile uint32_t s_rx_count;
 static volatile uint32_t s_rx_error_count;
 static volatile uint32_t s_rx_ignored_count;
+static volatile uint32_t s_native_ds_rx_timestamp_cia_invalid_count;
 static volatile uint8_t s_last_rx_source_id;
 static volatile uint32_t s_last_rx_sequence;
 static uint16_t s_antenna_delay = APP_UWB_ANTENNA_DELAY_DEFAULT;
@@ -4091,6 +4093,23 @@ static esp_err_t uwb_dw3000_receive_frame_until(
         }
 
         if (rx_good) {
+            if (s_runtime_mode == UWB_DW3000_RUNTIME_RANGING &&
+                (((status & DW3000_STATUS_CIADONE) == 0U) ||
+                 ((status & DW3000_STATUS_CIAERR) != 0U))) {
+                s_native_ds_rx_timestamp_cia_invalid_count++;
+                s_rx_error_count++;
+                ESP_LOGW(TAG,
+                         "Native DS RX rejected before RX_TIME: "
+                         "SYS_STATUS=0x%08lx cia_invalid=%lu",
+                         (unsigned long)status,
+                         (unsigned long)
+                             s_native_ds_rx_timestamp_cia_invalid_count);
+                ESP_RETURN_ON_ERROR(
+                    uwb_dw3000_clear_status(), TAG,
+                    "clear after Native DS CIA-invalid RX failed");
+                s_rx_armed = false;
+                return ESP_ERR_INVALID_RESPONSE;
+            }
             frame->rx_host_time_us = esp_timer_get_time();
             frame->rx_buffer_index = s_rx_double_buffer_index;
             frame->rx_buffer_status = rdb_status;
@@ -10068,6 +10087,7 @@ static void native_ds_set_ready(void *context)
 
 static void uwb_dw3000_ranging_loop(void)
 {
+    s_native_ds_rx_timestamp_cia_invalid_count = 0U;
     uint8_t anchor_ids[UWB_NATIVE_DS_MAX_ANCHORS] = {0};
     const size_t anchor_count = uwb_anchor_survey_anchor_ids(anchor_ids);
     const app_runtime_config_t *runtime = app_runtime_config_get();
@@ -10998,4 +11018,8 @@ void uwb_dw3000_get_native_ds_pipeline_stats(
     struct uwb_native_ds_pipeline_stats *stats)
 {
     uwb_native_ds_twr_get_stats(stats);
+    if (stats != NULL) {
+        stats->rx_timestamp_cia_invalid_count =
+            s_native_ds_rx_timestamp_cia_invalid_count;
+    }
 }

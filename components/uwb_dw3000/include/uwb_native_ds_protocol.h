@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define UWB_NATIVE_DS_PROTOCOL_MAX_PACKET_SIZE 40U
-#define UWB_NATIVE_DS_PROTOCOL_VERSION 1U
+#define UWB_NATIVE_DS_PROTOCOL_VERSION 2U
 #define UWB_NATIVE_DS_TIMESTAMP_MASK ((1ULL << 40U) - 1ULL)
 
 enum uwb_native_ds_message_type {
@@ -22,6 +22,12 @@ enum uwb_native_ds_message_type {
 
 enum uwb_native_ds_exchange_kind {
     UWB_NATIVE_DS_EXCHANGE_TAG_RANGE = 1,
+};
+
+enum uwb_native_ds_decode_result {
+    UWB_NATIVE_DS_DECODE_INVALID = 0,
+    UWB_NATIVE_DS_DECODE_OK = 1,
+    UWB_NATIVE_DS_DECODE_CRC_ERROR = 2,
 };
 
 struct uwb_native_ds_packet {
@@ -45,6 +51,10 @@ bool uwb_native_ds_protocol_encode(
     size_t capacity, size_t *payload_len);
 
 bool uwb_native_ds_protocol_decode(
+    const uint8_t *payload, size_t payload_len,
+    struct uwb_native_ds_packet *packet);
+
+enum uwb_native_ds_decode_result uwb_native_ds_protocol_decode_ex(
     const uint8_t *payload, size_t payload_len,
     struct uwb_native_ds_packet *packet);
 
