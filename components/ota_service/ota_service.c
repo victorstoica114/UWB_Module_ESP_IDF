@@ -1568,6 +1568,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"bno085_i2c_scl_elapsed_us\":%lu,"
         "\"bno085_i2c_scl_measured_hz\":%lu,"
         "\"bno085_report_count\":%lu,"
+        "\"bno085_gyro_rv_report_count\":%lu,"
         "\"bno085_packet_count\":%lu,"
         "\"bno085_input_packet_count\":%lu,"
         "\"bno085_timebase_count\":%lu,"
@@ -2144,6 +2145,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)bno_snapshot.i2c_scl_elapsed_us,
         (unsigned long)bno_snapshot.i2c_scl_measured_hz,
         (unsigned long)bno_snapshot.report_count,
+        (unsigned long)bno_snapshot.gyro_rv_report_count,
         (unsigned long)bno_snapshot.packet_count,
         (unsigned long)bno_snapshot.input_packet_count,
         (unsigned long)bno_snapshot.timebase_count,

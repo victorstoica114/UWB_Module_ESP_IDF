@@ -69,6 +69,8 @@ enum {
     WIRELESS_TELEMETRY_RECONNECT_MS = 2000,
     WIRELESS_TELEMETRY_WIFI_WAIT_MS = 500,
     WIRELESS_TELEMETRY_QUEUE_WAIT_MS = 20,
+    WIRELESS_TELEMETRY_ACCEL_COALESCE_MS = 30,
+    WIRELESS_TELEMETRY_ACCEL_COALESCE_SAMPLES = 4,
     WIRELESS_TELEMETRY_SEND_TIMEOUT_MS = 1000,
 };
 
@@ -879,6 +881,10 @@ static bool wireless_telemetry_take_batch(
     uint16_t binary_frame_count = 0;
     uint8_t binary_stream_type = 0;
     uint8_t binary_sample_len = 0;
+    const bool coalesce_accel =
+        item.type == WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL;
+    const TickType_t coalesce_started = xTaskGetTickCount();
+    uint32_t accel_samples = 0;
 
     while (true) {
         uint8_t item_stream_type = 0;
@@ -886,6 +892,9 @@ static bool wireless_telemetry_take_batch(
         const bool binary_item = wireless_telemetry_binary_item_info(
             item.type, &item_stream_type, &item_sample_len);
         if (binary_item) {
+            if (item.type == WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL) {
+                accel_samples++;
+            }
             if (binary_frame_open &&
                 item_stream_type != binary_stream_type) {
                 wireless_telemetry_finish_binary_frame(
@@ -940,7 +949,17 @@ static bool wireless_telemetry_take_batch(
             break;
         }
 
-        if (!wireless_telemetry_dequeue(&item, 0)) {
+        TickType_t next_wait = 0;
+        if (coalesce_accel &&
+            accel_samples < WIRELESS_TELEMETRY_ACCEL_COALESCE_SAMPLES) {
+            const TickType_t elapsed = xTaskGetTickCount() - coalesce_started;
+            const TickType_t window =
+                pdMS_TO_TICKS(WIRELESS_TELEMETRY_ACCEL_COALESCE_MS);
+            if (elapsed < window) {
+                next_wait = window - elapsed;
+            }
+        }
+        if (!wireless_telemetry_dequeue(&item, next_wait)) {
             break;
         }
     }
