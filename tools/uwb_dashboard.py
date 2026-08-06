@@ -115,7 +115,9 @@ TELEMETRY_STREAM_NATIVE_DS_POSITION = 15
 TELEMETRY_STREAM_NATIVE_DS_GEOMETRY = 16
 TELEMETRY_STREAM_FLEX_GEOMETRY = 17
 TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2 = 18
+TELEMETRY_STREAM_BNO085_IMU = 19
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
+TELEMETRY_IMU_SAMPLE_LEN = 42
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
 TELEMETRY_FLEX_OBSERVATION_V2_SAMPLE_LEN = 49
 TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
@@ -126,6 +128,7 @@ TELEMETRY_PASSIVE_DS_POSITION_V3_SAMPLE_LEN = 49
 TELEMETRY_PASSIVE_DS_POSITION_V4_SAMPLE_LEN = 63
 TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN = 24
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
+TELEMETRY_IMU_STRUCT = struct.Struct("<IIiiiIhhhhhhhBBBB")
 TELEMETRY_FLEX_OBSERVATION_STRUCT = struct.Struct("<IIiiiHBBBB")
 TELEMETRY_FLEX_OBSERVATION_V2_STRUCT = struct.Struct(
     "<IIiiiiiiiIHBBBBHB"
@@ -148,6 +151,7 @@ TELEMETRY_PASSIVE_DS_GEOMETRY_STRUCT = struct.Struct("<IIiiiBBBB")
 ANCHOR_RANGE_HISTORY_MAX_AGE_SEC = 30.0
 TELEMETRY_STREAM_SAMPLE_SIZES = {
     TELEMETRY_STREAM_BNO085_ACCEL: TELEMETRY_ACCEL_SAMPLE_LEN,
+    TELEMETRY_STREAM_BNO085_IMU: TELEMETRY_IMU_SAMPLE_LEN,
     TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION:
         TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN,
     TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2:
@@ -677,6 +681,52 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "z": z / 1000.0,
                     "accuracy": int(accuracy),
                     "reports": int(reports),
+                }
+            )
+        elif stream_type == TELEMETRY_STREAM_BNO085_IMU:
+            (
+                uptime_ms,
+                accel_reports,
+                x,
+                y,
+                z,
+                gyro_reports,
+                quat_i_q14,
+                quat_j_q14,
+                quat_k_q14,
+                quat_real_q14,
+                gyro_x_q10,
+                gyro_y_q10,
+                gyro_z_q10,
+                accuracy,
+                accel_time_flags,
+                gyro_time_flags,
+                imu_flags,
+            ) = TELEMETRY_IMU_STRUCT.unpack_from(frame, offset)
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    # Keep the established acceleration topic so storage, the
+                    # /api/accel endpoint and graph history remain unchanged.
+                    "topic": "bno085.accel",
+                    "x": x / 1000.0,
+                    "y": y / 1000.0,
+                    "z": z / 1000.0,
+                    "accuracy": int(accuracy),
+                    "reports": int(accel_reports),
+                    "gyro_reports": int(gyro_reports),
+                    "quat_i": quat_i_q14 / 16384.0,
+                    "quat_j": quat_j_q14 / 16384.0,
+                    "quat_k": quat_k_q14 / 16384.0,
+                    "quat_real": quat_real_q14 / 16384.0,
+                    "gyro_x": gyro_x_q10 / 1024.0,
+                    "gyro_y": gyro_y_q10 / 1024.0,
+                    "gyro_z": gyro_z_q10 / 1024.0,
+                    "accel_time_flags": int(accel_time_flags),
+                    "gyro_time_flags": int(gyro_time_flags),
+                    "imu_flags": int(imu_flags),
+                    "imu_valid": bool(imu_flags & 1),
                 }
             )
         elif stream_type == TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2:
@@ -5820,6 +5870,50 @@ function accelMagnitude(sample) {
   return Math.sqrt(sample.x * sample.x + sample.y * sample.y + sample.z * sample.z);
 }
 
+function imuDisplayEstimate(sample) {
+  if (!sample || !sample.imu_valid) return null;
+  let qx = Number(sample.quat_i);
+  let qy = Number(sample.quat_j);
+  let qz = Number(sample.quat_k);
+  let qw = Number(sample.quat_real);
+  const norm = Math.hypot(qx, qy, qz, qw);
+  if (![qx, qy, qz, qw, norm].every(Number.isFinite) || norm < 1e-6) return null;
+  qx /= norm;
+  qy /= norm;
+  qz /= norm;
+  qw /= norm;
+
+  const roll = Math.atan2(
+    2 * (qw * qx + qy * qz),
+    1 - 2 * (qx * qx + qy * qy),
+  );
+  const pitchTerm = Math.max(-1, Math.min(1, 2 * (qw * qy - qz * qx)));
+  const pitch = Math.asin(pitchTerm);
+  const yaw = Math.atan2(
+    2 * (qw * qz + qx * qy),
+    1 - 2 * (qy * qy + qz * qz),
+  );
+
+  // GyroRV expresses body orientation relative to the BNO reference frame.
+  // Rotate +g back into the body frame, then remove it from calibrated accel.
+  const standardGravity = 9.80665;
+  const gravityBody = {
+    x: standardGravity * 2 * (qx * qz - qw * qy),
+    y: standardGravity * 2 * (qy * qz + qw * qx),
+    z: standardGravity * (1 - 2 * (qx * qx + qy * qy)),
+  };
+  return {
+    rollDeg: roll * 180 / Math.PI,
+    pitchDeg: pitch * 180 / Math.PI,
+    yawDeg: yaw * 180 / Math.PI,
+    linearBody: {
+      x: Number(sample.x) - gravityBody.x,
+      y: Number(sample.y) - gravityBody.y,
+      z: Number(sample.z) - gravityBody.z,
+    },
+  };
+}
+
 function fmtAccel(value) {
   return Number.isFinite(value) ? value.toFixed(2) : "-";
 }
@@ -5941,6 +6035,9 @@ function ensureAccelCharts() {
         <div><span>Z</span><b id="latestZ${moduleId}">-</b></div>
       </div>
       <div class="latest-extra" id="latestExtra${moduleId}">no samples yet</div>
+      <div class="latest-extra" id="latestOrientation${moduleId}">RPY waiting - BNO reference, not ENU-calibrated</div>
+      <div class="latest-extra" id="latestGyro${moduleId}">gyro waiting - body frame</div>
+      <div class="latest-extra" id="latestLinear${moduleId}">linear acceleration waiting - body frame</div>
     </div>`).join("");
 
   state.chartsReady = true;
@@ -9421,6 +9518,7 @@ function renderAccelGraphs() {
       continue;
     }
     const magnitude = accelMagnitude(latest);
+    const imu = imuDisplayEstimate(latest);
     document.getElementById(`latestX${moduleId}`).textContent = fmtAccel(latest.x);
     document.getElementById(`latestY${moduleId}`).textContent = fmtAccel(latest.y);
     document.getElementById(`latestZ${moduleId}`).textContent = fmtAccel(latest.z);
@@ -9429,6 +9527,21 @@ function renderAccelGraphs() {
       : "";
     document.getElementById(`latestExtra${moduleId}`).textContent =
       `|a| ${fmtAccel(magnitude)} m/s^2 · accuracy ${latest.accuracy} · ${fmtAge(latest.received_at)}${rateText}`;
+    const orientationEl = document.getElementById(`latestOrientation${moduleId}`);
+    const gyroEl = document.getElementById(`latestGyro${moduleId}`);
+    const linearEl = document.getElementById(`latestLinear${moduleId}`);
+    if (imu) {
+      orientationEl.textContent =
+        `RPY ${fmtAccel(imu.rollDeg)} / ${fmtAccel(imu.pitchDeg)} / ${fmtAccel(imu.yawDeg)} deg · body→BNO reference, not ENU-calibrated`;
+      gyroEl.textContent =
+        `gyro ${fmtAccel(Number(latest.gyro_x))} / ${fmtAccel(Number(latest.gyro_y))} / ${fmtAccel(Number(latest.gyro_z))} rad/s · body frame`;
+      linearEl.textContent =
+        `linear est. ${fmtAccel(imu.linearBody.x)} / ${fmtAccel(imu.linearBody.y)} / ${fmtAccel(imu.linearBody.z)} m/s^2 · body frame`;
+    } else {
+      orientationEl.textContent = "RPY unavailable · legacy accel or invalid IMU sample · not ENU-calibrated";
+      gyroEl.textContent = "gyro unavailable · body frame";
+      linearEl.textContent = "linear acceleration unavailable · body frame";
+    }
   }
 }
 

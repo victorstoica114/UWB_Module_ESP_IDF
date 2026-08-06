@@ -48,6 +48,14 @@ bool wireless_telemetry_service_submit(const char *topic, const char *format,
 bool wireless_telemetry_service_submit_bno085_accel(
     int32_t x_milli_mps2, int32_t y_milli_mps2, int32_t z_milli_mps2,
     uint8_t accuracy, uint32_t report_count);
+bool wireless_telemetry_service_submit_bno085_imu(
+    int32_t accel_x_milli_mps2, int32_t accel_y_milli_mps2,
+    int32_t accel_z_milli_mps2, uint32_t accel_sequence,
+    uint8_t accel_accuracy, uint8_t accel_time_flags,
+    uint32_t gyro_rv_sequence, int16_t quat_i_q14, int16_t quat_j_q14,
+    int16_t quat_k_q14, int16_t quat_real_q14, int16_t gyro_x_q10,
+    int16_t gyro_y_q10, int16_t gyro_z_q10, uint8_t gyro_time_flags,
+    bool gyro_rv_valid);
 bool wireless_telemetry_service_submit_flex_tdoa_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
     uint8_t responder_index, uint16_t sequence, uint32_t slot_id,

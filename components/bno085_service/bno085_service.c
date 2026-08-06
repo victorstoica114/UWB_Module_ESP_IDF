@@ -832,9 +832,26 @@ static void bno085_emit_telemetry(const bno085_accel_sample_t *sample)
     }
 
     s_last_telemetry_ticks = sample->fusion_time_ticks;
-    if (wireless_telemetry_service_submit_bno085_accel(
+    bno085_gyro_rv_sample_t gyro_rv = {0};
+    bool gyro_rv_valid = false;
+    portENTER_CRITICAL(&s_sample_lock);
+    if (s_gyro_rv_ring_count > 0) {
+        const size_t latest =
+            (s_gyro_rv_ring_write + BNO085_GYRO_RV_RING_CAPACITY - 1U) %
+            BNO085_GYRO_RV_RING_CAPACITY;
+        gyro_rv = s_gyro_rv_ring[latest];
+        gyro_rv_valid = gyro_rv.sequence != 0;
+    }
+    portEXIT_CRITICAL(&s_sample_lock);
+
+    if (wireless_telemetry_service_submit_bno085_imu(
             sample->x_milli_mps2, sample->y_milli_mps2,
-            sample->z_milli_mps2, sample->accuracy, sample->sequence)) {
+            sample->z_milli_mps2, sample->sequence, sample->accuracy,
+            sample->time_flags, gyro_rv.sequence, gyro_rv.quat_i_q14,
+            gyro_rv.quat_j_q14, gyro_rv.quat_k_q14,
+            gyro_rv.quat_real_q14, gyro_rv.gyro_x_q10,
+            gyro_rv.gyro_y_q10, gyro_rv.gyro_z_q10,
+            gyro_rv.time_flags, gyro_rv_valid)) {
         s_telemetry_submit_count++;
     } else {
         s_telemetry_drop_count++;
