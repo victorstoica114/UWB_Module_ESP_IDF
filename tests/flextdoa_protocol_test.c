@@ -194,11 +194,18 @@ static void test_packet_codec(void)
         .previous_twr_responder_id = 5U,
         .previous_twr_mm = 4321U,
         .previous_slot_id = 0x1234U,
+        .sender_position = {
+            .flags = UWB_MOBILE_POSITION_VALID |
+                     UWB_MOBILE_POSITION_RTK_FIXED,
+            .age_ms = 42U,
+            .latitude_e7 = 443361762,
+            .longitude_e7 = 259475401,
+        },
     };
     uint8_t payload[64] = {0};
     const size_t encoded_size =
         flextdoa_encode_packet(&request, payload, sizeof(payload));
-    assert(encoded_size == 21U);
+    assert(encoded_size == FLEXTDOA_PACKET_FIXED_SIZE + 3U);
     assert(payload[0] == FLEXTDOA_MESSAGE_REQUEST);
     assert(payload[1] == 0x40U && payload[4] == 0x10U);
     assert(payload[7] == 3U);
@@ -216,6 +223,10 @@ static void test_packet_codec(void)
            request.previous_twr_responder_id);
     assert(decoded.previous_twr_mm == request.previous_twr_mm);
     assert(decoded.previous_slot_id == request.previous_slot_id);
+    assert(decoded.sender_position.latitude_e7 ==
+           request.sender_position.latitude_e7);
+    assert(decoded.sender_position.longitude_e7 ==
+           request.sender_position.longitude_e7);
     assert(!flextdoa_decode_packet(payload, encoded_size - 1U, &decoded));
 
     const struct flextdoa_packet response = {
@@ -223,10 +234,17 @@ static void test_packet_codec(void)
         .slot_id = 7U,
         .source_id = 4U,
         .processing_time_dtu = 424242U,
+        .sender_position = {
+            .flags = UWB_MOBILE_POSITION_VALID,
+            .latitude_e7 = 443361750,
+            .longitude_e7 = 259475390,
+        },
     };
     assert(flextdoa_encode_packet(
-               &response, payload, sizeof(payload)) == 18U);
-    assert(flextdoa_decode_packet(payload, 18U, &decoded));
+               &response, payload, sizeof(payload)) ==
+           FLEXTDOA_PACKET_FIXED_SIZE);
+    assert(flextdoa_decode_packet(
+        payload, FLEXTDOA_PACKET_FIXED_SIZE, &decoded));
     assert(decoded.type == FLEXTDOA_MESSAGE_RESPONSE);
     assert(decoded.destination_count == 0U);
 }

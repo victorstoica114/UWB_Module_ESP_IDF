@@ -3899,7 +3899,7 @@ tr.status-stale td { color: #4f3b1d; }
             <div><b>Ranging method</b><span>FlexTDOA and Passive DS-TWR use receive-only tags. Native DS-TWR ranges each active tag to every anchor. Each protocol keeps independent timing profiles.</span></div>
             <div class="native-ds-position-option"><b>Native calculation</b><span>The ESP32 tag solves each complete coherent frame. The Raspberry only receives and displays positions and diagnostics.</span></div>
             <div><b>Tags</b><span>Comma separated tag IDs. In both passive protocols every non-anchor module only listens on UWB, so additional tags consume no radio slots.</span></div>
-            <div><b>Geometry</b><span>FlexTDOA uses fixed GPS RTK ENU geometry. Passive DS-TWR starts from that surveyed geometry after every anchor is RTK Fixed, then follows packet-time GNSS positions; Float/SPS continuity is labelled as degraded. Passive anchor-to-anchor ranges remain diagnostics only. Native DS-TWR retains its own geometry.</span></div>
+            <div><b>Geometry</b><span>All three positioning protocols start from the surveyed GPS RTK ENU geometry after every anchor is RTK Fixed, then follow packet-time GNSS anchor positions. Float/SPS holds the last Fixed coordinate and is labelled as degraded continuity. Anchor-to-anchor ranges remain diagnostics only.</span></div>
             <div><b>Known reference</b><span>GPS RTK first fits the RTK anchor geometry to the active UWB anchors with one rigid 2D rotation/translation, then compares every UWB point with the nearest RTK-fixed tag sample. Centroid and manual coordinates remain available for static tests.</span></div>
           </div>
           <div id="positionToast" class="toast"></div>
@@ -6048,7 +6048,7 @@ function switchPositionProtocolSettings() {
   if (restartGeometry) {
     restartGeometry.disabled = true;
     restartGeometry.title =
-      "Passive DS-TWR v3 initializes only with all anchors RTK Fixed, then follows live packet-time GNSS anchor positions and exposes degraded continuity.";
+      "Mobile geometry initializes only with all anchors RTK Fixed, then follows live packet-time GNSS anchor positions and exposes degraded continuity.";
   }
 }
 
@@ -6143,10 +6143,20 @@ function synchronizePositionAnchorsFromRuntime(statuses) {
   return true;
 }
 
-function positionKnownReference(settings, anchors) {
+function positionKnownReference(settings, anchors, positionGeometry = null) {
   if (settings.referenceMode === "gps_rtk") {
     const tagId = Number(settings.tagIds?.[0] || 1);
-    const rtkGeometry = gpsRtkGeometryModel();
+    /*
+     * A surveyed geometry is static, so a long median is desirable.  An
+     * ESP32 dynamic geometry, however, contains the anchors at packet time.
+     * Comparing that snapshot with the old 120 s median makes a real anchor
+     * move look like a bad rigid fit and hides the RTK reference entirely.
+     * Use the last RTK-Fixed sample held for each anchor, matching the
+     * firmware's Float/SPS continuity policy.
+     */
+    const dynamicGeometry =
+      String(positionGeometry?.status || "") === "esp_dynamic";
+    const rtkGeometry = gpsRtkGeometryModel({latestOnly: dynamicGeometry});
     const rtkAlignment = gpsRtkToUwbAlignment(
       rtkGeometry, anchors, settings.anchorIds);
     if (!rtkAlignment) {
@@ -6166,7 +6176,7 @@ function positionKnownReference(settings, anchors) {
         error: `GPS RTK reference blocked: rigid anchor fit RMS ${measured} exceeds the ${(gpsRtkAnchorFitRmsLimitM * 100).toFixed(1)} cm limit. Clear and recollect RTK anchor samples before using RMSE.`,
       };
     }
-    const track = gpsRtkTagTrack(tagId, rtkAlignment);
+    const track = gpsRtkTagTrack(tagId, rtkAlignment, rtkGeometry);
     const latest = track[track.length - 1];
     if (!latest) {
       return {
@@ -6183,6 +6193,7 @@ function positionKnownReference(settings, anchors) {
         tagId,
         capturedAt: latest.t,
         rtkAlignment,
+        rtkGeometry,
         anchorFitRmsM,
       },
       error: "",
@@ -7407,10 +7418,9 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
     const expectedIds = anchorIds.map(Number);
     const candidates = Object.values(state.tdoa?.local_geometries || {})
       .filter(item => {
-        // Fixed RTK geometry is immutable for its published generation and
-        // is intentionally sent only when the ESP32 solver starts.  Do not
-        // age it out like a live, range-derived geometry; doing so hides
-        // otherwise fresh tag positions a fraction of a second later.
+        // Surveyed RTK bootstrap geometry is immutable for its published
+        // generation. Once mobile geometry activates, normal freshness rules
+        // apply to every protocol.
         const fixedGeometry = item?.dynamic === false;
         if (!item?.complete ||
             (!fixedGeometry && Number(item.age_sec) > maxAge)) return false;
@@ -7425,10 +7435,9 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
     const espGeometry = candidates[0] || null;
     if (!espGeometry) {
       // A dashboard restart clears its telemetry cache, while the modules
-      // continue to expose the same fixed RTK coordinates in /status.  Use
-      // that live, generation-tagged configuration as the authoritative
-      // fallback for fixed TDOA protocols instead of waiting for a radio
-      // geometry event that is intentionally emitted only at solver start.
+      // continue to expose the same surveyed RTK coordinates in /status. Use
+      // that generation-tagged configuration only as the bootstrap fallback;
+      // live mobile geometry arrives through telemetry.
       const persisted = protocol === "native_ds"
         ? null
         : persistedModuleAnchorGeometry(anchorIds);
@@ -7467,7 +7476,7 @@ function paperAnchorGeometry(anchorIds, maxAge, solver) {
       complete: true,
       positionReady: true,
       canFix: false,
-      status: protocol === "flextdoa" || espGeometry.dynamic === false
+      status: espGeometry.dynamic === false
         ? "esp_fixed_rtk"
         : "esp_dynamic",
       protocol,
@@ -7986,7 +7995,7 @@ function computePositionModel() {
   }
 
   state.positionResults = tags;
-  const referenceResult = positionKnownReference(settings, anchors);
+  const referenceResult = positionKnownReference(settings, anchors, geometry);
   return {
     settings,
     active,
@@ -8314,11 +8323,11 @@ function renderPositionGeometryPanel(model) {
   }
   if (note && fixedNativeDs) {
     note.textContent =
-      "Native DS-TWR solves directly in the fixed GPS RTK ENU geometry. Inter-anchor survey traffic is disabled in the positioning frame.";
+      "Native DS-TWR is still using its surveyed GPS RTK ENU bootstrap geometry. Inter-anchor survey traffic is disabled in the positioning frame.";
   } else if (note) {
     note.textContent = fixedRtk
-      ? "Diagnostic only: FlexTDOA uses the fixed GPS RTK geometry, not the live inter-anchor TWR ranges shown below. Δ = live TWR − RTK distance."
-      : "Live inter-anchor ranges used to maintain the protocol-specific geometry.";
+      ? "Survey bootstrap only: positioning uses GPS RTK geometry, not the inter-anchor TWR diagnostics shown below. Δ = live TWR − RTK distance."
+      : "Packet-time GPS RTK anchor geometry; inter-anchor ranges shown here are diagnostics only.";
   }
   if (status) {
     if (fixedRtk) {
@@ -8613,17 +8622,11 @@ function renderPositionReadout(model) {
   const missingCoords = model.settings.anchorIds.filter(id => !model.anchors[id]);
   if (missingCoords.length) {
     overlay.classList.add("active");
-    const fixedTdoa = positionProtocolUsesTdoa(model.settings.solver);
-    overlay.querySelector("h2").textContent = fixedTdoa
-      ? "Waiting for fixed GPS RTK geometry"
-      : "Waiting for live anchor geometry";
-    overlay.querySelector("p").textContent = fixedTdoa
-      ? `Apply RTK-fixed ENU geometry for anchors ${missingCoords.join(", ")} from the GPS map panel.`
-      : `Waiting for fresh ${solverName} anchor-to-anchor ranges involving: ${missingCoords.join(", ")}. Positioning starts automatically when the dynamic geometry is complete.`;
+    overlay.querySelector("h2").textContent = "Waiting for GPS RTK anchor geometry";
+    overlay.querySelector("p").textContent =
+      `Apply surveyed RTK-fixed ENU geometry for anchors ${missingCoords.join(", ")} from the GPS map panel. Mobile tracking activates after every anchor reports RTK Fixed.`;
     if (overlayButton) {
-      overlayButton.textContent = fixedTdoa
-        ? "Waiting for RTK Geometry"
-        : "Waiting for Anchor Ranges";
+      overlayButton.textContent = "Waiting for RTK Geometry";
       overlayButton.disabled = true;
       overlayButton.dataset.action = "wait";
     }
@@ -8692,7 +8695,7 @@ function renderPositionReadout(model) {
     return `<div class="position-tag-card"><b id="positionTagSummary${esc(tag.tagId)}">Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span id="positionTagMeta${esc(tag.tagId)}">${countText}${accuracyText}${referenceText}</span></div>`;
   });
   const emptyTagCard = !model.geometry?.positionReady
-    ? `<div class="position-tag-card"><b>waiting for geometry</b><span>${positionProtocolUsesTdoa(model.settings.solver) ? "Apply fixed RTK ENU anchor coordinates from the GPS map." : "Positioning starts automatically after fresh anchor-to-anchor ranges initialize the geometry."}</span></div>`
+    ? `<div class="position-tag-card"><b>waiting for geometry</b><span>Apply surveyed RTK ENU anchor coordinates from the GPS map. Mobile tracking starts after every anchor reports RTK Fixed.</span></div>`
     : `<div class="position-tag-card"><b>waiting for tags</b><span>No selected tag IDs.</span></div>`;
   readout.innerHTML = `${renderPositionSolverStatus(model)}${tagCards.join("") || emptyTagCard}`;
   const accuracyTableRows = Object.values(model.tags).map(tag => {
@@ -9706,6 +9709,8 @@ const gpsRtkMinimumSamples = 5;
 const gpsRtkMaximumSamples = 120;
 const gpsRtkSampleHorizonMs = 120000;
 const gpsRtkAnchorFitRmsLimitM = 0.10;
+const gpsRtkBaseJumpM = 0.25;
+const gpsRtkMaximumMotionHorizonSec = 2.0;
 
 function pruneGpsRtkSamples(nowMs = Date.now()) {
   const oldestAllowedMs = nowMs - gpsRtkSampleHorizonMs;
@@ -9777,6 +9782,20 @@ function medianFinite(values) {
     : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+function gpsRtkHorizontalSampleDistanceM(first, second) {
+  const firstLatitude = Number(first?.latitude) * Math.PI / 180;
+  const secondLatitude = Number(second?.latitude) * Math.PI / 180;
+  const latitudeDelta = secondLatitude - firstLatitude;
+  const longitudeDelta =
+    (Number(second?.longitude) - Number(first?.longitude)) * Math.PI / 180;
+  if (![firstLatitude, secondLatitude, latitudeDelta, longitudeDelta]
+      .every(Number.isFinite)) return Infinity;
+  const east = longitudeDelta * 6378137.0 *
+    Math.cos(0.5 * (firstLatitude + secondLatitude));
+  const north = latitudeDelta * 6378137.0;
+  return Math.hypot(east, north);
+}
+
 function recordGpsRtkSamples(statuses) {
   const capturedAt = Date.now();
   pruneGpsRtkSamples(capturedAt);
@@ -9795,9 +9814,26 @@ function recordGpsRtkSamples(statuses) {
       latitude.toFixed(9), longitude.toFixed(9), altitude.toFixed(4),
     ].join(":");
     if (state.gpsRtkLastTokens.get(moduleId) === token) continue;
-    state.gpsRtkLastTokens.set(moduleId, token);
     const samples = state.gpsRtkSamples.get(moduleId) || [];
-    samples.push({latitude, longitude, altitude, capturedAt});
+    const speedMps = Math.max(0, Number(item?.gps_speed_mps) || 0);
+    const previous = samples[samples.length - 1];
+    if (previous) {
+      const elapsedSec = Math.max(
+        0, (capturedAt - Number(previous.capturedAt || capturedAt)) / 1000);
+      const motionHorizonSec = Math.min(
+        gpsRtkMaximumMotionHorizonSec, Math.max(0.5, elapsedSec));
+      const allowedDisplacementM = gpsRtkBaseJumpM +
+        Math.max(speedMps, Number(previous.speedMps) || 0) *
+          motionHorizonSec;
+      if (gpsRtkHorizontalSampleDistanceM(
+            previous, {latitude, longitude}) > allowedDisplacementM) {
+        /* Match the ESP32 guard: a zero-speed false Fixed jump must not
+         * become either moving anchor geometry or tag ground truth. */
+        continue;
+      }
+    }
+    state.gpsRtkLastTokens.set(moduleId, token);
+    samples.push({latitude, longitude, altitude, capturedAt, speedMps});
     if (samples.length > gpsRtkMaximumSamples) {
       samples.splice(0, samples.length - gpsRtkMaximumSamples);
     }
@@ -9836,22 +9872,30 @@ function gpsRtkEcefToEnu(point, origin, latitudeDeg, longitudeDeg) {
   };
 }
 
-function gpsRtkGeometryModel() {
+function gpsRtkGeometryModel({latestOnly = false} = {}) {
   pruneGpsRtkSamples();
   const originSamples = state.gpsRtkSamples.get(2) || [];
-  if (originSamples.length < gpsRtkMinimumSamples) return null;
+  const minimumSamples = latestOnly ? 1 : gpsRtkMinimumSamples;
+  if (originSamples.length < minimumSamples) return null;
   for (const anchorId of gpsRtkAnchorIds) {
-    if ((state.gpsRtkSamples.get(anchorId) || []).length < gpsRtkMinimumSamples) {
+    if ((state.gpsRtkSamples.get(anchorId) || []).length < minimumSamples) {
       return null;
     }
   }
-  const originLatitude = medianFinite(originSamples.map(sample => sample.latitude));
-  const originLongitude = medianFinite(originSamples.map(sample => sample.longitude));
-  const originAltitude = medianFinite(originSamples.map(sample => sample.altitude));
+  const modelSamples = samples => latestOnly ? samples.slice(-1) : samples;
+  const selectedOriginSamples = modelSamples(originSamples);
+  const originLatitude = medianFinite(
+    selectedOriginSamples.map(sample => sample.latitude));
+  const originLongitude = medianFinite(
+    selectedOriginSamples.map(sample => sample.longitude));
+  const originAltitude = medianFinite(
+    selectedOriginSamples.map(sample => sample.altitude));
   const originEcef = gpsRtkEcef(originLatitude, originLongitude, originAltitude);
   const points = new Map();
   for (const moduleId of [1, ...gpsRtkAnchorIds]) {
-    const samples = state.gpsRtkSamples.get(moduleId) || [];
+    const samples = moduleId === 1
+      ? (state.gpsRtkSamples.get(moduleId) || [])
+      : modelSamples(state.gpsRtkSamples.get(moduleId) || []);
     if (!samples.length) continue;
     const enuSamples = samples.map(sample => gpsRtkEcefToEnu(
       gpsRtkEcef(sample.latitude, sample.longitude, sample.altitude),
@@ -9940,8 +9984,9 @@ function gpsRtkToUwbAlignment(geometry, anchors, anchorIds = gpsRtkAnchorIds) {
   };
 }
 
-function gpsRtkTagTrack(moduleId = 1, alignment = null) {
-  const geometry = gpsRtkGeometryModel();
+function gpsRtkTagTrack(moduleId = 1, alignment = null,
+                        referenceGeometry = null) {
+  const geometry = referenceGeometry || gpsRtkGeometryModel();
   const samples = state.gpsRtkSamples.get(Number(moduleId)) || [];
   if (!geometry || !samples.length) return [];
   const originEcef = gpsRtkEcef(
@@ -9968,7 +10013,8 @@ function gpsRtkTagTrack(moduleId = 1, alignment = null) {
 
 function positionGpsReferenceErrorStats(tagId, position, reference, windowSec) {
   const track = gpsRtkTagTrack(
-    reference.tagId || tagId, reference.rtkAlignment || null);
+    reference.tagId || tagId, reference.rtkAlignment || null,
+    reference.rtkGeometry || null);
   if (!track.length) return null;
   const now = Date.now() / 1000;
   const uwbSamples = (state.positionTrail[String(tagId)] || []).filter(point =>
@@ -12825,7 +12871,7 @@ function renderFlexTdoaTimingDiagram() {
     const delayedUs = timing.requestUs + timing.requestProcessUs + index * timing.responseUs;
     return `<div class="flex-packet-row">
       <b>RESP[${index}] · A${esc(anchorId)} → broadcast · +${fmtFixed(delayedUs / 1000, 2)} ms</b>
-      <code>header(type, source, seq) | slot32 | destination_count=0 | processing_dtu=reply | previous_twr(responder, distance_mm, slot16)</code>
+      <code>header(type, source, seq) | slot32 | destination_count=0 | processing_dtu=reply | previous_twr(responder, distance_mm, slot16) | sender GNSS(position, quality, velocity, age)</code>
     </div>`;
   }).join("");
 
@@ -12900,7 +12946,7 @@ function renderFlexTdoaTimingDiagram() {
       <div class="flex-packet-flow">
         <div class="flex-packet-row">
           <b>REQ · A${esc(selectedInitiator)} → ${esc(selectedResponders.map(id => `A${id}`).join(", "))}</b>
-          <code>header(type, source, seq) | slot32 | destination_count=${K} | responders[${K}] | processing_dtu=0 | previous_twr(responder, distance_mm, slot16)</code>
+          <code>header(type, source, seq) | slot32 | destination_count=${K} | responders[${K}] | processing_dtu=0 | previous_twr(responder, distance_mm, slot16) | sender GNSS(position, quality, velocity, age)</code>
         </div>
         ${responseFlow}
         <div class="flex-packet-row">
@@ -13264,7 +13310,7 @@ function renderNativeDsTwrTimingDiagram() {
         </div>
         <div class="flex-packet-row">
           <b>RESULT · A${esc(selectedAnchorId)} → T${esc(config.tagId)} · +${fmtFixed(config.respDelayMs, 0)} ms</b>
-          <code>one-shot raw distance; session and 32-bit frame must match before the tag accepts it</code>
+          <code>one-shot raw distance plus anchor GNSS position, quality, velocity and age; session and 32-bit frame must match before the tag accepts it</code>
         </div>
       </div>
     </div>
@@ -13776,8 +13822,8 @@ function passiveDsRuntimeConfig() {
     gapMs: Number(status.runtime_passive_ds_round_gap_ms ?? 1),
     rxMs: Number(status.runtime_passive_ds_rx_slice_ms || 100),
     timeoutMs: Number(status.runtime_passive_ds_rx_timeout_ms || 5),
-    respUs: Number(status.runtime_passive_ds_resp_delay_us || 1500),
-    finalUs: Number(status.runtime_passive_ds_final_delay_us || 1500),
+    respUs: Number(status.runtime_passive_ds_resp_delay_us || 1750),
+    finalUs: Number(status.runtime_passive_ds_final_delay_us || 1750),
     autoRxUus: Number(status.runtime_passive_ds_auto_rx_delay_uus || 500),
     pipelineMode: Number(status.runtime_passive_ds_pipeline_mode || 0),
     solveMode: Number(status.runtime_passive_ds_solve_mode || 0),

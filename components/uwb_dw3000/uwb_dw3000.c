@@ -33,6 +33,7 @@
 #include "uwb_flex_tdoa_runtime.h"
 #include "uwb_native_ds_runtime.h"
 #include "uwb_native_ds_twr.h"
+#include "uwb_mobile_geometry.h"
 #include "uwb_passive_ds_observation.h"
 #include "uwb_passive_ds_protocol.h"
 #include "uwb_passive_ds_runtime.h"
@@ -40,6 +41,8 @@
 #include "wireless_telemetry_service.h"
 
 static const char *TAG = "uwb_dw3000";
+
+static void uwb_capture_mobile_position(struct uwb_mobile_position *position);
 
 enum {
     /* ESP-IDF expresses the task stack depth in bytes. The multipoint
@@ -567,6 +570,16 @@ struct uwb_flex_tdoa_observation {
     bool resp_clock_offset_valid;
     int32_t resp_clock_offset_raw;
     double resp_clock_offset_ratio;
+    struct uwb_mobile_position initiator_position;
+    struct uwb_mobile_position responder_position;
+    bool dynamic_geometry;
+    int32_t initiator_x_mm;
+    int32_t initiator_y_mm;
+    int32_t responder_x_mm;
+    int32_t responder_y_mm;
+    uint32_t geometry_version;
+    int32_t geometry_fit_rms_mm;
+    bool geometry_all_rtk_fixed;
     TickType_t updated_tick;
 };
 
@@ -578,6 +591,7 @@ struct uwb_flex_tdoa_message_metadata {
     uint8_t previous_responder_id;
     uint16_t previous_distance_mm;
     uint16_t previous_slot_id;
+    struct uwb_mobile_position sender_position;
 };
 
 struct uwb_flex_tdoa_local_request {
@@ -1123,6 +1137,7 @@ static struct uwb_flex_tdoa_observation
 static struct flextdoa_cfo_estimator s_flex_tdoa_cfo_estimator;
 static struct flextdoa_slot_collection s_flex_tdoa_tag_collection;
 static struct uwb_flex_tdoa_local_request s_flex_tdoa_local_request;
+static struct uwb_mobile_geometry s_flex_tdoa_mobile_geometry;
 static esp_timer_handle_t s_flex_tdoa_schedule_timer;
 static volatile bool s_flex_tdoa_schedule_alarm_fired;
 static esp_timer_handle_t s_passive_ds_schedule_timer;
@@ -6092,6 +6107,7 @@ static size_t uwb_flex_tdoa_build_message(
         .destination_count = (uint8_t)destination_count,
         .processing_time_dtu = processing_dtu,
     };
+    uwb_capture_mobile_position(&packet.sender_position);
     if (destination_count > 0U) {
         memcpy(packet.destination_ids, destinations, destination_count);
     }
@@ -6143,6 +6159,7 @@ static bool uwb_flex_tdoa_parse_message(
         (uint8_t)packet.previous_twr_responder_id;
     metadata->previous_distance_mm = packet.previous_twr_mm;
     metadata->previous_slot_id = packet.previous_slot_id;
+    metadata->sender_position = packet.sender_position;
     return true;
 }
 
@@ -6316,6 +6333,61 @@ static void uwb_flex_tdoa_log_paper_observation(
         return;
     }
 
+    bool activated = uwb_mobile_geometry_ingest(
+        &s_flex_tdoa_mobile_geometry, observation->initiator_id,
+        &observation->initiator_position);
+    activated = uwb_mobile_geometry_ingest(
+                    &s_flex_tdoa_mobile_geometry,
+                    observation->responder_id,
+                    &observation->responder_position) ||
+                activated;
+    if (s_flex_tdoa_mobile_geometry.active) {
+        double initiator_x_m = 0.0;
+        double initiator_y_m = 0.0;
+        double responder_x_m = 0.0;
+        double responder_y_m = 0.0;
+        if (!uwb_mobile_geometry_project_anchor(
+                &s_flex_tdoa_mobile_geometry,
+                observation->initiator_id,
+                &observation->initiator_position,
+                &initiator_x_m, &initiator_y_m) ||
+            !uwb_mobile_geometry_project_anchor(
+                &s_flex_tdoa_mobile_geometry,
+                observation->responder_id,
+                &observation->responder_position,
+                &responder_x_m, &responder_y_m)) {
+            s_flex_tdoa_observation_invalid_since_summary++;
+            memset(observation, 0, sizeof(*observation));
+            return;
+        }
+        observation->dynamic_geometry = true;
+        observation->initiator_x_mm =
+            uwb_distance_meters_to_mm(initiator_x_m);
+        observation->initiator_y_mm =
+            uwb_distance_meters_to_mm(initiator_y_m);
+        observation->responder_x_mm =
+            uwb_distance_meters_to_mm(responder_x_m);
+        observation->responder_y_mm =
+            uwb_distance_meters_to_mm(responder_y_m);
+        observation->anchor_distance_mm = uwb_distance_meters_to_mm(
+            hypot(responder_x_m - initiator_x_m,
+                  responder_y_m - initiator_y_m));
+        observation->geometry_version =
+            uwb_mobile_geometry_version(observation->slot_id);
+        observation->geometry_fit_rms_mm =
+            uwb_distance_meters_to_mm(
+                s_flex_tdoa_mobile_geometry.fit_rms_m);
+        observation->geometry_all_rtk_fixed =
+            uwb_mobile_geometry_all_rtk_fixed(
+                &s_flex_tdoa_mobile_geometry);
+        if (activated) {
+            ESP_LOGI(TAG,
+                     "FLEX_TDOA mobile RTK geometry active fit_rms=%.3fm generation=%lu",
+                     s_flex_tdoa_mobile_geometry.fit_rms_m,
+                     (unsigned long)observation->geometry_version);
+        }
+    }
+
     const double reply_dtu = (double)observation->responder_reply_dtu;
     const uint64_t rx_delta_tag_raw = uwb_distance_delta_ts(
         observation->response_rx_tag_ts, observation->request_rx_tag_ts);
@@ -6407,7 +6479,13 @@ static void uwb_flex_tdoa_log_paper_observation(
             cfo_result.sample_count, cfo_result.flags);
     (void)uwb_flex_tdoa_runtime_submit_observation(
         tag_id, observation->initiator_id, observation->responder_id,
-        observation->slot_id, uwb_distance_meters_to_mm(diff_m));
+        observation->slot_id, uwb_distance_meters_to_mm(diff_m),
+        observation->dynamic_geometry,
+        observation->initiator_x_mm, observation->initiator_y_mm,
+        observation->responder_x_mm, observation->responder_y_mm,
+        observation->geometry_version,
+        observation->geometry_fit_rms_mm,
+        observation->geometry_all_rtk_fixed);
     s_flex_tdoa_observations_since_summary++;
     if (!queued) {
         s_flex_tdoa_observation_drops_since_summary++;
@@ -6615,6 +6693,8 @@ static void uwb_flex_tdoa_tag_process_frame(
             }
             observation->request_rx_tag_ts = frame->rx_timestamp;
             observation->responder_index = (uint8_t)i;
+            observation->initiator_position =
+                protocol_packet.sender_position;
             observation->have_request = true;
             observation->updated_tick = xTaskGetTickCount();
         }
@@ -6665,6 +6745,8 @@ static void uwb_flex_tdoa_tag_process_frame(
         observation->slot_id = slot_id;
         observation->responder_index = responder_index;
         observation->responder_reply_dtu = reply_dtu;
+        observation->responder_position =
+            protocol_packet.sender_position;
         observation->anchor_distance_mm =
             uwb_flex_tdoa_reference_anchor_distance_mm(initiator_id,
                                                        responder_id);
@@ -6813,12 +6895,27 @@ static void uwb_flex_tdoa_tag_loop(const uint8_t *anchor_ids,
     s_flex_tdoa_tag_last_request_slot_id = 0U;
     s_flex_tdoa_missed_requests_since_summary = 0U;
     const app_runtime_config_t *config = app_runtime_config_get();
-    flextdoa_cfo_estimator_reset(&s_flex_tdoa_cfo_estimator);
-    if (config != NULL) {
-        flextdoa_cfo_estimator_configure(
-            &s_flex_tdoa_cfo_estimator,
-            config->flex_tdoa_config_generation);
+    if (config == NULL) {
+        ESP_LOGE(TAG, "FLEX_TDOA missing runtime configuration");
+        return;
     }
+    struct uwb_mobile_anchor fixed[UWB_ANCHOR_SURVEY_MAX_ANCHORS] = {0};
+    if (config->flex_tdoa_geometry_fixed) {
+        for (size_t index = 0U; index < anchor_count; ++index) {
+            fixed[index] = (struct uwb_mobile_anchor){
+                .id = anchor_ids[index],
+                .x_m = config->flex_tdoa_anchor_x_mm[index] / 1000.0,
+                .y_m = config->flex_tdoa_anchor_y_mm[index] / 1000.0,
+            };
+        }
+    }
+    uwb_mobile_geometry_init(
+        &s_flex_tdoa_mobile_geometry, fixed,
+        config->flex_tdoa_geometry_fixed ? anchor_count : 0U);
+    flextdoa_cfo_estimator_reset(&s_flex_tdoa_cfo_estimator);
+    flextdoa_cfo_estimator_configure(
+        &s_flex_tdoa_cfo_estimator,
+        config->flex_tdoa_config_generation);
     const uint8_t tag_id = s_source_id;
     const esp_err_t solver_err = uwb_flex_tdoa_runtime_start_solver();
     if (solver_err != ESP_OK) {
@@ -9949,7 +10046,7 @@ struct uwb_passive_ds_clean_tag_frame {
         UWB_PASSIVE_DS_MAX_RESPONDERS];
 };
 
-static int16_t uwb_passive_ds_velocity_mmps(double value_mps)
+static int16_t uwb_anchor_velocity_mmps(double value_mps)
 {
     const double value_mmps = value_mps * 1000.0;
     if (!isfinite(value_mmps)) {
@@ -9964,8 +10061,8 @@ static int16_t uwb_passive_ds_velocity_mmps(double value_mps)
     return (int16_t)lround(value_mmps);
 }
 
-static void uwb_passive_ds_capture_anchor_position(
-    struct uwb_passive_ds_anchor_position *position)
+static void uwb_capture_mobile_position(
+    struct uwb_mobile_position *position)
 {
     static gps_service_position_snapshot_t last_gps;
     if (position == NULL) {
@@ -9995,9 +10092,9 @@ static void uwb_passive_ds_capture_anchor_position(
         last_gps.longitude_deg > 180.0) {
         return;
     }
-    position->flags = UWB_PASSIVE_DS_POSITION_VALID;
+    position->flags = UWB_MOBILE_POSITION_VALID;
     if (last_gps.fix_quality == 4U) {
-        position->flags |= UWB_PASSIVE_DS_POSITION_RTK_FIXED;
+        position->flags |= UWB_MOBILE_POSITION_RTK_FIXED;
     }
     position->age_ms = (uint16_t)(fix_age_ms < UINT16_MAX
                                       ? fix_age_ms
@@ -10013,14 +10110,32 @@ static void uwb_passive_ds_capture_anchor_position(
         const double course_rad = last_gps.course_deg *
                                   0.01745329251994329577;
         position->velocity_east_mmps =
-            uwb_passive_ds_velocity_mmps(
+            uwb_anchor_velocity_mmps(
                 last_gps.speed_mps * sin(course_rad));
         position->velocity_north_mmps =
-            uwb_passive_ds_velocity_mmps(
+            uwb_anchor_velocity_mmps(
                 last_gps.speed_mps * cos(course_rad));
         position->flags |=
-            UWB_PASSIVE_DS_POSITION_VELOCITY_VALID;
+            UWB_MOBILE_POSITION_VELOCITY_VALID;
     }
+}
+
+static void uwb_passive_ds_capture_anchor_position(
+    struct uwb_passive_ds_anchor_position *position)
+{
+    if (position == NULL) {
+        return;
+    }
+    struct uwb_mobile_position mobile = {0};
+    uwb_capture_mobile_position(&mobile);
+    *position = (struct uwb_passive_ds_anchor_position){
+        .flags = mobile.flags,
+        .age_ms = mobile.age_ms,
+        .latitude_e7 = mobile.latitude_e7,
+        .longitude_e7 = mobile.longitude_e7,
+        .velocity_east_mmps = mobile.velocity_east_mmps,
+        .velocity_north_mmps = mobile.velocity_north_mmps,
+    };
 }
 
 struct uwb_passive_ds_clean_tag_stats {
@@ -11579,6 +11694,13 @@ static void native_ds_set_ready(void *context)
     s_status = UWB_DW3000_STATUS_READY;
 }
 
+static void native_ds_capture_anchor_position(
+    void *context, struct uwb_mobile_position *position)
+{
+    (void)context;
+    uwb_capture_mobile_position(position);
+}
+
 static void uwb_dw3000_ranging_loop(void)
 {
     s_native_ds_rx_timestamp_cia_invalid_count = 0U;
@@ -11638,6 +11760,7 @@ static void uwb_dw3000_ranging_loop(void)
         .wait_until_us = native_ds_wait_until_us,
         .stop_requested = native_ds_stop_requested,
         .set_ready = native_ds_set_ready,
+        .capture_anchor_position = native_ds_capture_anchor_position,
         .consume_report = NULL,
         .context = NULL,
     };

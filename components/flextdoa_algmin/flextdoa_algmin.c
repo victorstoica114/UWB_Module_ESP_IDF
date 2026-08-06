@@ -80,10 +80,23 @@ static bool evaluate(
             return false;
         }
 
-        const double initiator_dx = x_m - initiator->x_m;
-        const double initiator_dy = y_m - initiator->y_m;
-        const double responder_dx = x_m - responder->x_m;
-        const double responder_dy = y_m - responder->y_m;
+        const double initiator_x_m = observation->dynamic_geometry
+            ? observation->initiator_x_m : initiator->x_m;
+        const double initiator_y_m = observation->dynamic_geometry
+            ? observation->initiator_y_m : initiator->y_m;
+        const double responder_x_m = observation->dynamic_geometry
+            ? observation->responder_x_m : responder->x_m;
+        const double responder_y_m = observation->dynamic_geometry
+            ? observation->responder_y_m : responder->y_m;
+        if (!isfinite(initiator_x_m) || !isfinite(initiator_y_m) ||
+            !isfinite(responder_x_m) || !isfinite(responder_y_m)) {
+            return false;
+        }
+
+        const double initiator_dx = x_m - initiator_x_m;
+        const double initiator_dy = y_m - initiator_y_m;
+        const double responder_dx = x_m - responder_x_m;
+        const double responder_dy = y_m - responder_y_m;
         const double initiator_distance =
             hypot(initiator_dx, initiator_dy);
         const double responder_distance =

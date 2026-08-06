@@ -136,9 +136,17 @@ static void mock_set_ready(void *context)
     (void)context;
 }
 
+static void mock_capture_anchor_position(
+    void *context, struct uwb_mobile_position *position)
+{
+    (void)context;
+    memset(position, 0, sizeof(*position));
+}
+
 static void mock_consume_report(void *context, bool tag_range,
                                 uint8_t initiator_id, uint8_t responder_id,
-                                uint32_t frame_id, double distance_m)
+                                uint32_t frame_id, double distance_m,
+                                const struct uwb_mobile_position *position)
 {
     struct mock_radio *mock = context;
     assert(tag_range);
@@ -146,6 +154,7 @@ static void mock_consume_report(void *context, bool tag_range,
     assert(responder_id == 4U);
     assert(frame_id == 1U);
     assert(distance_m == 1.234);
+    assert(position != NULL);
     mock->report_count++;
 }
 
@@ -176,6 +185,7 @@ int main(void)
         .wait_until_us = mock_wait_until_us,
         .stop_requested = mock_stop_requested,
         .set_ready = mock_set_ready,
+        .capture_anchor_position = mock_capture_anchor_position,
         .consume_report = mock_consume_report,
     };
     assert(uwb_native_ds_twr_run(&config, &radio) == ESP_OK);

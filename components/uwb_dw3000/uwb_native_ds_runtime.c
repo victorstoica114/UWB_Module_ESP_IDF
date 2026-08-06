@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "uwb_mobile_geometry.h"
 #include "uwb_native_ds_position_solver.h"
 #include "wireless_telemetry_service.h"
 
@@ -18,6 +19,10 @@ struct uwb_native_ds_runtime_context {
     uint32_t position_publish_count;
     bool range_calibration_enabled;
     int32_t anchor_range_bias_mm[UWB_NATIVE_DS_MAX_ANCHORS];
+    struct uwb_mobile_geometry mobile_geometry;
+    bool mobile_geometry_active;
+    bool mobile_geometry_all_rtk_fixed;
+    int32_t mobile_geometry_fit_rms_mm;
 };
 
 static struct uwb_native_ds_runtime_context *runtime_context(void *context)
@@ -109,6 +114,14 @@ static void runtime_set_ready(void *context)
     runtime->backend.set_ready(runtime->backend.context);
 }
 
+static void runtime_capture_anchor_position(
+    void *context, struct uwb_mobile_position *position)
+{
+    struct uwb_native_ds_runtime_context *runtime = runtime_context(context);
+    runtime->backend.capture_anchor_position(
+        runtime->backend.context, position);
+}
+
 static int32_t meters_to_mm(float value_m)
 {
     const float value_mm = value_m * 1000.0f;
@@ -117,24 +130,74 @@ static int32_t meters_to_mm(float value_m)
 }
 
 static void runtime_publish_geometry(
-    const struct uwb_native_ds_position_solver *solver, int32_t fit_rms_mm)
+    const struct uwb_native_ds_runtime_context *runtime)
 {
     struct uwb_native_ds_position_output geometry = {0};
-    if (!uwb_native_ds_position_solver_geometry(solver, &geometry)) {
+    if (runtime == NULL ||
+        !uwb_native_ds_position_solver_geometry(
+            &runtime->solver, &geometry)) {
         return;
     }
     for (size_t index = 0U; index < geometry.anchor_count; ++index) {
         (void)wireless_telemetry_service_submit_native_ds_geometry(
-            solver->anchor_ids[index], geometry.anchor_count,
+            runtime->solver.anchor_ids[index], geometry.anchor_count,
             geometry.geometry_version,
             meters_to_mm(geometry.anchor_x_m[index]),
-            meters_to_mm(geometry.anchor_y_m[index]), fit_rms_mm);
+            meters_to_mm(geometry.anchor_y_m[index]),
+            runtime->mobile_geometry_fit_rms_mm,
+            runtime->mobile_geometry_active,
+            runtime->mobile_geometry_all_rtk_fixed);
+    }
+}
+
+static void runtime_update_mobile_geometry(
+    struct uwb_native_ds_runtime_context *runtime, uint8_t anchor_id,
+    uint32_t frame_id,
+    const struct uwb_mobile_position *anchor_position)
+{
+    if (runtime == NULL || anchor_position == NULL) {
+        return;
+    }
+    const bool activated = uwb_mobile_geometry_ingest(
+        &runtime->mobile_geometry, anchor_id, anchor_position);
+    if (!runtime->mobile_geometry.active) {
+        return;
+    }
+    float x_m[UWB_NATIVE_DS_POSITION_MAX_ANCHORS] = {0};
+    float y_m[UWB_NATIVE_DS_POSITION_MAX_ANCHORS] = {0};
+    for (size_t index = 0U; index < runtime->solver.anchor_count; ++index) {
+        double x = 0.0;
+        double y = 0.0;
+        if (!uwb_mobile_geometry_latest(
+                &runtime->mobile_geometry,
+                runtime->solver.anchor_ids[index], &x, &y)) {
+            return;
+        }
+        x_m[index] = (float)x;
+        y_m[index] = (float)y;
+    }
+    const uint32_t version = uwb_mobile_geometry_version(frame_id);
+    if (!uwb_native_ds_position_solver_update_geometry(
+            &runtime->solver, x_m, y_m, version)) {
+        return;
+    }
+    runtime->mobile_geometry_active = true;
+    runtime->mobile_geometry_all_rtk_fixed =
+        uwb_mobile_geometry_all_rtk_fixed(&runtime->mobile_geometry);
+    runtime->mobile_geometry_fit_rms_mm =
+        meters_to_mm((float)runtime->mobile_geometry.fit_rms_m);
+    if (activated) {
+        ESP_LOGI(TAG,
+                 "mobile RTK geometry active fit_rms=%.3fm generation=%lu",
+                 runtime->mobile_geometry.fit_rms_m,
+                 (unsigned long)version);
     }
 }
 
 static void runtime_consume_report(
     void *context, bool tag_range, uint8_t initiator_id,
-    uint8_t responder_id, uint32_t frame_id, double distance_m)
+    uint8_t responder_id, uint32_t frame_id, double distance_m,
+    const struct uwb_mobile_position *anchor_position)
 {
     struct uwb_native_ds_runtime_context *runtime = runtime_context(context);
     if (runtime == NULL || !runtime->solver_ready) {
@@ -151,6 +214,11 @@ static void runtime_consume_report(
                 break;
             }
         }
+    }
+
+    if (tag_range) {
+        runtime_update_mobile_geometry(
+            runtime, responder_id, frame_id, anchor_position);
     }
 
     struct uwb_native_ds_position_output output = {0};
@@ -184,7 +252,9 @@ static void runtime_consume_report(
                 output.geometry_version,
                 meters_to_mm(output.anchor_x_m[index]),
                 meters_to_mm(output.anchor_y_m[index]),
-                meters_to_mm(output.geometry_fit_rms_m));
+                meters_to_mm(output.geometry_fit_rms_m),
+                runtime->mobile_geometry_active,
+                runtime->mobile_geometry_all_rtk_fixed);
         }
     }
     if (output.position_valid) {
@@ -194,8 +264,11 @@ static void runtime_consume_report(
             meters_to_mm(output.rms_m), output.observation_count,
             output.anchor_count, output.geometry_version);
         runtime->position_publish_count++;
+        if (runtime->mobile_geometry_active) {
+            runtime_publish_geometry(runtime);
+        }
         if ((runtime->position_publish_count % 32U) == 0U) {
-            runtime_publish_geometry(&runtime->solver, 0);
+            runtime_publish_geometry(runtime);
         }
     }
 }
@@ -209,7 +282,8 @@ static bool backend_valid(const struct uwb_native_ds_radio_ops *backend)
            backend->receive != NULL && backend->add_delay_ms != NULL &&
            backend->programmed_tx_timestamp != NULL &&
            backend->now_us != NULL && backend->wait_until_us != NULL &&
-           backend->stop_requested != NULL && backend->set_ready != NULL;
+           backend->stop_requested != NULL && backend->set_ready != NULL &&
+           backend->capture_anchor_position != NULL;
 }
 
 esp_err_t uwb_native_ds_runtime_run(
@@ -237,6 +311,16 @@ esp_err_t uwb_native_ds_runtime_run(
             anchor_x_m[index] = (float)config->anchor_x_mm[index] / 1000.0f;
             anchor_y_m[index] = (float)config->anchor_y_mm[index] / 1000.0f;
         }
+        struct uwb_mobile_anchor fixed[UWB_NATIVE_DS_MAX_ANCHORS] = {0};
+        for (size_t index = 0U; index < config->anchor_count; ++index) {
+            fixed[index] = (struct uwb_mobile_anchor){
+                .id = config->anchor_ids[index],
+                .x_m = anchor_x_m[index],
+                .y_m = anchor_y_m[index],
+            };
+        }
+        uwb_mobile_geometry_init(
+            &runtime.mobile_geometry, fixed, config->anchor_count);
         runtime.solver_ready = uwb_native_ds_position_solver_init(
             &runtime.solver, config->tag_id, config->anchor_ids,
             anchor_x_m, anchor_y_m, config->anchor_count,
@@ -245,7 +329,7 @@ esp_err_t uwb_native_ds_runtime_run(
             ESP_LOGE(TAG, "Native DS-TWR position solver init failed");
             return ESP_ERR_INVALID_STATE;
         }
-        runtime_publish_geometry(&runtime.solver, 0);
+        runtime_publish_geometry(&runtime);
     }
 
     const struct uwb_native_ds_radio_ops radio = {
@@ -260,6 +344,7 @@ esp_err_t uwb_native_ds_runtime_run(
         .wait_until_us = runtime_wait_until_us,
         .stop_requested = runtime_stop_requested,
         .set_ready = runtime_set_ready,
+        .capture_anchor_position = runtime_capture_anchor_position,
         .consume_report = runtime_consume_report,
     };
     return uwb_native_ds_twr_run(config, &radio);

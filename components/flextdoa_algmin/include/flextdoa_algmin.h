@@ -16,6 +16,13 @@ struct flextdoa_range_difference {
     uint16_t responder_id;
     /* Paper Eq. (14): distance(tag, responder) - distance(tag, initiator). */
     double range_difference_m;
+    /* Mobile anchors are evaluated at the time of this radio observation.
+     * Static observations continue to resolve coordinates by anchor ID. */
+    bool dynamic_geometry;
+    double initiator_x_m;
+    double initiator_y_m;
+    double responder_x_m;
+    double responder_y_m;
 };
 
 struct flextdoa_algmin_seed {

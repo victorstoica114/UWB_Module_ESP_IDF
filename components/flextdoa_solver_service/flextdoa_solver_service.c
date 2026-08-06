@@ -41,12 +41,23 @@ struct flex_solver_item {
     uint8_t responder_id;
     uint32_t slot_id;
     int32_t difference_mm;
+    bool dynamic_geometry;
+    int32_t initiator_x_mm;
+    int32_t initiator_y_mm;
+    int32_t responder_x_mm;
+    int32_t responder_y_mm;
+    uint32_t geometry_version;
+    int32_t geometry_fit_rms_mm;
+    bool geometry_all_rtk_fixed;
 };
 
 struct flex_solver_state {
     bool geometry_ready;
     uint8_t anchor_count;
     uint32_t geometry_generation;
+    bool dynamic_geometry;
+    bool geometry_all_rtk_fixed;
+    int32_t geometry_fit_rms_mm;
     struct flextdoa_anchor_position anchors[FLEXTDOA_MAX_ANCHORS];
     struct flextdoa_anchor_bias anchor_biases[FLEXTDOA_MAX_ANCHORS];
     struct flextdoa_algmin_seed previous_position;
@@ -93,6 +104,9 @@ static void flex_solver_load_geometry(struct flex_solver_state *state)
     const app_runtime_config_t *config = app_runtime_config_get();
     state->anchor_count = config->anchor_count;
     state->geometry_generation = config->flex_tdoa_geometry_generation;
+    state->dynamic_geometry = false;
+    state->geometry_all_rtk_fixed = false;
+    state->geometry_fit_rms_mm = 0;
     state->geometry_ready =
         config->flex_tdoa_geometry_fixed && config->anchor_count >= 3U &&
         config->anchor_count <= FLEXTDOA_MAX_ANCHORS;
@@ -163,6 +177,20 @@ static const struct flextdoa_anchor_position *flex_solver_find_anchor(
     return NULL;
 }
 
+static bool flex_solver_update_anchor(
+    struct flex_solver_state *state, uint16_t anchor_id,
+    int32_t x_mm, int32_t y_mm)
+{
+    for (size_t index = 0U; index < state->anchor_count; ++index) {
+        if (state->anchors[index].anchor_id == anchor_id) {
+            state->anchors[index].x_m = x_mm / 1000.0;
+            state->anchors[index].y_m = y_mm / 1000.0;
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool flex_solver_observation_is_physical(
     const struct flex_solver_state *state, uint16_t initiator_id,
     uint16_t responder_id, double difference_m)
@@ -190,7 +218,9 @@ static bool flex_solver_publish_geometry(
                         state->anchor_count, state->geometry_generation,
                         (int32_t)lround(state->anchors[index].x_m * 1000.0),
                         (int32_t)lround(state->anchors[index].y_m * 1000.0),
-                        0) &&
+                        state->geometry_fit_rms_mm,
+                        state->dynamic_geometry,
+                        state->geometry_all_rtk_fixed) &&
                     submitted;
     }
     return submitted;
@@ -330,6 +360,29 @@ static void flex_solver_accept_observation(
         return;
     }
 
+    if (item->dynamic_geometry) {
+        if (!state->dynamic_geometry) {
+            state->previous_position.valid = false;
+            state->frame_tag_id = 0U;
+            state->last_closed_frame_valid = false;
+            flextdoa_frame_aggregator_reset(&state->frame);
+            state->dynamic_geometry = true;
+        }
+        if (!flex_solver_update_anchor(
+                state, item->initiator_id,
+                item->initiator_x_mm, item->initiator_y_mm) ||
+            !flex_solver_update_anchor(
+                state, item->responder_id,
+                item->responder_x_mm, item->responder_y_mm)) {
+            state->observations_rejected++;
+            return;
+        }
+        state->geometry_generation = item->geometry_version;
+        state->geometry_fit_rms_mm = item->geometry_fit_rms_mm;
+        state->geometry_all_rtk_fixed =
+            item->geometry_all_rtk_fixed;
+    }
+
     const double difference_m = item->difference_mm / 1000.0;
     if (!flex_solver_observation_is_physical(
             state, item->initiator_id, item->responder_id,
@@ -355,6 +408,11 @@ static void flex_solver_accept_observation(
         .initiator_id = item->initiator_id,
         .responder_id = item->responder_id,
         .range_difference_m = difference_m,
+        .dynamic_geometry = item->dynamic_geometry,
+        .initiator_x_m = item->initiator_x_mm / 1000.0,
+        .initiator_y_m = item->initiator_y_mm / 1000.0,
+        .responder_x_m = item->responder_x_mm / 1000.0,
+        .responder_y_m = item->responder_y_mm / 1000.0,
     };
     const uint16_t complete_frame_observations =
         (uint16_t)((uint16_t)config->flex_tdoa_slot_count *
@@ -532,7 +590,11 @@ bool flextdoa_solver_service_reset(void)
 
 bool flextdoa_solver_service_submit_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
-    uint32_t slot_id, int32_t difference_mm)
+    uint32_t slot_id, int32_t difference_mm, bool dynamic_geometry,
+    int32_t initiator_x_mm, int32_t initiator_y_mm,
+    int32_t responder_x_mm, int32_t responder_y_mm,
+    uint32_t geometry_version, int32_t geometry_fit_rms_mm,
+    bool geometry_all_rtk_fixed)
 {
     const struct flex_solver_item item = {
         .type = FLEX_SOLVER_ITEM_OBSERVATION,
@@ -541,6 +603,14 @@ bool flextdoa_solver_service_submit_observation(
         .responder_id = responder_id,
         .slot_id = slot_id,
         .difference_mm = difference_mm,
+        .dynamic_geometry = dynamic_geometry,
+        .initiator_x_mm = initiator_x_mm,
+        .initiator_y_mm = initiator_y_mm,
+        .responder_x_mm = responder_x_mm,
+        .responder_y_mm = responder_y_mm,
+        .geometry_version = geometry_version,
+        .geometry_fit_rms_mm = geometry_fit_rms_mm,
+        .geometry_all_rtk_fixed = geometry_all_rtk_fixed,
     };
     return flex_solver_submit(&item);
 }

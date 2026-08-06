@@ -61,10 +61,15 @@ bool uwb_native_ds_position_solver_init(
     const float *anchor_y_m, size_t anchor_count,
     uint32_t geometry_version);
 
-/* Returns the immutable fixed geometry for initial/periodic telemetry. */
+/* Returns the current fixed or packet-time mobile geometry. */
 bool uwb_native_ds_position_solver_geometry(
     const struct uwb_native_ds_position_solver *solver,
     struct uwb_native_ds_position_output *output);
+
+bool uwb_native_ds_position_solver_update_geometry(
+    struct uwb_native_ds_position_solver *solver,
+    const float *anchor_x_m, const float *anchor_y_m,
+    uint32_t geometry_version);
 
 bool uwb_native_ds_position_solver_submit_anchor_range(
     struct uwb_native_ds_position_solver *solver, uint8_t initiator_id,

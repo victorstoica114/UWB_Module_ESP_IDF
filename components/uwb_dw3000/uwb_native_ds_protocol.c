@@ -9,7 +9,8 @@
 #define NATIVE_DS_FINAL_SIZE \
     (NATIVE_DS_HEADER_SIZE + 15U + NATIVE_DS_CRC_SIZE)
 #define NATIVE_DS_RESULT_SIZE \
-    (NATIVE_DS_HEADER_SIZE + 4U + NATIVE_DS_CRC_SIZE)
+    (NATIVE_DS_HEADER_SIZE + 4U + UWB_MOBILE_POSITION_WIRE_SIZE + \
+     NATIVE_DS_CRC_SIZE)
 #define NATIVE_DS_TIME_UNIT_SECONDS 15.650040064102564e-12
 #define NATIVE_DS_SPEED_OF_LIGHT_MPS 299702547.0
 
@@ -130,6 +131,13 @@ bool uwb_native_ds_protocol_encode(
                  packet->final_tx_timestamp);
     } else if (packet->type == UWB_NATIVE_DS_MESSAGE_RESULT) {
         put_u32(payload, NATIVE_DS_HEADER_SIZE, packet->distance_mm);
+        if (!uwb_mobile_position_encode(
+                &packet->sender_position,
+                &payload[NATIVE_DS_HEADER_SIZE + 4U],
+                size - NATIVE_DS_HEADER_SIZE - 4U -
+                    NATIVE_DS_CRC_SIZE)) {
+            return false;
+        }
     }
     put_u16(payload, size - NATIVE_DS_CRC_SIZE,
             crc16_ccitt_false(payload, size - NATIVE_DS_CRC_SIZE));
@@ -176,6 +184,13 @@ enum uwb_native_ds_decode_result uwb_native_ds_protocol_decode_ex(
             get_ts40(payload, NATIVE_DS_HEADER_SIZE + 10U);
     } else if (type == UWB_NATIVE_DS_MESSAGE_RESULT) {
         packet->distance_mm = get_u32(payload, NATIVE_DS_HEADER_SIZE);
+        if (!uwb_mobile_position_decode(
+                &payload[NATIVE_DS_HEADER_SIZE + 4U],
+                expected_size - NATIVE_DS_HEADER_SIZE - 4U -
+                    NATIVE_DS_CRC_SIZE,
+                &packet->sender_position)) {
+            return UWB_NATIVE_DS_DECODE_INVALID;
+        }
     }
     return UWB_NATIVE_DS_DECODE_OK;
 }

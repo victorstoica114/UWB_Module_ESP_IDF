@@ -264,6 +264,48 @@ static void test_conservative_partial_frame_and_geometry_gate(
            FLEXTDOA_SOLUTION_GATE_RANK_DEFICIENT);
 }
 
+static void test_packet_time_mobile_geometry(
+    const struct flextdoa_anchor_position *anchors,
+    size_t anchor_count, double tag_x, double tag_y)
+{
+    struct flextdoa_range_difference observations[12] = {0};
+    size_t count = 0U;
+    for (size_t initiator = 0U; initiator < anchor_count; ++initiator) {
+        const double shift_x = 0.25 * (double)initiator;
+        const double shift_y = -0.10 * (double)initiator;
+        for (size_t responder = 0U; responder < anchor_count; ++responder) {
+            if (responder == initiator) {
+                continue;
+            }
+            const double initiator_x = anchors[initiator].x_m + shift_x;
+            const double initiator_y = anchors[initiator].y_m + shift_y;
+            const double responder_x = anchors[responder].x_m + shift_x;
+            const double responder_y = anchors[responder].y_m + shift_y;
+            observations[count++] = (struct flextdoa_range_difference){
+                .initiator_id = anchors[initiator].anchor_id,
+                .responder_id = anchors[responder].anchor_id,
+                .range_difference_m =
+                    distance(tag_x, tag_y, responder_x, responder_y) -
+                    distance(tag_x, tag_y, initiator_x, initiator_y),
+                .dynamic_geometry = true,
+                .initiator_x_m = initiator_x,
+                .initiator_y_m = initiator_y,
+                .responder_x_m = responder_x,
+                .responder_y_m = responder_y,
+            };
+        }
+    }
+    assert(count == 12U);
+
+    struct flextdoa_algmin_result result = {0};
+    assert(flextdoa_algmin_solve_2d(
+        anchors, anchor_count, observations, count, NULL, &result));
+    assert(result.valid);
+    assert(fabs(result.x_m - tag_x) < 1.0e-5);
+    assert(fabs(result.y_m - tag_y) < 1.0e-5);
+    assert(result.residual_rms_m < 1.0e-6);
+}
+
 int main(void)
 {
     const struct flextdoa_anchor_position anchors[] = {
@@ -307,6 +349,8 @@ int main(void)
     test_complete_frame_produces_one_solution(
         anchors, 4U, tag_x, tag_y);
     test_conservative_partial_frame_and_geometry_gate(
+        anchors, 4U, tag_x, tag_y);
+    test_packet_time_mobile_geometry(
         anchors, 4U, tag_x, tag_y);
 
     puts("flextdoa_algmin_test: PASS");

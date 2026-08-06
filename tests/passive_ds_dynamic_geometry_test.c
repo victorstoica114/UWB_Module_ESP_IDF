@@ -56,10 +56,24 @@ int main(void)
     assert(geometry.fit_rms_m < 0.03);
     assert(passive_ds_dynamic_geometry_all_rtk_fixed(&geometry));
 
-    struct passive_ds_dynamic_position_sample moved =
-        sample_at(6.0, 0.0);
+    struct passive_ds_dynamic_position_sample false_fixed =
+        sample_at(7.0, 0.0);
+    assert(!passive_ds_dynamic_geometry_ingest(
+        &geometry, 3U, &false_fixed));
+    assert(!passive_ds_dynamic_geometry_all_rtk_fixed(&geometry));
     double x_m = 0.0;
     double y_m = 0.0;
+    assert(passive_ds_dynamic_geometry_latest(
+        &geometry, 3U, &x_m, &y_m));
+    assert(fabs(x_m - 5.0) < 0.03);
+    assert(fabs(y_m) < 0.03);
+    /* A plausible Fixed recovery immediately clears degraded continuity. */
+    assert(!passive_ds_dynamic_geometry_ingest(
+        &geometry, 3U, &samples[1]));
+    assert(passive_ds_dynamic_geometry_all_rtk_fixed(&geometry));
+
+    struct passive_ds_dynamic_position_sample moved =
+        sample_at(6.0, 0.0);
     assert(passive_ds_dynamic_geometry_project(
         &geometry, &moved, &x_m, &y_m));
     assert(fabs(x_m - 6.0) < 0.03);

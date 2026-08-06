@@ -23,10 +23,17 @@ bool uwb_flex_tdoa_runtime_reload_geometry(void)
 
 bool uwb_flex_tdoa_runtime_submit_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
-    uint32_t slot_id, int32_t difference_mm)
+    uint32_t slot_id, int32_t difference_mm, bool dynamic_geometry,
+    int32_t initiator_x_mm, int32_t initiator_y_mm,
+    int32_t responder_x_mm, int32_t responder_y_mm,
+    uint32_t geometry_version, int32_t geometry_fit_rms_mm,
+    bool geometry_all_rtk_fixed)
 {
     return flextdoa_solver_service_submit_observation(
-        tag_id, initiator_id, responder_id, slot_id, difference_mm);
+        tag_id, initiator_id, responder_id, slot_id, difference_mm,
+        dynamic_geometry, initiator_x_mm, initiator_y_mm,
+        responder_x_mm, responder_y_mm, geometry_version,
+        geometry_fit_rms_mm, geometry_all_rtk_fixed);
 }
 
 int32_t uwb_flex_tdoa_runtime_store_anchor_range(

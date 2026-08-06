@@ -5,10 +5,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "uwb_mobile_geometry.h"
+
 #define FLEXTDOA_MAX_ANCHORS 16U
 #define FLEXTDOA_MAX_RESPONDERS (FLEXTDOA_MAX_ANCHORS - 1U)
 #define FLEXTDOA_TIMESTAMP_BITS 40U
-#define FLEXTDOA_PACKET_FIXED_SIZE 18U
+#define FLEXTDOA_PACKET_FIXED_SIZE \
+    (18U + UWB_MOBILE_POSITION_WIRE_SIZE)
 
 enum flextdoa_message_type {
     FLEXTDOA_MESSAGE_REQUEST = 1,
@@ -43,6 +46,7 @@ struct flextdoa_packet {
     uint16_t previous_twr_responder_id;
     uint16_t previous_twr_mm;
     uint16_t previous_slot_id;
+    struct uwb_mobile_position sender_position;
 };
 
 struct flextdoa_observation_input {

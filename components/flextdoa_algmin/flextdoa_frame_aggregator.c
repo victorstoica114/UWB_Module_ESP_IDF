@@ -123,7 +123,12 @@ enum flextdoa_frame_ingest_result flextdoa_frame_aggregator_ingest(
                           minimum_observation_count) ||
         observation == NULL ||
         observation->initiator_id == observation->responder_id ||
-        !isfinite(observation->range_difference_m)) {
+        !isfinite(observation->range_difference_m) ||
+        (observation->dynamic_geometry &&
+         (!isfinite(observation->initiator_x_m) ||
+          !isfinite(observation->initiator_y_m) ||
+          !isfinite(observation->responder_x_m) ||
+          !isfinite(observation->responder_y_m)))) {
         return FLEXTDOA_FRAME_REJECTED;
     }
 

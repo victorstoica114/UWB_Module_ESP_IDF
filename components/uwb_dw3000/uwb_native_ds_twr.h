@@ -7,6 +7,7 @@
 
 #include "esp_err.h"
 #include "uwb_dw3000.h"
+#include "uwb_mobile_geometry.h"
 
 #define UWB_NATIVE_DS_MAX_FRAME_LEN 64U
 #define UWB_NATIVE_DS_MAX_ANCHORS UWB_NATIVE_DS_PIPELINE_MAX_ANCHORS
@@ -42,9 +43,12 @@ struct uwb_native_ds_radio_ops {
     void (*wait_until_us)(void *context, int64_t deadline_us);
     bool (*stop_requested)(void *context);
     void (*set_ready)(void *context);
+    void (*capture_anchor_position)(
+        void *context, struct uwb_mobile_position *position);
     void (*consume_report)(void *context, bool tag_range,
                            uint8_t initiator_id, uint8_t responder_id,
-                           uint32_t frame_id, double distance_m);
+                           uint32_t frame_id, double distance_m,
+                           const struct uwb_mobile_position *anchor_position);
 };
 
 struct uwb_native_ds_config {

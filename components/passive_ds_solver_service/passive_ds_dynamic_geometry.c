@@ -5,7 +5,9 @@
 
 #define PASSIVE_DS_EARTH_RADIUS_M 6378137.0
 #define PASSIVE_DS_DEG_TO_RAD 0.01745329251994329577
-#define PASSIVE_DS_DYNAMIC_MAX_INITIAL_FIT_RMS_M 0.50
+#define PASSIVE_DS_DYNAMIC_MAX_INITIAL_FIT_RMS_M 0.15
+#define PASSIVE_DS_DYNAMIC_BASE_JUMP_M 0.25
+#define PASSIVE_DS_DYNAMIC_MOTION_HORIZON_S 0.50
 
 static int anchor_index(const struct passive_ds_dynamic_geometry *geometry,
                         uint8_t anchor_id)
@@ -198,9 +200,41 @@ bool passive_ds_dynamic_geometry_ingest(
         latest->rtk_fixed = false;
         return false;
     }
-    raw_position(geometry, sample, &latest->east_m, &latest->north_m,
-                 &latest->velocity_east_mps,
-                 &latest->velocity_north_mps);
+    double east_m = 0.0;
+    double north_m = 0.0;
+    double velocity_east_mps = 0.0;
+    double velocity_north_mps = 0.0;
+    raw_position(geometry, sample, &east_m, &north_m,
+                 &velocity_east_mps, &velocity_north_mps);
+    if (geometry->active && latest->valid) {
+        const double displacement_m = hypot(
+            east_m - latest->east_m, north_m - latest->north_m);
+        const double previous_speed_mps = hypot(
+            latest->velocity_east_mps,
+            latest->velocity_north_mps);
+        const double candidate_speed_mps = hypot(
+            velocity_east_mps, velocity_north_mps);
+        const double allowed_displacement_m =
+            PASSIVE_DS_DYNAMIC_BASE_JUMP_M +
+            fmax(previous_speed_mps, candidate_speed_mps) *
+                PASSIVE_DS_DYNAMIC_MOTION_HORIZON_S;
+        if (!isfinite(displacement_m) ||
+            displacement_m > allowed_displacement_m) {
+            /*
+             * An RTK receiver can briefly label an ambiguity jump as Fixed.
+             * Holding the last plausible Fixed coordinate is safer than
+             * poisoning every TDOA equation with a metre-scale zero-speed
+             * anchor jump.  Normal continuous motion remains below the base
+             * step, while faster motion is admitted by the RMC velocity.
+             */
+            latest->rtk_fixed = false;
+            return false;
+        }
+    }
+    latest->east_m = east_m;
+    latest->north_m = north_m;
+    latest->velocity_east_mps = velocity_east_mps;
+    latest->velocity_north_mps = velocity_north_mps;
     latest->valid = true;
     latest->rtk_fixed = sample_rtk_fixed(sample);
     const bool was_active = geometry->active;

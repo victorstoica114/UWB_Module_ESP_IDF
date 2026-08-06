@@ -133,6 +133,33 @@ bool uwb_native_ds_position_solver_geometry(
     return true;
 }
 
+bool uwb_native_ds_position_solver_update_geometry(
+    struct uwb_native_ds_position_solver *solver,
+    const float *anchor_x_m, const float *anchor_y_m,
+    uint32_t geometry_version)
+{
+    if (solver == NULL || anchor_x_m == NULL || anchor_y_m == NULL ||
+        solver->anchor_count < 3U || geometry_version == 0U) {
+        return false;
+    }
+    for (size_t index = 0U; index < solver->anchor_count; ++index) {
+        if (!isfinite(anchor_x_m[index]) ||
+            !isfinite(anchor_y_m[index])) {
+            return false;
+        }
+    }
+    if (!geometry_is_observable(
+            anchor_x_m, anchor_y_m, solver->anchor_count)) {
+        return false;
+    }
+    memcpy(solver->anchor_x_m, anchor_x_m,
+           solver->anchor_count * sizeof(solver->anchor_x_m[0]));
+    memcpy(solver->anchor_y_m, anchor_y_m,
+           solver->anchor_count * sizeof(solver->anchor_y_m[0]));
+    solver->geometry_version = geometry_version;
+    return true;
+}
+
 static bool initial_position(const struct uwb_native_ds_position_solver *solver,
                              float *x_m, float *y_m)
 {

@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "uwb_mobile_geometry.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -41,6 +43,7 @@ struct uwb_native_ds_packet {
     uint64_t response_rx_timestamp;
     uint64_t final_tx_timestamp;
     uint32_t distance_mm;
+    struct uwb_mobile_position sender_position;
 };
 
 size_t uwb_native_ds_protocol_packet_size(

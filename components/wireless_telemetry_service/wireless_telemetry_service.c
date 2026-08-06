@@ -1405,7 +1405,7 @@ bool wireless_telemetry_service_submit_flex_position(
 bool wireless_telemetry_service_submit_flex_geometry(
     uint8_t tag_id, uint8_t anchor_id, uint8_t anchor_count,
     uint32_t geometry_version, int32_t x_mm, int32_t y_mm,
-    int32_t fit_rms_mm)
+    int32_t fit_rms_mm, bool dynamic, bool all_rtk_fixed)
 {
     if (!s_connected || tag_id == 0U || anchor_id == 0U ||
         anchor_count < 3U) {
@@ -1424,8 +1424,8 @@ bool wireless_telemetry_service_submit_flex_geometry(
                 .anchor_id = anchor_id,
                 .anchor_count = anchor_count,
                 .tag_id = tag_id,
-                /* FlexTDOA positions use fixed GPS RTK ENU geometry. */
-                .flags = 0U,
+                .flags = (dynamic ? 1U : 0U) |
+                         (all_rtk_fixed ? 2U : 0U),
             },
         },
     };
@@ -1579,7 +1579,8 @@ bool wireless_telemetry_service_submit_native_ds_position(
 
 bool wireless_telemetry_service_submit_native_ds_geometry(
     uint8_t anchor_id, uint8_t anchor_count, uint32_t geometry_version,
-    int32_t x_mm, int32_t y_mm, int32_t fit_rms_mm)
+    int32_t x_mm, int32_t y_mm, int32_t fit_rms_mm, bool dynamic,
+    bool all_rtk_fixed)
 {
     if (!s_connected || anchor_id == 0U || anchor_count < 3U) {
         return false;
@@ -1597,8 +1598,8 @@ bool wireless_telemetry_service_submit_native_ds_geometry(
                 .anchor_id = anchor_id,
                 .anchor_count = anchor_count,
                 .tag_id = app_identity_get_module_id(),
-                /* Native DS positions are published in fixed RTK ENU. */
-                .flags = 0U,
+                .flags = (dynamic ? 1U : 0U) |
+                         (all_rtk_fixed ? 2U : 0U),
             },
         },
     };

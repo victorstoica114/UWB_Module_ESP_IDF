@@ -98,6 +98,19 @@ int main(void)
     assert(output.geometry_version == 29U);
     assert(output.geometry_fit_rms_m < 0.001f);
 
+    /* Packet-time mobile coordinates replace the surveyed solver geometry. */
+    const float moved_x[] = {0.100f, 3.944f, -3.020f, 1.155f};
+    const float moved_y[] = {-0.050f, 2.873f, 3.849f, 6.786f};
+    assert(uwb_native_ds_position_solver_update_geometry(
+        &solver, moved_x, moved_y, 0x80000067U));
+    assert(uwb_native_ds_position_solver_geometry(&solver, &output));
+    assert(output.geometry_version == 0x80000067U);
+    assert_near(output.anchor_x_m[0], 0.100f, 0.0001f);
+    submit_complete_frame(&solver, anchors, moved_x, moved_y, anchor_count,
+                          103U, -0.450f, 1.125f, &output);
+    assert_near(output.x_m, -0.450f, 0.001f);
+    assert_near(output.y_m, 1.125f, 0.001f);
+
     puts("uwb_native_ds_position_solver_test: PASS");
     return 0;
 }

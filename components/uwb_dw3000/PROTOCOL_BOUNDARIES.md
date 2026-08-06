@@ -15,6 +15,12 @@ call a solver implementation directly.
 `uwb_anchor_range_cache.c` implements generic cache mechanics.  It contains no
 global cache.  A cache instance is always supplied by one protocol runtime.
 
+`uwb_mobile_geometry` owns the protocol-neutral GNSS wire sample and rigid
+RTK-to-UWB projection used by FlexTDOA and Native DS-TWR. It has no radio,
+solver, task or global runtime state. Passive DS-TWR retains its equivalent
+protocol-private implementation so its validated packet and solver boundary
+does not change.
+
 ## FlexTDOA
 
 - `uwb_flex_tdoa_runtime.c`: Flex-only cache and solver lifecycle.
@@ -38,8 +44,9 @@ no dependency on either receive-only protocol.
   equation using POLL/RESPONSE/FINAL and delayed responder exchange timing.
 - `uwb_passive_ds_runtime.c`: Passive-only anchor diagnostic cache, counters
   and raw solver lifecycle.
-- `passive_ds_solver_service`: raw AlgMin solver using fixed RTK ENU geometry.
-  It supports either one coherent radio star or a three-star spatial window;
+- `passive_ds_solver_service`: raw AlgMin solver bootstrapped from surveyed RTK
+  ENU geometry and evaluated with packet-time anchor GNSS coordinates. It
+  supports either one coherent radio star or a three-star spatial window;
   neither mode performs temporal filtering or prediction.
 
 The driver cannot obtain a mutable pointer to Passive runtime state.  It uses

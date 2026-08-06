@@ -221,6 +221,12 @@ size_t flextdoa_encode_packet(
     offset += 2U;
     put_u16_le(&payload[offset], packet->previous_slot_id);
     offset += 2U;
+    if (!uwb_mobile_position_encode(
+            &packet->sender_position, &payload[offset],
+            capacity - offset)) {
+        return 0U;
+    }
+    offset += UWB_MOBILE_POSITION_WIRE_SIZE;
     return offset;
 }
 
@@ -261,7 +267,10 @@ bool flextdoa_decode_packet(
     packet->previous_twr_mm = get_u16_le(&payload[offset]);
     offset += 2U;
     packet->previous_slot_id = get_u16_le(&payload[offset]);
-    return true;
+    offset += 2U;
+    return uwb_mobile_position_decode(
+        &payload[offset], payload_len - offset,
+        &packet->sender_position);
 }
 
 uint64_t flextdoa_timestamp_delta(uint64_t later, uint64_t earlier)

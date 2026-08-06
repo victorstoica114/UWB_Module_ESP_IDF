@@ -211,7 +211,8 @@ static esp_err_t tag_exchange(
     anchor_stats->completed_range_count++;
     s_stats.last_distance_mm = (int32_t)result.packet.distance_mm;
     radio->consume_report(radio->context, true, config->tag_id, anchor_id,
-                          frame_id, distance_m);
+                          frame_id, distance_m,
+                          &result.packet.sender_position);
     return ESP_OK;
 }
 
@@ -353,6 +354,8 @@ static esp_err_t anchor_exchange(
 
     packet.type = UWB_NATIVE_DS_MESSAGE_RESULT;
     packet.distance_mm = distance_mm;
+    radio->capture_anchor_position(
+        radio->context, &packet.sender_position);
     if (!encode_packet(&packet, payload, &payload_len)) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -481,7 +484,9 @@ static bool config_valid(const struct uwb_native_ds_config *config,
         radio->add_delay_ms == NULL ||
         radio->programmed_tx_timestamp == NULL || radio->now_us == NULL ||
         radio->wait_until_us == NULL || radio->stop_requested == NULL ||
-        radio->set_ready == NULL || radio->consume_report == NULL) {
+        radio->set_ready == NULL ||
+        radio->capture_anchor_position == NULL ||
+        radio->consume_report == NULL) {
         return false;
     }
     const uint64_t minimum_slot_ms =

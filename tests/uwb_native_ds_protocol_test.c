@@ -18,6 +18,14 @@ static void codec_round_trip(enum uwb_native_ds_message_type type)
         .response_rx_timestamp = 123456789U,
         .final_tx_timestamp = 987654321U,
         .distance_mm = 3472U,
+        .sender_position = {
+            .flags = UWB_MOBILE_POSITION_VALID,
+            .age_ms = 73U,
+            .latitude_e7 = 443361762,
+            .longitude_e7 = 259475401,
+            .velocity_east_mmps = 12,
+            .velocity_north_mmps = -8,
+        },
     };
     uint8_t payload[UWB_NATIVE_DS_PROTOCOL_MAX_PACKET_SIZE] = {0};
     size_t payload_len = 0U;
@@ -40,6 +48,12 @@ static void codec_round_trip(enum uwb_native_ds_message_type type)
     }
     if (type == UWB_NATIVE_DS_MESSAGE_RESULT) {
         assert(decoded.distance_mm == source.distance_mm);
+        assert(decoded.sender_position.flags ==
+               source.sender_position.flags);
+        assert(decoded.sender_position.latitude_e7 ==
+               source.sender_position.latitude_e7);
+        assert(decoded.sender_position.longitude_e7 ==
+               source.sender_position.longitude_e7);
     }
 
     assert(!uwb_native_ds_protocol_decode(payload, payload_len - 1U,
