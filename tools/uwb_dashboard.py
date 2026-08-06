@@ -13936,10 +13936,28 @@ function renderPassiveDsMultipointTiming(root, config) {
       key: index === 0 ? "POLL → RESP[0]" : `RESP[${index - 1}] → RESP[${index}]`,
       duration: index === 0 ? firstResponseDelayMs : responseSpacingMs,
       cls: index === 0 ? "req" : "response",
+      detail: index === 0
+        ? `POLL TX at 0.000 ms; RESP[0] TX at ${fmtFixed(firstResponseDelayMs, 3)} ms`
+        : `RESP[${index - 1}] TX at interval start; RESP[${index}] TX at interval end`,
     })),
-    {key: `RESP[${responderCount - 1}] → FINAL`, duration: finalDelayMs, cls: "response"},
-    {key: "SCHEDULER SLACK", duration: schedulerSlackMs, cls: "guard"},
-    {key: "INTER-STAR GAP", duration: frameGuardMs, cls: "guard"},
+    {
+      key: `RESP[${responderCount - 1}] → FINAL`,
+      duration: finalDelayMs,
+      cls: "response",
+      detail: `RESP[${responderCount - 1}] TX at interval start; aggregate FINAL TX at interval end`,
+    },
+    {
+      key: "SCHEDULER SLACK",
+      duration: schedulerSlackMs,
+      cls: "guard",
+      detail: "No UWB packet; wait to the configured exchange-budget boundary",
+    },
+    {
+      key: "INTER-STAR GAP",
+      duration: frameGuardMs,
+      cls: "guard",
+      detail: "No UWB packet; quiet gap before the next rotating star",
+    },
   ].filter(segment => segment.duration > 0);
   const columns = segments.map(segment =>
     `${Math.max(0.001, segment.duration)}fr`).join(" ");
@@ -13961,11 +13979,33 @@ function renderPassiveDsMultipointTiming(root, config) {
         (index === boundaries.length - 1 ? "edge-end" : "")
     )
   ).join("");
+  let detailElapsedMs = 0;
+  const detailRows = segments.map(segment => {
+    const startMs = detailElapsedMs;
+    const endMs = startMs + segment.duration;
+    detailElapsedMs = endMs;
+    return `<tr>
+      <td>${esc(segment.key)}</td>
+      <td>${fmtFixed(startMs, 3)}</td>
+      <td>${fmtFixed(endMs, 3)}</td>
+      <td>${fmtFixed(segment.duration, 3)} ms</td>
+      <td>${esc(segment.detail)}</td>
+    </tr>`;
+  }).join("");
+  const responsePacketRows = Array.from(
+    {length: responderCount}, (_, index) => {
+      const txAtMs = firstResponseDelayMs + index * responseSpacingMs;
+      return `<div class="flex-packet-row">
+        <b>t=${fmtFixed(txAtMs, 3)} ms · RESP[${index}] · responder → broadcast</b>
+        <code>responder index=${index} | exact reply_dtu32 | sender GNSS position + quality + velocity + age | completed-exchange refs | CRC16</code>
+      </div>`;
+    }
+  ).join("");
   const overrun = radioMs >= config.slotMs;
   root.className = "";
   root.innerHTML = `
     <div class="flex-timing-metrics">
-      <div class="flex-timing-metric"><span>Protocol</span><strong>Clean Rotating Full-DS · N+2</strong></div>
+      <div class="flex-timing-metric"><span>Protocol</span><strong>Clean Rotating Full-DS · N+1 packets</strong></div>
       <div class="flex-timing-metric"><span>Reference</span><strong>rotates every radio star</strong></div>
       <div class="flex-timing-metric"><span>Position policy</span><strong>${esc(passiveDsSolveModeLabel(config.solveMode))}</strong></div>
       <div class="flex-timing-metric"><span>Radio star</span><strong>${fmtFixed(radioStarMs, 2)} ms · ${fmtFixed(radioStarHz, 2)} Hz</strong></div>
@@ -13996,11 +14036,24 @@ function renderPassiveDsMultipointTiming(root, config) {
         </div>
       </div>
     </div>
-    <div class="flex-packet-flow" style="margin-top:12px">
-      <div class="flex-packet-row"><b>POLL · rotating initiator → broadcast</b><code>PDS3 v3 | session | frame | initiator GNSS position + quality + velocity + age | two completed-exchange refs | CRC16</code></div>
-      <div class="flex-packet-row"><b>RESP[0..${responderCount - 1}] · delayed native TX</b><code>responder index | exact reply_dtu32 | responder GNSS position + quality + velocity + age | two completed-exchange refs | CRC16</code></div>
-      <div class="flex-packet-row"><b>FINAL · initiator → broadcast</b><code>poll_tx40 | final_tx40 | responder ID + resp_rx40 | CRC16</code></div>
-      <div class="flex-packet-row"><b>Receive-only tags</b><code>POLL_RX + RESP_RX + FINAL_RX + responder exchange timing → passive three-clock DS equation; CFO is diagnostic only</code></div>
+    <div class="flex-timing-detail-grid">
+      <table class="flex-timing-table">
+        <thead><tr><th>Interval above</th><th>Start ms</th><th>End ms</th><th>Budget</th><th>Exact meaning</th></tr></thead>
+        <tbody>${detailRows}</tbody>
+      </table>
+      <div>
+        <div class="flex-timing-label">
+          <strong>Radio events at the boundaries above</strong>
+          <span>Packet payloads, not additional timeline segments</span>
+        </div>
+        <div class="flex-packet-flow">
+          <div class="flex-packet-row"><b>t=0.000 ms · POLL · rotating initiator → broadcast</b><code>PDS3 v3 | session | frame | sender GNSS position + quality + velocity + age | completed-exchange refs | CRC16</code></div>
+          ${responsePacketRows}
+          <div class="flex-packet-row"><b>t=${fmtFixed(radioMs, 3)} ms · FINAL · initiator → broadcast</b><code>poll_tx40 | final_tx40 | responder_count=${responderCount} | responders[ID + resp_rx40] | CRC16</code></div>
+          <div class="flex-packet-row"><b>${fmtFixed(radioMs, 3)}–${fmtFixed(radioStarMs, 3)} ms · no transmission</b><code>scheduler slack followed by inter-star gap; the next star begins at ${fmtFixed(radioStarMs, 3)} ms</code></div>
+          <div class="flex-packet-row"><b>Receive-only tags</b><code>timestamp POLL_RX, each RESP_RX and FINAL_RX; emit no UWB packet</code></div>
+        </div>
+      </div>
     </div>
     <div class="flex-timing-note ${overrun ? "warn" : ""}">
       ${config.live ? "Live configuration" : "Configured fallback"} ·

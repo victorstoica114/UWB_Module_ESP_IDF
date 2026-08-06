@@ -78,6 +78,12 @@ int main(void)
     assert(!passive_ds_dynamic_geometry_ingest(
         &geometry, 3U, &moved));
     assert(!passive_ds_dynamic_geometry_all_rtk_fixed(&geometry));
+    /* Float/SPS marks degraded quality but must not replace the last fixed
+     * coordinate used by the solver. */
+    assert(passive_ds_dynamic_geometry_latest(
+        &geometry, 3U, &x_m, &y_m));
+    assert(fabs(x_m - 5.0) < 0.03);
+    assert(fabs(y_m) < 0.03);
     assert(passive_ds_dynamic_geometry_project(
         &geometry, &moved, &x_m, &y_m));
 

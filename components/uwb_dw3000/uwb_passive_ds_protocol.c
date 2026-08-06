@@ -121,8 +121,7 @@ static bool position_valid(
                position->velocity_east_mmps == 0 &&
                position->velocity_north_mmps == 0;
     }
-    return (position->flags & UWB_PASSIVE_DS_POSITION_RTK_FIXED) != 0U &&
-           position->latitude_e7 >= -900000000 &&
+    return position->latitude_e7 >= -900000000 &&
            position->latitude_e7 <= 900000000 &&
            position->longitude_e7 >= -1800000000 &&
            position->longitude_e7 <= 1800000000;

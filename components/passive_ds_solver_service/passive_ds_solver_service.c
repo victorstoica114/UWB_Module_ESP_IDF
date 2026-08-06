@@ -245,6 +245,21 @@ static struct passive_ds_dynamic_position_sample dynamic_sample(
     };
 }
 
+static bool project_dynamic_anchor(
+    const struct passive_ds_dynamic_geometry *geometry,
+    uint8_t anchor_id,
+    const struct passive_ds_dynamic_position_sample *sample,
+    double *x_m, double *y_m)
+{
+    if (sample != NULL &&
+        (sample->flags & PASSIVE_DS_DYNAMIC_POSITION_RTK_FIXED) != 0U) {
+        return passive_ds_dynamic_geometry_project(
+            geometry, sample, x_m, y_m);
+    }
+    return passive_ds_dynamic_geometry_latest(
+        geometry, anchor_id, x_m, y_m);
+}
+
 static bool refresh_dynamic_anchors(
     struct passive_ds_solver_state *state)
 {
@@ -770,11 +785,13 @@ static void handle_observation(
     double responder_y_m = 0.0;
     const bool dynamic_observation = state->dynamic_geometry.active;
     if (dynamic_observation &&
-        (!passive_ds_dynamic_geometry_project(
-             &state->dynamic_geometry, &initiator_sample,
+        (!project_dynamic_anchor(
+             &state->dynamic_geometry, item->initiator_id,
+             &initiator_sample,
              &initiator_x_m, &initiator_y_m) ||
-         !passive_ds_dynamic_geometry_project(
-             &state->dynamic_geometry, &responder_sample,
+         !project_dynamic_anchor(
+             &state->dynamic_geometry, item->responder_id,
+             &responder_sample,
              &responder_x_m, &responder_y_m))) {
         state->rejected_count++;
         return;

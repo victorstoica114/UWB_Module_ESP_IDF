@@ -188,6 +188,16 @@ bool passive_ds_dynamic_geometry_ingest(
     }
     struct passive_ds_dynamic_anchor_state *latest =
         &geometry->latest[index];
+    if (geometry->active && !sample_rtk_fixed(sample)) {
+        /*
+         * RTK Float/SPS coordinates can jump by enough to make an otherwise
+         * coherent Passive DS star physically inconsistent.  Keep the last
+         * RTK Fixed coordinate as the degraded-continuity hold point while
+         * still exposing the current quality through all_rtk_fixed().
+         */
+        latest->rtk_fixed = false;
+        return false;
+    }
     raw_position(geometry, sample, &latest->east_m, &latest->north_m,
                  &latest->velocity_east_mps,
                  &latest->velocity_north_mps);

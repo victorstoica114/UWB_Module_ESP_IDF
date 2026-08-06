@@ -160,8 +160,9 @@ static void test_codec_and_crc(void)
         .initiator_id = 4U,
         .anchor_count = 4U,
         .sender_position = {
-            .flags = UWB_PASSIVE_DS_POSITION_VALID |
-                     UWB_PASSIVE_DS_POSITION_RTK_FIXED,
+            /* A valid non-fixed sample must remain encodable after mobile
+             * geometry activation, preserving RTK Float/SPS continuity. */
+            .flags = UWB_PASSIVE_DS_POSITION_VALID,
             .age_ms = 81U,
             .latitude_e7 = 444355456,
             .longitude_e7 = 260973987,
