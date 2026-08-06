@@ -759,7 +759,9 @@ static void format_passive_ds_pipeline_stats_json(
         "\"response_timeouts\":%lu,\"final_timeouts\":%lu,"
         "\"invalid_frames\":%lu,\"state_collisions\":%lu,"
         "\"schedule_alarms\":%lu,\"schedule_overruns\":%lu,"
-        "\"rx_rearm_failures\":%lu,\"stages\":{"
+        "\"rx_rearm_failures\":%lu,"
+        "\"rx_phy_retries\":%lu,\"rx_recovered_after_phy\":%lu,"
+        "\"rx_timeouts_after_phy\":%lu,\"stages\":{"
         "\"poll_tx\":%s,\"response_tx\":%s,\"final_tx\":%s,"
         "\"final_rx\":%s,\"cia_read\":%s,\"rx_rearm\":%s}}",
         stats->deadline_pipeline_active ? "true" : "false",
@@ -771,6 +773,9 @@ static void format_passive_ds_pipeline_stats_json(
         (unsigned long)stats->schedule_alarm_count,
         (unsigned long)stats->schedule_overrun_count,
         (unsigned long)stats->rx_rearm_failure_count,
+        (unsigned long)stats->rx_phy_retry_count,
+        (unsigned long)stats->rx_recovered_after_phy_count,
+        (unsigned long)stats->rx_timeout_after_phy_count,
         poll, response, final_tx, final_rx, cia, rearm);
 }
 

@@ -81,6 +81,20 @@ FLEX_TDOA_ANCHOR_RE = re.compile(
     r"raw=(?P<raw>[-+]?\d+(?:\.\d+)?)\s+m"
 )
 CAL_SYNC_SKIP_RE = re.compile(r"\bUWB CAL slot skipped due to sync fail\b")
+PASSIVE_DS_TAG_QUALITY_RE = re.compile(
+    r"\bPASSIVE_DS tag quality\b\s+"
+    r"radio_star=(?P<radio_0>\d+)/(?P<radio_1>\d+)/"
+    r"(?P<radio_2>\d+)/(?P<radio_3>\d+)\s+"
+    r"computed_star=(?P<computed_0>\d+)/(?P<computed_1>\d+)/"
+    r"(?P<computed_2>\d+)/(?P<computed_3>\d+)\s+"
+    r"radio_obs=(?P<radio_obs>\d+)\s+"
+    r"computed_obs=(?P<computed_obs>\d+)\s+"
+    r"computed_incomplete=(?P<computed_incomplete>\d+)\s+"
+    r"solver_full=(?P<solver_full>\d+)\s+"
+    r"miss_poll=(?P<miss_poll>\d+)\s+"
+    r"queue_attempt_drop=(?P<telemetry_attempt_drop>\d+)/"
+    r"(?P<solver_attempt_drop>\d+)"
+)
 TELEMETRY_BINARY_MAGIC = b"UWT1"
 TELEMETRY_BINARY_HEADER_LEN = 12
 TELEMETRY_STREAM_BNO085_ACCEL = 1
@@ -1135,6 +1149,7 @@ class DashboardState:
         self.status_targets: list[str] = []
         self.status_by_module: dict[int, dict[str, Any]] = {}
         self.status_errors: dict[str, str] = {}
+        self.passive_ds_tag_diagnostics: dict[int, dict[str, Any]] = {}
 
     def add_log(self, line: str, addr: tuple[str, int]) -> None:
         parsed = self.parse_line(line)
@@ -1154,6 +1169,7 @@ class DashboardState:
             self.record_ranging_locked(item)
             self.record_tdoa_anchor_locked(item)
             self.record_tdoa_locked(item)
+            self.record_passive_ds_tag_diagnostics_locked(item)
 
     def add_telemetry(self, line: str, addr: tuple[str, int]) -> None:
         parsed = self.parse_telemetry(line)
@@ -1338,6 +1354,46 @@ class DashboardState:
             "tag": tag,
             "message": message,
             "component": classify_component(tag, message),
+        }
+
+    def record_passive_ds_tag_diagnostics_locked(
+        self, item: dict[str, Any]
+    ) -> None:
+        module_id = item.get("module_id")
+        if module_id is None:
+            return
+        raw_message = str(item.get("message") or item.get("raw") or "")
+        match = PASSIVE_DS_TAG_QUALITY_RE.search(raw_message)
+        if match is None:
+            return
+
+        radio_ready_paths = [
+            int(match.group(f"radio_{index}")) for index in range(4)
+        ]
+        computed_ready_paths = [
+            int(match.group(f"computed_{index}")) for index in range(4)
+        ]
+        self.passive_ds_tag_diagnostics[int(module_id)] = {
+            "module_id": int(module_id),
+            "ready_paths": {
+                "radio": radio_ready_paths,
+                "computed": computed_ready_paths,
+            },
+            "radio_full": radio_ready_paths[3],
+            "computed_full": computed_ready_paths[3],
+            "solver_full": int(match.group("solver_full")),
+            "usable_ge1": sum(computed_ready_paths[1:]),
+            "radio_obs": int(match.group("radio_obs")),
+            "computed_obs": int(match.group("computed_obs")),
+            "computed_incomplete": int(match.group("computed_incomplete")),
+            "miss_poll": int(match.group("miss_poll")),
+            "queue_attempt_drop": {
+                "telemetry": int(match.group("telemetry_attempt_drop")),
+                "solver": int(match.group("solver_attempt_drop")),
+            },
+            "received_at": item.get("received_at"),
+            "uptime_ms": item.get("uptime_ms"),
+            "log_id": item.get("id"),
         }
 
     def record_accel_locked(self, item: dict[str, Any]) -> None:
@@ -2236,6 +2292,16 @@ class DashboardState:
             next_log_id = self.next_log_id
             ranging = self.ranging_snapshot_locked(now)
             tdoa = self.tdoa_snapshot_locked(now)
+            passive_ds_tag_diagnostics = {
+                str(module_id): {
+                    **item,
+                    "age_sec": max(
+                        0.0,
+                        now - float(item.get("received_at") or now),
+                    ),
+                }
+                for module_id, item in self.passive_ds_tag_diagnostics.items()
+            }
         statuses.sort(
             key=lambda item: (
                 int(item.get("module_id") or 9999),
@@ -2257,6 +2323,7 @@ class DashboardState:
             "accel_history": {},
             "ranging": ranging,
             "tdoa": tdoa,
+            "passive_ds_tag_diagnostics": passive_ds_tag_diagnostics,
         }
 
 
@@ -4767,8 +4834,8 @@ tr.status-stale td { color: #4f3b1d; }
                 <label for="passiveDsMultiGapMs">Frame gap ms</label><input id="passiveDsMultiGapMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsMultiRxMs">Anchor RX slice ms</label><input id="passiveDsMultiRxMs" value="100" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsMultiTimeoutMs">RX timeout ms</label><input id="passiveDsMultiTimeoutMs" value="5" type="number" min="1" max="60000" step="1">
-                <label for="passiveDsMultiRespUs">First RESP delay µs</label><input id="passiveDsMultiRespUs" value="1500" type="number" min="100" max="1000000" step="50">
-                <label for="passiveDsMultiFinalUs">Last RESP → FINAL µs</label><input id="passiveDsMultiFinalUs" value="1500" type="number" min="100" max="1000000" step="50">
+                <label for="passiveDsMultiRespUs">First RESP delay µs</label><input id="passiveDsMultiRespUs" value="1750" type="number" min="100" max="1000000" step="50">
+                <label for="passiveDsMultiFinalUs">Last RESP → FINAL µs</label><input id="passiveDsMultiFinalUs" value="1750" type="number" min="100" max="1000000" step="50">
                 <label for="passiveDsMultiAutoRxUus">Auto RX delay UUS</label><input id="passiveDsMultiAutoRxUus" value="500" type="number" min="0" max="65535" step="10">
                 <label for="passiveDsMultiFreshSec">Observation freshness s</label><input id="passiveDsMultiFreshSec" value="0.2" type="number" min="0.05" step="0.05">
               </div>
@@ -5134,6 +5201,7 @@ const state = {
   lastAccelId: 0,
   terminals: new Map(),
   statuses: [],
+  passiveDsTagDiagnostics: {},
   accelHistory: {},
   accelSeen: new Set(),
   timebaseSecPerDiv: Number(localStorage.getItem("uwbDash.setting.accelTimebase") || "5"),
@@ -11212,6 +11280,7 @@ function renderPd(statuses) {
 
 function renderInfo(snapshot) {
   state.statuses = snapshot.statuses || [];
+  state.passiveDsTagDiagnostics = snapshot.passive_ds_tag_diagnostics || {};
   synchronizePositionAnchorsFromRuntime(state.statuses);
   state.ranging = snapshot.ranging || {distances: {}, max_age_sec: 3};
   const selectedSolver = positionSettings().solver;
@@ -13324,12 +13393,12 @@ const passiveDsProfileDefaults = {
     prefix: "passiveDsMulti",
     label: "Clean Rotating Full-DS",
     schedule: 2,
-    slotMs: 8,
+    slotMs: 9,
     gapMs: 1,
     rxMs: 100,
     timeoutMs: 5,
-    respUs: 1500,
-    finalUs: 1500,
+    respUs: 1750,
+    finalUs: 1750,
     autoRxUus: 500,
     freshSec: 0.2,
     solveMode: 2,
@@ -13684,7 +13753,7 @@ async function applyPassiveDsProfile(key) {
       passive_ds_solve_mode: String(
         key === "multi" ? values.solveMode : 0
       ),
-      reboot: "1",
+      hot_switch: "1",
     },
   }, "passiveDsProfileToast");
   if (apiResponseOk(data)) {
@@ -13772,12 +13841,12 @@ function passiveDsRuntimeConfig() {
   return {
     anchorIds,
     schedule: Number(status.runtime_passive_ds_schedule ?? 2),
-    slotMs: Number(status.runtime_passive_ds_slot_ms || 8),
+    slotMs: Number(status.runtime_passive_ds_slot_ms || 9),
     gapMs: Number(status.runtime_passive_ds_round_gap_ms ?? 1),
     rxMs: Number(status.runtime_passive_ds_rx_slice_ms || 100),
     timeoutMs: Number(status.runtime_passive_ds_rx_timeout_ms || 5),
-    respUs: Number(status.runtime_passive_ds_resp_delay_us || 1500),
-    finalUs: Number(status.runtime_passive_ds_final_delay_us || 1500),
+    respUs: Number(status.runtime_passive_ds_resp_delay_us || 1750),
+    finalUs: Number(status.runtime_passive_ds_final_delay_us || 1750),
     autoRxUus: Number(status.runtime_passive_ds_auto_rx_delay_uus || 500),
     pipelineMode: Number(status.runtime_passive_ds_pipeline_mode || 0),
     solveMode: Number(status.runtime_passive_ds_solve_mode || 0),
@@ -13868,7 +13937,7 @@ function renderPassiveDsExperimentControls() {
 
   const root = document.getElementById("passiveDsPipelineDiagnostics");
   if (!root) return;
-  const rows = candidates
+  const pipelineRows = candidates
     .filter(statusIsFresh)
     .map(item => {
       const stats = item.passive_ds_pipeline_stats;
@@ -13879,6 +13948,7 @@ function renderPassiveDsExperimentControls() {
         <td>${stats.deadline_active ? "deadline" : "legacy"}</td>
         <td>${esc(stats.completed ?? 0)}</td>
         <td>${esc(stats.response_timeouts ?? 0)}/${esc(stats.final_timeouts ?? 0)}</td>
+        <td>${esc(stats.rx_phy_retries ?? 0)}/${esc(stats.rx_recovered_after_phy ?? 0)}/${esc(stats.rx_timeouts_after_phy ?? 0)}</td>
         <td>${esc(stats.invalid_frames ?? 0)}/${esc(stats.state_collisions ?? 0)}/${esc(stats.schedule_overruns ?? 0)}</td>
         <td>${passiveDsStageMetric(stages.poll_tx)}</td>
         <td>${passiveDsStageMetric(stages.response_tx)}</td>
@@ -13890,21 +13960,57 @@ function renderPassiveDsExperimentControls() {
     })
     .filter(Boolean)
     .join("");
-  if (!rows) {
+  const tagRows = Object.values(state.passiveDsTagDiagnostics || {})
+    .sort((left, right) => Number(left.module_id) - Number(right.module_id))
+    .map(item => {
+      const ready = item.ready_paths || {};
+      const radioReady = Array.isArray(ready.radio) ? ready.radio : [];
+      const computedReady = Array.isArray(ready.computed) ? ready.computed : [];
+      const drops = item.queue_attempt_drop || {};
+      return `<tr>
+        <td>M${esc(item.module_id)}</td>
+        <td>${radioReady.map(esc).join("/") || "&mdash;"}</td>
+        <td>${computedReady.map(esc).join("/") || "&mdash;"}</td>
+        <td>${esc(item.radio_full ?? 0)}</td>
+        <td>${esc(item.computed_full ?? 0)}</td>
+        <td>${esc(item.solver_full ?? 0)}</td>
+        <td>${esc(item.usable_ge1 ?? 0)}</td>
+        <td>${esc(item.radio_obs ?? 0)}/${esc(item.computed_obs ?? 0)}</td>
+        <td>${esc(item.computed_incomplete ?? 0)}</td>
+        <td>${esc(item.miss_poll ?? 0)}</td>
+        <td>${esc(drops.telemetry ?? 0)}/${esc(drops.solver ?? 0)}</td>
+        <td>${fmtFixed(item.age_sec, 1)} s</td>
+      </tr>`;
+    })
+    .join("");
+  if (!pipelineRows && !tagRows) {
     root.className = "muted";
     root.textContent = "Waiting for instrumented firmware status...";
     return;
   }
   root.className = "table-wrap";
-  root.innerHTML = `<table>
+  root.innerHTML = `${tagRows ? `<table>
+    <thead><tr>
+      <th>Module</th>
+      <th>Radio ready paths 0/1/2/3</th>
+      <th>Computed ready paths 0/1/2/3</th>
+      <th>Radio full</th><th>Computed full</th><th>Solver full</th>
+      <th>Usable &gt;=1</th><th>Observations radio/computed</th>
+      <th>Computed incomplete</th><th>Miss poll</th>
+      <th>Queue attempt drops tel/solver</th><th>Age</th>
+    </tr></thead><tbody>${tagRows}</tbody>
+  </table>
+  <p class="muted">Counts describe ready paths and processing attempts; they are not packet-loss percentages.</p>` : ""}
+  ${pipelineRows ? `<table>
     <thead><tr>
       <th>Module</th><th>Pipeline</th><th>Complete</th>
-      <th>RESP/FINAL timeout</th><th>invalid/collision/overrun</th>
+      <th>RESP/FINAL timeout</th><th>PHY retry/recovered/timeout</th>
+      <th>invalid/collision/overrun</th>
       <th>POLL TX avg/max</th><th>RESP TX avg/max</th>
       <th>FINAL TX avg/max</th><th>FINAL RX avg/max</th>
       <th>CIA avg/max</th><th>RX re-arm avg/max</th>
-    </tr></thead><tbody>${rows}</tbody>
-  </table>`;
+    </tr></thead><tbody>${pipelineRows}</tbody>
+  </table>` : ""}`;
 }
 
 function renderPassiveDsMultipointTiming(root, config) {
@@ -15327,11 +15433,10 @@ class DashboardHttpServer(ThreadingHTTPServer):
             raise RuntimeError("APP_OTA_PASSWORD missing in secrets.h")
         if not params:
             raise RuntimeError("No runtime config parameters provided")
-        # Native DS-TWR has no shared anchor schedule: the tag starts every
-        # exchange, so a coordinated in-place UWB restart safely reloads its
-        # timing while Wi-Fi, GPS and the ESP32 remain online. Passive DS-TWR
-        # does have shared frame state; retain the conservative reboot fallback
-        # for every hot-switch request that is not Native timing-only.
+        # Timing-only Native and Passive DS-TWR changes are reloaded through a
+        # coordinated in-place UWB restart while Wi-Fi, GPS and the ESP32 stay
+        # online. Protocol, geometry and participant changes keep the
+        # conservative full-reboot fallback.
         native_timing_keys = {
             "ranging_slot_ms",
             "ranging_gap_ms",
@@ -15348,7 +15453,28 @@ class DashboardHttpServer(ThreadingHTTPServer):
             and bool(changed_keys)
             and changed_keys <= native_timing_keys
         )
-        if hot_switch_requested and not native_timing_hot_switch:
+        passive_timing_keys = {
+            "passive_ds_schedule",
+            "passive_ds_slot_ms",
+            "passive_ds_gap_ms",
+            "passive_ds_rx_ms",
+            "passive_ds_timeout_ms",
+            "passive_ds_resp_delay_us",
+            "passive_ds_final_delay_us",
+            "passive_ds_auto_rx_delay_uus",
+            "passive_ds_pipeline_mode",
+            "passive_ds_solve_mode",
+            "passive_ds_rolling_max_hz",
+        }
+        passive_timing_hot_switch = (
+            hot_switch_requested
+            and bool(changed_keys)
+            and changed_keys <= passive_timing_keys
+        )
+        timing_hot_switch = (
+            native_timing_hot_switch or passive_timing_hot_switch
+        )
+        if hot_switch_requested and not timing_hot_switch:
             params = dict(params)
             params.pop("hot_switch", None)
             params["reboot"] = "1"
@@ -15373,10 +15499,10 @@ class DashboardHttpServer(ThreadingHTTPServer):
             # Keep the lock until every module reports the requested timing
             # after either an ESP reboot or an in-place UWB restart.
             transition_kind = (
-                "hot switch" if native_timing_hot_switch else "reboot"
+                "hot switch" if timing_hot_switch else "reboot"
             )
             if (str(params.get("reboot") or "") == "1" or
-                    native_timing_hot_switch):
+                    timing_hot_switch):
                 time.sleep(0.6)
                 with ThreadPoolExecutor(max_workers=min(5, len(targets))) as executor:
                     verified = list(
@@ -15397,7 +15523,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
                         continue
                     result[
                         "verified_after_hot_switch"
-                        if native_timing_hot_switch
+                        if timing_hot_switch
                         else "verified_after_reboot"
                     ] = True
                     result["module_id"] = status.get("module_id")

@@ -30,8 +30,17 @@ bool passive_ds_batch_residuals_valid(double equation_rms_m,
                                       double max_abs_residual_m);
 
 /*
- * Select the newest three complete stars with distinct initiators.  Returns
- * zero unless their newest-to-oldest frame span is within max_frame_span.
+ * A star normally contains anchor_count - 1 observations.  The raw fallback
+ * may retain a star with exactly one missing responder, provided at least two
+ * TDOA equations remain for the planar solver.
+ */
+bool passive_ds_batch_star_observation_count_valid(
+    size_t anchor_count, size_t observation_count);
+
+/*
+ * Select the newest three usable stars with distinct initiators.  A usable
+ * star may be complete or the one-responder-missing raw fallback.  Returns
+ * zero unless their newest-to-oldest frame span is within max_frame_span;
  * selected_indices are ordered newest first.
  */
 size_t passive_ds_batch_select_recent_unique(

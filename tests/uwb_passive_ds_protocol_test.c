@@ -47,10 +47,10 @@ static void test_rotating_plan_and_timing(void)
     assert(plan.responder_ids[1] == 5U);
     assert(plan.responder_ids[2] == 2U);
     assert(uwb_passive_ds_responder_index(&plan, 5U) == 1);
-    assert(uwb_passive_ds_response_delay_us(1500U, 750U, 2U) ==
-           3000U);
+    assert(uwb_passive_ds_response_delay_us(1750U, 750U, 2U) ==
+           3250U);
     assert(uwb_passive_ds_final_delay_from_poll_us(
-               1500U, 750U, 3U, 1500U) == 4500U);
+               1750U, 750U, 3U, 1750U) == 5000U);
     assert(uwb_passive_ds_protocol_packet_size(
                UWB_PASSIVE_DS_MESSAGE_POLL, 0U) == 60U);
     assert(uwb_passive_ds_protocol_packet_size(

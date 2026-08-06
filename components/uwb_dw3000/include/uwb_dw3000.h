@@ -37,6 +37,9 @@ struct uwb_passive_ds_pipeline_stats {
     uint32_t schedule_alarm_count;
     uint32_t schedule_overrun_count;
     uint32_t rx_rearm_failure_count;
+    uint32_t rx_phy_retry_count;
+    uint32_t rx_recovered_after_phy_count;
+    uint32_t rx_timeout_after_phy_count;
     struct uwb_passive_ds_stage_stats poll_tx;
     struct uwb_passive_ds_stage_stats response_tx;
     struct uwb_passive_ds_stage_stats final_tx;

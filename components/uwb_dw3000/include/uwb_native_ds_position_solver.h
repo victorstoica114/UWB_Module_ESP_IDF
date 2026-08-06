@@ -49,7 +49,7 @@ struct uwb_native_ds_position_solver {
     uint64_t pair_cycle_mask;
 
     bool tag_frame_active;
-    bool tag_frame_emitted;
+    bool tag_frame_finalized;
     uint32_t tag_frame_id;
     uint16_t tag_range_mask;
     float tag_range_m[UWB_NATIVE_DS_POSITION_MAX_ANCHORS];

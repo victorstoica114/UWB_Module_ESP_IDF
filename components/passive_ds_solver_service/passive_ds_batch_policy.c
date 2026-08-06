@@ -16,6 +16,20 @@ bool passive_ds_batch_residuals_valid(double equation_rms_m,
            max_abs_residual_m <= PASSIVE_DS_BATCH_MAX_ABS_RESIDUAL_M;
 }
 
+bool passive_ds_batch_star_observation_count_valid(
+    size_t anchor_count, size_t observation_count)
+{
+    if (anchor_count < 3U || observation_count < 2U) {
+        return false;
+    }
+    const size_t complete_count = anchor_count - 1U;
+    const size_t minimum_count = complete_count > 2U
+                                     ? complete_count - 1U
+                                     : complete_count;
+    return observation_count >= minimum_count &&
+           observation_count <= complete_count;
+}
+
 size_t passive_ds_batch_select_recent_unique(
     const struct passive_ds_batch_star_ref *stars,
     size_t star_count,

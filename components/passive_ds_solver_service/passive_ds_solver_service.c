@@ -33,7 +33,13 @@ enum {
     PASSIVE_DS_SOLVER_TASK_STACK_BYTES = 40960,
     PASSIVE_DS_SOLVER_TASK_PRIORITY = 5,
     PASSIVE_DS_SOLVER_FRAME_BUCKETS = 32,
-    PASSIVE_DS_SOLVER_FRAME_MAX_AGE_MS = 250,
+    /*
+     * A responder repeats its two most recent completed exchanges.  At the
+     * 10 ms field profile, 80 ms leaves ample time for those references to
+     * arrive while bounding a one-anchor radio shadow well below the old
+     * 250 ms dead interval.
+     */
+    PASSIVE_DS_SOLVER_FRAME_MAX_AGE_MS = 80,
     PASSIVE_DS_SOLVER_INDEPENDENT_MAX_FRAME_SPAN = 3,
     PASSIVE_DS_SOLVER_OVERLAP_MAX_FRAME_SPAN = 6,
     PASSIVE_DS_DYNAMIC_GEOMETRY_PUBLISH_MS = 100,
@@ -84,6 +90,7 @@ struct passive_ds_solver_frame {
     uint16_t observation_mask;
     uint32_t session_id;
     uint32_t frame_id;
+    TickType_t created_tick;
     TickType_t updated_tick;
     struct passive_ds_solver_frame_observation
         observations[APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U];
@@ -131,10 +138,12 @@ struct passive_ds_solver_state {
     uint32_t independent_solved_count;
     uint32_t rejected_count;
     uint32_t incomplete_count;
+    uint32_t partial_star_count;
     uint32_t previous_solved_count;
     uint32_t previous_independent_solved_count;
     uint32_t previous_rejected_count;
     uint32_t previous_incomplete_count;
+    uint32_t previous_partial_star_count;
     TickType_t summary_tick;
 };
 
@@ -323,18 +332,73 @@ static void reset_frame(struct passive_ds_solver_frame *frame)
     }
 }
 
+static void process_star(
+    struct passive_ds_solver_state *state,
+    const struct passive_ds_solver_complete_star *star);
+
+static void finalize_frame(struct passive_ds_solver_state *state,
+                           struct passive_ds_solver_frame *frame,
+                           TickType_t now, bool partial)
+{
+    if (state == NULL || frame == NULL || !frame->active) {
+        return;
+    }
+    if (passive_ds_batch_star_observation_count_valid(
+            state->anchor_count, frame->observation_count)) {
+        const struct passive_ds_solver_complete_star star = {
+            .valid = true,
+            .tag_id = frame->tag_id,
+            .initiator_id = frame->initiator_id,
+            .observation_count = frame->observation_count,
+            .observation_mask = frame->observation_mask,
+            .session_id = frame->session_id,
+            .frame_id = frame->frame_id,
+            .completed_tick = now,
+        };
+        struct passive_ds_solver_complete_star completed = star;
+        memcpy(completed.observations, frame->observations,
+               sizeof(completed.observations));
+        if (partial) {
+            state->partial_star_count++;
+        }
+        reset_frame(frame);
+        process_star(state, &completed);
+        return;
+    }
+    reset_frame(frame);
+}
+
 static void expire_frames(struct passive_ds_solver_state *state,
                           TickType_t now)
 {
     const TickType_t maximum_age =
         pdMS_TO_TICKS(PASSIVE_DS_SOLVER_FRAME_MAX_AGE_MS);
-    for (size_t index = 0U; index < PASSIVE_DS_SOLVER_FRAME_BUCKETS;
-         ++index) {
-        struct passive_ds_solver_frame *frame = &state->frames[index];
-        if (frame->active && now - frame->updated_tick > maximum_age) {
-            state->incomplete_count++;
-            reset_frame(frame);
+    /* Process expired frames oldest first so three adjacent partial stars
+     * retain their frame ordering even though buckets are hash-indexed. */
+    while (true) {
+        size_t oldest_index = SIZE_MAX;
+        TickType_t oldest_age = 0U;
+        for (size_t index = 0U;
+             index < PASSIVE_DS_SOLVER_FRAME_BUCKETS; ++index) {
+            const struct passive_ds_solver_frame *frame =
+                &state->frames[index];
+            if (!frame->active) {
+                continue;
+            }
+            const TickType_t age = now - frame->created_tick;
+            if (age > maximum_age &&
+                (oldest_index == SIZE_MAX || age > oldest_age)) {
+                oldest_index = index;
+                oldest_age = age;
+            }
         }
+        if (oldest_index == SIZE_MAX) {
+            break;
+        }
+        struct passive_ds_solver_frame *frame =
+            &state->frames[oldest_index];
+        state->incomplete_count++;
+        finalize_frame(state, frame, now, true);
     }
 }
 
@@ -383,6 +447,7 @@ static struct passive_ds_solver_frame *acquire_frame(
     frame->initiator_id = item->initiator_id;
     frame->session_id = item->session_id;
     frame->frame_id = item->frame_id;
+    frame->created_tick = now;
     frame->updated_tick = now;
     return frame;
 }
@@ -496,10 +561,6 @@ static bool solve_stars(
         return false;
     }
     const size_t observations_per_star = state->anchor_count - 1U;
-    const size_t expected_count = star_count * observations_per_star;
-    if (expected_count > PASSIVE_DS_SOLVER_MAX_OBSERVATIONS) {
-        return false;
-    }
     struct passive_ds_position_observation
         observations[PASSIVE_DS_SOLVER_MAX_OBSERVATIONS] = {0};
     size_t output = 0U;
@@ -508,21 +569,29 @@ static bool solve_stars(
         if (!stars[star_index].valid ||
             stars[star_index].tag_id != stars[0].tag_id ||
             stars[star_index].session_id != stars[0].session_id ||
-            stars[star_index].observation_count != observations_per_star) {
+            !passive_ds_batch_star_observation_count_valid(
+                state->anchor_count,
+                stars[star_index].observation_count)) {
             return false;
         }
         observation_mask |= stars[star_index].observation_mask;
+        size_t copied = 0U;
         for (size_t item = 0U; item < observations_per_star; ++item) {
             const struct passive_ds_solver_frame_observation *source =
                 &stars[star_index].observations[item];
-            if (!source->valid ||
-                source->initiator_id != stars[star_index].initiator_id ||
+            if (!source->valid) {
+                continue;
+            }
+            if (source->initiator_id != stars[star_index].initiator_id ||
                 source->delay_ratio_q15 == 0U ||
                 source->delay_ratio_q15 >= 32768U) {
                 return false;
             }
             if (state->dynamic_geometry.active &&
                 !source->dynamic_geometry) {
+                return false;
+            }
+            if (output >= PASSIVE_DS_SOLVER_MAX_OBSERVATIONS) {
                 return false;
             }
             observations[output++] =
@@ -538,6 +607,10 @@ static bool solve_stars(
                     .responder_x_m = source->responder_x_m,
                     .responder_y_m = source->responder_y_m,
                 };
+            copied++;
+        }
+        if (copied != stars[star_index].observation_count) {
+            return false;
         }
     }
 
@@ -652,7 +725,7 @@ static void expire_independent_stars(
     }
 }
 
-static void process_complete_star(
+static void process_star(
     struct passive_ds_solver_state *state,
     const struct passive_ds_solver_complete_star *star)
 {
@@ -843,20 +916,7 @@ static void handle_observation(
     frame->observation_count++;
     frame->updated_tick = now;
     if (frame->observation_count == state->anchor_count - 1U) {
-        struct passive_ds_solver_complete_star star = {
-            .valid = true,
-            .tag_id = frame->tag_id,
-            .initiator_id = frame->initiator_id,
-            .observation_count = frame->observation_count,
-            .observation_mask = frame->observation_mask,
-            .session_id = frame->session_id,
-            .frame_id = frame->frame_id,
-            .completed_tick = now,
-        };
-        memcpy(star.observations, frame->observations,
-               sizeof(star.observations));
-        reset_frame(frame);
-        process_complete_star(state, &star);
+        finalize_frame(state, frame, now, false);
     }
 }
 
@@ -873,7 +933,7 @@ static void submit_summary(struct passive_ds_solver_state *state,
     (void)wireless_log_service_submit(
         'I', TAG,
         "raw %s-RTK pos=%lu/s independent=%lu/s reject=%lu "
-        "batch_incomplete=%lu "
+        "batch_incomplete=%lu partial_stars=%lu "
         "geometry=%u generation=%lu queue_drop=%lu stack_free=%luB",
         state->dynamic_geometry.active ? "mobile" : "fixed",
         (unsigned long)(state->solved_count -
@@ -884,6 +944,8 @@ static void submit_summary(struct passive_ds_solver_state *state,
                         state->previous_rejected_count),
         (unsigned long)(state->incomplete_count -
                         state->previous_incomplete_count),
+        (unsigned long)(state->partial_star_count -
+                        state->previous_partial_star_count),
         state->geometry_ready ? 1U : 0U,
         (unsigned long)state->geometry_version,
         (unsigned long)s_dropped,
@@ -893,6 +955,7 @@ static void submit_summary(struct passive_ds_solver_state *state,
         state->independent_solved_count;
     state->previous_rejected_count = state->rejected_count;
     state->previous_incomplete_count = state->incomplete_count;
+    state->previous_partial_star_count = state->partial_star_count;
     state->summary_tick = now;
     if (!state->geometry_published) {
         (void)publish_geometry(state);
