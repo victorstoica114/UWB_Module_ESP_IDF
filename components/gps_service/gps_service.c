@@ -16,6 +16,7 @@
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -56,6 +57,7 @@ static uint32_t s_last_log_ms;
 static uint32_t s_last_no_data_log_ms;
 static uint32_t s_last_rx_timestamp_ms;
 static uint32_t s_last_fix_timestamp_ms;
+static int64_t s_last_fix_timestamp_us;
 static gps_service_snapshot_t s_snapshot;
 
 typedef struct {
@@ -486,6 +488,7 @@ static void parse_gga(char *fields[], size_t count, uint32_t now_ms)
             s_snapshot.longitude_deg = longitude;
             s_snapshot.fix_valid = true;
             s_last_fix_timestamp_ms = now_ms;
+            s_last_fix_timestamp_us = esp_timer_get_time();
             s_snapshot.last_fix_age_ms = 0;
         } else if (quality == 0) {
             s_snapshot.fix_valid = false;
@@ -553,6 +556,7 @@ static void parse_rmc(char *fields[], size_t count, uint32_t now_ms)
             s_snapshot.longitude_deg = longitude;
             s_snapshot.fix_valid = true;
             s_last_fix_timestamp_ms = now_ms;
+            s_last_fix_timestamp_us = esp_timer_get_time();
             s_snapshot.last_fix_age_ms = 0;
         }
         gps_unlock();
@@ -640,6 +644,7 @@ static void parse_psti030(char *fields[], size_t count)
             s_snapshot.longitude_deg = longitude;
             s_snapshot.fix_valid = true;
             s_last_fix_timestamp_ms = ticks_to_ms();
+            s_last_fix_timestamp_us = esp_timer_get_time();
             s_snapshot.last_fix_age_ms = 0;
         }
         if (have_age) {
@@ -869,6 +874,26 @@ static void gps_copy_snapshot(gps_service_snapshot_t *snapshot)
     }
 }
 
+bool gps_service_try_get_position_snapshot(
+    gps_service_position_snapshot_t *snapshot)
+{
+    if (snapshot == NULL || !gps_lock(0)) {
+        return false;
+    }
+    *snapshot = (gps_service_position_snapshot_t){
+        .fix_valid = s_snapshot.fix_valid,
+        .fix_quality = s_snapshot.fix_quality,
+        .latitude_deg = s_snapshot.latitude_deg,
+        .longitude_deg = s_snapshot.longitude_deg,
+        .speed_mps = s_snapshot.speed_mps,
+        .course_deg = s_snapshot.course_deg,
+        .rmc_status = s_snapshot.rmc_status,
+        .fix_monotonic_us = s_last_fix_timestamp_us,
+    };
+    gps_unlock();
+    return true;
+}
+
 static void gps_set_last_rx_timestamp(uint32_t now_ms)
 {
     if (gps_lock(pdMS_TO_TICKS(20))) {
@@ -983,6 +1008,7 @@ static void gps_task(void *arg)
         memset(&s_snapshot, 0, sizeof(s_snapshot));
         s_last_rx_timestamp_ms = 0;
         s_last_fix_timestamp_ms = 0;
+        s_last_fix_timestamp_us = 0;
         s_snapshot.runtime_enabled = true;
         s_snapshot.task_running = true;
         s_snapshot.last_rx_age_ms = UINT32_MAX;

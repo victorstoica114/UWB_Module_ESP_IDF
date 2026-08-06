@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS "passive_ds_batch_policy.c"
+         "passive_ds_dynamic_geometry.c"
          "passive_ds_position_solver.c"
          "passive_ds_solver_service.c"
     INCLUDE_DIRS "include"

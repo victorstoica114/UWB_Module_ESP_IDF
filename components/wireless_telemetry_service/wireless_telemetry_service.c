@@ -1660,7 +1660,8 @@ bool wireless_telemetry_service_submit_passive_ds_position(
 
 bool wireless_telemetry_service_submit_passive_ds_geometry(
     uint8_t anchor_id, uint8_t anchor_count, uint32_t geometry_version,
-    int32_t x_mm, int32_t y_mm, int32_t fit_rms_mm)
+    int32_t x_mm, int32_t y_mm, int32_t fit_rms_mm, bool dynamic,
+    bool all_rtk_fixed)
 {
     if (!s_connected || anchor_id == 0U || anchor_count < 3U) {
         return false;
@@ -1678,8 +1679,10 @@ bool wireless_telemetry_service_submit_passive_ds_geometry(
                 .anchor_id = anchor_id,
                 .anchor_count = anchor_count,
                 .tag_id = app_identity_get_module_id(),
-                /* Bit 0 denotes dynamic range-derived geometry. */
-                .flags = 0U,
+                /* Bit 0 denotes live geometry; bit 1 means every current
+                 * anchor coordinate is backed by an RTK-fixed sample. */
+                .flags = (dynamic ? 1U : 0U) |
+                         (all_rtk_fixed ? 2U : 0U),
             },
         },
     };

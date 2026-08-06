@@ -26,6 +26,16 @@ struct passive_ds_position_observation {
     double difference_m;
     /* Responder reply / complete responder exchange, strictly within (0,1). */
     double delay_ratio;
+    /*
+     * Optional transmitter positions at this observation's UWB packet
+     * epochs.  This keeps a moving-anchor batch physically coherent without
+     * filtering or averaging the tag position.
+     */
+    bool dynamic_geometry;
+    double initiator_x_m;
+    double initiator_y_m;
+    double responder_x_m;
+    double responder_y_m;
 };
 
 struct passive_ds_position_result {

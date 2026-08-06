@@ -52,9 +52,9 @@ static void test_rotating_plan_and_timing(void)
     assert(uwb_passive_ds_final_delay_from_poll_us(
                1500U, 750U, 3U, 1500U) == 4500U);
     assert(uwb_passive_ds_protocol_packet_size(
-               UWB_PASSIVE_DS_MESSAGE_POLL, 0U) == 45U);
+               UWB_PASSIVE_DS_MESSAGE_POLL, 0U) == 60U);
     assert(uwb_passive_ds_protocol_packet_size(
-               UWB_PASSIVE_DS_MESSAGE_RESPONSE, 0U) == 50U);
+               UWB_PASSIVE_DS_MESSAGE_RESPONSE, 0U) == 65U);
     assert(uwb_passive_ds_protocol_packet_size(
                UWB_PASSIVE_DS_MESSAGE_FINAL, 3U) == 47U);
 }
@@ -76,6 +76,21 @@ static void round_trip(const struct uwb_passive_ds_packet *packet)
     assert(decoded.frame_id == packet->frame_id);
     assert(decoded.initiator_id == packet->initiator_id);
     assert(decoded.anchor_count == packet->anchor_count);
+    if (packet->type == UWB_PASSIVE_DS_MESSAGE_POLL ||
+        packet->type == UWB_PASSIVE_DS_MESSAGE_RESPONSE) {
+        assert(decoded.sender_position.flags ==
+               packet->sender_position.flags);
+        assert(decoded.sender_position.age_ms ==
+               packet->sender_position.age_ms);
+        assert(decoded.sender_position.latitude_e7 ==
+               packet->sender_position.latitude_e7);
+        assert(decoded.sender_position.longitude_e7 ==
+               packet->sender_position.longitude_e7);
+        assert(decoded.sender_position.velocity_east_mmps ==
+               packet->sender_position.velocity_east_mmps);
+        assert(decoded.sender_position.velocity_north_mmps ==
+               packet->sender_position.velocity_north_mmps);
+    }
     if (packet->type == UWB_PASSIVE_DS_MESSAGE_POLL ||
         packet->type == UWB_PASSIVE_DS_MESSAGE_RESPONSE) {
         if (packet->type == UWB_PASSIVE_DS_MESSAGE_RESPONSE) {
@@ -121,6 +136,16 @@ static void test_codec_and_crc(void)
         .frame_id = 42U,
         .initiator_id = 4U,
         .anchor_count = 4U,
+        .sender_position = {
+            .flags = UWB_PASSIVE_DS_POSITION_VALID |
+                     UWB_PASSIVE_DS_POSITION_RTK_FIXED |
+                     UWB_PASSIVE_DS_POSITION_VELOCITY_VALID,
+            .age_ms = 37U,
+            .latitude_e7 = 444355123,
+            .longitude_e7 = 260973456,
+            .velocity_east_mmps = 1250,
+            .velocity_north_mmps = -340,
+        },
         .completed_exchange_count = 1U,
         .completed_exchanges = {
             {0x12345678U, 41U, 3U, 287538800U},
@@ -134,6 +159,13 @@ static void test_codec_and_crc(void)
         .frame_id = 42U,
         .initiator_id = 4U,
         .anchor_count = 4U,
+        .sender_position = {
+            .flags = UWB_PASSIVE_DS_POSITION_VALID |
+                     UWB_PASSIVE_DS_POSITION_RTK_FIXED,
+            .age_ms = 81U,
+            .latitude_e7 = 444355456,
+            .longitude_e7 = 260973987,
+        },
         .responder_index = 2U,
         .responder_reply_dtu = 95846644U,
         .completed_exchange_count = 2U,

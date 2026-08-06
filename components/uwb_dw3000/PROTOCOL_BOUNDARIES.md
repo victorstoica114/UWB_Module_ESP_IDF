@@ -32,7 +32,7 @@ no dependency on either receive-only protocol.
 
 ## Passive DS-TWR
 
-- `uwb_passive_ds_protocol.c`: PDS2 packet codec, rotating star plan, timing
+- `uwb_passive_ds_protocol.c`: PDS3 packet codec, rotating star plan, timing
   helpers and full anchor DS-TWR equation.
 - `uwb_passive_ds_observation.c`: three-packet passive DS range-difference
   equation using POLL/RESPONSE/FINAL and delayed responder exchange timing.

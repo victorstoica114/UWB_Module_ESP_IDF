@@ -9,12 +9,20 @@
 extern "C" {
 #endif
 
-#define UWB_PASSIVE_DS_PROTOCOL_VERSION 2U
+#define UWB_PASSIVE_DS_PROTOCOL_VERSION 3U
 #define UWB_PASSIVE_DS_MAX_ANCHORS 4U
 #define UWB_PASSIVE_DS_MAX_RESPONDERS (UWB_PASSIVE_DS_MAX_ANCHORS - 1U)
 #define UWB_PASSIVE_DS_EXCHANGE_HISTORY 2U
-#define UWB_PASSIVE_DS_MAX_PACKET_SIZE 50U
+#define UWB_PASSIVE_DS_MAX_PACKET_SIZE 65U
 #define UWB_PASSIVE_DS_TIMESTAMP_MASK ((1ULL << 40U) - 1ULL)
+
+#define UWB_PASSIVE_DS_POSITION_VALID (1U << 0U)
+#define UWB_PASSIVE_DS_POSITION_RTK_FIXED (1U << 1U)
+#define UWB_PASSIVE_DS_POSITION_VELOCITY_VALID (1U << 2U)
+#define UWB_PASSIVE_DS_POSITION_KNOWN_FLAGS                         \
+    (UWB_PASSIVE_DS_POSITION_VALID |                               \
+     UWB_PASSIVE_DS_POSITION_RTK_FIXED |                           \
+     UWB_PASSIVE_DS_POSITION_VELOCITY_VALID)
 
 enum uwb_passive_ds_message_type {
     UWB_PASSIVE_DS_MESSAGE_POLL = 1,
@@ -40,12 +48,31 @@ struct uwb_passive_ds_exchange_reference {
     uint32_t responder_exchange_dtu;
 };
 
+/*
+ * Position of the packet transmitter at its most recent GNSS epoch.
+ * latitude/longitude use 1e-7 degree units (about 1.1 cm north/south),
+ * velocity uses mm/s in the geographic east/north axes and age_ms advances
+ * the GNSS epoch to the UWB transmission.  Invalid fixes are encoded as an
+ * all-zero structure and keep the fixed surveyed-geometry fallback intact.
+ */
+struct uwb_passive_ds_anchor_position {
+    uint8_t flags;
+    uint16_t age_ms;
+    int32_t latitude_e7;
+    int32_t longitude_e7;
+    int16_t velocity_east_mmps;
+    int16_t velocity_north_mmps;
+};
+
 struct uwb_passive_ds_packet {
     enum uwb_passive_ds_message_type type;
     uint32_t session_id;
     uint32_t frame_id;
     uint8_t initiator_id;
     uint8_t anchor_count;
+
+    /* Present on POLL/RESPONSE; FINAL has no sender-position field. */
+    struct uwb_passive_ds_anchor_position sender_position;
 
     /* POLL and RESPONSE completed-exchange references. */
     uint8_t completed_exchange_count;

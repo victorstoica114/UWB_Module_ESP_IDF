@@ -38,11 +38,33 @@ bool uwb_passive_ds_runtime_submit_anchor_range(
 bool uwb_passive_ds_runtime_submit_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
     uint32_t session_id, uint32_t frame_id, int32_t difference_mm,
-    uint16_t delay_ratio_q15)
+    uint16_t delay_ratio_q15,
+    const struct uwb_passive_ds_anchor_position *initiator_position,
+    const struct uwb_passive_ds_anchor_position *responder_position)
 {
+    if (initiator_position == NULL || responder_position == NULL) {
+        return false;
+    }
+    const struct passive_ds_solver_anchor_position solver_initiator = {
+        .flags = initiator_position->flags,
+        .age_ms = initiator_position->age_ms,
+        .latitude_e7 = initiator_position->latitude_e7,
+        .longitude_e7 = initiator_position->longitude_e7,
+        .velocity_east_mmps = initiator_position->velocity_east_mmps,
+        .velocity_north_mmps = initiator_position->velocity_north_mmps,
+    };
+    const struct passive_ds_solver_anchor_position solver_responder = {
+        .flags = responder_position->flags,
+        .age_ms = responder_position->age_ms,
+        .latitude_e7 = responder_position->latitude_e7,
+        .longitude_e7 = responder_position->longitude_e7,
+        .velocity_east_mmps = responder_position->velocity_east_mmps,
+        .velocity_north_mmps = responder_position->velocity_north_mmps,
+    };
     return passive_ds_solver_service_submit_observation(
         tag_id, initiator_id, responder_id, session_id, frame_id,
-        difference_mm, delay_ratio_q15);
+        difference_mm, delay_ratio_q15, &solver_initiator,
+        &solver_responder);
 }
 
 int32_t uwb_passive_ds_runtime_store_anchor_range(

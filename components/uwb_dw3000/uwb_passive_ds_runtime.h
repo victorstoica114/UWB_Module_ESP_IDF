@@ -7,6 +7,7 @@
 #include "esp_err.h"
 #include "uwb_anchor_range_cache.h"
 #include "uwb_dw3000.h"
+#include "uwb_passive_ds_protocol.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,7 +51,9 @@ bool uwb_passive_ds_runtime_submit_anchor_range(
 bool uwb_passive_ds_runtime_submit_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
     uint32_t session_id, uint32_t frame_id, int32_t difference_mm,
-    uint16_t delay_ratio_q15);
+    uint16_t delay_ratio_q15,
+    const struct uwb_passive_ds_anchor_position *initiator_position,
+    const struct uwb_passive_ds_anchor_position *responder_position);
 int32_t uwb_passive_ds_runtime_store_anchor_range(
     uint8_t anchor_a_id, uint8_t anchor_b_id, int32_t distance_mm,
     int32_t raw_distance_mm, uint32_t slot_id, uint16_t sequence);

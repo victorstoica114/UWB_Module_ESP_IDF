@@ -27,6 +27,7 @@
 #include "flextdoa_cfo_estimator.h"
 #include "flextdoa_collector.h"
 #include "flextdoa_protocol.h"
+#include "gps_service.h"
 #include "uwb_config.h"
 #include "uwb_anchor_range_cache.h"
 #include "uwb_flex_tdoa_runtime.h"
@@ -61,6 +62,10 @@ enum {
     UWB_DW3000_SPI_VALIDATED_MAX_HZ = 40 * 1000 * 1000,
     UWB_DW3000_SPI_VERIFY_READS = 8,
     UWB_DW3000_SPI_MAX_TRANSFER_BYTES = 96,
+    /* ESP-IDF limits polling transactions to 64 bytes when the SPI bus is
+     * initialized without DMA. PDS3 frames are larger, so register windows
+     * are transferred in explicitly addressed chunks below. */
+    UWB_DW3000_SPI_POLLING_TRANSFER_BYTES = 64,
     UWB_DW3000_RESET_SETTLE_MS = 5,
     UWB_DW3000_RESET_PULSE_MS = 20,
     UWB_DW3000_WAKE_AFTER_RESET_MS = 300,
@@ -71,7 +76,8 @@ enum {
     UWB_DW3000_TX_TIMEOUT_MS = 120,
     UWB_FLEX_TDOA_TX_TIMEOUT_MS = 10,
     UWB_DW3000_TX_POLL_MS = 2,
-    UWB_DW3000_PAYLOAD_LEN = 64,
+    /* PDS3 adds a 15-byte RTK position sample to POLL and RESPONSE. */
+    UWB_DW3000_PAYLOAD_LEN = 80,
 };
 
 _Static_assert(UWB_DW3000_SPI_ALLOW_OVERCLOCK ||
@@ -607,7 +613,7 @@ struct uwb_flex_tdoa_geometry_staging {
     int32_t anchor_y_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS];
 };
 
-#if 0 /* Passive DS-TWR v1 types: retired by the PDS2 clean runtime below. */
+#if 0 /* Passive DS-TWR v1 types: retired by the PDS3 clean runtime below. */
 struct uwb_passive_ds_schedule {
     bool synced;
     uint32_t next_owned_slot_id;
@@ -1979,26 +1985,37 @@ static esp_err_t uwb_dw3000_read_bytes(uint8_t base, uint8_t sub, uint8_t *data,
 {
     uint8_t tx[UWB_DW3000_SPI_MAX_TRANSFER_BYTES];
     uint8_t rx[UWB_DW3000_SPI_MAX_TRANSFER_BYTES];
-    const size_t header_len =
-        uwb_dw3000_build_header(tx, sizeof(tx), base, sub, false);
-    const size_t total_len = header_len + len;
-
-    if (data == NULL || header_len == 0 ||
-        total_len > UWB_DW3000_SPI_MAX_TRANSFER_BYTES) {
+    if (data == NULL || len == 0U ||
+        (size_t)sub + len > 128U) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    memset(tx + header_len, 0, len);
+    size_t offset = 0U;
+    while (offset < len) {
+        const uint8_t chunk_sub = (uint8_t)((size_t)sub + offset);
+        const size_t header_len = uwb_dw3000_build_header(
+            tx, sizeof(tx), base, chunk_sub, false);
+        if (header_len == 0U ||
+            header_len >= UWB_DW3000_SPI_POLLING_TRANSFER_BYTES) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        const size_t capacity =
+            UWB_DW3000_SPI_POLLING_TRANSFER_BYTES - header_len;
+        const size_t remaining = len - offset;
+        const size_t chunk_len = remaining < capacity ? remaining : capacity;
+        const size_t total_len = header_len + chunk_len;
 
-    spi_transaction_t transaction = {
-        .length = total_len * 8,
-        .tx_buffer = tx,
-        .rx_buffer = rx,
-    };
-
-    ESP_RETURN_ON_ERROR(spi_device_polling_transmit(s_spi, &transaction), TAG,
-                        "SPI read failed");
-    memcpy(data, rx + header_len, len);
+        memset(tx + header_len, 0, chunk_len);
+        spi_transaction_t transaction = {
+            .length = total_len * 8U,
+            .tx_buffer = tx,
+            .rx_buffer = rx,
+        };
+        ESP_RETURN_ON_ERROR(spi_device_polling_transmit(s_spi, &transaction),
+                            TAG, "SPI read failed");
+        memcpy(data + offset, rx + header_len, chunk_len);
+        offset += chunk_len;
+    }
     return ESP_OK;
 }
 
@@ -2006,24 +2023,35 @@ static esp_err_t uwb_dw3000_write_bytes(uint8_t base, uint8_t sub,
                                         const uint8_t *data, size_t len)
 {
     uint8_t tx[UWB_DW3000_SPI_MAX_TRANSFER_BYTES];
-    const size_t header_len =
-        uwb_dw3000_build_header(tx, sizeof(tx), base, sub, true);
-    const size_t total_len = header_len + len;
-
-    if (data == NULL || header_len == 0 ||
-        total_len > UWB_DW3000_SPI_MAX_TRANSFER_BYTES) {
+    if (data == NULL || len == 0U ||
+        (size_t)sub + len > 128U) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    memcpy(tx + header_len, data, len);
+    size_t offset = 0U;
+    while (offset < len) {
+        const uint8_t chunk_sub = (uint8_t)((size_t)sub + offset);
+        const size_t header_len = uwb_dw3000_build_header(
+            tx, sizeof(tx), base, chunk_sub, true);
+        if (header_len == 0U ||
+            header_len >= UWB_DW3000_SPI_POLLING_TRANSFER_BYTES) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        const size_t capacity =
+            UWB_DW3000_SPI_POLLING_TRANSFER_BYTES - header_len;
+        const size_t remaining = len - offset;
+        const size_t chunk_len = remaining < capacity ? remaining : capacity;
+        const size_t total_len = header_len + chunk_len;
 
-    spi_transaction_t transaction = {
-        .length = total_len * 8,
-        .tx_buffer = tx,
-    };
-
-    ESP_RETURN_ON_ERROR(spi_device_polling_transmit(s_spi, &transaction), TAG,
-                        "SPI write failed");
+        memcpy(tx + header_len, data + offset, chunk_len);
+        spi_transaction_t transaction = {
+            .length = total_len * 8U,
+            .tx_buffer = tx,
+        };
+        ESP_RETURN_ON_ERROR(spi_device_polling_transmit(s_spi, &transaction),
+                            TAG, "SPI write failed");
+        offset += chunk_len;
+    }
     return ESP_OK;
 }
 
@@ -3028,7 +3056,7 @@ static esp_err_t uwb_flex_tdoa_extend_rx_timestamp32(
 }
 
 // Double-buffer timing metadata is contiguous: RX_FINFO starts at byte 0 and
-// RX_TIME at byte 4. FlexTDOA additionally reads CIA_DIAG_0 at byte 12; PDS2
+// RX_TIME at byte 4. FlexTDOA additionally reads CIA_DIAG_0 at byte 12; PDS3
 // stops after RX_TIME because Eq19 does not use per-packet CFO. Payload and
 // metadata are read in two compact SPI bursts.
 
@@ -7691,7 +7719,7 @@ static void uwb_dw3000_flex_tdoa_loop(void)
 
 #if 0 /*
        * Passive DS-TWR v1 runtime. It is deliberately excluded from the
-       * firmware; PDS2 below is the only active Passive DS implementation.
+       * firmware; PDS3 below is the only active Passive DS implementation.
        */
 static bool uwb_passive_ds_slot_pair(
     uint32_t slot_id, const uint8_t *anchor_ids, size_t anchor_count,
@@ -8354,9 +8382,10 @@ static void uwb_passive_ds_tag_submit_double_sided(
     const uint16_t delay_ratio_q15 = (uint16_t)lround(
         fmin(32767.0,
              fmax(1.0, result->responder_delay_ratio * 32768.0)));
+    const struct uwb_passive_ds_anchor_position no_position = {0};
     (void)uwb_passive_ds_runtime_submit_observation(
-        tag_id, initiator_id, responder_id, solver_slot_id, difference_mm,
-        delay_ratio_q15);
+        tag_id, initiator_id, responder_id, 1U, solver_slot_id,
+        difference_mm, delay_ratio_q15, &no_position, &no_position);
 }
 
 static void uwb_passive_ds_tag_handle_status(
@@ -9851,7 +9880,7 @@ static void uwb_passive_ds_arm_schedule_alarm(int64_t due_host_us,
 }
 
 /*
- * Clean passive DS-TWR runtime (PDS2 wire protocol v2).
+ * Clean passive DS-TWR runtime (PDS3 wire protocol v3).
  *
  * One rotating initiator broadcasts POLL, every other anchor transmits one
  * delayed RESPONSE, and the initiator broadcasts a timestamp aggregate in
@@ -9865,7 +9894,7 @@ static void uwb_passive_ds_arm_schedule_alarm(int64_t due_host_us,
 _Static_assert(UWB_DISTANCE_FRAME_HEADER_LEN +
                        UWB_PASSIVE_DS_MAX_PACKET_SIZE <=
                    UWB_DW3000_PAYLOAD_LEN,
-               "PDS2 packet exceeds DW3000 payload buffer");
+               "PDS3 packet exceeds DW3000 payload buffer");
 struct uwb_passive_ds_clean_schedule {
     bool synced;
     uint32_t session_id;
@@ -9896,6 +9925,7 @@ struct uwb_passive_ds_clean_tag_response {
     uint32_t responder_reply_dtu;
     uint32_t responder_exchange_dtu;
     int32_t cfo_comparison_mm;
+    struct uwb_passive_ds_anchor_position responder_position;
 };
 
 struct uwb_passive_ds_clean_tag_frame {
@@ -9914,9 +9944,84 @@ struct uwb_passive_ds_clean_tag_frame {
     uint64_t initiator_poll_tx;
     uint64_t initiator_final_tx;
     int64_t created_host_us;
+    struct uwb_passive_ds_anchor_position initiator_position;
     struct uwb_passive_ds_clean_tag_response responses[
         UWB_PASSIVE_DS_MAX_RESPONDERS];
 };
+
+static int16_t uwb_passive_ds_velocity_mmps(double value_mps)
+{
+    const double value_mmps = value_mps * 1000.0;
+    if (!isfinite(value_mmps)) {
+        return 0;
+    }
+    if (value_mmps >= (double)INT16_MAX) {
+        return INT16_MAX;
+    }
+    if (value_mmps <= (double)INT16_MIN) {
+        return INT16_MIN;
+    }
+    return (int16_t)lround(value_mmps);
+}
+
+static void uwb_passive_ds_capture_anchor_position(
+    struct uwb_passive_ds_anchor_position *position)
+{
+    static gps_service_position_snapshot_t last_gps;
+    if (position == NULL) {
+        return;
+    }
+    memset(position, 0, sizeof(*position));
+    gps_service_position_snapshot_t refreshed = {0};
+    if (gps_service_try_get_position_snapshot(&refreshed)) {
+        last_gps = refreshed;
+    }
+    const int64_t now_us = esp_timer_get_time();
+    const uint32_t fix_age_ms = last_gps.fix_monotonic_us > 0 &&
+                                        now_us >= last_gps.fix_monotonic_us
+                                    ? (uint32_t)fmin(
+                                          UINT32_MAX,
+                                          (double)(now_us -
+                                                   last_gps.fix_monotonic_us) /
+                                              1000.0)
+                                    : UINT32_MAX;
+    if (!last_gps.fix_valid || last_gps.fix_quality == 0U ||
+        fix_age_ms > 1000U ||
+        !isfinite(last_gps.latitude_deg) ||
+        !isfinite(last_gps.longitude_deg) ||
+        last_gps.latitude_deg < -90.0 ||
+        last_gps.latitude_deg > 90.0 ||
+        last_gps.longitude_deg < -180.0 ||
+        last_gps.longitude_deg > 180.0) {
+        return;
+    }
+    position->flags = UWB_PASSIVE_DS_POSITION_VALID;
+    if (last_gps.fix_quality == 4U) {
+        position->flags |= UWB_PASSIVE_DS_POSITION_RTK_FIXED;
+    }
+    position->age_ms = (uint16_t)(fix_age_ms < UINT16_MAX
+                                      ? fix_age_ms
+                                      : UINT16_MAX);
+    position->latitude_e7 =
+        (int32_t)llround(last_gps.latitude_deg * 10000000.0);
+    position->longitude_e7 =
+        (int32_t)llround(last_gps.longitude_deg * 10000000.0);
+    if (last_gps.rmc_status == 'A' &&
+        isfinite(last_gps.speed_mps) &&
+        last_gps.speed_mps >= 0.0 && last_gps.speed_mps <= 30.0 &&
+        isfinite(last_gps.course_deg)) {
+        const double course_rad = last_gps.course_deg *
+                                  0.01745329251994329577;
+        position->velocity_east_mmps =
+            uwb_passive_ds_velocity_mmps(
+                last_gps.speed_mps * sin(course_rad));
+        position->velocity_north_mmps =
+            uwb_passive_ds_velocity_mmps(
+                last_gps.speed_mps * cos(course_rad));
+        position->flags |=
+            UWB_PASSIVE_DS_POSITION_VELOCITY_VALID;
+    }
+}
 
 struct uwb_passive_ds_clean_tag_stats {
     uint32_t polls;
@@ -10125,6 +10230,7 @@ static esp_err_t uwb_passive_ds_clean_initiate(
         .initiator_id = plan.initiator_id,
         .anchor_count = (uint8_t)anchor_count,
     };
+    uwb_passive_ds_capture_anchor_position(&poll.sender_position);
     uwb_passive_ds_clean_history_attach(&poll, history);
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
     size_t payload_length = uwb_passive_ds_clean_encode_frame(
@@ -10339,6 +10445,7 @@ static esp_err_t uwb_passive_ds_clean_respond(
         .responder_index = responder_index,
         .responder_reply_dtu = (uint32_t)reply_dtu,
     };
+    uwb_passive_ds_capture_anchor_position(&response.sender_position);
     uwb_passive_ds_clean_history_attach(&response, history);
     uint8_t payload[UWB_DW3000_PAYLOAD_LEN] = {0};
     const size_t payload_length = uwb_passive_ds_clean_encode_frame(
@@ -10538,6 +10645,7 @@ uwb_passive_ds_clean_tag_begin_frame(
         (uint8_t)((1U << plan->responder_count) - 1U);
     frame->poll_rx_timestamp = poll_rx_timestamp;
     frame->created_host_us = esp_timer_get_time();
+    frame->initiator_position = poll->sender_position;
     for (uint8_t index = 0U; index < plan->responder_count; ++index) {
         frame->responses[index].responder_id =
             plan->responder_ids[index];
@@ -10624,7 +10732,8 @@ static bool uwb_passive_ds_clean_tag_try_emit(
     const bool solver_ok = uwb_passive_ds_runtime_submit_observation(
         s_source_id, frame->initiator_id, response->responder_id,
         frame->session_id, frame->frame_id, difference_mm,
-        delay_ratio_q15);
+        delay_ratio_q15, &frame->initiator_position,
+        &response->responder_position);
     stats->observations++;
     if (!telemetry_ok || !solver_ok) {
         stats->queue_drops++;
@@ -10741,6 +10850,7 @@ static void uwb_passive_ds_clean_tag_process_response(
     response->sequence = radio_frame->sequence;
     response->response_rx_timestamp = radio_frame->rx_timestamp;
     response->responder_reply_dtu = packet->responder_reply_dtu;
+    response->responder_position = packet->sender_position;
     frame->response_mask |= bit;
     stats->responses[index]++;
 
@@ -10869,7 +10979,7 @@ static void uwb_passive_ds_clean_tag_loop(
     bool have_current_session = false;
     s_status = UWB_DW3000_STATUS_READY;
     ESP_LOGI(TAG,
-             "PASSIVE_DS clean receive-only tag=%u geometry=fixed_rtk "
+             "PASSIVE_DS clean receive-only tag=%u geometry=fixed_then_mobile_rtk "
              "observation=three_packet_eq19 cfo=diagnostic solver=raw",
              (unsigned)s_source_id);
 

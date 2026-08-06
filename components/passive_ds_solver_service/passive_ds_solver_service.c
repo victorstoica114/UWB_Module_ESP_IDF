@@ -12,6 +12,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "passive_ds_batch_policy.h"
+#include "passive_ds_dynamic_geometry.h"
 #include "passive_ds_position_solver.h"
 #include "uwb_config.h"
 #include "wireless_log_service.h"
@@ -35,6 +36,7 @@ enum {
     PASSIVE_DS_SOLVER_FRAME_MAX_AGE_MS = 250,
     PASSIVE_DS_SOLVER_INDEPENDENT_MAX_FRAME_SPAN = 3,
     PASSIVE_DS_SOLVER_OVERLAP_MAX_FRAME_SPAN = 6,
+    PASSIVE_DS_DYNAMIC_GEOMETRY_PUBLISH_MS = 100,
     PASSIVE_DS_SOLVER_MAX_OBSERVATIONS =
         PASSIVE_DS_BATCH_STARS_PER_POSITION *
         (APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U),
@@ -57,6 +59,8 @@ struct passive_ds_solver_item {
     uint32_t frame_id;
     int32_t difference_mm;
     uint16_t delay_ratio_q15;
+    struct passive_ds_solver_anchor_position initiator_position;
+    struct passive_ds_solver_anchor_position responder_position;
 };
 
 struct passive_ds_solver_frame_observation {
@@ -65,6 +69,11 @@ struct passive_ds_solver_frame_observation {
     uint8_t responder_id;
     int32_t difference_mm;
     uint16_t delay_ratio_q15;
+    bool dynamic_geometry;
+    double initiator_x_m;
+    double initiator_y_m;
+    double responder_x_m;
+    double responder_y_m;
 };
 
 struct passive_ds_solver_frame {
@@ -101,6 +110,11 @@ struct passive_ds_solver_state {
     uint32_t geometry_version;
     struct passive_ds_position_anchor
         anchors[APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    struct passive_ds_position_anchor
+        fixed_anchors[APP_RUNTIME_CONFIG_MAX_ANCHORS];
+    struct passive_ds_dynamic_geometry dynamic_geometry;
+    bool dynamic_geometry_dirty;
+    TickType_t last_dynamic_geometry_publish_tick;
     struct passive_ds_solver_frame frames[PASSIVE_DS_SOLVER_FRAME_BUCKETS];
     struct passive_ds_solver_complete_star
         recent_stars[APP_RUNTIME_CONFIG_MAX_ANCHORS];
@@ -148,6 +162,9 @@ static bool publish_geometry(struct passive_ds_solver_state *state)
         return false;
     }
     bool published = true;
+    const bool all_rtk_fixed =
+        passive_ds_dynamic_geometry_all_rtk_fixed(
+            &state->dynamic_geometry);
     for (uint8_t index = 0U; index < state->anchor_count; ++index) {
         published &=
             wireless_telemetry_service_submit_passive_ds_geometry(
@@ -155,7 +172,11 @@ static bool publish_geometry(struct passive_ds_solver_state *state)
                 state->geometry_version,
                 (int32_t)lround(state->anchors[index].x_m * 1000.0),
                 (int32_t)lround(state->anchors[index].y_m * 1000.0),
-                0);
+                (int32_t)lround(
+                    state->dynamic_geometry.active
+                        ? state->dynamic_geometry.fit_rms_m * 1000.0
+                        : 0.0),
+                state->dynamic_geometry.active, all_rtk_fixed);
     }
     state->geometry_published = published;
     return published;
@@ -181,13 +202,103 @@ static void apply_runtime_config(struct passive_ds_solver_state *state)
             .x_m = config->flex_tdoa_anchor_x_mm[index] / 1000.0,
             .y_m = config->flex_tdoa_anchor_y_mm[index] / 1000.0,
         };
+        state->fixed_anchors[index] = state->anchors[index];
     }
+    passive_ds_dynamic_geometry_init(
+        &state->dynamic_geometry, state->fixed_anchors,
+        state->anchor_count);
     state->geometry_ready = true;
     (void)publish_geometry(state);
     ESP_LOGI(TAG,
              "raw solver geometry=fixed_rtk anchors=%u generation=%lu",
              (unsigned)state->anchor_count,
              (unsigned long)state->geometry_version);
+}
+
+static void clear_measurement_state(
+    struct passive_ds_solver_state *state)
+{
+    if (state == NULL) {
+        return;
+    }
+    memset(state->frames, 0, sizeof(state->frames));
+    memset(state->recent_stars, 0, sizeof(state->recent_stars));
+    memset(state->independent_stars, 0,
+           sizeof(state->independent_stars));
+    state->previous_position_valid = false;
+    state->last_published_frame_valid = false;
+}
+
+static struct passive_ds_dynamic_position_sample dynamic_sample(
+    const struct passive_ds_solver_anchor_position *position)
+{
+    if (position == NULL) {
+        return (struct passive_ds_dynamic_position_sample){0};
+    }
+    return (struct passive_ds_dynamic_position_sample){
+        .flags = position->flags,
+        .age_ms = position->age_ms,
+        .latitude_e7 = position->latitude_e7,
+        .longitude_e7 = position->longitude_e7,
+        .velocity_east_mmps = position->velocity_east_mmps,
+        .velocity_north_mmps = position->velocity_north_mmps,
+    };
+}
+
+static bool refresh_dynamic_anchors(
+    struct passive_ds_solver_state *state)
+{
+    if (state == NULL || !state->dynamic_geometry.active) {
+        return false;
+    }
+    struct passive_ds_position_anchor refreshed[
+        APP_RUNTIME_CONFIG_MAX_ANCHORS] = {0};
+    for (uint8_t index = 0U; index < state->anchor_count; ++index) {
+        refreshed[index].id = state->anchor_ids[index];
+        if (!passive_ds_dynamic_geometry_latest(
+                &state->dynamic_geometry, state->anchor_ids[index],
+                &refreshed[index].x_m, &refreshed[index].y_m)) {
+            return false;
+        }
+    }
+    memcpy(state->anchors, refreshed,
+           state->anchor_count * sizeof(state->anchors[0]));
+    return true;
+}
+
+static uint32_t next_dynamic_geometry_version(uint32_t current)
+{
+    uint32_t sequence = (current & 0x7fffffffU) + 1U;
+    if (sequence == 0U || sequence > 0x7fffffffU) {
+        sequence = 1U;
+    }
+    return 0x80000000U | sequence;
+}
+
+static void maybe_publish_dynamic_geometry(
+    struct passive_ds_solver_state *state, TickType_t now)
+{
+    if (state == NULL || !state->dynamic_geometry.active ||
+        !state->dynamic_geometry_dirty ||
+        !refresh_dynamic_anchors(state)) {
+        return;
+    }
+    const TickType_t interval =
+        pdMS_TO_TICKS(PASSIVE_DS_DYNAMIC_GEOMETRY_PUBLISH_MS);
+    if (state->geometry_published &&
+        state->last_dynamic_geometry_publish_tick != 0U &&
+        now - state->last_dynamic_geometry_publish_tick < interval) {
+        return;
+    }
+    if (state->geometry_published) {
+        state->geometry_version =
+            next_dynamic_geometry_version(state->geometry_version);
+        state->geometry_published = false;
+    }
+    if (publish_geometry(state)) {
+        state->dynamic_geometry_dirty = false;
+        state->last_dynamic_geometry_publish_tick = now;
+    }
 }
 
 static void reset_frame(struct passive_ds_solver_frame *frame)
@@ -264,12 +375,7 @@ static struct passive_ds_solver_frame *acquire_frame(
 static void reset_session_state(
     struct passive_ds_solver_state *state, uint32_t session_id)
 {
-    memset(state->frames, 0, sizeof(state->frames));
-    memset(state->recent_stars, 0, sizeof(state->recent_stars));
-    memset(state->independent_stars, 0,
-           sizeof(state->independent_stars));
-    state->previous_position_valid = false;
-    state->last_published_frame_valid = false;
+    clear_measurement_state(state);
     state->session_valid = true;
     state->session_id = session_id;
 }
@@ -297,11 +403,23 @@ static bool residual_metrics(
         if (initiator < 0 || responder < 0 || initiator == responder) {
             return false;
         }
+        const double initiator_x = observations[index].dynamic_geometry
+            ? observations[index].initiator_x_m
+            : state->anchors[initiator].x_m;
+        const double initiator_y = observations[index].dynamic_geometry
+            ? observations[index].initiator_y_m
+            : state->anchors[initiator].y_m;
+        const double responder_x = observations[index].dynamic_geometry
+            ? observations[index].responder_x_m
+            : state->anchors[responder].x_m;
+        const double responder_y = observations[index].dynamic_geometry
+            ? observations[index].responder_y_m
+            : state->anchors[responder].y_m;
         const double predicted =
-            hypot(result->x_m - state->anchors[responder].x_m,
-                  result->y_m - state->anchors[responder].y_m) -
-            hypot(result->x_m - state->anchors[initiator].x_m,
-                  result->y_m - state->anchors[initiator].y_m);
+            hypot(result->x_m - responder_x,
+                  result->y_m - responder_y) -
+            hypot(result->x_m - initiator_x,
+                  result->y_m - initiator_y);
         const double residual = observations[index].difference_m - predicted;
         if (!isfinite(residual)) {
             return false;
@@ -388,6 +506,10 @@ static bool solve_stars(
                 source->delay_ratio_q15 >= 32768U) {
                 return false;
             }
+            if (state->dynamic_geometry.active &&
+                !source->dynamic_geometry) {
+                return false;
+            }
             observations[output++] =
                 (struct passive_ds_position_observation){
                     .initiator_id = source->initiator_id,
@@ -395,6 +517,11 @@ static bool solve_stars(
                     .difference_m = source->difference_mm / 1000.0,
                     .delay_ratio =
                         (double)source->delay_ratio_q15 / 32768.0,
+                    .dynamic_geometry = source->dynamic_geometry,
+                    .initiator_x_m = source->initiator_x_m,
+                    .initiator_y_m = source->initiator_y_m,
+                    .responder_x_m = source->responder_x_m,
+                    .responder_y_m = source->responder_y_m,
                 };
         }
     }
@@ -614,6 +741,48 @@ static void handle_observation(
         state->rejected_count++;
         return;
     }
+
+    const struct passive_ds_dynamic_position_sample initiator_sample =
+        dynamic_sample(&item->initiator_position);
+    const struct passive_ds_dynamic_position_sample responder_sample =
+        dynamic_sample(&item->responder_position);
+    bool activated = passive_ds_dynamic_geometry_ingest(
+        &state->dynamic_geometry, item->initiator_id,
+        &initiator_sample);
+    activated = passive_ds_dynamic_geometry_ingest(
+                    &state->dynamic_geometry, item->responder_id,
+                    &responder_sample) ||
+                activated;
+    if (activated) {
+        clear_measurement_state(state);
+        state->geometry_version =
+            next_dynamic_geometry_version(state->geometry_version);
+        state->geometry_published = false;
+        state->dynamic_geometry_dirty = true;
+        ESP_LOGI(TAG,
+                 "mobile RTK geometry active fit_rms=%.3fm generation=%lu",
+                 state->dynamic_geometry.fit_rms_m,
+                 (unsigned long)state->geometry_version);
+    }
+    double initiator_x_m = 0.0;
+    double initiator_y_m = 0.0;
+    double responder_x_m = 0.0;
+    double responder_y_m = 0.0;
+    const bool dynamic_observation = state->dynamic_geometry.active;
+    if (dynamic_observation &&
+        (!passive_ds_dynamic_geometry_project(
+             &state->dynamic_geometry, &initiator_sample,
+             &initiator_x_m, &initiator_y_m) ||
+         !passive_ds_dynamic_geometry_project(
+             &state->dynamic_geometry, &responder_sample,
+             &responder_x_m, &responder_y_m))) {
+        state->rejected_count++;
+        return;
+    }
+    if (dynamic_observation) {
+        state->dynamic_geometry_dirty = true;
+        maybe_publish_dynamic_geometry(state, now);
+    }
     const int responder_slot = responder_slot_index(
         state, initiator_index, responder_index);
     if (responder_slot < 0) {
@@ -633,7 +802,8 @@ static void handle_observation(
         if (observation->initiator_id != item->initiator_id ||
             observation->responder_id != item->responder_id ||
             observation->difference_mm != item->difference_mm ||
-            observation->delay_ratio_q15 != item->delay_ratio_q15) {
+            observation->delay_ratio_q15 != item->delay_ratio_q15 ||
+            observation->dynamic_geometry != dynamic_observation) {
             state->rejected_count++;
             reset_frame(frame);
         }
@@ -645,6 +815,11 @@ static void handle_observation(
         .responder_id = item->responder_id,
         .difference_mm = item->difference_mm,
         .delay_ratio_q15 = item->delay_ratio_q15,
+        .dynamic_geometry = dynamic_observation,
+        .initiator_x_m = initiator_x_m,
+        .initiator_y_m = initiator_y_m,
+        .responder_x_m = responder_x_m,
+        .responder_y_m = responder_y_m,
     };
     frame->observation_mask |=
         (uint16_t)(1U << (uint8_t)responder_index);
@@ -680,9 +855,10 @@ static void submit_summary(struct passive_ds_solver_state *state,
     }
     (void)wireless_log_service_submit(
         'I', TAG,
-        "raw fixed-RTK pos=%lu/s independent=%lu/s reject=%lu "
+        "raw %s-RTK pos=%lu/s independent=%lu/s reject=%lu "
         "batch_incomplete=%lu "
         "geometry=%u generation=%lu queue_drop=%lu stack_free=%luB",
+        state->dynamic_geometry.active ? "mobile" : "fixed",
         (unsigned long)(state->solved_count -
                         state->previous_solved_count),
         (unsigned long)(state->independent_solved_count -
@@ -767,7 +943,7 @@ bool passive_ds_solver_service_reset(void)
     if (!s_started) {
         return true;
     }
-    const struct passive_ds_solver_item item = {
+    struct passive_ds_solver_item item = {
         .type = PASSIVE_DS_SOLVER_ITEM_RESET,
     };
     return submit_item(&item);
@@ -787,9 +963,11 @@ bool passive_ds_solver_service_submit_anchor_range(
 bool passive_ds_solver_service_submit_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
     uint32_t session_id, uint32_t frame_id, int32_t difference_mm,
-    uint16_t delay_ratio_q15)
+    uint16_t delay_ratio_q15,
+    const struct passive_ds_solver_anchor_position *initiator_position,
+    const struct passive_ds_solver_anchor_position *responder_position)
 {
-    const struct passive_ds_solver_item item = {
+    struct passive_ds_solver_item item = {
         .type = PASSIVE_DS_SOLVER_ITEM_OBSERVATION,
         .tag_id = tag_id,
         .initiator_id = initiator_id,
@@ -799,5 +977,11 @@ bool passive_ds_solver_service_submit_observation(
         .difference_mm = difference_mm,
         .delay_ratio_q15 = delay_ratio_q15,
     };
+    if (initiator_position != NULL) {
+        item.initiator_position = *initiator_position;
+    }
+    if (responder_position != NULL) {
+        item.responder_position = *responder_position;
+    }
     return submit_item(&item);
 }

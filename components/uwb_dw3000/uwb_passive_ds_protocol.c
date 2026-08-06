@@ -5,16 +5,19 @@
 
 #define PASSIVE_DS_HEADER_SIZE 16U
 #define PASSIVE_DS_CRC_SIZE 2U
+#define PASSIVE_DS_POSITION_SIZE 15U
 #define PASSIVE_DS_COMPLETED_EXCHANGE_SIZE 13U
 #define PASSIVE_DS_POLL_SIZE                                          \
     (PASSIVE_DS_HEADER_SIZE + 1U +                                   \
      UWB_PASSIVE_DS_EXCHANGE_HISTORY *                               \
          PASSIVE_DS_COMPLETED_EXCHANGE_SIZE +                        \
+     PASSIVE_DS_POSITION_SIZE +                                      \
      PASSIVE_DS_CRC_SIZE)
 #define PASSIVE_DS_RESPONSE_SIZE                                      \
     (PASSIVE_DS_HEADER_SIZE + 6U +                                   \
      UWB_PASSIVE_DS_EXCHANGE_HISTORY *                               \
          PASSIVE_DS_COMPLETED_EXCHANGE_SIZE +                        \
+     PASSIVE_DS_POSITION_SIZE +                                      \
      PASSIVE_DS_CRC_SIZE)
 #define PASSIVE_DS_FINAL_FIXED_SIZE \
     (PASSIVE_DS_HEADER_SIZE + 11U + PASSIVE_DS_CRC_SIZE)
@@ -22,7 +25,7 @@
 #define PASSIVE_DS_TIME_UNIT_SECONDS 15.650040064102564e-12
 #define PASSIVE_DS_SPEED_OF_LIGHT_MPS 299702547.0
 
-static const uint8_t s_magic[4] = {'P', 'D', 'S', '2'};
+static const uint8_t s_magic[4] = {'P', 'D', 'S', '3'};
 
 static void put_u16(uint8_t *payload, size_t offset, uint16_t value)
 {
@@ -50,6 +53,26 @@ static uint32_t get_u32(const uint8_t *payload, size_t offset)
            ((uint32_t)payload[offset + 1U] << 8U) |
            ((uint32_t)payload[offset + 2U] << 16U) |
            ((uint32_t)payload[offset + 3U] << 24U);
+}
+
+static void put_i16(uint8_t *payload, size_t offset, int16_t value)
+{
+    put_u16(payload, offset, (uint16_t)value);
+}
+
+static int16_t get_i16(const uint8_t *payload, size_t offset)
+{
+    return (int16_t)get_u16(payload, offset);
+}
+
+static void put_i32(uint8_t *payload, size_t offset, int32_t value)
+{
+    put_u32(payload, offset, (uint32_t)value);
+}
+
+static int32_t get_i32(const uint8_t *payload, size_t offset)
+{
+    return (int32_t)get_u32(payload, offset);
 }
 
 static void put_ts40(uint8_t *payload, size_t offset, uint64_t value)
@@ -82,6 +105,61 @@ static uint16_t crc16_ccitt_false(const uint8_t *payload, size_t length)
         }
     }
     return crc;
+}
+
+static bool position_valid(
+    const struct uwb_passive_ds_anchor_position *position)
+{
+    if (position == NULL ||
+        (position->flags & ~UWB_PASSIVE_DS_POSITION_KNOWN_FLAGS) != 0U) {
+        return false;
+    }
+    if ((position->flags & UWB_PASSIVE_DS_POSITION_VALID) == 0U) {
+        return position->flags == 0U && position->age_ms == 0U &&
+               position->latitude_e7 == 0 &&
+               position->longitude_e7 == 0 &&
+               position->velocity_east_mmps == 0 &&
+               position->velocity_north_mmps == 0;
+    }
+    return (position->flags & UWB_PASSIVE_DS_POSITION_RTK_FIXED) != 0U &&
+           position->latitude_e7 >= -900000000 &&
+           position->latitude_e7 <= 900000000 &&
+           position->longitude_e7 >= -1800000000 &&
+           position->longitude_e7 <= 1800000000;
+}
+
+static bool encode_position(
+    const struct uwb_passive_ds_anchor_position *position,
+    uint8_t *payload, size_t offset)
+{
+    if (!position_valid(position)) {
+        return false;
+    }
+    payload[offset] = position->flags;
+    put_u16(payload, offset + 1U, position->age_ms);
+    put_i32(payload, offset + 3U, position->latitude_e7);
+    put_i32(payload, offset + 7U, position->longitude_e7);
+    put_i16(payload, offset + 11U, position->velocity_east_mmps);
+    put_i16(payload, offset + 13U, position->velocity_north_mmps);
+    return true;
+}
+
+static bool decode_position(
+    const uint8_t *payload, size_t offset,
+    struct uwb_passive_ds_anchor_position *position)
+{
+    if (payload == NULL || position == NULL) {
+        return false;
+    }
+    *position = (struct uwb_passive_ds_anchor_position){
+        .flags = payload[offset],
+        .age_ms = get_u16(payload, offset + 1U),
+        .latitude_e7 = get_i32(payload, offset + 3U),
+        .longitude_e7 = get_i32(payload, offset + 7U),
+        .velocity_east_mmps = get_i16(payload, offset + 11U),
+        .velocity_north_mmps = get_i16(payload, offset + 13U),
+    };
+    return position_valid(position);
 }
 
 static bool encode_completed_exchanges(
@@ -230,10 +308,20 @@ bool uwb_passive_ds_protocol_encode(
         if (!encode_completed_exchanges(packet, payload, 16U)) {
             return false;
         }
+        if (!encode_position(&packet->sender_position, payload,
+                             length - PASSIVE_DS_CRC_SIZE -
+                                 PASSIVE_DS_POSITION_SIZE)) {
+            return false;
+        }
     } else if (packet->type == UWB_PASSIVE_DS_MESSAGE_RESPONSE) {
         payload[16] = packet->responder_index;
         put_u32(payload, 17U, packet->responder_reply_dtu);
         if (!encode_completed_exchanges(packet, payload, 21U)) {
+            return false;
+        }
+        if (!encode_position(&packet->sender_position, payload,
+                             length - PASSIVE_DS_CRC_SIZE -
+                                 PASSIVE_DS_POSITION_SIZE)) {
             return false;
         }
     } else if (packet->type == UWB_PASSIVE_DS_MESSAGE_FINAL) {
@@ -307,12 +395,24 @@ enum uwb_passive_ds_decode_result uwb_passive_ds_protocol_decode(
         if (!decode_completed_exchanges(payload, 16U, packet)) {
             return UWB_PASSIVE_DS_DECODE_INVALID;
         }
+        if (!decode_position(payload,
+                             expected - PASSIVE_DS_CRC_SIZE -
+                                 PASSIVE_DS_POSITION_SIZE,
+                             &packet->sender_position)) {
+            return UWB_PASSIVE_DS_DECODE_INVALID;
+        }
     } else if (type == UWB_PASSIVE_DS_MESSAGE_RESPONSE) {
         packet->responder_index = payload[16];
         packet->responder_reply_dtu = get_u32(payload, 17U);
         if (packet->responder_index >= packet->anchor_count - 1U ||
             packet->responder_reply_dtu == 0U ||
             !decode_completed_exchanges(payload, 21U, packet)) {
+            return UWB_PASSIVE_DS_DECODE_INVALID;
+        }
+        if (!decode_position(payload,
+                             expected - PASSIVE_DS_CRC_SIZE -
+                                 PASSIVE_DS_POSITION_SIZE,
+                             &packet->sender_position)) {
             return UWB_PASSIVE_DS_DECODE_INVALID;
         }
     } else if (type == UWB_PASSIVE_DS_MESSAGE_FINAL) {

@@ -1,4 +1,4 @@
-# Passive DS-TWR v2
+# Passive DS-TWR v3
 
 Passive DS-TWR combines full double-sided ranging between anchors with
 receive-only tags. It is a clean protocol, independent of Native DS-TWR and
@@ -15,7 +15,7 @@ For `N` configured anchors, one star contains `N + 1` broadcasts:
    train.
 
 The initiator is `anchor_ids[frame_id % anchor_count]`. All packets carry the
-`PDS2` magic, protocol version, session ID, frame ID, initiator ID and CRC-16.
+`PDS3` magic, protocol version, session ID, frame ID, initiator ID and CRC-16.
 The session ID separates scheduler epochs after a reboot.
 
 Each response contains its responder index and exact programmed reply interval
@@ -25,6 +25,12 @@ received response. After receiving FINAL, every responder retains its complete
 `POLL_RX..FINAL_RX` interval. Its next POLL or RESPONSE carries the two most
 recent completed-exchange references. This delayed transport adds no radio
 packet and gives every reference a natural retransmission opportunity.
+
+POLL and RESPONSE also carry the sender's GNSS latitude/longitude and quality,
+fix age and east/north velocity. The UWB task reads this through a non-blocking
+GNSS snapshot, so a GPS parser mutex can never delay a scheduled transmission.
+The additional 15 bytes add only a small PHY airtime cost at 6.8 Mb/s and fit
+inside the enlarged 80-byte radio buffer.
 
 ## Anchor ranging
 
@@ -90,6 +96,25 @@ no EKF, prediction or temporal low-pass filter. A partial radio star expires
 and produces no position. The previous solution may be used only as a
 numerical initial seed; it is never blended into the new result.
 
+The solver starts in the surveyed fixed geometry. It collects RTK-fixed packet
+positions from all anchors and fits one rigid 2D rotation/translation from
+geographic east/north into the surveyed UWB frame. The fit must have at least
+three anchors and RMS below `0.50 m`; on success, the switch is atomic and all
+old star buckets are discarded. From that point every TDOA equation uses the
+initiator position at POLL and responder position at RESPONSE. Fix age is
+advanced with the transmitted velocity before the coordinate is used.
+
+Mobile geometry lives only in RAM and is never written repeatedly to NVS.
+The surveyed NVS geometry remains the boot/fallback reference. Before mobile
+activation, missing RTK positions retain fixed-geometry operation. Activation
+still requires one coherent RTK-fixed sample from every anchor. After
+activation, every valid packet-time GNSS coordinate is accepted so a temporary
+RTK Float/SPS interval does not make the tag disappear. The dashboard marks
+that interval as `degraded GNSS continuity`; accuracy then follows the
+receiver's non-fixed quality until all anchors return to RTK Fixed. The solver
+never mixes surveyed fallback coordinates with moving-anchor coordinates in
+one batch.
+
 Before publication, equation residuals are recomputed without temporal state.
 A batch is rejected when raw equation RMS exceeds `0.25 m` or the largest
 absolute residual exceeds `0.50 m`. The same observations are retried once
@@ -125,13 +150,14 @@ The per-anchor observation correction is applied to the directed TDOA value;
 the per-pair range correction applies only to reported anchor DS-TWR
 diagnostics.
 
-Observation telemetry identifies fixed geometry, frame/session identity,
+Observation telemetry identifies the geometry version, frame/session identity,
 three-packet DS result, interpolation ratio and applied calibration. The old
 CFO result is exposed only as a same-frame comparison. Position telemetry
 labels independent and overlapping raw windows separately and reports their
 residuals and solver status. RTK error statistics use independent positions.
-The dashboard labels anchor DS-TWR ranges as diagnostics and never presents
-them as live geometry.
+The tag publishes the latest moving geometry at no more than 10 Hz and marks
+it dynamic. The dashboard ages this geometry normally, labels anchor DS-TWR
+ranges as diagnostics and never presents those ranges as live coordinates.
 
 ## Verification order
 

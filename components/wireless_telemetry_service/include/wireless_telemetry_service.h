@@ -103,7 +103,8 @@ bool wireless_telemetry_service_submit_passive_ds_position(
     uint32_t position_rejected_count, bool unfiltered_esp_solver);
 bool wireless_telemetry_service_submit_passive_ds_geometry(
     uint8_t anchor_id, uint8_t anchor_count, uint32_t geometry_version,
-    int32_t x_mm, int32_t y_mm, int32_t fit_rms_mm);
+    int32_t x_mm, int32_t y_mm, int32_t fit_rms_mm, bool dynamic,
+    bool all_rtk_fixed);
 
 #ifdef __cplusplus
 }

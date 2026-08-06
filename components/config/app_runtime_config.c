@@ -1036,7 +1036,7 @@ esp_err_t app_runtime_config_reload(void)
     read_config_from_nvs(&loaded);
 
     /*
-     * Passive DS-TWR v2 has one wire schedule and two raw solve policies.
+     * Passive DS-TWR v3 has one wire schedule and two raw solve policies.
      * Keep surveyed geometry, calibration and either supported solve policy
      * from NVS, but migrate retired schedule/pipeline/rolling selectors.
      */
@@ -1071,7 +1071,7 @@ esp_err_t app_runtime_config_reload(void)
         loaded.passive_ds_auto_rx_delay_uus =
             APP_UWB_PASSIVE_DS_AUTO_RX_DELAY_UUS;
         ESP_LOGW(TAG,
-                 "Migrated legacy Passive DS profile to PDS2 field baseline");
+                 "Migrated legacy Passive DS profile to PDS3 field baseline");
     }
 
     if (!app_runtime_config_validate(&loaded)) {

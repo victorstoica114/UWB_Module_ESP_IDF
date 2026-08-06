@@ -193,10 +193,26 @@ static struct passive_ds_cost_result position_cost(
             continue;
         }
 
-        const double initiator_dx = x_m - anchors[initiator].x_m;
-        const double initiator_dy = y_m - anchors[initiator].y_m;
-        const double responder_dx = x_m - anchors[responder].x_m;
-        const double responder_dy = y_m - anchors[responder].y_m;
+        const double initiator_x = observation->dynamic_geometry
+            ? observation->initiator_x_m
+            : anchors[initiator].x_m;
+        const double initiator_y = observation->dynamic_geometry
+            ? observation->initiator_y_m
+            : anchors[initiator].y_m;
+        const double responder_x = observation->dynamic_geometry
+            ? observation->responder_x_m
+            : anchors[responder].x_m;
+        const double responder_y = observation->dynamic_geometry
+            ? observation->responder_y_m
+            : anchors[responder].y_m;
+        if (!isfinite(initiator_x) || !isfinite(initiator_y) ||
+            !isfinite(responder_x) || !isfinite(responder_y)) {
+            continue;
+        }
+        const double initiator_dx = x_m - initiator_x;
+        const double initiator_dy = y_m - initiator_y;
+        const double responder_dx = x_m - responder_x;
+        const double responder_dy = y_m - responder_y;
         const double initiator_distance = hypot(initiator_dx, initiator_dy);
         const double responder_distance = hypot(responder_dx, responder_dy);
         if (initiator_distance < 0.02 || responder_distance < 0.02) {

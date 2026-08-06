@@ -104,6 +104,18 @@ typedef struct {
     char last_sentence_id[8];
 } gps_service_snapshot_t;
 
+/* Minimal non-blocking snapshot for radio deadline paths. */
+typedef struct {
+    bool fix_valid;
+    int fix_quality;
+    double latitude_deg;
+    double longitude_deg;
+    double speed_mps;
+    double course_deg;
+    char rmc_status;
+    int64_t fix_monotonic_us;
+} gps_service_position_snapshot_t;
+
 esp_err_t gps_service_start(void);
 esp_err_t gps_service_apply_runtime_config(void);
 /* Temporarily release the primary GNSS UART without changing the persisted
@@ -116,6 +128,8 @@ esp_err_t gps_service_suspend_primary_uart(void);
 esp_err_t gps_service_reset_receiver_for_update(void);
 esp_err_t gps_service_resume_primary_uart(void);
 void gps_service_get_snapshot(gps_service_snapshot_t *snapshot);
+bool gps_service_try_get_position_snapshot(
+    gps_service_position_snapshot_t *snapshot);
 const char *gps_service_fix_quality_to_string(int quality);
 
 #ifdef __cplusplus
