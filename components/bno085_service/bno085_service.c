@@ -67,6 +67,7 @@ enum {
     BNO085_SAMPLE_RING_PSRAM_CAPACITY = 512,
     BNO085_SAMPLE_RING_INTERNAL_CAPACITY = 128,
     BNO085_GYRO_RV_RING_CAPACITY = 256,
+    BNO085_COPY_MAX_SAMPLES = 32,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -840,7 +841,8 @@ static void bno085_emit_telemetry(const bno085_accel_sample_t *sample)
     }
 }
 
-static uint64_t bno085_packet_hint_ticks(uint8_t *time_flags)
+static uint64_t bno085_packet_hint_ticks(uint8_t *time_flags,
+                                         uint32_t *hint_generation)
 {
     uint64_t hint_ticks = 0;
     uint32_t generation = 0;
@@ -849,8 +851,14 @@ static uint64_t bno085_packet_hint_ticks(uint8_t *time_flags)
     generation = s_hint_generation;
     portEXIT_CRITICAL(&s_hint_lock);
 
+    if (hint_generation != NULL) {
+        *hint_generation = 0;
+    }
+
     if (generation != s_consumed_hint_generation && hint_ticks != 0) {
-        s_consumed_hint_generation = generation;
+        if (hint_generation != NULL) {
+            *hint_generation = generation;
+        }
         if (time_flags != NULL) {
             *time_flags = BNO085_ACCEL_TIME_HINT_EXACT;
         }
@@ -861,6 +869,13 @@ static uint64_t bno085_packet_hint_ticks(uint8_t *time_flags)
         *time_flags = BNO085_ACCEL_TIME_HINT_ESTIMATED;
     }
     return bno085_service_fusion_time_ticks();
+}
+
+static void bno085_consume_packet_hint(uint32_t hint_generation)
+{
+    if (hint_generation != 0) {
+        s_consumed_hint_generation = hint_generation;
+    }
 }
 
 static void bno085_parse_input_reports(const uint8_t *payload, size_t len,
@@ -1215,12 +1230,15 @@ static bool bno085_drain_startup_packets(void)
         }
 
         uint8_t packet_time_flags = 0;
+        uint32_t packet_hint_generation = 0;
         const uint64_t packet_hint_ticks =
-            bno085_packet_hint_ticks(&packet_time_flags);
+            bno085_packet_hint_ticks(&packet_time_flags,
+                                     &packet_hint_generation);
         size_t packet_len = 0;
         const esp_err_t err = bno085_read_packet(packet, sizeof(packet),
                                                  &packet_len);
         if (err == ESP_OK) {
+            bno085_consume_packet_hint(packet_hint_generation);
             bno085_parse_packet(packet, packet_len, packet_hint_ticks,
                                 packet_time_flags);
             continue;
@@ -1285,12 +1303,15 @@ static void bno085_drain_ready_packets(uint8_t *packet, size_t packet_size)
     const uint32_t start_ms = ticks_to_ms();
     for (uint32_t i = 0; i < BNO085_MAX_PACKETS_PER_WAKE; ++i) {
         uint8_t packet_time_flags = 0;
+        uint32_t packet_hint_generation = 0;
         const uint64_t packet_hint_ticks =
-            bno085_packet_hint_ticks(&packet_time_flags);
+            bno085_packet_hint_ticks(&packet_time_flags,
+                                     &packet_hint_generation);
         size_t packet_len = 0;
         const esp_err_t err = bno085_read_packet(packet, packet_size,
                                                  &packet_len);
         if (err == ESP_OK) {
+            bno085_consume_packet_hint(packet_hint_generation);
             bno085_parse_packet(packet, packet_len, packet_hint_ticks,
                                 packet_time_flags);
 
@@ -1497,6 +1518,10 @@ size_t bno085_service_copy_accel_samples(uint32_t after_sequence,
         return 0;
     }
 
+    if (max_samples > BNO085_COPY_MAX_SAMPLES) {
+        max_samples = BNO085_COPY_MAX_SAMPLES;
+    }
+
     size_t copied = 0;
     portENTER_CRITICAL(&s_sample_lock);
     const size_t oldest =
@@ -1519,6 +1544,10 @@ size_t bno085_service_copy_gyro_rv_samples(uint32_t after_sequence,
 {
     if (samples == NULL || max_samples == 0 || s_gyro_rv_ring == NULL) {
         return 0;
+    }
+
+    if (max_samples > BNO085_COPY_MAX_SAMPLES) {
+        max_samples = BNO085_COPY_MAX_SAMPLES;
     }
 
     size_t copied = 0;
