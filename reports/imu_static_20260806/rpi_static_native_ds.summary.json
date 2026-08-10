@@ -1,0 +1,230 @@
+{
+  "fusion_config": {
+    "alpha": 0.35,
+    "beta": 0.08,
+    "cross_stream_reorder_tolerance_ms": 50,
+    "gravity_mps2": 9.80665,
+    "imu_gap_reset_ms": 300,
+    "max_accel_integration_gap_ms": 50,
+    "max_horizontal_accel_mps2": 40.0,
+    "max_velocity_mps": 5.0,
+    "min_velocity_correction_dt_s": 0.005,
+    "position_gap_reset_ms": 2500,
+    "position_reacquire_after_rejects": 3,
+    "position_reacquire_gap_ms": 2500,
+    "quaternion_hard_norm_max": 1.2,
+    "quaternion_hard_norm_min": 0.8,
+    "quaternion_soft_norm_max": 1.05,
+    "quaternion_soft_norm_min": 0.95,
+    "reboot_backstep_ms": 50,
+    "uwb_default_innovation_gate_m": 2.0,
+    "uwb_min_innovation_gate_m": 0.2,
+    "uwb_rms_gate_multiplier": 3.0,
+    "uwb_sigma_gate_multiplier": 4.0,
+    "yaw_alignment_gain": 0.25,
+    "yaw_max_abs_gyro_z_rps": 0.35,
+    "yaw_max_course_uncertainty_deg": 10.0,
+    "yaw_max_imu_age_ms": 50,
+    "yaw_max_innovation_deg": 20.0,
+    "yaw_max_window_ms": 5000,
+    "yaw_min_displacement_m": 1.0,
+    "yaw_min_segment_m": 0.02,
+    "yaw_min_speed_mps": 0.5,
+    "yaw_min_straightness": 0.95,
+    "yaw_min_window_ms": 2000
+  },
+  "input_files": [
+    "D:\\Documente\\UWB_ESP_IDF\\.worktrees\\passive-ds-rx-recovery\\reports\\uwb_dynamic_capture\\rpi_static_native_rtkfixed_180s.native_ds.jsonl"
+  ],
+  "limitations": [
+    "RTK association compares dashboard telemetry receive time with GPS measurement time estimated from the reported fix age.",
+    "RTK-to-UWB alignment uses anchor geometry, never the tag trajectory.",
+    "Only RTK-fixed quality 4 fixes enter accuracy metrics.",
+    "UwbImuFusion yaw assumes body +X follows the direction of travel."
+  ],
+  "overall_metrics": {
+    "fused_vs_rtk": {
+      "count": 1328,
+      "max_m": 0.6289661099975647,
+      "mean_m": 0.534219541636805,
+      "median_m": 0.5339453420300395,
+      "p95_m": 0.555160950040257,
+      "rmse_m": 0.5343872521995199
+    },
+    "raw_vs_rtk": {
+      "count": 1328,
+      "max_m": 0.8214299498530728,
+      "mean_m": 0.5346893901194945,
+      "median_m": 0.5337680394741614,
+      "p95_m": 0.5661390582526606,
+      "rmse_m": 0.535171432541142
+    }
+  },
+  "schema_version": 1,
+  "selected_protocol": "native_ds",
+  "track_count": 1,
+  "tracks": [
+    {
+      "fusion_final": {
+        "diagnostics": {
+          "consecutive_position_outliers": 0,
+          "frame": "UWB horizontal; BNO reference yaw-aligned, not ENU-calibrated",
+          "imu_invalid_samples": 0,
+          "imu_samples": 22865,
+          "last_gyro_body_rps": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "last_imu_dt_s": 0.01,
+          "last_linear_accel_bno_ref_mps2": [
+            0.08502021173460227,
+            0.025749828771774452,
+            0.08228753190477356
+          ],
+          "last_linear_accel_uwb_mps2": null,
+          "last_position_dt_s": 0.04,
+          "last_position_residual_m": 0.04847354351459014,
+          "last_position_rms_m": 0.118,
+          "last_position_sigma_m": 0.124,
+          "last_quaternion_norm": 1.0000111329680854,
+          "last_reset_reason": null,
+          "last_uwb_innovation_gate_m": 0.496,
+          "last_yaw_course_uncertainty_deg": null,
+          "last_yaw_displacement_m": 0.010000000000000009,
+          "last_yaw_innovation_deg": null,
+          "last_yaw_reject_reason": null,
+          "last_yaw_speed_mps": null,
+          "last_yaw_straightness": null,
+          "last_yaw_window_duration_s": 4.97,
+          "module_id": 1,
+          "module_mismatches": 0,
+          "ordering_rejects": 5862,
+          "position_accepted": 3983,
+          "position_corrections": 3982,
+          "position_outliers": 57,
+          "position_reacquisitions": 0,
+          "position_samples": 4040,
+          "protocol": "native_ds",
+          "ready": true,
+          "reset_count": 0,
+          "tag_id": 1,
+          "velocity_clamps": 0,
+          "yaw_alignment_assumption": "body +X follows UWB displacement",
+          "yaw_alignment_deg": null,
+          "yaw_alignment_rad": null,
+          "yaw_alignment_updates": 0,
+          "yaw_alignment_valid": false
+        },
+        "flags": [
+          "snapshot"
+        ],
+        "module_id": 1,
+        "protocol": "native_ds",
+        "ready": true,
+        "stream": "fused",
+        "tag_id": 1,
+        "uptime_ms": 259840,
+        "vx": -0.13869648158669734,
+        "vy": -0.07454749374247045,
+        "x": 0.6558951626257294,
+        "y": 7.557843490570864
+      },
+      "input_counts": {
+        "imu_candidates": 22865,
+        "imu_missing_or_invalid_orientation": 0,
+        "imu_used": 22865,
+        "positions": 4040,
+        "rtk_fixed_fixes": 119,
+        "rtk_matches": 1328
+      },
+      "metrics": {
+        "fused_minus_raw_rmse_m": -0.0007841803416220872,
+        "fused_vs_rtk": {
+          "count": 1328,
+          "max_m": 0.6289661099975647,
+          "mean_m": 0.534219541636805,
+          "median_m": 0.5339453420300395,
+          "p95_m": 0.555160950040257,
+          "rmse_m": 0.5343872521995199
+        },
+        "raw_vs_rtk": {
+          "count": 1328,
+          "max_m": 0.8214299498530728,
+          "mean_m": 0.5346893901194945,
+          "median_m": 0.5337680394741614,
+          "p95_m": 0.5661390582526606,
+          "rmse_m": 0.535171432541142
+        }
+      },
+      "module_id": 1,
+      "protocol": "native_ds",
+      "rtk_alignment": {
+        "all_anchor_geometry_rtk_fixed": true,
+        "anchor_count": 4,
+        "anchor_fit_rms_m": 0.6836203727451987,
+        "anchor_ids": [
+          2,
+          3,
+          4,
+          5
+        ],
+        "available": true,
+        "geometry_wall_ns": 1786051845482771417,
+        "maximum_anchor_time_delta_ms": 34.818931,
+        "source": "runtime_fixed_geometry",
+        "transform": {
+          "cosine": 0.9984084372438908,
+          "origin_latitude_deg": 44.3361067,
+          "origin_longitude_deg": 25.94749132,
+          "sine": 0.05639674139710209,
+          "translate_x_m": 0.66503603307281,
+          "translate_y_m": -0.03369480039643058
+        }
+      },
+      "tag_id": 1,
+      "timing": {
+        "fused_position": {
+          "gap_count": 0,
+          "gap_threshold_ms": 120.0,
+          "interval_max_ms": 100.0,
+          "interval_median_ms": 40.0,
+          "interval_p95_ms": 60.0,
+          "rate_hz": 22.440135563086837,
+          "samples": 4040,
+          "span_s": 179.99
+        },
+        "imu_used": {
+          "gap_count": 0,
+          "gap_threshold_ms": 100.0,
+          "interval_max_ms": 40.0,
+          "interval_median_ms": 10.0,
+          "interval_p95_ms": 20.0,
+          "rate_hz": 126.98694806998056,
+          "samples": 22865,
+          "span_s": 180.05
+        },
+        "raw_position": {
+          "gap_count": 0,
+          "gap_threshold_ms": 120.0,
+          "interval_max_ms": 100.0,
+          "interval_median_ms": 40.0,
+          "interval_p95_ms": 60.0,
+          "rate_hz": 22.440135563086837,
+          "samples": 4040,
+          "span_s": 179.99
+        },
+        "rtk_fixed": {
+          "gap_count": 0,
+          "gap_threshold_ms": 4731.0,
+          "interval_max_ms": 1695.0,
+          "interval_median_ms": 1577.0,
+          "interval_p95_ms": 1672.15,
+          "rate_hz": 0.6601213952057285,
+          "samples": 119,
+          "span_s": 178.755
+        }
+      }
+    }
+  ]
+}
