@@ -3742,9 +3742,30 @@ button.danger:disabled { background: #f8d7da; border-color: #efb5bc; color: #9f1
   height: 100%;
   overflow: auto;
 }
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th, td { padding: 8px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; }
+th, td {
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
 th { color: var(--muted); font-weight: 700; }
+.info-status-table { min-width: 1820px; }
+.info-status-table .col-module { width: 105px; }
+.info-status-table .col-wifi { width: 90px; }
+.info-status-table .col-runtime { width: 130px; }
+.info-status-table .col-components { width: 95px; }
+.info-status-table .col-gps { width: 370px; }
+.info-status-table .col-uwb { width: 125px; }
+.info-status-table .col-antenna { width: 70px; }
+.info-status-table .col-logs { width: 225px; }
+.info-status-table .col-resources { width: 250px; }
+.info-status-table .col-battery { width: 360px; }
+.info-status-table .resource-cell {
+  min-width: 0;
+  max-width: none;
+}
 .charger-status-table { table-layout: fixed; }
 .charger-status-table th,
 .charger-status-table td { overflow-wrap: anywhere; }
@@ -3893,6 +3914,8 @@ th { color: var(--muted); font-weight: 700; }
   color: #173c83;
   font-size: 11px;
   font-weight: 700;
+  pointer-events: none;
+  white-space: nowrap;
   box-shadow: 0 1px 3px rgba(23, 32, 42, 0.15);
 }
 .gps-map-distance-tooltip::before { display: none; }
@@ -4429,8 +4452,11 @@ tr.status-stale td { color: #4f3b1d; }
 .flex-parameter-table { width: 100%; font-size: 11px; }
 .flex-parameter-table th,
 .flex-parameter-table td { padding: 6px 8px; vertical-align: top; }
-.flex-parameter-table td:nth-child(1) { width: 120px; font-weight: 700; }
-.flex-parameter-table td:nth-child(2) { width: 230px; }
+.flex-parameter-table:not(.protocol-counter-table) th:nth-child(1),
+.flex-parameter-table:not(.protocol-counter-table) td:nth-child(1) { width: 120px; font-weight: 700; }
+.flex-parameter-table:not(.protocol-counter-table) th:nth-child(2),
+.flex-parameter-table:not(.protocol-counter-table) td:nth-child(2) { width: 230px; }
+.protocol-counter-table { min-width: 1500px; }
 .flex-scope {
   display: inline-block;
   padding: 1px 5px;
@@ -5099,7 +5125,19 @@ tr.status-stale td { color: #4f3b1d; }
     </section>
     <section id="info" class="page">
       <div class="table-wrap">
-        <table>
+        <table class="info-status-table">
+          <colgroup>
+            <col class="col-module">
+            <col class="col-wifi">
+            <col class="col-runtime">
+            <col class="col-components">
+            <col class="col-gps">
+            <col class="col-uwb">
+            <col class="col-antenna">
+            <col class="col-logs">
+            <col class="col-resources">
+            <col class="col-battery">
+          </colgroup>
           <thead><tr><th>Module</th><th>Wi-Fi</th><th>Runtime</th><th>Components</th><th>GPS</th><th>UWB</th><th>Antenna</th><th>Logs</th><th>Resources</th><th>Battery</th></tr></thead>
           <tbody id="infoRows"></tbody>
         </table>
@@ -6228,6 +6266,8 @@ const state = {
   gpsMapTrailLayer: null,
   gpsMapAnchorPolygon: null,
   gpsMapDistanceLayer: null,
+  gpsMapDistanceLabelChoices: new Map(),
+  gpsMapDistanceMeasureCanvas: null,
   gpsMapLastTrailToken: "",
   gpsMapHasFit: false,
   gpsMapTileErrors: 0,
@@ -7282,13 +7322,18 @@ function positionKnownReference(settings, anchors, positionGeometry = null) {
      */
     const dynamicGeometry =
       String(positionGeometry?.status || "") === "esp_dynamic";
-    const rtkGeometry = gpsRtkGeometryModel({latestOnly: dynamicGeometry});
+    const minimumReferenceAnchors = Math.min(3, settings.anchorIds.length);
+    const rtkGeometry = gpsRtkGeometryModel({
+      latestOnly: dynamicGeometry,
+      requiredAnchorIds: settings.anchorIds,
+      minimumAnchorCount: minimumReferenceAnchors,
+    });
     const rtkAlignment = gpsRtkToUwbAlignment(
       rtkGeometry, anchors, settings.anchorIds);
     if (!rtkAlignment) {
       return {
         reference: null,
-        error: "GPS RTK reference blocked: waiting for enough current RTK-fixed anchor samples to validate the rigid anchor fit.",
+        error: `GPS RTK reference blocked: waiting for at least ${minimumReferenceAnchors} of ${settings.anchorIds.length} current RTK-fixed anchors to validate the rigid fit.`,
       };
     }
     const anchorFitRmsM = Number(rtkAlignment.anchorFitRmsM);
@@ -7314,13 +7359,15 @@ function positionKnownReference(settings, anchors, positionGeometry = null) {
       reference: {
         x: latest.x,
         y: latest.y,
-        label: `GPS RTK tag M${tagId} (anchor-aligned)`,
+        label: `GPS RTK tag M${tagId} (anchor-aligned ${rtkAlignment.anchorCount}/${settings.anchorIds.length})`,
         dynamicGps: true,
         tagId,
         capturedAt: latest.t,
         rtkAlignment,
         rtkGeometry,
         anchorFitRmsM,
+        anchorFitCount: rtkAlignment.anchorCount,
+        anchorFitRequestedCount: settings.anchorIds.length,
       },
       error: "",
     };
@@ -9890,6 +9937,7 @@ function renderPositionReadout(model) {
     referenceStatus.className = "muted";
     referenceStatus.textContent =
       `${model.reference.label}: x=${fmtFixed(model.reference.x, 3)} m, y=${fmtFixed(model.reference.y, 3)} m` +
+      `${Number.isFinite(Number(model.reference.anchorFitCount)) ? ` · fit anchors ${model.reference.anchorFitCount}/${model.reference.anchorFitRequestedCount}` : ""}` +
       `${Number.isFinite(Number(model.reference.anchorFitRmsM)) ? ` · anchor fit RMS ${fmtPositionCm(model.reference.anchorFitRmsM, 1)}` : ""}` +
       ` · rolling ${fmtFixed(model.settings.errorWindowSec, 0)} s`;
     errorRows.innerHTML = Object.values(model.tags).map(tag => {
@@ -10962,14 +11010,17 @@ function gpsRtkFixedGeometryGenerationKey(settings, geometry, anchors) {
   if (!["persisted", "esp_fixed_rtk"].includes(String(geometry?.status || ""))) {
     return "";
   }
-  const generation = Number(
-    geometry?.generation ?? geometry?.frameId ?? geometry?.updates
-  );
+  /* A protocol restart increments the ESP32 geometry generation even when
+   * the surveyed anchor coordinates are byte-for-byte identical.  Including
+   * that volatile counter in this key discarded the browser's valid RTK
+   * alignment on every Passive/Native/Flex switch and hid the target until a
+   * fresh survey window accumulated.  Coordinates, not the transport
+   * generation, define the reference frame that may invalidate the cache. */
   const coordinates = (settings.anchorIds || []).map(anchorId => {
     const point = anchors?.[anchorId];
     return `${Number(anchorId)}:${Number(point?.x).toFixed(4)}:${Number(point?.y).toFixed(4)}`;
   }).join("|");
-  return `${Number.isFinite(generation) ? generation : "unknown"}:${coordinates}`;
+  return coordinates;
 }
 
 function syncGpsRtkAnchorSampleContext(settings, geometry, anchors) {
@@ -11093,16 +11144,32 @@ function gpsRtkEcefToEnu(point, origin, latitudeDeg, longitudeDeg) {
   };
 }
 
-function gpsRtkGeometryModel({latestOnly = false} = {}) {
+function gpsRtkGeometryModel({
+  latestOnly = false,
+  requiredAnchorIds = gpsRtkAnchorIds,
+  minimumAnchorCount = null,
+} = {}) {
   pruneGpsRtkSamples();
-  const originSamples = state.gpsRtkSamples.get(2) || [];
+  const requestedAnchorIds = [...new Set(
+    (requiredAnchorIds || gpsRtkAnchorIds)
+      .map(Number)
+      .filter(id => Number.isInteger(id) && id > 0)
+  )];
+  if (!requestedAnchorIds.length) return null;
   const minimumSamples = latestOnly ? 1 : gpsRtkMinimumSamples;
-  if (originSamples.length < minimumSamples) return null;
-  for (const anchorId of gpsRtkAnchorIds) {
-    if ((state.gpsRtkSamples.get(anchorId) || []).length < minimumSamples) {
-      return null;
-    }
-  }
+  const usableAnchorIds = requestedAnchorIds.filter(anchorId =>
+    (state.gpsRtkSamples.get(anchorId) || []).length >= minimumSamples
+  );
+  const requestedMinimum = minimumAnchorCount === null
+    ? requestedAnchorIds.length
+    : Number(minimumAnchorCount);
+  const requiredCount = Math.max(
+    2, Math.min(requestedAnchorIds.length, requestedMinimum));
+  if (usableAnchorIds.length < requiredCount) return null;
+  const originAnchorId = usableAnchorIds.includes(2)
+    ? 2
+    : usableAnchorIds[0];
+  const originSamples = state.gpsRtkSamples.get(originAnchorId) || [];
   const modelSamples = samples => latestOnly ? samples.slice(-1) : samples;
   const selectedOriginSamples = modelSamples(originSamples);
   const originLatitude = medianFinite(
@@ -11113,7 +11180,7 @@ function gpsRtkGeometryModel({latestOnly = false} = {}) {
     selectedOriginSamples.map(sample => sample.altitude));
   const originEcef = gpsRtkEcef(originLatitude, originLongitude, originAltitude);
   const points = new Map();
-  for (const moduleId of [1, ...gpsRtkAnchorIds]) {
+  for (const moduleId of [1, ...usableAnchorIds]) {
     const samples = moduleId === 1
       ? (state.gpsRtkSamples.get(moduleId) || [])
       : modelSamples(state.gpsRtkSamples.get(moduleId) || []);
@@ -11122,7 +11189,7 @@ function gpsRtkGeometryModel({latestOnly = false} = {}) {
       gpsRtkEcef(sample.latitude, sample.longitude, sample.altitude),
       originEcef, originLatitude, originLongitude
     ));
-    points.set(moduleId, moduleId === 2
+    points.set(moduleId, moduleId === originAnchorId
       ? {east: 0, north: 0, up: 0}
       : {
           east: medianFinite(enuSamples.map(point => point.east)),
@@ -11130,12 +11197,17 @@ function gpsRtkGeometryModel({latestOnly = false} = {}) {
           up: medianFinite(enuSamples.map(point => point.up)),
         });
   }
-  const anchorUps = gpsRtkAnchorIds.map(id => points.get(id)?.up).filter(Number.isFinite);
+  const anchorUps = usableAnchorIds
+    .map(id => points.get(id)?.up)
+    .filter(Number.isFinite);
   return {
     originLatitude,
     originLongitude,
     originAltitude,
     points,
+    anchorIds: usableAnchorIds,
+    requestedAnchorIds,
+    originAnchorId,
     verticalSpreadM: anchorUps.length
       ? Math.max(...anchorUps) - Math.min(...anchorUps)
       : NaN,
@@ -11501,6 +11573,165 @@ function gpsMapPairDistances(sorted, currentValid) {
   return pairs;
 }
 
+function gpsMapDistancePairKey(pair) {
+  const firstId = Number(pair?.first?.item?.module_id || 0);
+  const secondId = Number(pair?.second?.item?.module_id || 0);
+  return firstId < secondId
+    ? `${firstId}:${secondId}`
+    : `${secondId}:${firstId}`;
+}
+
+function gpsMapDistanceLabelSize(text) {
+  let width = Math.max(72, String(text || "").length * 6.2 + 12);
+  try {
+    if (!state.gpsMapDistanceMeasureCanvas) {
+      state.gpsMapDistanceMeasureCanvas = document.createElement("canvas");
+    }
+    const context = state.gpsMapDistanceMeasureCanvas.getContext("2d");
+    if (context) {
+      const family = window.getComputedStyle(document.body).fontFamily || "sans-serif";
+      context.font = `700 11px ${family}`;
+      width = Math.max(72, Math.ceil(context.measureText(String(text || "")).width) + 12);
+    }
+  } catch (_) {
+    // The deterministic character estimate above remains valid without canvas.
+  }
+  return {width, height: 22};
+}
+
+function gpsMapLabelRect(center, size) {
+  return {
+    left: center.x - size.width / 2,
+    right: center.x + size.width / 2,
+    top: center.y - size.height / 2,
+    bottom: center.y + size.height / 2,
+  };
+}
+
+function gpsMapRectOverlapArea(first, second) {
+  const width = Math.max(0, Math.min(first.right, second.right) - Math.max(first.left, second.left));
+  const height = Math.max(0, Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top));
+  return width * height;
+}
+
+function gpsMapRectOutsideArea(rect, mapSize, margin = 7) {
+  const clippedWidth = Math.max(
+    0, Math.min(rect.right, mapSize.x - margin) - Math.max(rect.left, margin));
+  const clippedHeight = Math.max(
+    0, Math.min(rect.bottom, mapSize.y - margin) - Math.max(rect.top, margin));
+  const area = Math.max(0, rect.right - rect.left) * Math.max(0, rect.bottom - rect.top);
+  return Math.max(0, area - clippedWidth * clippedHeight);
+}
+
+function gpsMapDistanceLabelCandidates() {
+  return [
+    {tangent: 0, normal: 0},
+    {tangent: 0, normal: 20},
+    {tangent: 0, normal: -20},
+    {tangent: 0, normal: 40},
+    {tangent: 0, normal: -40},
+    {tangent: 36, normal: 20},
+    {tangent: -36, normal: 20},
+    {tangent: 36, normal: -20},
+    {tangent: -36, normal: -20},
+    {tangent: 0, normal: 60},
+    {tangent: 0, normal: -60},
+    {tangent: 58, normal: 38},
+    {tangent: -58, normal: 38},
+    {tangent: 58, normal: -38},
+    {tangent: -58, normal: -38},
+    {tangent: 72, normal: 0},
+    {tangent: -72, normal: 0},
+  ];
+}
+
+function gpsMapDistanceLabelLayout(pairs) {
+  const placements = new Map();
+  if (!state.gpsMap || !pairs.length) return placements;
+
+  const mapSize = state.gpsMap.getSize();
+  const occupied = [];
+  const markerObstacles = [];
+  const markerIds = new Set();
+  for (const pair of pairs) {
+    for (const endpoint of [pair.first, pair.second]) {
+      const moduleId = Number(endpoint?.item?.module_id || 0);
+      if (!moduleId || markerIds.has(moduleId)) continue;
+      markerIds.add(moduleId);
+      const point = state.gpsMap.latLngToLayerPoint([
+        endpoint.position.lat, endpoint.position.lng,
+      ]);
+      markerObstacles.push({
+        left: point.x - 25,
+        right: point.x + 25,
+        top: point.y - 20,
+        bottom: point.y + 20,
+      });
+    }
+  }
+
+  const orderedPairs = [...pairs].sort((first, second) => {
+    const firstTag = Number(first.first.item.module_id) === 1 || Number(first.second.item.module_id) === 1;
+    const secondTag = Number(second.first.item.module_id) === 1 || Number(second.second.item.module_id) === 1;
+    if (firstTag !== secondTag) return firstTag ? -1 : 1;
+    return gpsMapDistancePairKey(first).localeCompare(gpsMapDistancePairKey(second));
+  });
+  const candidates = gpsMapDistanceLabelCandidates();
+  const activeKeys = new Set();
+
+  for (const pair of orderedPairs) {
+    const key = gpsMapDistancePairKey(pair);
+    activeKeys.add(key);
+    const first = state.gpsMap.latLngToLayerPoint([
+      pair.first.position.lat, pair.first.position.lng,
+    ]);
+    const second = state.gpsMap.latLngToLayerPoint([
+      pair.second.position.lat, pair.second.position.lng,
+    ]);
+    const deltaX = second.x - first.x;
+    const deltaY = second.y - first.y;
+    const length = Math.max(1, Math.hypot(deltaX, deltaY));
+    const tangent = {x: deltaX / length, y: deltaY / length};
+    const normal = {x: -tangent.y, y: tangent.x};
+    const midpoint = {x: (first.x + second.x) / 2, y: (first.y + second.y) / 2};
+    const text = `${pair.label} · ${gpsMapDistanceText(pair.horizontal)}`;
+    const size = gpsMapDistanceLabelSize(text);
+    const previousChoice = state.gpsMapDistanceLabelChoices.get(key);
+    let best = null;
+
+    candidates.forEach((candidate, candidateIndex) => {
+      const offset = {
+        x: tangent.x * candidate.tangent + normal.x * candidate.normal,
+        y: tangent.y * candidate.tangent + normal.y * candidate.normal,
+      };
+      const center = {x: midpoint.x + offset.x, y: midpoint.y + offset.y};
+      const rect = gpsMapLabelRect(center, size);
+      const labelOverlap = occupied.reduce(
+        (sum, obstacle) => sum + gpsMapRectOverlapArea(rect, obstacle), 0);
+      const markerOverlap = markerObstacles.reduce(
+        (sum, obstacle) => sum + gpsMapRectOverlapArea(rect, obstacle), 0);
+      const outsideArea = gpsMapRectOutsideArea(rect, mapSize);
+      const displacement = Math.hypot(candidate.tangent, candidate.normal);
+      const hysteresis = candidateIndex === previousChoice ? -120 : 0;
+      const score = labelOverlap * 1000 + markerOverlap * 220 +
+        outsideArea * 1400 + displacement + hysteresis;
+      if (!best || score < best.score) {
+        best = {candidateIndex, offset, rect, score};
+      }
+    });
+
+    if (!best) continue;
+    state.gpsMapDistanceLabelChoices.set(key, best.candidateIndex);
+    placements.set(key, best.offset);
+    occupied.push(best.rect);
+  }
+
+  for (const key of [...state.gpsMapDistanceLabelChoices.keys()]) {
+    if (!activeKeys.has(key)) state.gpsMapDistanceLabelChoices.delete(key);
+  }
+  return placements;
+}
+
 function fitGpsMapToModules() {
   if (!ensureGpsMap()) return;
   const points = gpsMapVisiblePositions();
@@ -11691,8 +11922,10 @@ function renderGpsMap(statuses) {
   }
   if (state.gpsMapDistanceLayer) {
     state.gpsMapDistanceLayer.clearLayers();
+    const labelPlacements = gpsMapDistanceLabelLayout(pairDistances);
     for (const pair of pairDistances) {
       const tagPair = Number(pair.first.item.module_id) === 1 || Number(pair.second.item.module_id) === 1;
+      const labelOffset = labelPlacements.get(gpsMapDistancePairKey(pair)) || {x: 0, y: 0};
       L.polyline(
         [[pair.first.position.lat, pair.first.position.lng], [pair.second.position.lat, pair.second.position.lng]],
         {
@@ -11704,7 +11937,13 @@ function renderGpsMap(statuses) {
         }
       ).bindTooltip(
         `${pair.label} · ${gpsMapDistanceText(pair.horizontal)}`,
-        {permanent: true, direction: "center", className: "gps-map-distance-tooltip", opacity: 0.96}
+        {
+          permanent: true,
+          direction: "center",
+          className: "gps-map-distance-tooltip",
+          opacity: 0.96,
+          offset: L.point(labelOffset.x, labelOffset.y),
+        }
       ).addTo(state.gpsMapDistanceLayer);
     }
   }
@@ -14313,7 +14552,7 @@ function nativeDsPipelineDiagnosticsHtml() {
       <strong>Live protocol counters</strong>
       <span>Direct counters from the clean POLL → RESP → FINAL → RESULT implementation.</span>
     </div>
-    <div class="table-wrap"><table class="flex-parameter-table">
+    <div class="table-wrap"><table class="flex-parameter-table protocol-counter-table">
       <thead><tr>
         <th>Module</th><th>Role</th><th>POLL TX/RX</th>
         <th>RESP TX/RX</th><th>FINAL TX/RX</th><th>RESULT TX/RX</th><th>Ranges</th>
@@ -15189,7 +15428,7 @@ function renderPassiveDsExperimentControls() {
     return;
   }
   root.className = "table-wrap";
-  root.innerHTML = `${tagRows ? `<table>
+  root.innerHTML = `${tagRows ? `<table class="protocol-counter-table">
     <thead><tr>
       <th>Module</th>
       <th>Radio ready paths 0/1/2/3</th>
@@ -15201,7 +15440,7 @@ function renderPassiveDsExperimentControls() {
     </tr></thead><tbody>${tagRows}</tbody>
   </table>
   <p class="muted">Counts describe ready paths and processing attempts; they are not packet-loss percentages.</p>` : ""}
-  ${pipelineRows ? `<table>
+  ${pipelineRows ? `<table class="protocol-counter-table">
     <thead><tr>
       <th>Module</th><th>Pipeline</th><th>Complete</th>
       <th>RESP/FINAL timeout</th><th>PHY retry/recovered/timeout</th>
