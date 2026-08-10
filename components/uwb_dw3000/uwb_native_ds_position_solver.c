@@ -7,6 +7,9 @@
 #define NATIVE_DS_MIN_RANGE_M 0.02f
 #define NATIVE_DS_MAX_RANGE_M 100.0f
 #define NATIVE_DS_MIN_GEOMETRY_AREA_M2 1.0e-4f
+#define NATIVE_DS_MAX_EQUATION_RMS_M 0.25f
+#define NATIVE_DS_MAX_ABS_RESIDUAL_M 0.50f
+#define NATIVE_DS_RANGE_COHERENCE_MARGIN_M 0.50f
 
 static int anchor_index(const struct uwb_native_ds_position_solver *solver,
                         uint8_t anchor_id)
@@ -42,6 +45,16 @@ static uint64_t complete_pair_mask(size_t anchor_count)
 static uint16_t complete_anchor_mask(size_t anchor_count)
 {
     return (uint16_t)((1UL << anchor_count) - 1UL);
+}
+
+static size_t range_count(uint16_t range_mask)
+{
+    size_t count = 0U;
+    while (range_mask != 0U) {
+        count += range_mask & 1U;
+        range_mask >>= 1U;
+    }
+    return count;
 }
 
 static bool frame_is_newer(uint32_t candidate, uint32_t current)
@@ -160,18 +173,96 @@ bool uwb_native_ds_position_solver_update_geometry(
     return true;
 }
 
-static bool initial_position(const struct uwb_native_ds_position_solver *solver,
-                             float *x_m, float *y_m)
+static bool selected_geometry_is_observable(
+    const struct uwb_native_ds_position_solver *solver, uint16_t range_mask)
 {
-    const float x0 = solver->anchor_x_m[0];
-    const float y0 = solver->anchor_y_m[0];
-    const float r0 = solver->tag_range_m[0];
+    float maximum_twice_area = 0.0f;
+    for (size_t first = 0U; first < solver->anchor_count; ++first) {
+        if ((range_mask & (uint16_t)(1U << first)) == 0U) {
+            continue;
+        }
+        for (size_t second = first + 1U; second < solver->anchor_count;
+             ++second) {
+            if ((range_mask & (uint16_t)(1U << second)) == 0U) {
+                continue;
+            }
+            for (size_t third = second + 1U; third < solver->anchor_count;
+                 ++third) {
+                if ((range_mask & (uint16_t)(1U << third)) == 0U) {
+                    continue;
+                }
+                const float twice_area = fabsf(
+                    (solver->anchor_x_m[second] -
+                     solver->anchor_x_m[first]) *
+                        (solver->anchor_y_m[third] -
+                         solver->anchor_y_m[first]) -
+                    (solver->anchor_y_m[second] -
+                     solver->anchor_y_m[first]) *
+                        (solver->anchor_x_m[third] -
+                         solver->anchor_x_m[first]));
+                maximum_twice_area =
+                    fmaxf(maximum_twice_area, twice_area);
+            }
+        }
+    }
+    return maximum_twice_area >= 2.0f * NATIVE_DS_MIN_GEOMETRY_AREA_M2;
+}
+
+static bool selected_ranges_are_coherent(
+    const struct uwb_native_ds_position_solver *solver, uint16_t range_mask)
+{
+    for (size_t first = 0U; first < solver->anchor_count; ++first) {
+        if ((range_mask & (uint16_t)(1U << first)) == 0U) {
+            continue;
+        }
+        for (size_t second = first + 1U; second < solver->anchor_count;
+             ++second) {
+            if ((range_mask & (uint16_t)(1U << second)) == 0U) {
+                continue;
+            }
+            const float anchor_distance = hypotf(
+                solver->anchor_x_m[first] - solver->anchor_x_m[second],
+                solver->anchor_y_m[first] - solver->anchor_y_m[second]);
+            const float first_range = solver->tag_range_m[first];
+            const float second_range = solver->tag_range_m[second];
+            if (fabsf(first_range - second_range) >
+                    anchor_distance + NATIVE_DS_RANGE_COHERENCE_MARGIN_M ||
+                first_range + second_range +
+                        NATIVE_DS_RANGE_COHERENCE_MARGIN_M <
+                    anchor_distance) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool initial_position(const struct uwb_native_ds_position_solver *solver,
+                             uint16_t range_mask, float *x_m, float *y_m)
+{
+    size_t reference = solver->anchor_count;
+    for (size_t index = 0U; index < solver->anchor_count; ++index) {
+        if ((range_mask & (uint16_t)(1U << index)) != 0U) {
+            reference = index;
+            break;
+        }
+    }
+    if (reference == solver->anchor_count) {
+        return false;
+    }
+    const float x0 = solver->anchor_x_m[reference];
+    const float y0 = solver->anchor_y_m[reference];
+    const float r0 = solver->tag_range_m[reference];
     float h00 = 0.0f;
     float h01 = 0.0f;
     float h11 = 0.0f;
     float g0 = 0.0f;
     float g1 = 0.0f;
-    for (size_t index = 1U; index < solver->anchor_count; ++index) {
+    for (size_t index = 0U; index < solver->anchor_count; ++index) {
+        if (index == reference ||
+            (range_mask & (uint16_t)(1U << index)) == 0U) {
+            continue;
+        }
         const float xi = solver->anchor_x_m[index];
         const float yi = solver->anchor_y_m[index];
         const float ri = solver->tag_range_m[index];
@@ -195,11 +286,20 @@ static bool initial_position(const struct uwb_native_ds_position_solver *solver,
 }
 
 static bool solve_position(struct uwb_native_ds_position_solver *solver,
+                           uint16_t range_mask,
+                           bool apply_quality_gate,
                            struct uwb_native_ds_position_output *output)
 {
+    const size_t observation_count = range_count(range_mask);
+    if (observation_count < 3U ||
+        !selected_geometry_is_observable(solver, range_mask) ||
+        (apply_quality_gate &&
+         !selected_ranges_are_coherent(solver, range_mask))) {
+        return false;
+    }
     float x_m = 0.0f;
     float y_m = 0.0f;
-    if (!initial_position(solver, &x_m, &y_m)) {
+    if (!initial_position(solver, range_mask, &x_m, &y_m)) {
         return false;
     }
 
@@ -211,6 +311,9 @@ static bool solve_position(struct uwb_native_ds_position_solver *solver,
         float g0 = 0.0f;
         float g1 = 0.0f;
         for (size_t index = 0U; index < solver->anchor_count; ++index) {
+            if ((range_mask & (uint16_t)(1U << index)) == 0U) {
+                continue;
+            }
             const float dx = x_m - solver->anchor_x_m[index];
             const float dy = y_m - solver->anchor_y_m[index];
             const float predicted = hypotf(dx, dy);
@@ -247,7 +350,11 @@ static bool solve_position(struct uwb_native_ds_position_solver *solver,
     float h00 = 0.0f;
     float h01 = 0.0f;
     float h11 = 0.0f;
+    float maximum_abs_residual = 0.0f;
     for (size_t index = 0U; index < solver->anchor_count; ++index) {
+        if ((range_mask & (uint16_t)(1U << index)) == 0U) {
+            continue;
+        }
         const float dx = x_m - solver->anchor_x_m[index];
         const float dy = y_m - solver->anchor_y_m[index];
         const float predicted = hypotf(dx, dy);
@@ -256,6 +363,8 @@ static bool solve_position(struct uwb_native_ds_position_solver *solver,
         const float jx = dx / safe_predicted;
         const float jy = dy / safe_predicted;
         sse += residual * residual;
+        maximum_abs_residual =
+            fmaxf(maximum_abs_residual, fabsf(residual));
         h00 += jx * jx;
         h01 += jx * jy;
         h11 += jy * jy;
@@ -265,8 +374,7 @@ static bool solve_position(struct uwb_native_ds_position_solver *solver,
     const float determinant = h00 * h11 - h01 * h01;
     if (determinant > 1.0e-8f) {
         const float degrees_of_freedom =
-            (float)(solver->anchor_count > 2U ? solver->anchor_count - 2U
-                                               : 1U);
+            (float)(observation_count > 2U ? observation_count - 2U : 1U);
         const float variance = sse / degrees_of_freedom;
         const float cov00 = variance * h11 / determinant;
         const float cov01 = -variance * h01 / determinant;
@@ -278,13 +386,20 @@ static bool solve_position(struct uwb_native_ds_position_solver *solver,
                             0.5f * (cov00 + cov11 + eigen_term)));
     }
 
+    const float rms_m = sqrtf(sse / (float)observation_count);
+    if (apply_quality_gate &&
+        (rms_m > NATIVE_DS_MAX_EQUATION_RMS_M ||
+         maximum_abs_residual > NATIVE_DS_MAX_ABS_RESIDUAL_M)) {
+        return false;
+    }
+
     output->position_valid = true;
     output->frame_id = solver->tag_frame_id;
     output->x_m = x_m;
     output->y_m = y_m;
     output->sigma_m = sigma;
-    output->rms_m = sqrtf(sse / (float)solver->anchor_count);
-    output->observation_count = solver->anchor_count;
+    output->rms_m = rms_m;
+    output->observation_count = (uint8_t)observation_count;
     output->iteration_count = iterations;
     return true;
 }
@@ -363,25 +478,30 @@ bool uwb_native_ds_position_solver_submit_tag_range(
     if (!solver->tag_frame_active) {
         solver->tag_frame_active = true;
         solver->tag_frame_id = frame_id;
-        solver->tag_frame_emitted = false;
+        solver->tag_frame_finalized = false;
         solver->tag_range_mask = 0U;
     } else if (frame_id != solver->tag_frame_id) {
         if (!frame_is_newer(frame_id, solver->tag_frame_id)) {
             return true;
         }
+        if (!solver->tag_frame_finalized &&
+            range_count(solver->tag_range_mask) >= 3U) {
+            solver->tag_frame_finalized = true;
+            (void)solve_position(solver, solver->tag_range_mask, true,
+                                 output);
+        }
         solver->tag_frame_id = frame_id;
-        solver->tag_frame_emitted = false;
+        solver->tag_frame_finalized = false;
         solver->tag_range_mask = 0U;
     }
 
     solver->tag_range_m[index] = distance_m;
     solver->tag_range_mask |= (uint16_t)(1U << index);
-    if (solver->tag_frame_emitted ||
+    if (solver->tag_frame_finalized ||
         solver->tag_range_mask != complete_anchor_mask(solver->anchor_count)) {
         return true;
     }
-    if (solve_position(solver, output)) {
-        solver->tag_frame_emitted = true;
-    }
+    solver->tag_frame_finalized = true;
+    (void)solve_position(solver, solver->tag_range_mask, false, output);
     return true;
 }

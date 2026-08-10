@@ -24,6 +24,23 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
+try:
+    from uwb_imu_fusion import UwbImuFusion
+except ImportError:  # Supports importing this script as tools.uwb_dashboard.
+    from tools.uwb_imu_fusion import UwbImuFusion
+
+
+IMU_FUSION_NON_ADVANCING_FLAGS = frozenset(
+    {
+        "module_mismatch",
+        "event_out_of_order",
+        "imu_out_of_order",
+        "imu_duplicate_uptime",
+        "position_out_of_order",
+        "position_duplicate_uptime",
+    }
+)
+
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 LEAFLET_ROOT = pathlib.Path("/usr/share/javascript/leaflet")
@@ -81,6 +98,20 @@ FLEX_TDOA_ANCHOR_RE = re.compile(
     r"raw=(?P<raw>[-+]?\d+(?:\.\d+)?)\s+m"
 )
 CAL_SYNC_SKIP_RE = re.compile(r"\bUWB CAL slot skipped due to sync fail\b")
+PASSIVE_DS_TAG_QUALITY_RE = re.compile(
+    r"\bPASSIVE_DS tag quality\b\s+"
+    r"radio_star=(?P<radio_0>\d+)/(?P<radio_1>\d+)/"
+    r"(?P<radio_2>\d+)/(?P<radio_3>\d+)\s+"
+    r"computed_star=(?P<computed_0>\d+)/(?P<computed_1>\d+)/"
+    r"(?P<computed_2>\d+)/(?P<computed_3>\d+)\s+"
+    r"radio_obs=(?P<radio_obs>\d+)\s+"
+    r"computed_obs=(?P<computed_obs>\d+)\s+"
+    r"computed_incomplete=(?P<computed_incomplete>\d+)\s+"
+    r"solver_full=(?P<solver_full>\d+)\s+"
+    r"miss_poll=(?P<miss_poll>\d+)\s+"
+    r"queue_attempt_drop=(?P<telemetry_attempt_drop>\d+)/"
+    r"(?P<solver_attempt_drop>\d+)"
+)
 TELEMETRY_BINARY_MAGIC = b"UWT1"
 TELEMETRY_BINARY_HEADER_LEN = 12
 TELEMETRY_STREAM_BNO085_ACCEL = 1
@@ -101,7 +132,9 @@ TELEMETRY_STREAM_NATIVE_DS_POSITION = 15
 TELEMETRY_STREAM_NATIVE_DS_GEOMETRY = 16
 TELEMETRY_STREAM_FLEX_GEOMETRY = 17
 TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2 = 18
+TELEMETRY_STREAM_BNO085_IMU = 19
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
+TELEMETRY_IMU_SAMPLE_LEN = 42
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
 TELEMETRY_FLEX_OBSERVATION_V2_SAMPLE_LEN = 49
 TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
@@ -112,6 +145,7 @@ TELEMETRY_PASSIVE_DS_POSITION_V3_SAMPLE_LEN = 49
 TELEMETRY_PASSIVE_DS_POSITION_V4_SAMPLE_LEN = 63
 TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN = 24
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
+TELEMETRY_IMU_STRUCT = struct.Struct("<IIiiiIhhhhhhhBBBB")
 TELEMETRY_FLEX_OBSERVATION_STRUCT = struct.Struct("<IIiiiHBBBB")
 TELEMETRY_FLEX_OBSERVATION_V2_STRUCT = struct.Struct(
     "<IIiiiiiiiIHBBBBHB"
@@ -134,6 +168,7 @@ TELEMETRY_PASSIVE_DS_GEOMETRY_STRUCT = struct.Struct("<IIiiiBBBB")
 ANCHOR_RANGE_HISTORY_MAX_AGE_SEC = 30.0
 TELEMETRY_STREAM_SAMPLE_SIZES = {
     TELEMETRY_STREAM_BNO085_ACCEL: TELEMETRY_ACCEL_SAMPLE_LEN,
+    TELEMETRY_STREAM_BNO085_IMU: TELEMETRY_IMU_SAMPLE_LEN,
     TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION:
         TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN,
     TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2:
@@ -665,6 +700,52 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "reports": int(reports),
                 }
             )
+        elif stream_type == TELEMETRY_STREAM_BNO085_IMU:
+            (
+                uptime_ms,
+                accel_reports,
+                x,
+                y,
+                z,
+                gyro_reports,
+                quat_i_q14,
+                quat_j_q14,
+                quat_k_q14,
+                quat_real_q14,
+                gyro_x_q10,
+                gyro_y_q10,
+                gyro_z_q10,
+                accuracy,
+                accel_time_flags,
+                gyro_time_flags,
+                imu_flags,
+            ) = TELEMETRY_IMU_STRUCT.unpack_from(frame, offset)
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    # Keep the established acceleration topic so storage, the
+                    # /api/accel endpoint and graph history remain unchanged.
+                    "topic": "bno085.accel",
+                    "x": x / 1000.0,
+                    "y": y / 1000.0,
+                    "z": z / 1000.0,
+                    "accuracy": int(accuracy),
+                    "reports": int(accel_reports),
+                    "gyro_reports": int(gyro_reports),
+                    "quat_i": quat_i_q14 / 16384.0,
+                    "quat_j": quat_j_q14 / 16384.0,
+                    "quat_k": quat_k_q14 / 16384.0,
+                    "quat_real": quat_real_q14 / 16384.0,
+                    "gyro_x": gyro_x_q10 / 1024.0,
+                    "gyro_y": gyro_y_q10 / 1024.0,
+                    "gyro_z": gyro_z_q10 / 1024.0,
+                    "accel_time_flags": int(accel_time_flags),
+                    "gyro_time_flags": int(gyro_time_flags),
+                    "imu_flags": int(imu_flags),
+                    "imu_valid": bool(imu_flags & 1),
+                }
+            )
         elif stream_type == TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2:
             (
                 uptime_ms,
@@ -1135,6 +1216,12 @@ class DashboardState:
         self.status_targets: list[str] = []
         self.status_by_module: dict[int, dict[str, Any]] = {}
         self.status_errors: dict[str, str] = {}
+        self.passive_ds_tag_diagnostics: dict[int, dict[str, Any]] = {}
+        self.latest_imu_by_module: dict[int, dict[str, Any]] = {}
+        self.imu_fusions: dict[tuple[int, str, int], UwbImuFusion] = {}
+        self.imu_fusion_latest: dict[str, dict[str, Any]] = {}
+        self.imu_fusion_last_emit_ms: dict[tuple[int, str, int], int] = {}
+        self.imu_fusion_emit_interval_ms = 20
 
     def add_log(self, line: str, addr: tuple[str, int]) -> None:
         parsed = self.parse_line(line)
@@ -1154,6 +1241,7 @@ class DashboardState:
             self.record_ranging_locked(item)
             self.record_tdoa_anchor_locked(item)
             self.record_tdoa_locked(item)
+            self.record_passive_ds_tag_diagnostics_locked(item)
 
     def add_telemetry(self, line: str, addr: tuple[str, int]) -> None:
         parsed = self.parse_telemetry(line)
@@ -1266,23 +1354,171 @@ class DashboardState:
             math.isfinite(value) for value in (x_m, y_m, sigma_m, rms_m)
         ):
             return
+        protocol = str(
+            item.get("tdoa_protocol") or "flextdoa"
+        ).strip().lower()
         stored = {
             **item,
             "received_at": float(item.get("received_at") or time.time()),
             "position_event_id": self.next_position_event_id,
-            "tdoa_protocol": str(item.get("tdoa_protocol") or "flextdoa"),
+            "tdoa_protocol": protocol,
             "position_stream_type": (
                 {
                     "passive_ds": "passive_ds_position",
                     "native_ds": "native_ds_position",
-                }.get(item.get("tdoa_protocol"), "flextdoa_position")
+                }.get(protocol, "flextdoa_position")
             ),
             "position_stream_event_id": self.next_position_stream_event_id,
         }
+        # The position publisher can be a receive-only listener.  Its local
+        # BNO085 must never be fused into a remote tag track: tag IDs are the
+        # physical module IDs in this deployment, so route IMU by tag_id.
+        imu_module_id = tag_id
+        fusion_key = (imu_module_id, protocol, tag_id)
+        stored["imu_fusion_module_id"] = imu_module_id
+        for stale_key in list(self.imu_fusions):
+            if stale_key[0] != imu_module_id or stale_key == fusion_key:
+                continue
+            self.imu_fusions.pop(stale_key, None)
+            self.imu_fusion_last_emit_ms.pop(stale_key, None)
+            self.imu_fusion_latest.pop(self._fusion_key_text(stale_key), None)
+        fusion = self.imu_fusions.get(fusion_key)
+        if fusion is None:
+            fusion = UwbImuFusion()
+            self.imu_fusions[fusion_key] = fusion
+            latest_imu = self.latest_imu_by_module.get(imu_module_id)
+            if (
+                latest_imu is not None
+                and int(latest_imu.get("uptime_ms") or 0)
+                <= int(item.get("uptime_ms") or 0)
+            ):
+                try:
+                    fusion.update_imu(latest_imu)
+                except (TypeError, ValueError):
+                    pass
+        try:
+            fusion_position = {
+                **stored,
+                "module_id": imu_module_id,
+                "protocol": protocol,
+            }
+            fused = fusion.update_position(fusion_position)
+        except (TypeError, ValueError):
+            fused = None
+        if fused is not None:
+            self._attach_imu_fusion_locked(stored, fusion_key, fused)
         self.next_position_event_id += 1
         self.next_position_stream_event_id += 1
         self.tdoa_local_positions[tag_id] = stored
         self.tdoa_position_events.append(stored)
+        if fused is not None:
+            self._emit_imu_fusion_event_locked(
+                fusion_key, fused, stored["received_at"], force=True
+            )
+        self.position_condition.notify_all()
+
+    @staticmethod
+    def _fusion_key_text(key: tuple[int, str, int]) -> str:
+        module_id, protocol, tag_id = key
+        return f"{module_id}:{protocol}:{tag_id}"
+
+    def _attach_imu_fusion_locked(
+        self,
+        item: dict[str, Any],
+        key: tuple[int, str, int],
+        fused: dict[str, Any],
+    ) -> None:
+        self._store_imu_fusion_latest_locked(
+            key, fused, float(item.get("received_at") or time.time())
+        )
+        item["imu_fused_valid"] = bool(fused.get("ready"))
+        item["imu_fused_x_m"] = fused.get("x")
+        item["imu_fused_y_m"] = fused.get("y")
+        item["imu_fused_vx_mps"] = fused.get("vx")
+        item["imu_fused_vy_mps"] = fused.get("vy")
+        item["imu_fusion_flags"] = fused.get("flags", [])
+        item["imu_fusion_diagnostics"] = fused.get("diagnostics", {})
+
+    def _store_imu_fusion_latest_locked(
+        self,
+        key: tuple[int, str, int],
+        fused: dict[str, Any],
+        received_at: float,
+    ) -> None:
+        module_id, protocol, tag_id = key
+        self.imu_fusion_latest[self._fusion_key_text(key)] = {
+            **fused,
+            "module_id": module_id,
+            "tag_id": tag_id,
+            "tdoa_protocol": protocol,
+            "received_at": float(received_at),
+        }
+
+    def _emit_imu_fusion_event_locked(
+        self,
+        key: tuple[int, str, int],
+        fused: dict[str, Any],
+        received_at: float,
+        *,
+        force: bool = False,
+    ) -> None:
+        flags = {str(value) for value in fused.get("flags", [])}
+        if flags & IMU_FUSION_NON_ADVANCING_FLAGS:
+            return
+        reset_event = "reset" in flags
+        ready = bool(fused.get("ready"))
+        if not ready and not reset_event:
+            return
+        uptime_ms = int(fused.get("uptime_ms") or 0)
+        previous_ms = self.imu_fusion_last_emit_ms.get(key)
+        if (
+            not force
+            and not reset_event
+            and previous_ms is not None
+            and uptime_ms - previous_ms < self.imu_fusion_emit_interval_ms
+        ):
+            return
+        module_id, protocol, tag_id = key
+        x_m = fused.get("x")
+        y_m = fused.get("y")
+        coordinates_valid = (
+            x_m is not None
+            and y_m is not None
+            and math.isfinite(float(x_m))
+            and math.isfinite(float(y_m))
+        )
+        if ready and not coordinates_valid:
+            return
+        event = {
+            "module_id": module_id,
+            "tag_id": tag_id,
+            "uptime_ms": uptime_ms,
+            "received_at": float(received_at),
+            "tdoa_protocol": protocol,
+            "position_stream_type": f"{protocol}_imu_fused_position",
+            "position_event_id": self.next_position_event_id,
+            "position_stream_event_id": self.next_position_stream_event_id,
+            "position_filter": "imu_alpha_beta",
+            "solver_location": "raspberry_pi",
+            "solution_kind": "imu_prediction" if ready else "imu_reset",
+            "independent_frame": False,
+            "imu_fused": True,
+            "imu_fusion_reset": reset_event,
+            "vx_mps": fused.get("vx"),
+            "vy_mps": fused.get("vy"),
+            "imu_fusion_flags": fused.get("flags", []),
+            "imu_fusion_diagnostics": fused.get("diagnostics", {}),
+        }
+        if coordinates_valid:
+            event["x_m"] = float(x_m)
+            event["y_m"] = float(y_m)
+        self.next_position_event_id += 1
+        self.next_position_stream_event_id += 1
+        if uptime_ms > 0:
+            self.imu_fusion_last_emit_ms[key] = uptime_ms
+        elif reset_event:
+            self.imu_fusion_last_emit_ms.pop(key, None)
+        self.tdoa_position_events.append(event)
         self.position_condition.notify_all()
 
     def position_events_after(
@@ -1338,6 +1574,46 @@ class DashboardState:
             "tag": tag,
             "message": message,
             "component": classify_component(tag, message),
+        }
+
+    def record_passive_ds_tag_diagnostics_locked(
+        self, item: dict[str, Any]
+    ) -> None:
+        module_id = item.get("module_id")
+        if module_id is None:
+            return
+        raw_message = str(item.get("message") or item.get("raw") or "")
+        match = PASSIVE_DS_TAG_QUALITY_RE.search(raw_message)
+        if match is None:
+            return
+
+        radio_ready_paths = [
+            int(match.group(f"radio_{index}")) for index in range(4)
+        ]
+        computed_ready_paths = [
+            int(match.group(f"computed_{index}")) for index in range(4)
+        ]
+        self.passive_ds_tag_diagnostics[int(module_id)] = {
+            "module_id": int(module_id),
+            "ready_paths": {
+                "radio": radio_ready_paths,
+                "computed": computed_ready_paths,
+            },
+            "radio_full": radio_ready_paths[3],
+            "computed_full": computed_ready_paths[3],
+            "solver_full": int(match.group("solver_full")),
+            "usable_ge1": sum(computed_ready_paths[1:]),
+            "radio_obs": int(match.group("radio_obs")),
+            "computed_obs": int(match.group("computed_obs")),
+            "computed_incomplete": int(match.group("computed_incomplete")),
+            "miss_poll": int(match.group("miss_poll")),
+            "queue_attempt_drop": {
+                "telemetry": int(match.group("telemetry_attempt_drop")),
+                "solver": int(match.group("solver_attempt_drop")),
+            },
+            "received_at": item.get("received_at"),
+            "uptime_ms": item.get("uptime_ms"),
+            "log_id": item.get("id"),
         }
 
     def record_accel_locked(self, item: dict[str, Any]) -> None:
@@ -1418,6 +1694,27 @@ class DashboardState:
         )
         history.append(sample)
         self.accel_samples.append(sample)
+        # Legacy acceleration-only telemetry has no orientation and cannot be
+        # fused.  A full IMU sample marked invalid must still reach an active
+        # fusion so it can stop integrating stale acceleration safely.
+        if "imu_valid" not in sample:
+            return
+        if bool(sample.get("imu_valid")):
+            self.latest_imu_by_module[module_id] = dict(sample)
+        received_at = float(sample.get("received_at") or time.time())
+        for key, fusion in list(self.imu_fusions.items()):
+            if key[0] != module_id:
+                continue
+            try:
+                fused = fusion.update_imu(sample)
+            except (TypeError, ValueError):
+                continue
+            self._store_imu_fusion_latest_locked(
+                key, fused, received_at
+            )
+            self._emit_imu_fusion_event_locked(
+                key, fused, received_at, force=False
+            )
 
     def record_ranging_locked(self, item: dict[str, Any]) -> None:
         raw_message = str(item.get("message") or item.get("raw") or "")
@@ -2183,6 +2480,74 @@ class DashboardState:
             "telemetry_client_count": telemetry_client_count,
         }
 
+    def capture_snapshot(self) -> dict[str, Any]:
+        """Return current collector inputs without large recent histories."""
+
+        with self.lock:
+            now = time.time()
+            statuses = []
+            seen_targets: set[str] = set()
+            for status in self.status_by_module.values():
+                item = dict(status)
+                updated_at = float(item.get("status_updated_at") or 0.0)
+                age_sec = now - updated_at if updated_at > 0.0 else None
+                target = str(item.get("target") or "")
+                if target:
+                    seen_targets.add(target)
+                error = self.status_errors.get(target)
+                online = (
+                    age_sec is not None
+                    and age_sec <= self.status_online_max_age_sec
+                    and bool(item.get("wifi_connected"))
+                )
+                item["http_status_age_sec"] = age_sec
+                item["http_status_online"] = online
+                item["http_status_degraded"] = bool(error) and online
+                if error:
+                    item["http_status_error"] = error
+                statuses.append(item)
+            for target in self.status_targets:
+                if target in seen_targets:
+                    continue
+                statuses.append(
+                    {
+                        "module_id": None,
+                        "hostname": target,
+                        "target": target,
+                        "ip": target,
+                        "wifi_connected": False,
+                        "wifi_connected_rssi": "-",
+                        "wifi_disconnect_count": "-",
+                        "runtime_anchor_ids": [],
+                        "status_updated_at": None,
+                        "http_status_age_sec": None,
+                        "http_status_online": False,
+                        "http_status_error": self.status_errors.get(
+                            target, "no status yet"
+                        ),
+                    }
+                )
+            statuses.sort(
+                key=lambda item: (
+                    int(item.get("module_id") or 9999),
+                    str(item.get("target") or item.get("ip") or ""),
+                )
+            )
+            ranging = self.ranging_snapshot_locked(now)
+            tdoa = self.tdoa_snapshot_locked(now)
+            return {
+                "client_count": self.client_count,
+                "telemetry_client_count": self.telemetry_client_count,
+                "statuses": statuses,
+                "ranging": {"distances": ranging.get("distances") or {}},
+                "tdoa": {
+                    "observations": tdoa.get("observations") or {},
+                    "anchor_distances": tdoa.get("anchor_distances") or {},
+                    "local_positions": tdoa.get("local_positions") or {},
+                    "local_geometries": tdoa.get("local_geometries") or {},
+                },
+            }
+
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             now = time.time()
@@ -2236,6 +2601,17 @@ class DashboardState:
             next_log_id = self.next_log_id
             ranging = self.ranging_snapshot_locked(now)
             tdoa = self.tdoa_snapshot_locked(now)
+            passive_ds_tag_diagnostics = {
+                str(module_id): {
+                    **item,
+                    "age_sec": max(
+                        0.0,
+                        now - float(item.get("received_at") or now),
+                    ),
+                }
+                for module_id, item in self.passive_ds_tag_diagnostics.items()
+            }
+            imu_fusion = dict(self.imu_fusion_latest)
         statuses.sort(
             key=lambda item: (
                 int(item.get("module_id") or 9999),
@@ -2257,6 +2633,8 @@ class DashboardState:
             "accel_history": {},
             "ranging": ranging,
             "tdoa": tdoa,
+            "passive_ds_tag_diagnostics": passive_ds_tag_diagnostics,
+            "imu_fusion": imu_fusion,
         }
 
 
@@ -3914,7 +4292,7 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div class="section">
             <h2>Live Position</h2>
-            <div class="position-legend"><span style="color:#d7352a">live marker (all updates)</span><span style="color:#7b8798">pre-filter current (when available)</span><span style="color:#2b64d8">displayed independent trail</span><span style="color:#7b8798">pre-filter independent trail</span><span style="color:#6d4c9f">known reference</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
+            <div class="position-legend"><span style="color:#d7352a">live marker (all updates)</span><span style="color:#7b8798">pre-filter current (when available)</span><span style="color:#2b64d8">displayed independent trail</span><span style="color:#0e9f6e">IMU fused trail</span><span style="color:#7b8798">pre-filter independent trail</span><span style="color:#6d4c9f">known reference</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
             <div id="positionReadout" class="position-readout"></div>
             <table>
               <thead><tr><th>Tag</th><th>axis σ</th><th>equation RMS</th><th>max residual</th></tr></thead>
@@ -4767,8 +5145,8 @@ tr.status-stale td { color: #4f3b1d; }
                 <label for="passiveDsMultiGapMs">Frame gap ms</label><input id="passiveDsMultiGapMs" value="1" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsMultiRxMs">Anchor RX slice ms</label><input id="passiveDsMultiRxMs" value="100" type="number" min="1" max="60000" step="1">
                 <label for="passiveDsMultiTimeoutMs">RX timeout ms</label><input id="passiveDsMultiTimeoutMs" value="5" type="number" min="1" max="60000" step="1">
-                <label for="passiveDsMultiRespUs">First RESP delay µs</label><input id="passiveDsMultiRespUs" value="1500" type="number" min="100" max="1000000" step="50">
-                <label for="passiveDsMultiFinalUs">Last RESP → FINAL µs</label><input id="passiveDsMultiFinalUs" value="1500" type="number" min="100" max="1000000" step="50">
+                <label for="passiveDsMultiRespUs">First RESP delay µs</label><input id="passiveDsMultiRespUs" value="1750" type="number" min="100" max="1000000" step="50">
+                <label for="passiveDsMultiFinalUs">Last RESP → FINAL µs</label><input id="passiveDsMultiFinalUs" value="1750" type="number" min="100" max="1000000" step="50">
                 <label for="passiveDsMultiAutoRxUus">Auto RX delay UUS</label><input id="passiveDsMultiAutoRxUus" value="500" type="number" min="0" max="65535" step="10">
                 <label for="passiveDsMultiFreshSec">Observation freshness s</label><input id="passiveDsMultiFreshSec" value="0.2" type="number" min="0.05" step="0.05">
               </div>
@@ -5134,6 +5512,7 @@ const state = {
   lastAccelId: 0,
   terminals: new Map(),
   statuses: [],
+  passiveDsTagDiagnostics: {},
   accelHistory: {},
   accelSeen: new Set(),
   timebaseSecPerDiv: Number(localStorage.getItem("uwbDash.setting.accelTimebase") || "5"),
@@ -5147,9 +5526,13 @@ const state = {
   calibrationResult: null,
   ranging: {distances: {}, max_age_sec: 3},
   tdoa: {observations: {}, anchor_distances: {}, local_positions: {}, local_geometries: {}, max_age_sec: 3},
+  imuFusion: {},
   positionTrail: {},
   positionRawTrail: {},
+  positionImuTrail: {},
   positionTrailTokens: {},
+  positionImuTrailTokens: {},
+  positionImuSnapshotTokens: {},
   positionAnchorTrail: {},
   positionResults: {},
   positionModel: null,
@@ -5752,6 +6135,50 @@ function accelMagnitude(sample) {
   return Math.sqrt(sample.x * sample.x + sample.y * sample.y + sample.z * sample.z);
 }
 
+function imuDisplayEstimate(sample) {
+  if (!sample || !sample.imu_valid) return null;
+  let qx = Number(sample.quat_i);
+  let qy = Number(sample.quat_j);
+  let qz = Number(sample.quat_k);
+  let qw = Number(sample.quat_real);
+  const norm = Math.hypot(qx, qy, qz, qw);
+  if (![qx, qy, qz, qw, norm].every(Number.isFinite) || norm < 1e-6) return null;
+  qx /= norm;
+  qy /= norm;
+  qz /= norm;
+  qw /= norm;
+
+  const roll = Math.atan2(
+    2 * (qw * qx + qy * qz),
+    1 - 2 * (qx * qx + qy * qy),
+  );
+  const pitchTerm = Math.max(-1, Math.min(1, 2 * (qw * qy - qz * qx)));
+  const pitch = Math.asin(pitchTerm);
+  const yaw = Math.atan2(
+    2 * (qw * qz + qx * qy),
+    1 - 2 * (qy * qy + qz * qz),
+  );
+
+  // GyroRV expresses body orientation relative to the BNO reference frame.
+  // Rotate +g back into the body frame, then remove it from calibrated accel.
+  const standardGravity = 9.80665;
+  const gravityBody = {
+    x: standardGravity * 2 * (qx * qz - qw * qy),
+    y: standardGravity * 2 * (qy * qz + qw * qx),
+    z: standardGravity * (1 - 2 * (qx * qx + qy * qy)),
+  };
+  return {
+    rollDeg: roll * 180 / Math.PI,
+    pitchDeg: pitch * 180 / Math.PI,
+    yawDeg: yaw * 180 / Math.PI,
+    linearBody: {
+      x: Number(sample.x) - gravityBody.x,
+      y: Number(sample.y) - gravityBody.y,
+      z: Number(sample.z) - gravityBody.z,
+    },
+  };
+}
+
 function fmtAccel(value) {
   return Number.isFinite(value) ? value.toFixed(2) : "-";
 }
@@ -5873,6 +6300,9 @@ function ensureAccelCharts() {
         <div><span>Z</span><b id="latestZ${moduleId}">-</b></div>
       </div>
       <div class="latest-extra" id="latestExtra${moduleId}">no samples yet</div>
+      <div class="latest-extra" id="latestOrientation${moduleId}">RPY waiting - BNO reference, not ENU-calibrated</div>
+      <div class="latest-extra" id="latestGyro${moduleId}">gyro waiting - body frame</div>
+      <div class="latest-extra" id="latestLinear${moduleId}">linear acceleration waiting - body frame</div>
     </div>`).join("");
 
   state.chartsReady = true;
@@ -7831,10 +8261,47 @@ function recordPositionTrailPoint(
 function resetPositionTagTrails() {
   state.positionTrail = {};
   state.positionRawTrail = {};
+  state.positionImuTrail = {};
   state.positionTrailTokens = {};
+  state.positionImuTrailTokens = {};
+  state.positionImuSnapshotTokens = {};
   state.positionStreamRenderLatencies = [];
   state.positionStreamLatestEvent = null;
   state.positionStreamLastRenderedEventToken = "";
+}
+
+function applyImuFusionSnapshot(fusions, expectedProtocol) {
+  state.imuFusion = fusions || {};
+  for (const fused of Object.values(state.imuFusion)) {
+    const protocol = String(fused?.tdoa_protocol || fused?.protocol || "");
+    const tagId = Number(fused?.tag_id);
+    if (protocol !== expectedProtocol || !Number.isFinite(tagId) || tagId <= 0) {
+      continue;
+    }
+    const key = String(tagId);
+    const flags = Array.isArray(fused?.flags) ? fused.flags.map(String) : [];
+    const snapshotToken = [
+      protocol,
+      Number(fused?.uptime_ms || 0),
+      flags.join(","),
+      Boolean(fused?.ready),
+    ].join(":");
+    if (state.positionImuSnapshotTokens[key] === snapshotToken) continue;
+    state.positionImuSnapshotTokens[key] = snapshotToken;
+    if (flags.includes("reset")) {
+      delete state.positionImuTrail[key];
+      delete state.positionImuTrailTokens[key];
+    }
+    const x = Number(fused?.x);
+    const y = Number(fused?.y);
+    if (!fused?.ready || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if ((state.positionImuTrail[key] || []).length) continue;
+    const timestamp = Number.isFinite(Number(fused?.received_at))
+      ? Number(fused.received_at)
+      : Date.now() / 1000;
+    appendPositionTrailPoint(
+      state.positionImuTrail, key, {x, y}, timestamp, fused);
+  }
 }
 
 function positionTrailDrawSamples(trail) {
@@ -8020,8 +8487,14 @@ function positionBounds(model) {
     if (tag.metricPosition) points.push(tag.metricPosition);
   }
   for (const tagId of Object.keys(model.tags)) {
-    const trail = state.positionTrail[tagId] || [];
-    for (const point of trail) points.push(point);
+    for (const store of [
+      state.positionTrail,
+      state.positionRawTrail,
+      state.positionImuTrail,
+    ]) {
+      const trail = store[tagId] || [];
+      for (const point of trail) points.push(point);
+    }
   }
   if (model.reference) points.push(model.reference);
   if (!points.length) {
@@ -8195,6 +8668,12 @@ function drawPosition(model) {
       tx,
       state.positionTrail[tagId] || [],
       "rgba(43, 100, 216, 0.76)"
+    );
+    drawTagTrail(
+      ctx,
+      tx,
+      state.positionImuTrail[tagId] || [],
+      "rgba(14, 159, 110, 0.88)"
     );
   }
 
@@ -8839,17 +9318,21 @@ function positionTrailSummary() {
   const keys = new Set([
     ...Object.keys(state.positionTrail || {}),
     ...Object.keys(state.positionRawTrail || {}),
+    ...Object.keys(state.positionImuTrail || {}),
   ]);
   let ekfCount = 0;
   let rawCount = 0;
+  let fusedCount = 0;
   let oldest = Infinity;
   let newest = -Infinity;
   for (const key of keys) {
     const ekf = state.positionTrail[key] || [];
     const raw = state.positionRawTrail[key] || [];
+    const fused = state.positionImuTrail[key] || [];
     ekfCount += ekf.length;
     rawCount += raw.length;
-    const representative = ekf.length ? ekf : raw;
+    fusedCount += fused.length;
+    const representative = ekf.length ? ekf : raw.length ? raw : fused;
     if (!representative.length) continue;
     oldest = Math.min(oldest, Number(representative[0].t));
     newest = Math.max(
@@ -8858,6 +9341,7 @@ function positionTrailSummary() {
   return {
     ekfCount,
     rawCount,
+    fusedCount,
     spanSec: Number.isFinite(oldest) && Number.isFinite(newest)
       ? Math.max(0, newest - oldest)
       : 0,
@@ -8940,13 +9424,13 @@ function updatePositionStreamMetrics() {
     const usesTdoa = positionProtocolUsesTdoa(positionSettings().solver);
     const nativeMode = positionSettings().nativeDsUpdateMode;
     trailElement.textContent = directEspSolve
-      ? `independent raw trail: ${passiveUnfiltered ? trail.rawCount || trail.ekfCount : trail.ekfCount} points · ` +
+      ? `independent raw trail: ${passiveUnfiltered ? trail.rawCount || trail.ekfCount : trail.ekfCount} points · IMU fused ${trail.fusedCount} · ` +
         `${fmtFixed(trail.spanSec, 1)} s${latencyText}`
       : usesTdoa
-      ? `independent trail: EKF ${trail.ekfCount} · raw ${trail.rawCount} · ` +
+      ? `independent trail: EKF ${trail.ekfCount} · raw ${trail.rawCount} · IMU fused ${trail.fusedCount} · ` +
         `${fmtFixed(trail.spanSec, 1)} s${latencyText}`
       : `${nativeMode === "rolling" ? "rolling" : "coherent"} trail: ` +
-        `${trail.ekfCount} points · ` +
+        `${trail.ekfCount} points · IMU fused ${trail.fusedCount} · ` +
         `${fmtFixed(trail.spanSec, 1)} s${latencyText}`;
     trailElement.className = "position-pill good";
   }
@@ -9151,6 +9635,31 @@ function ingestPositionStreamSample(item) {
   // briefly, because local_positions is keyed only by tag ID.
   if (!positionTdoaProtocolMatches(item, settings.solver)) return;
   const key = String(tagId);
+  if (item.imu_fused === true) {
+    if (item.imu_fusion_reset === true) {
+      delete state.positionImuTrail[key];
+      delete state.positionImuTrailTokens[key];
+    }
+    const fusedToken = `imu:${eventId}`;
+    if (state.positionImuTrailTokens[key] === fusedToken) return;
+    state.positionImuTrailTokens[key] = fusedToken;
+    const timestamp = Number.isFinite(Number(item.received_at))
+      ? Number(item.received_at)
+      : Date.now() / 1000;
+    const fusedX = Number(item.x_m);
+    const fusedY = Number(item.y_m);
+    if (Number.isFinite(fusedX) && Number.isFinite(fusedY)) {
+      appendPositionTrailPoint(
+        state.positionImuTrail,
+        key,
+        {x: fusedX, y: fusedY},
+        timestamp,
+        item
+      );
+    }
+    schedulePositionStreamRender();
+    return;
+  }
   const previous = state.tdoa?.local_positions?.[key];
   if (positionTdoaProtocolMatches(previous, settings.solver) &&
       Number(previous?.position_event_id || 0) >= eventId) return;
@@ -9356,6 +9865,7 @@ function renderAccelGraphs() {
       continue;
     }
     const magnitude = accelMagnitude(latest);
+    const imu = imuDisplayEstimate(latest);
     document.getElementById(`latestX${moduleId}`).textContent = fmtAccel(latest.x);
     document.getElementById(`latestY${moduleId}`).textContent = fmtAccel(latest.y);
     document.getElementById(`latestZ${moduleId}`).textContent = fmtAccel(latest.z);
@@ -9364,6 +9874,21 @@ function renderAccelGraphs() {
       : "";
     document.getElementById(`latestExtra${moduleId}`).textContent =
       `|a| ${fmtAccel(magnitude)} m/s^2 · accuracy ${latest.accuracy} · ${fmtAge(latest.received_at)}${rateText}`;
+    const orientationEl = document.getElementById(`latestOrientation${moduleId}`);
+    const gyroEl = document.getElementById(`latestGyro${moduleId}`);
+    const linearEl = document.getElementById(`latestLinear${moduleId}`);
+    if (imu) {
+      orientationEl.textContent =
+        `RPY ${fmtAccel(imu.rollDeg)} / ${fmtAccel(imu.pitchDeg)} / ${fmtAccel(imu.yawDeg)} deg · body→BNO reference, not ENU-calibrated`;
+      gyroEl.textContent =
+        `gyro ${fmtAccel(Number(latest.gyro_x))} / ${fmtAccel(Number(latest.gyro_y))} / ${fmtAccel(Number(latest.gyro_z))} rad/s · body frame`;
+      linearEl.textContent =
+        `linear est. ${fmtAccel(imu.linearBody.x)} / ${fmtAccel(imu.linearBody.y)} / ${fmtAccel(imu.linearBody.z)} m/s^2 · body frame`;
+    } else {
+      orientationEl.textContent = "RPY unavailable · legacy accel or invalid IMU sample · not ENU-calibrated";
+      gyroEl.textContent = "gyro unavailable · body frame";
+      linearEl.textContent = "linear acceleration unavailable · body frame";
+    }
   }
 }
 
@@ -11258,10 +11783,12 @@ function renderPd(statuses) {
 
 function renderInfo(snapshot) {
   state.statuses = snapshot.statuses || [];
+  state.passiveDsTagDiagnostics = snapshot.passive_ds_tag_diagnostics || {};
   synchronizePositionAnchorsFromRuntime(state.statuses);
   state.ranging = snapshot.ranging || {distances: {}, max_age_sec: 3};
   const selectedSolver = positionSettings().solver;
   const expectedPositionProtocol = positionGeometryProtocol(selectedSolver);
+  applyImuFusionSnapshot(snapshot.imu_fusion || {}, expectedPositionProtocol);
   const displayMaxAge = positionDisplayMaxAge(positionSettings());
   const now = Date.now() / 1000;
   const previousLocalPositions = state.tdoa?.local_positions || {};
@@ -13370,12 +13897,12 @@ const passiveDsProfileDefaults = {
     prefix: "passiveDsMulti",
     label: "Clean Rotating Full-DS",
     schedule: 2,
-    slotMs: 8,
+    slotMs: 9,
     gapMs: 1,
     rxMs: 100,
     timeoutMs: 5,
-    respUs: 1500,
-    finalUs: 1500,
+    respUs: 1750,
+    finalUs: 1750,
     autoRxUus: 500,
     freshSec: 0.2,
     solveMode: 2,
@@ -13730,7 +14257,7 @@ async function applyPassiveDsProfile(key) {
       passive_ds_solve_mode: String(
         key === "multi" ? values.solveMode : 0
       ),
-      reboot: "1",
+      hot_switch: "1",
     },
   }, "passiveDsProfileToast");
   if (apiResponseOk(data)) {
@@ -13818,7 +14345,7 @@ function passiveDsRuntimeConfig() {
   return {
     anchorIds,
     schedule: Number(status.runtime_passive_ds_schedule ?? 2),
-    slotMs: Number(status.runtime_passive_ds_slot_ms || 8),
+    slotMs: Number(status.runtime_passive_ds_slot_ms || 9),
     gapMs: Number(status.runtime_passive_ds_round_gap_ms ?? 1),
     rxMs: Number(status.runtime_passive_ds_rx_slice_ms || 100),
     timeoutMs: Number(status.runtime_passive_ds_rx_timeout_ms || 5),
@@ -13914,7 +14441,7 @@ function renderPassiveDsExperimentControls() {
 
   const root = document.getElementById("passiveDsPipelineDiagnostics");
   if (!root) return;
-  const rows = candidates
+  const pipelineRows = candidates
     .filter(statusIsFresh)
     .map(item => {
       const stats = item.passive_ds_pipeline_stats;
@@ -13925,6 +14452,7 @@ function renderPassiveDsExperimentControls() {
         <td>${stats.deadline_active ? "deadline" : "legacy"}</td>
         <td>${esc(stats.completed ?? 0)}</td>
         <td>${esc(stats.response_timeouts ?? 0)}/${esc(stats.final_timeouts ?? 0)}</td>
+        <td>${esc(stats.rx_phy_retries ?? 0)}/${esc(stats.rx_recovered_after_phy ?? 0)}/${esc(stats.rx_timeouts_after_phy ?? 0)}</td>
         <td>${esc(stats.invalid_frames ?? 0)}/${esc(stats.state_collisions ?? 0)}/${esc(stats.schedule_overruns ?? 0)}</td>
         <td>${passiveDsStageMetric(stages.poll_tx)}</td>
         <td>${passiveDsStageMetric(stages.response_tx)}</td>
@@ -13936,21 +14464,57 @@ function renderPassiveDsExperimentControls() {
     })
     .filter(Boolean)
     .join("");
-  if (!rows) {
+  const tagRows = Object.values(state.passiveDsTagDiagnostics || {})
+    .sort((left, right) => Number(left.module_id) - Number(right.module_id))
+    .map(item => {
+      const ready = item.ready_paths || {};
+      const radioReady = Array.isArray(ready.radio) ? ready.radio : [];
+      const computedReady = Array.isArray(ready.computed) ? ready.computed : [];
+      const drops = item.queue_attempt_drop || {};
+      return `<tr>
+        <td>M${esc(item.module_id)}</td>
+        <td>${radioReady.map(esc).join("/") || "&mdash;"}</td>
+        <td>${computedReady.map(esc).join("/") || "&mdash;"}</td>
+        <td>${esc(item.radio_full ?? 0)}</td>
+        <td>${esc(item.computed_full ?? 0)}</td>
+        <td>${esc(item.solver_full ?? 0)}</td>
+        <td>${esc(item.usable_ge1 ?? 0)}</td>
+        <td>${esc(item.radio_obs ?? 0)}/${esc(item.computed_obs ?? 0)}</td>
+        <td>${esc(item.computed_incomplete ?? 0)}</td>
+        <td>${esc(item.miss_poll ?? 0)}</td>
+        <td>${esc(drops.telemetry ?? 0)}/${esc(drops.solver ?? 0)}</td>
+        <td>${fmtFixed(item.age_sec, 1)} s</td>
+      </tr>`;
+    })
+    .join("");
+  if (!pipelineRows && !tagRows) {
     root.className = "muted";
     root.textContent = "Waiting for instrumented firmware status...";
     return;
   }
   root.className = "table-wrap";
-  root.innerHTML = `<table>
+  root.innerHTML = `${tagRows ? `<table>
+    <thead><tr>
+      <th>Module</th>
+      <th>Radio ready paths 0/1/2/3</th>
+      <th>Computed ready paths 0/1/2/3</th>
+      <th>Radio full</th><th>Computed full</th><th>Solver full</th>
+      <th>Usable &gt;=1</th><th>Observations radio/computed</th>
+      <th>Computed incomplete</th><th>Miss poll</th>
+      <th>Queue attempt drops tel/solver</th><th>Age</th>
+    </tr></thead><tbody>${tagRows}</tbody>
+  </table>
+  <p class="muted">Counts describe ready paths and processing attempts; they are not packet-loss percentages.</p>` : ""}
+  ${pipelineRows ? `<table>
     <thead><tr>
       <th>Module</th><th>Pipeline</th><th>Complete</th>
-      <th>RESP/FINAL timeout</th><th>invalid/collision/overrun</th>
+      <th>RESP/FINAL timeout</th><th>PHY retry/recovered/timeout</th>
+      <th>invalid/collision/overrun</th>
       <th>POLL TX avg/max</th><th>RESP TX avg/max</th>
       <th>FINAL TX avg/max</th><th>FINAL RX avg/max</th>
       <th>CIA avg/max</th><th>RX re-arm avg/max</th>
-    </tr></thead><tbody>${rows}</tbody>
-  </table>`;
+    </tr></thead><tbody>${pipelineRows}</tbody>
+  </table>` : ""}`;
 }
 
 function renderPassiveDsMultipointTiming(root, config) {
@@ -15092,6 +15656,9 @@ class HttpHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/snapshot":
             self.send_json(self.server.state.snapshot())
             return
+        if parsed.path == "/api/capture-snapshot":
+            self.send_json(self.server.state.capture_snapshot())
+            return
         if parsed.path == "/api/position-stream":
             self.handle_position_stream(parsed)
             return
@@ -15373,11 +15940,10 @@ class DashboardHttpServer(ThreadingHTTPServer):
             raise RuntimeError("APP_OTA_PASSWORD missing in secrets.h")
         if not params:
             raise RuntimeError("No runtime config parameters provided")
-        # Native DS-TWR has no shared anchor schedule: the tag starts every
-        # exchange, so a coordinated in-place UWB restart safely reloads its
-        # timing while Wi-Fi, GPS and the ESP32 remain online. Passive DS-TWR
-        # does have shared frame state; retain the conservative reboot fallback
-        # for every hot-switch request that is not Native timing-only.
+        # Timing-only Native and Passive DS-TWR changes are reloaded through a
+        # coordinated in-place UWB restart while Wi-Fi, GPS and the ESP32 stay
+        # online. Protocol, geometry and participant changes keep the
+        # conservative full-reboot fallback.
         native_timing_keys = {
             "ranging_slot_ms",
             "ranging_gap_ms",
@@ -15394,7 +15960,28 @@ class DashboardHttpServer(ThreadingHTTPServer):
             and bool(changed_keys)
             and changed_keys <= native_timing_keys
         )
-        if hot_switch_requested and not native_timing_hot_switch:
+        passive_timing_keys = {
+            "passive_ds_schedule",
+            "passive_ds_slot_ms",
+            "passive_ds_gap_ms",
+            "passive_ds_rx_ms",
+            "passive_ds_timeout_ms",
+            "passive_ds_resp_delay_us",
+            "passive_ds_final_delay_us",
+            "passive_ds_auto_rx_delay_uus",
+            "passive_ds_pipeline_mode",
+            "passive_ds_solve_mode",
+            "passive_ds_rolling_max_hz",
+        }
+        passive_timing_hot_switch = (
+            hot_switch_requested
+            and bool(changed_keys)
+            and changed_keys <= passive_timing_keys
+        )
+        timing_hot_switch = (
+            native_timing_hot_switch or passive_timing_hot_switch
+        )
+        if hot_switch_requested and not timing_hot_switch:
             params = dict(params)
             params.pop("hot_switch", None)
             params["reboot"] = "1"
@@ -15419,10 +16006,10 @@ class DashboardHttpServer(ThreadingHTTPServer):
             # Keep the lock until every module reports the requested timing
             # after either an ESP reboot or an in-place UWB restart.
             transition_kind = (
-                "hot switch" if native_timing_hot_switch else "reboot"
+                "hot switch" if timing_hot_switch else "reboot"
             )
             if (str(params.get("reboot") or "") == "1" or
-                    native_timing_hot_switch):
+                    timing_hot_switch):
                 time.sleep(0.6)
                 with ThreadPoolExecutor(max_workers=min(5, len(targets))) as executor:
                     verified = list(
@@ -15443,7 +16030,7 @@ class DashboardHttpServer(ThreadingHTTPServer):
                         continue
                     result[
                         "verified_after_hot_switch"
-                        if native_timing_hot_switch
+                        if timing_hot_switch
                         else "verified_after_reboot"
                     ] = True
                     result["module_id"] = status.get("module_id")

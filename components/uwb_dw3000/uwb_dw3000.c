@@ -127,6 +127,9 @@ _Static_assert(UWB_DW3000_SPI_OPERATION_REQUEST_HZ <=
 #define DW3000_REG_INDIRECT_POINTER_B 0x1E
 #define DW3000_REG_INDIRECT_CTRL 0x1F
 
+#define DW3000_OTP_CFG_DGC_KICK (1UL << 6U)
+#define DW3000_OTP_CFG_DGC_SEL (1UL << 13U)
+
 #define DW3000_SUB_NONE 0x00
 #define DW3000_DEV_ID_DW3000 0xDECA0302UL
 #define DW3000_DEV_ID_DW3120 0xDECA0312UL
@@ -3584,9 +3587,15 @@ static esp_err_t uwb_dw3000_write_sys_config(void)
     uint32_t otp_val = 0;
     ESP_RETURN_ON_ERROR(uwb_dw3000_read32(DW3000_REG_OTP_IF, 0x08, &otp_val),
                         TAG, "OTP config read failed");
-    otp_val |= 0x40;
-    ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_OTP_IF, 0x08, otp_val),
-                        TAG, "OTP config update failed");
+    otp_val &= ~DW3000_OTP_CFG_DGC_SEL;
+    if (channel_number == 9U) {
+        otp_val |= DW3000_OTP_CFG_DGC_SEL;
+    }
+    otp_val |= DW3000_OTP_CFG_DGC_KICK;
+    ESP_RETURN_ON_ERROR(
+        uwb_dw3000_write_u32_len(DW3000_REG_OTP_IF, 0x08,
+                                 otp_val & 0xFFFFU, 2),
+        TAG, "OTP config update failed");
 
     ESP_RETURN_ON_ERROR(uwb_dw3000_write_u32_auto(DW3000_REG_RX_TUNE, 0x19, 0xF0),
                         TAG, "RX tune write failed");
@@ -4814,6 +4823,70 @@ static esp_err_t uwb_distance_receive_matching(
                  uwb_distance_type_name(expected_type),
                  (unsigned)expected_source_id, (unsigned)expected_sequence,
                  (unsigned long)s_rx_ignored_count);
+    }
+}
+
+/* Passive DS keeps several frames in one tightly bounded radio exchange.
+ * A recoverable DW3000 PHY error must not abandon frames that have not been
+ * transmitted yet.  Retry with the same absolute deadline so recovery can
+ * never extend the exchange into the next scheduled star. */
+static esp_err_t uwb_distance_receive_matching_retry_phy_until(
+    uint8_t expected_type, uint8_t expected_source_id,
+    bool match_sequence, uint16_t expected_sequence,
+    struct uwb_distance_frame *frame, int64_t deadline_us,
+    uint32_t *phy_retry_count)
+{
+    if (frame == NULL || deadline_us <= 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (phy_retry_count != NULL) {
+        *phy_retry_count = 0U;
+    }
+
+    while (true) {
+        const int64_t remaining_us =
+            deadline_us - esp_timer_get_time();
+        if (remaining_us <= 0) {
+            return ESP_ERR_TIMEOUT;
+        }
+        const uint32_t remaining_ms =
+            (uint32_t)((remaining_us + 999LL) / 1000LL);
+
+        struct uwb_dw3000_rx_frame rx_frame = {0};
+        const esp_err_t err = uwb_dw3000_receive_frame_until(
+            &rx_frame, remaining_ms, deadline_us);
+        if (err == ESP_ERR_INVALID_RESPONSE) {
+            if (phy_retry_count != NULL) {
+                (*phy_retry_count)++;
+            }
+            continue;
+        }
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        struct uwb_distance_frame parsed = {0};
+        if (!uwb_distance_parse_frame(&rx_frame, &parsed)) {
+            s_rx_ignored_count++;
+            continue;
+        }
+
+        const bool type_ok = parsed.type == expected_type;
+        const bool source_ok = expected_source_id == 0U ||
+                               parsed.source_id == expected_source_id;
+        const bool destination_ok =
+            uwb_distance_destination_matches(parsed.destination_id);
+        const bool sequence_ok =
+            !match_sequence || parsed.sequence == expected_sequence;
+        if (!type_ok || !source_ok || !destination_ok || !sequence_ok) {
+            s_rx_ignored_count++;
+            continue;
+        }
+
+        s_last_rx_source_id = parsed.source_id;
+        s_last_rx_sequence = parsed.sequence;
+        *frame = parsed;
+        return ESP_OK;
     }
 }
 
@@ -6593,6 +6666,33 @@ static esp_err_t uwb_distance_receive_next_until(
         s_last_rx_source_id = frame->source_id;
         s_last_rx_sequence = frame->sequence;
         return ESP_OK;
+    }
+}
+
+/* Keep a receive-only listener inside one bounded host RX window when the
+ * DW3000 reports a recoverable PHY error. receive_frame_until() leaves RX
+ * disarmed after that error, so the next iteration re-arms it immediately;
+ * the absolute deadline prevents repeated errors from extending the window. */
+static esp_err_t uwb_distance_receive_next_retry_phy_until(
+    struct uwb_distance_frame *frame, int64_t deadline_us,
+    uint32_t *phy_retry_count)
+{
+    if (frame == NULL || deadline_us <= 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (phy_retry_count != NULL) {
+        *phy_retry_count = 0U;
+    }
+
+    while (true) {
+        const esp_err_t err =
+            uwb_distance_receive_next_until(frame, deadline_us);
+        if (err != ESP_ERR_INVALID_RESPONSE) {
+            return err;
+        }
+        if (phy_retry_count != NULL) {
+            (*phy_retry_count)++;
+        }
     }
 }
 
@@ -10035,6 +10135,8 @@ struct uwb_passive_ds_clean_tag_frame {
     uint8_t response_mask;
     uint8_t final_mask;
     uint8_t exchange_mask;
+    uint8_t radio_ready_mask;
+    uint8_t computed_mask;
     uint8_t emitted_mask;
     uint64_t poll_rx_timestamp;
     uint64_t final_rx_timestamp;
@@ -10144,6 +10246,13 @@ struct uwb_passive_ds_clean_tag_stats {
     uint32_t finals;
     uint32_t complete;
     uint32_t incomplete;
+    uint32_t solver_full;
+    uint32_t radio_ready_stars[UWB_PASSIVE_DS_MAX_RESPONDERS + 1U];
+    uint32_t computed_stars[UWB_PASSIVE_DS_MAX_RESPONDERS + 1U];
+    uint32_t radio_ready_observations;
+    uint32_t computed_observations;
+    uint32_t computed_incomplete;
+    uint32_t missing_poll;
     uint32_t invalid;
     uint32_t missing_cfo;
     uint32_t missing_response;
@@ -10152,6 +10261,8 @@ struct uwb_passive_ds_clean_tag_stats {
     uint32_t missing_exchange;
     uint32_t observations;
     uint32_t queue_drops;
+    uint32_t telemetry_drops;
+    uint32_t solver_drops;
     uint32_t last_frame_id;
     bool have_last_frame;
     int64_t summary_started_us;
@@ -10415,21 +10526,20 @@ static esp_err_t uwb_passive_ds_clean_initiate(
     uint64_t response_rx[UWB_PASSIVE_DS_MAX_RESPONDERS] = {0};
     uint8_t response_mask = 0U;
     uint8_t response_count = 0U;
+    bool phy_retry_pending = false;
     uwb_passive_ds_arm_schedule_alarm(collection_deadline_us, 0);
     while (response_count < plan.responder_count &&
            esp_timer_get_time() < collection_deadline_us) {
-        const int64_t remaining_us =
-            collection_deadline_us - esp_timer_get_time();
-        uint32_t timeout_ms = remaining_us > 0
-                                  ? (uint32_t)((remaining_us + 999) / 1000)
-                                  : 1U;
-        if (timeout_ms > config->passive_ds_rx_timeout_ms) {
-            timeout_ms = config->passive_ds_rx_timeout_ms;
-        }
         struct uwb_distance_frame response_frame = {0};
-        const esp_err_t rx_err = uwb_distance_receive_next(
-            &response_frame, timeout_ms);
+        const esp_err_t rx_err = uwb_distance_receive_next_until(
+            &response_frame, collection_deadline_us);
         if (rx_err != ESP_OK) {
+            if (rx_err == ESP_ERR_INVALID_RESPONSE) {
+                uwb_passive_ds_runtime_increment(
+                    UWB_PASSIVE_DS_RUNTIME_COUNTER_RX_PHY_RETRY);
+                phy_retry_pending = true;
+                continue;
+            }
             if (rx_err == ESP_ERR_TIMEOUT ||
                 rx_err == ESP_ERR_NOT_FINISHED) {
                 continue;
@@ -10459,9 +10569,18 @@ static esp_err_t uwb_passive_ds_clean_initiate(
         response_rx[response.responder_index] =
             response_frame.rx_timestamp;
         response_count++;
+        if (phy_retry_pending) {
+            uwb_passive_ds_runtime_increment(
+                UWB_PASSIVE_DS_RUNTIME_COUNTER_RX_RECOVERED_AFTER_PHY);
+            phy_retry_pending = false;
+        }
     }
     (void)esp_timer_stop(s_passive_ds_schedule_timer);
     s_passive_ds_schedule_alarm_fired = false;
+    if (phy_retry_pending) {
+        uwb_passive_ds_runtime_increment(
+            UWB_PASSIVE_DS_RUNTIME_COUNTER_RX_TIMEOUT_AFTER_PHY);
+    }
 
     struct uwb_passive_ds_packet final = {
         .type = UWB_PASSIVE_DS_MESSAGE_FINAL,
@@ -10590,10 +10709,23 @@ static esp_err_t uwb_passive_ds_clean_respond(
     }
 
     struct uwb_distance_frame final_frame = {0};
-    err = uwb_distance_receive_matching(
+    const int64_t final_deadline_us =
+        esp_timer_get_time() + (int64_t)final_wait_ms * 1000LL;
+    uint32_t phy_retry_count = 0U;
+    err = uwb_distance_receive_matching_retry_phy_until(
         UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_FINAL,
         poll->initiator_id, true, poll_frame->sequence, &final_frame,
-        final_wait_ms);
+        final_deadline_us, &phy_retry_count);
+    for (uint32_t retry = 0U; retry < phy_retry_count; ++retry) {
+        uwb_passive_ds_runtime_increment(
+            UWB_PASSIVE_DS_RUNTIME_COUNTER_RX_PHY_RETRY);
+    }
+    if (phy_retry_count > 0U) {
+        uwb_passive_ds_runtime_increment(
+            err == ESP_OK
+                ? UWB_PASSIVE_DS_RUNTIME_COUNTER_RX_RECOVERED_AFTER_PHY
+                : UWB_PASSIVE_DS_RUNTIME_COUNTER_RX_TIMEOUT_AFTER_PHY);
+    }
     if (err != ESP_OK) {
         uwb_passive_ds_runtime_increment(
             UWB_PASSIVE_DS_RUNTIME_COUNTER_FINAL_TIMEOUT);
@@ -10679,40 +10811,65 @@ uwb_passive_ds_clean_tag_find_frame(
     return NULL;
 }
 
-static void uwb_passive_ds_clean_tag_count_incomplete(
-    const struct uwb_passive_ds_clean_tag_frame *frame,
+static uint8_t uwb_passive_ds_clean_tag_mask_count(uint8_t mask)
+{
+    uint8_t count = 0U;
+    while (mask != 0U) {
+        count += mask & 1U;
+        mask >>= 1U;
+    }
+    return count;
+}
+
+static void uwb_passive_ds_clean_tag_finalize_frame(
+    struct uwb_passive_ds_clean_tag_frame *frame,
     struct uwb_passive_ds_clean_tag_stats *stats)
 {
     if (frame == NULL || stats == NULL || !frame->in_use) {
         return;
     }
-    stats->incomplete++;
+    const uint8_t expected_count =
+        uwb_passive_ds_clean_tag_mask_count(frame->expected_mask);
+    const uint8_t radio_ready_count =
+        uwb_passive_ds_clean_tag_mask_count(
+            frame->radio_ready_mask & frame->expected_mask);
+    const uint8_t computed_count =
+        uwb_passive_ds_clean_tag_mask_count(
+            frame->computed_mask & frame->expected_mask);
+    if (radio_ready_count <= UWB_PASSIVE_DS_MAX_RESPONDERS) {
+        stats->radio_ready_stars[radio_ready_count]++;
+    }
+    if (computed_count <= UWB_PASSIVE_DS_MAX_RESPONDERS) {
+        stats->computed_stars[computed_count]++;
+    }
+    if (radio_ready_count == expected_count) {
+        stats->complete++;
+    } else {
+        stats->incomplete++;
+    }
+    if (computed_count < expected_count) {
+        stats->computed_incomplete++;
+    }
     const uint8_t missing_response =
         (uint8_t)(frame->expected_mask &
                   (uint8_t)~frame->response_mask);
-    const uint8_t missing_final_entry =
-        (uint8_t)(frame->response_mask &
-                  (uint8_t)~frame->final_mask &
-                  frame->expected_mask);
     if (!frame->have_final) {
         stats->missing_final++;
     }
-    const uint8_t missing_exchange =
-        (uint8_t)(frame->response_mask &
-                  (uint8_t)~frame->exchange_mask &
-                  frame->expected_mask);
     for (uint8_t index = 0U; index < UWB_PASSIVE_DS_MAX_RESPONDERS;
          ++index) {
-        if ((missing_response & (uint8_t)(1U << index)) != 0U) {
+        const uint8_t bit = (uint8_t)(1U << index);
+        if ((missing_response & bit) != 0U) {
             stats->missing_response++;
-        }
-        if ((missing_final_entry & (uint8_t)(1U << index)) != 0U) {
+        } else if (!frame->have_final) {
+            continue;
+        } else if ((frame->final_mask & bit) == 0U) {
             stats->missing_final_entry++;
-        }
-        if ((missing_exchange & (uint8_t)(1U << index)) != 0U) {
+        } else if ((frame->exchange_mask & bit) == 0U) {
             stats->missing_exchange++;
         }
     }
+    frame->in_use = false;
 }
 
 static void uwb_passive_ds_clean_tag_invalidate_frame(
@@ -10725,7 +10882,7 @@ static void uwb_passive_ds_clean_tag_invalidate_frame(
     if (frame == NULL) {
         return;
     }
-    uwb_passive_ds_clean_tag_count_incomplete(frame, stats);
+    uwb_passive_ds_clean_tag_finalize_frame(frame, stats);
     memset(frame, 0, sizeof(*frame));
 }
 
@@ -10750,7 +10907,7 @@ uwb_passive_ds_clean_tag_begin_frame(
     struct uwb_passive_ds_clean_tag_frame *frame =
         &frames[poll->frame_id %
                 UWB_PASSIVE_DS_CLEAN_TAG_FRAME_BUCKETS];
-    uwb_passive_ds_clean_tag_count_incomplete(frame, stats);
+    uwb_passive_ds_clean_tag_finalize_frame(frame, stats);
     memset(frame, 0, sizeof(*frame));
     frame->in_use = true;
     frame->session_id = poll->session_id;
@@ -10784,6 +10941,11 @@ static bool uwb_passive_ds_clean_tag_try_emit(
         !response->have_response || !response->have_final_entry ||
         !response->have_exchange) {
         return false;
+    }
+    const uint8_t bit = (uint8_t)(1U << responder_index);
+    if ((frame->radio_ready_mask & bit) == 0U) {
+        frame->radio_ready_mask |= bit;
+        stats->radio_ready_observations++;
     }
     const struct uwb_passive_ds_observation_input input = {
         .listener_poll_rx = frame->poll_rx_timestamp,
@@ -10823,6 +10985,10 @@ static bool uwb_passive_ds_clean_tag_try_emit(
         difference_mm -= correction;
         comparison_mm -= correction;
     }
+    if ((frame->computed_mask & bit) == 0U) {
+        frame->computed_mask |= bit;
+        stats->computed_observations++;
+    }
 
     const int32_t baseline_mm =
         uwb_passive_ds_fixed_anchor_distance_mm(
@@ -10853,16 +11019,21 @@ static bool uwb_passive_ds_clean_tag_try_emit(
     if (!telemetry_ok || !solver_ok) {
         stats->queue_drops++;
     }
+    if (!telemetry_ok) {
+        stats->telemetry_drops++;
+    }
+    if (!solver_ok) {
+        stats->solver_drops++;
+    }
     if (!solver_ok) {
         return false;
     }
     response->emitted = true;
-    const uint8_t bit = (uint8_t)(1U << responder_index);
     frame->emitted_mask |= bit;
     if ((frame->emitted_mask & frame->expected_mask) ==
         frame->expected_mask) {
-        stats->complete++;
-        frame->in_use = false;
+        stats->solver_full++;
+        uwb_passive_ds_clean_tag_finalize_frame(frame, stats);
     }
     return true;
 }
@@ -11100,8 +11271,26 @@ static void uwb_passive_ds_clean_tag_loop(
 
     while (!uwb_dw3000_runtime_switch_pending()) {
         struct uwb_distance_frame frame = {0};
-        const esp_err_t err = uwb_distance_receive_next(
-            &frame, app_runtime_config_get()->passive_ds_rx_slice_ms);
+        const uint32_t rx_slice_ms =
+            app_runtime_config_get()->passive_ds_rx_slice_ms;
+        const int64_t rx_deadline_us =
+            esp_timer_get_time() + (int64_t)rx_slice_ms * 1000LL;
+        uint32_t phy_retry_count = 0U;
+        const esp_err_t err = uwb_distance_receive_next_retry_phy_until(
+            &frame, rx_deadline_us, &phy_retry_count);
+        for (uint32_t retry = 0U; retry < phy_retry_count; ++retry) {
+            uwb_passive_ds_runtime_increment(
+                UWB_PASSIVE_DS_RUNTIME_COUNTER_RX_PHY_RETRY);
+        }
+        if (phy_retry_count > 0U) {
+            if (err == ESP_OK) {
+                uwb_passive_ds_runtime_increment(
+                    UWB_PASSIVE_DS_RUNTIME_COUNTER_RX_RECOVERED_AFTER_PHY);
+            } else if (err == ESP_ERR_TIMEOUT) {
+                uwb_passive_ds_runtime_increment(
+                    UWB_PASSIVE_DS_RUNTIME_COUNTER_RX_TIMEOUT_AFTER_PHY);
+            }
+        }
         if (err == ESP_OK) {
             if (frame.type ==
                 UWB_DISTANCE_FRAME_PASSIVE_DS_MULTI_POLL) {
@@ -11124,7 +11313,7 @@ static void uwb_passive_ds_clean_tag_loop(
                                  index <
                                      UWB_PASSIVE_DS_CLEAN_TAG_FRAME_BUCKETS;
                                  ++index) {
-                                uwb_passive_ds_clean_tag_count_incomplete(
+                                uwb_passive_ds_clean_tag_finalize_frame(
                                     &frames[index], &stats);
                             }
                             memset(frames, 0, sizeof(frames));
@@ -11136,7 +11325,13 @@ static void uwb_passive_ds_clean_tag_loop(
                             const int32_t gap = (int32_t)(
                                 poll.frame_id - stats.last_frame_id);
                             if (gap > 1 && gap < 4096) {
-                                stats.incomplete += (uint32_t)(gap - 1);
+                                const uint32_t missed =
+                                    (uint32_t)(gap - 1);
+                                stats.incomplete += missed;
+                                stats.computed_incomplete += missed;
+                                stats.missing_poll += missed;
+                                stats.radio_ready_stars[0] += missed;
+                                stats.computed_stars[0] += missed;
                             }
                         }
                         stats.have_last_frame = true;
@@ -11187,7 +11382,7 @@ static void uwb_passive_ds_clean_tag_loop(
              index < UWB_PASSIVE_DS_CLEAN_TAG_FRAME_BUCKETS; ++index) {
             if (frames[index].in_use &&
                 now_us - frames[index].created_host_us > 250000LL) {
-                uwb_passive_ds_clean_tag_count_incomplete(
+                uwb_passive_ds_clean_tag_finalize_frame(
                     &frames[index], &stats);
                 memset(&frames[index], 0, sizeof(frames[index]));
             }
@@ -11217,6 +11412,29 @@ static void uwb_passive_ds_clean_tag_loop(
                 (unsigned long)stats.queue_drops,
                 (unsigned long)s_passive_ds_rx_errors_since_summary,
                 (unsigned long)s_passive_ds_rx_error_status_since_summary);
+            ESP_LOGI(
+                TAG,
+                "PASSIVE_DS tag quality "
+                "radio_star=%lu/%lu/%lu/%lu "
+                "computed_star=%lu/%lu/%lu/%lu "
+                "radio_obs=%lu computed_obs=%lu "
+                "computed_incomplete=%lu solver_full=%lu "
+                "miss_poll=%lu queue_attempt_drop=%lu/%lu",
+                (unsigned long)stats.radio_ready_stars[0],
+                (unsigned long)stats.radio_ready_stars[1],
+                (unsigned long)stats.radio_ready_stars[2],
+                (unsigned long)stats.radio_ready_stars[3],
+                (unsigned long)stats.computed_stars[0],
+                (unsigned long)stats.computed_stars[1],
+                (unsigned long)stats.computed_stars[2],
+                (unsigned long)stats.computed_stars[3],
+                (unsigned long)stats.radio_ready_observations,
+                (unsigned long)stats.computed_observations,
+                (unsigned long)stats.computed_incomplete,
+                (unsigned long)stats.solver_full,
+                (unsigned long)stats.missing_poll,
+                (unsigned long)stats.telemetry_drops,
+                (unsigned long)stats.solver_drops);
             const uint32_t last_frame = stats.last_frame_id;
             const bool have_last = stats.have_last_frame;
             memset(&stats, 0, sizeof(stats));

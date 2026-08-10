@@ -185,6 +185,15 @@ void uwb_passive_ds_runtime_increment(
     case UWB_PASSIVE_DS_RUNTIME_COUNTER_COMPLETED_EXCHANGE:
         s_runtime.pipeline_stats.completed_exchange_count++;
         break;
+    case UWB_PASSIVE_DS_RUNTIME_COUNTER_RX_PHY_RETRY:
+        s_runtime.pipeline_stats.rx_phy_retry_count++;
+        break;
+    case UWB_PASSIVE_DS_RUNTIME_COUNTER_RX_RECOVERED_AFTER_PHY:
+        s_runtime.pipeline_stats.rx_recovered_after_phy_count++;
+        break;
+    case UWB_PASSIVE_DS_RUNTIME_COUNTER_RX_TIMEOUT_AFTER_PHY:
+        s_runtime.pipeline_stats.rx_timeout_after_phy_count++;
+        break;
     default:
         break;
     }

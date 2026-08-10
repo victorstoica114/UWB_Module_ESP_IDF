@@ -113,6 +113,18 @@ static void test_raw_residual_gate(void)
     assert(!passive_ds_batch_residuals_valid(0.1, INFINITY));
 }
 
+static void test_partial_star_policy(void)
+{
+    assert(!passive_ds_batch_star_observation_count_valid(2U, 2U));
+    assert(passive_ds_batch_star_observation_count_valid(3U, 2U));
+    assert(!passive_ds_batch_star_observation_count_valid(3U, 1U));
+    assert(!passive_ds_batch_star_observation_count_valid(3U, 3U));
+    assert(passive_ds_batch_star_observation_count_valid(4U, 2U));
+    assert(passive_ds_batch_star_observation_count_valid(4U, 3U));
+    assert(!passive_ds_batch_star_observation_count_valid(4U, 1U));
+    assert(!passive_ds_batch_star_observation_count_valid(4U, 4U));
+}
+
 static double distance_to(
     const struct passive_ds_position_anchor *anchor,
     double x_m,
@@ -170,6 +182,53 @@ static void test_raw_three_star_correlated_solve(void)
     assert(result.rms_m < 1e-6);
 }
 
+static void test_raw_three_partial_star_correlated_solve(void)
+{
+    const struct passive_ds_position_anchor anchors[] = {
+        {.id = 2U, .x_m = 0.0, .y_m = 0.0},
+        {.id = 3U, .x_m = 0.0, .y_m = 4.9},
+        {.id = 4U, .x_m = 5.0, .y_m = 0.0},
+        {.id = 5U, .x_m = 5.0, .y_m = 4.9},
+    };
+    const double expected_x_m = 2.1;
+    const double expected_y_m = 3.2;
+    struct passive_ds_position_observation observations[6] = {0};
+    size_t output = 0U;
+
+    /* Simulate A4 being shadowed: the other three initiators retain the two
+     * equations that do not involve A4. */
+    const size_t initiators[] = {0U, 1U, 3U};
+    for (size_t star = 0U; star < 3U; ++star) {
+        const size_t initiator = initiators[star];
+        for (size_t responder = 0U; responder < 4U; ++responder) {
+            if (responder == initiator || responder == 2U) {
+                continue;
+            }
+            observations[output++] =
+                (struct passive_ds_position_observation){
+                    .initiator_id = anchors[initiator].id,
+                    .responder_id = anchors[responder].id,
+                    .difference_m =
+                        distance_to(&anchors[responder], expected_x_m,
+                                    expected_y_m) -
+                        distance_to(&anchors[initiator], expected_x_m,
+                                    expected_y_m),
+                    .delay_ratio = 0.5,
+                };
+        }
+    }
+    assert(output == 6U);
+
+    struct passive_ds_position_result result = {0};
+    assert(passive_ds_position_solve_correlated(
+        anchors, 4U, observations, output, 0.25,
+        false, 0.0, 0.0, &result));
+    assert(result.observation_count == 6U);
+    assert(fabs(result.x_m - expected_x_m) < 1e-5);
+    assert(fabs(result.y_m - expected_y_m) < 1e-5);
+    assert(result.rms_m < 1e-6);
+}
+
 int main(void)
 {
     test_frame_order_wrap_safe();
@@ -177,7 +236,9 @@ int main(void)
     test_duplicate_initiator_and_nonreuse();
     test_wrap_selection();
     test_raw_residual_gate();
+    test_partial_star_policy();
     test_raw_three_star_correlated_solve();
+    test_raw_three_partial_star_correlated_solve();
     puts("passive DS raw three-star policy and solver: OK");
     return 0;
 }

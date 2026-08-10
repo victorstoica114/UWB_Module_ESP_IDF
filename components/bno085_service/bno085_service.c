@@ -1,4 +1,5 @@
 #include "bno085_service.h"
+#include "bno085_timing.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -9,9 +10,11 @@
 #include "app_runtime_config.h"
 #include "board_config.h"
 #include "driver/gpio.h"
+#include "driver/gptimer.h"
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -40,18 +43,31 @@ enum {
     BNO085_STALL_RECOVERY_MS = 5000,
     BNO085_ACCEL_REPORT_LEN = 10,
     BNO085_TIMEBASE_REPORT_LEN = 5,
+    BNO085_REBASE_REPORT_LEN = 5,
     BNO085_CHANNEL_CONTROL = 2,
     BNO085_CHANNEL_EXECUTABLE = 1,
     BNO085_CHANNEL_INPUT_REPORTS = 3,
+    BNO085_CHANNEL_GYRO_RV = 5,
     BNO085_EXECUTABLE_RESET = 0x01,
     BNO085_REPORT_SET_FEATURE = 0xFD,
     BNO085_REPORT_GET_FEATURE_RESPONSE = 0xFC,
     BNO085_REPORT_TIMEBASE = 0xFB,
+    BNO085_REPORT_REBASE = 0xFA,
     BNO085_REPORT_ACCELEROMETER = 0x01,
+    BNO085_REPORT_GYRO_RV = 0x2A,
+    BNO085_GYRO_RV_REPORT_LEN = 14,
+    BNO085_GYRO_RV_RATE_HZ = 100,
+    BNO085_GYRO_RV_INTERVAL_US = 1000000U / BNO085_GYRO_RV_RATE_HZ,
     BNO085_ACCEL_Q_POINT = 8,
     BNO085_NOTIFY_INT = 1U << 0,
     BNO085_NOTIFY_CONFIG = 1U << 1,
     BNO085_NOTIFY_STOP = 1U << 2,
+    BNO085_TELEMETRY_RATE_HZ = 100,
+    BNO085_HIGH_RATE_BATCH_INTERVAL_US = 10000,
+    BNO085_SAMPLE_RING_PSRAM_CAPACITY = 512,
+    BNO085_SAMPLE_RING_INTERNAL_CAPACITY = 128,
+    BNO085_GYRO_RV_RING_CAPACITY = 256,
+    BNO085_COPY_MAX_SAMPLES = 32,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -102,6 +118,32 @@ static uint32_t s_i2c_scl_edges;
 static uint32_t s_i2c_scl_elapsed_us;
 static uint32_t s_i2c_scl_measured_hz;
 static uint32_t s_i2c_scl_measure_count;
+static gptimer_handle_t s_fusion_timer;
+static bno085_accel_sample_t *s_sample_ring;
+static size_t s_sample_ring_capacity;
+static size_t s_sample_ring_count;
+static size_t s_sample_ring_write;
+static uint32_t s_sample_overwrite_count;
+static uint32_t s_telemetry_submit_count;
+static uint32_t s_telemetry_drop_count;
+static uint32_t s_telemetry_decimated_count;
+static uint32_t s_monotonic_repair_count;
+static uint64_t s_last_fusion_time_ticks;
+static uint64_t s_last_telemetry_ticks;
+static bool s_batch_timebase_valid;
+static uint64_t s_batch_hint_ticks;
+static int32_t s_batch_base_delta_100us;
+static int32_t s_batch_rebase_delta_100us;
+static portMUX_TYPE s_sample_lock = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint64_t s_last_hint_ticks;
+static volatile uint32_t s_hint_generation;
+static uint32_t s_consumed_hint_generation;
+static portMUX_TYPE s_hint_lock = portMUX_INITIALIZER_UNLOCKED;
+static bno085_gyro_rv_sample_t *s_gyro_rv_ring;
+static size_t s_gyro_rv_ring_count;
+static size_t s_gyro_rv_ring_write;
+static uint32_t s_gyro_rv_report_count;
+static uint32_t s_gyro_rv_overwrite_count;
 
 static esp_err_t bno085_hold_in_reset(void);
 static bool bno085_drain_startup_packets(void);
@@ -169,6 +211,131 @@ static float q_to_float(int16_t raw, uint8_t q_point)
 static int32_t float_to_milli(float value)
 {
     return (int32_t)(value * 1000.0f + (value >= 0.0f ? 0.5f : -0.5f));
+}
+
+static esp_err_t bno085_fusion_timer_init(void)
+{
+    if (s_fusion_timer != NULL) {
+        return ESP_OK;
+    }
+
+    const gptimer_config_t config = {
+        .clk_src = GPTIMER_CLK_SRC_DEFAULT,
+        .direction = GPTIMER_COUNT_UP,
+        .resolution_hz = BNO085_FUSION_TIMER_HZ,
+    };
+    esp_err_t err = gptimer_new_timer(&config, &s_fusion_timer);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = gptimer_enable(s_fusion_timer);
+    if (err == ESP_OK) {
+        err = gptimer_start(s_fusion_timer);
+    }
+    if (err != ESP_OK) {
+        (void)gptimer_disable(s_fusion_timer);
+        (void)gptimer_del_timer(s_fusion_timer);
+        s_fusion_timer = NULL;
+        return err;
+    }
+    ESP_LOGI(TAG, "BNO085 fusion clock started at %u Hz",
+             (unsigned)BNO085_FUSION_TIMER_HZ);
+    return ESP_OK;
+}
+
+uint64_t bno085_service_fusion_time_ticks(void)
+{
+    uint64_t ticks = 0;
+    if (s_fusion_timer != NULL) {
+        (void)gptimer_get_raw_count(s_fusion_timer, &ticks);
+    }
+    return ticks;
+}
+
+static esp_err_t bno085_sample_ring_init(void)
+{
+    if (s_sample_ring != NULL && s_gyro_rv_ring != NULL) {
+        return ESP_OK;
+    }
+
+    if (s_sample_ring == NULL) {
+        s_sample_ring = heap_caps_calloc(BNO085_SAMPLE_RING_PSRAM_CAPACITY,
+                                         sizeof(*s_sample_ring),
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_sample_ring != NULL) {
+            s_sample_ring_capacity = BNO085_SAMPLE_RING_PSRAM_CAPACITY;
+        } else {
+            s_sample_ring = heap_caps_calloc(
+                BNO085_SAMPLE_RING_INTERNAL_CAPACITY, sizeof(*s_sample_ring),
+                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            s_sample_ring_capacity =
+                s_sample_ring != NULL ? BNO085_SAMPLE_RING_INTERNAL_CAPACITY
+                                      : 0;
+        }
+    }
+    if (s_sample_ring == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (s_gyro_rv_ring == NULL) {
+        s_gyro_rv_ring = heap_caps_calloc(
+            BNO085_GYRO_RV_RING_CAPACITY, sizeof(*s_gyro_rv_ring),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_gyro_rv_ring == NULL) {
+            s_gyro_rv_ring = heap_caps_calloc(
+                BNO085_GYRO_RV_RING_CAPACITY, sizeof(*s_gyro_rv_ring),
+                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        }
+    }
+    if (s_gyro_rv_ring == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "BNO085 local sample ring ready: %u samples (%s)",
+             (unsigned)s_sample_ring_capacity,
+             s_sample_ring_capacity == BNO085_SAMPLE_RING_PSRAM_CAPACITY
+                 ? "PSRAM"
+                 : "internal RAM");
+    ESP_LOGI(TAG, "BNO085 GyroRV ring ready: %u samples",
+             (unsigned)BNO085_GYRO_RV_RING_CAPACITY);
+    return ESP_OK;
+}
+
+static void bno085_store_sample(const bno085_accel_sample_t *sample)
+{
+    if (sample == NULL || s_sample_ring == NULL ||
+        s_sample_ring_capacity == 0) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_sample_lock);
+    s_last_fusion_time_ticks = sample->fusion_time_ticks;
+    s_sample_ring[s_sample_ring_write] = *sample;
+    s_sample_ring_write = (s_sample_ring_write + 1U) % s_sample_ring_capacity;
+    if (s_sample_ring_count < s_sample_ring_capacity) {
+        s_sample_ring_count++;
+    } else {
+        s_sample_overwrite_count++;
+    }
+    portEXIT_CRITICAL(&s_sample_lock);
+}
+
+static void bno085_store_gyro_rv_sample(
+    const bno085_gyro_rv_sample_t *sample)
+{
+    if (sample == NULL || s_gyro_rv_ring == NULL) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_sample_lock);
+    s_gyro_rv_ring[s_gyro_rv_ring_write] = *sample;
+    s_gyro_rv_ring_write =
+        (s_gyro_rv_ring_write + 1U) % BNO085_GYRO_RV_RING_CAPACITY;
+    if (s_gyro_rv_ring_count < BNO085_GYRO_RV_RING_CAPACITY) {
+        s_gyro_rv_ring_count++;
+    } else {
+        s_gyro_rv_overwrite_count++;
+    }
+    portEXIT_CRITICAL(&s_sample_lock);
 }
 
 static uint32_t ticks_to_ms(void)
@@ -271,6 +438,14 @@ static void IRAM_ATTR bno085_int_isr_handler(void *arg)
 {
     (void)arg;
     BaseType_t higher_priority_task_woken = pdFALSE;
+    uint64_t hint_ticks = 0;
+    if (s_fusion_timer != NULL &&
+        gptimer_get_raw_count(s_fusion_timer, &hint_ticks) == ESP_OK) {
+        portENTER_CRITICAL_ISR(&s_hint_lock);
+        s_last_hint_ticks = hint_ticks;
+        s_hint_generation++;
+        portEXIT_CRITICAL_ISR(&s_hint_lock);
+    }
     s_int_irq_count++;
     /* H_INTN is level-low on I2C and deasserts as soon as the address is seen;
        mask it until the task drains the SHTP packet and waits again. */
@@ -556,9 +731,45 @@ static esp_err_t bno085_enable_accelerometer(void)
 {
     const uint32_t interval_ms = bno085_accel_interval_ms();
     const uint32_t interval_us = interval_ms * 1000U;
+    const uint32_t batch_interval_us =
+        interval_ms <= BNO085_HIGH_RATE_INTERVAL_MS
+            ? BNO085_HIGH_RATE_BATCH_INTERVAL_US
+            : 0U;
     const uint8_t payload[] = {
         BNO085_REPORT_SET_FEATURE,
         BNO085_REPORT_ACCELEROMETER,
+        0x00,
+        0x00,
+        0x00,
+        (uint8_t)(interval_us & 0xFFU),
+        (uint8_t)((interval_us >> 8) & 0xFFU),
+        (uint8_t)((interval_us >> 16) & 0xFFU),
+        (uint8_t)((interval_us >> 24) & 0xFFU),
+        (uint8_t)(batch_interval_us & 0xFFU),
+        (uint8_t)((batch_interval_us >> 8) & 0xFFU),
+        (uint8_t)((batch_interval_us >> 16) & 0xFFU),
+        (uint8_t)((batch_interval_us >> 24) & 0xFFU),
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+    };
+
+    const esp_err_t err =
+        bno085_send_packet(BNO085_CHANNEL_CONTROL, payload, sizeof(payload));
+    if (err == ESP_OK) {
+        s_configured_accel_interval_ms = interval_ms;
+        bno085_update_i2c_realtime_period();
+    }
+    return err;
+}
+
+static esp_err_t bno085_enable_gyro_rv(void)
+{
+    const uint32_t interval_us = BNO085_GYRO_RV_INTERVAL_US;
+    const uint8_t payload[] = {
+        BNO085_REPORT_SET_FEATURE,
+        BNO085_REPORT_GYRO_RV,
         0x00,
         0x00,
         0x00,
@@ -575,14 +786,8 @@ static esp_err_t bno085_enable_accelerometer(void)
         0x00,
         0x00,
     };
-
-    const esp_err_t err =
-        bno085_send_packet(BNO085_CHANNEL_CONTROL, payload, sizeof(payload));
-    if (err == ESP_OK) {
-        s_configured_accel_interval_ms = interval_ms;
-        bno085_update_i2c_realtime_period();
-    }
-    return err;
+    return bno085_send_packet(BNO085_CHANNEL_CONTROL, payload,
+                              sizeof(payload));
 }
 
 static void bno085_reconfigure_accelerometer_if_needed(void)
@@ -617,16 +822,85 @@ static esp_err_t bno085_soft_reset(void)
                               sizeof(payload));
 }
 
-static void bno085_emit_telemetry(void)
+static void bno085_emit_telemetry(const bno085_accel_sample_t *sample)
 {
-    (void)wireless_telemetry_service_submit_bno085_accel(
-        float_to_milli(s_last_x_mps2), float_to_milli(s_last_y_mps2),
-        float_to_milli(s_last_z_mps2), s_last_accuracy, s_report_count);
+    if (!bno085_timing_due(s_last_telemetry_ticks,
+                           sample->fusion_time_ticks,
+                           BNO085_TELEMETRY_RATE_HZ)) {
+        s_telemetry_decimated_count++;
+        return;
+    }
+
+    s_last_telemetry_ticks = sample->fusion_time_ticks;
+    bno085_gyro_rv_sample_t gyro_rv = {0};
+    bool gyro_rv_valid = false;
+    portENTER_CRITICAL(&s_sample_lock);
+    if (s_gyro_rv_ring_count > 0) {
+        const size_t latest =
+            (s_gyro_rv_ring_write + BNO085_GYRO_RV_RING_CAPACITY - 1U) %
+            BNO085_GYRO_RV_RING_CAPACITY;
+        gyro_rv = s_gyro_rv_ring[latest];
+        gyro_rv_valid = gyro_rv.sequence != 0;
+    }
+    portEXIT_CRITICAL(&s_sample_lock);
+
+    if (wireless_telemetry_service_submit_bno085_imu(
+            sample->x_milli_mps2, sample->y_milli_mps2,
+            sample->z_milli_mps2, sample->sequence, sample->accuracy,
+            sample->time_flags, gyro_rv.sequence, gyro_rv.quat_i_q14,
+            gyro_rv.quat_j_q14, gyro_rv.quat_k_q14,
+            gyro_rv.quat_real_q14, gyro_rv.gyro_x_q10,
+            gyro_rv.gyro_y_q10, gyro_rv.gyro_z_q10,
+            gyro_rv.time_flags, gyro_rv_valid)) {
+        s_telemetry_submit_count++;
+    } else {
+        s_telemetry_drop_count++;
+    }
 }
 
-static void bno085_parse_input_reports(const uint8_t *payload, size_t len)
+static uint64_t bno085_packet_hint_ticks(uint8_t *time_flags,
+                                         uint32_t *hint_generation)
+{
+    uint64_t hint_ticks = 0;
+    uint32_t generation = 0;
+    portENTER_CRITICAL(&s_hint_lock);
+    hint_ticks = s_last_hint_ticks;
+    generation = s_hint_generation;
+    portEXIT_CRITICAL(&s_hint_lock);
+
+    if (hint_generation != NULL) {
+        *hint_generation = 0;
+    }
+
+    if (generation != s_consumed_hint_generation && hint_ticks != 0) {
+        if (hint_generation != NULL) {
+            *hint_generation = generation;
+        }
+        if (time_flags != NULL) {
+            *time_flags = BNO085_ACCEL_TIME_HINT_EXACT;
+        }
+        return hint_ticks;
+    }
+
+    if (time_flags != NULL) {
+        *time_flags = BNO085_ACCEL_TIME_HINT_ESTIMATED;
+    }
+    return bno085_service_fusion_time_ticks();
+}
+
+static void bno085_consume_packet_hint(uint32_t hint_generation)
+{
+    if (hint_generation != 0) {
+        s_consumed_hint_generation = hint_generation;
+    }
+}
+
+static void bno085_parse_input_reports(const uint8_t *payload, size_t len,
+                                       uint64_t packet_hint_ticks,
+                                       uint8_t packet_time_flags)
 {
     size_t pos = 0;
+    s_batch_timebase_valid = false;
 
     while (pos < len) {
         const uint8_t report_id = payload[pos];
@@ -636,7 +910,24 @@ static void bno085_parse_input_reports(const uint8_t *payload, size_t len)
                 return;
             }
             s_timebase_count++;
+            s_batch_hint_ticks = packet_hint_ticks;
+            s_batch_base_delta_100us =
+                bno085_timing_read_le_i32(&payload[pos + 1]);
+            s_batch_rebase_delta_100us = 0;
+            s_batch_timebase_valid =
+                s_batch_base_delta_100us != INT32_MAX;
             pos += BNO085_TIMEBASE_REPORT_LEN;
+            continue;
+        }
+
+        if (report_id == BNO085_REPORT_REBASE) {
+            if (pos + BNO085_REBASE_REPORT_LEN > len) {
+                s_parse_error_count++;
+                return;
+            }
+            s_batch_rebase_delta_100us =
+                bno085_timing_read_le_i32(&payload[pos + 1]);
+            pos += BNO085_REBASE_REPORT_LEN;
             continue;
         }
 
@@ -647,6 +938,8 @@ static void bno085_parse_input_reports(const uint8_t *payload, size_t len)
             }
 
             const uint8_t status = payload[pos + 2] & 0x03U;
+            const uint16_t delay_100us =
+                bno085_timing_report_delay_100us(&payload[pos]);
             const int16_t raw_x = read_le_i16(&payload[pos + 4]);
             const int16_t raw_y = read_le_i16(&payload[pos + 6]);
             const int16_t raw_z = read_le_i16(&payload[pos + 8]);
@@ -656,7 +949,38 @@ static void bno085_parse_input_reports(const uint8_t *payload, size_t len)
             s_last_z_mps2 = q_to_float(raw_z, BNO085_ACCEL_Q_POINT);
             s_last_accuracy = status;
             s_report_count++;
-            bno085_emit_telemetry();
+
+            uint8_t time_flags = packet_time_flags;
+            uint64_t sample_ticks = packet_hint_ticks;
+            if (s_batch_timebase_valid) {
+                sample_ticks = bno085_timing_reconstruct_ticks(
+                    s_batch_hint_ticks, s_batch_base_delta_100us,
+                    s_batch_rebase_delta_100us, delay_100us);
+                time_flags |= BNO085_ACCEL_TIME_SH2_VALID;
+            }
+            uint64_t previous_sample_ticks = 0;
+            portENTER_CRITICAL(&s_sample_lock);
+            previous_sample_ticks = s_last_fusion_time_ticks;
+            portEXIT_CRITICAL(&s_sample_lock);
+            if (sample_ticks <= previous_sample_ticks) {
+                sample_ticks = previous_sample_ticks +
+                               (uint64_t)bno085_accel_period_us() *
+                                   (BNO085_FUSION_TIMER_HZ / 1000000U);
+                time_flags |= BNO085_ACCEL_TIME_MONOTONIC_REPAIRED;
+                s_monotonic_repair_count++;
+            }
+            const bno085_accel_sample_t sample = {
+                .fusion_time_ticks = sample_ticks,
+                .sequence = s_report_count,
+                .x_milli_mps2 = float_to_milli(s_last_x_mps2),
+                .y_milli_mps2 = float_to_milli(s_last_y_mps2),
+                .z_milli_mps2 = float_to_milli(s_last_z_mps2),
+                .sensor_delay_100us = delay_100us,
+                .accuracy = status,
+                .time_flags = time_flags,
+            };
+            bno085_store_sample(&sample);
+            bno085_emit_telemetry(&sample);
             pos += BNO085_ACCEL_REPORT_LEN;
             continue;
         }
@@ -665,7 +989,9 @@ static void bno085_parse_input_reports(const uint8_t *payload, size_t len)
     }
 }
 
-static void bno085_parse_packet(const uint8_t *packet, size_t packet_len)
+static void bno085_parse_packet(const uint8_t *packet, size_t packet_len,
+                                uint64_t packet_hint_ticks,
+                                uint8_t packet_time_flags)
 {
     if (packet_len < BNO085_SHTP_HEADER_LEN) {
         s_parse_error_count++;
@@ -681,7 +1007,8 @@ static void bno085_parse_packet(const uint8_t *packet, size_t packet_len)
         s_input_packet_count++;
         s_last_input_payload_len = payload_len;
         const uint32_t before = s_report_count;
-        bno085_parse_input_reports(payload, payload_len);
+        bno085_parse_input_reports(payload, payload_len, packet_hint_ticks,
+                                   packet_time_flags);
         const uint32_t reports_in_packet = s_report_count - before;
         if (reports_in_packet > s_max_reports_per_packet) {
             s_max_reports_per_packet = reports_in_packet;
@@ -689,12 +1016,57 @@ static void bno085_parse_packet(const uint8_t *packet, size_t packet_len)
         return;
     }
 
-    if (channel == BNO085_CHANNEL_CONTROL && payload_len >= 9 &&
+    if (channel == BNO085_CHANNEL_GYRO_RV) {
+        if (payload_len == 0 ||
+            payload_len % BNO085_GYRO_RV_REPORT_LEN != 0) {
+            s_parse_error_count++;
+            return;
+        }
+        const size_t report_total =
+            payload_len / BNO085_GYRO_RV_REPORT_LEN;
+        const uint64_t period_ticks =
+            (uint64_t)BNO085_GYRO_RV_INTERVAL_US *
+            (BNO085_FUSION_TIMER_HZ / 1000000U);
+        uint64_t first_ticks = packet_hint_ticks;
+        const uint64_t preceding_ticks = (report_total - 1U) * period_ticks;
+        if (first_ticks >= preceding_ticks) {
+            first_ticks -= preceding_ticks;
+        }
+        for (size_t index = 0; index < report_total; ++index) {
+            const uint8_t *report =
+                &payload[index * BNO085_GYRO_RV_REPORT_LEN];
+            const bno085_gyro_rv_sample_t sample = {
+                .fusion_time_ticks = first_ticks + index * period_ticks,
+                .sequence = ++s_gyro_rv_report_count,
+                .quat_i_q14 = read_le_i16(&report[0]),
+                .quat_j_q14 = read_le_i16(&report[2]),
+                .quat_k_q14 = read_le_i16(&report[4]),
+                .quat_real_q14 = read_le_i16(&report[6]),
+                .gyro_x_q10 = read_le_i16(&report[8]),
+                .gyro_y_q10 = read_le_i16(&report[10]),
+                .gyro_z_q10 = read_le_i16(&report[12]),
+                .time_flags = packet_time_flags,
+            };
+            bno085_store_gyro_rv_sample(&sample);
+        }
+        return;
+    }
+
+    if (channel == BNO085_CHANNEL_CONTROL && payload_len >= 13 &&
         payload[0] == BNO085_REPORT_GET_FEATURE_RESPONSE &&
         payload[1] == BNO085_REPORT_ACCELEROMETER) {
         const uint32_t interval_us = read_le_u32(&payload[5]);
-        ESP_LOGI(TAG, "BNO085 accelerometer feature accepted: interval=%u us",
-                 (unsigned)interval_us);
+        const uint32_t batch_interval_us = read_le_u32(&payload[9]);
+        ESP_LOGI(TAG,
+                 "BNO085 accelerometer feature accepted: interval=%u us batch=%u us",
+                 (unsigned)interval_us, (unsigned)batch_interval_us);
+        return;
+    }
+    if (channel == BNO085_CHANNEL_CONTROL && payload_len >= 9 &&
+        payload[0] == BNO085_REPORT_GET_FEATURE_RESPONSE &&
+        payload[1] == BNO085_REPORT_GYRO_RV) {
+        ESP_LOGI(TAG, "BNO085 GyroRV feature accepted: interval=%u us",
+                 (unsigned)read_le_u32(&payload[5]));
     }
 }
 
@@ -708,12 +1080,20 @@ static void bno085_log_status(void)
     s_last_log_ms = now_ms;
 
     ESP_LOGI(TAG,
-             "BNO085 summary x=%.2f y=%.2f z=%.2f acc=%u rep=%u ms=%u pkt=%u in=%u tb=%u max=%u len=%u cont=%u/%u cerr=%u hp=%u null=%u err=%u/%u irq=%u il=%d wt=%u",
+             "BNO085 summary x=%.2f y=%.2f z=%.2f acc=%u rep=%u gyro=%u ms=%u pkt=%u in=%u tb=%u max=%u ring=%u/%u ovw=%u telem=%u/%u dec=%u fix=%u len=%u cont=%u/%u cerr=%u hp=%u null=%u err=%u/%u irq=%u il=%d wt=%u",
              (double)s_last_x_mps2, (double)s_last_y_mps2,
              (double)s_last_z_mps2, (unsigned)s_last_accuracy,
-             (unsigned)s_report_count, (unsigned)bno085_accel_interval_ms(),
+             (unsigned)s_report_count, (unsigned)s_gyro_rv_report_count,
+             (unsigned)bno085_accel_interval_ms(),
              (unsigned)s_packet_count, (unsigned)s_input_packet_count,
              (unsigned)s_timebase_count, (unsigned)s_max_reports_per_packet,
+             (unsigned)s_sample_ring_count,
+             (unsigned)s_sample_ring_capacity,
+             (unsigned)s_sample_overwrite_count,
+             (unsigned)s_telemetry_submit_count,
+             (unsigned)s_telemetry_drop_count,
+             (unsigned)s_telemetry_decimated_count,
+             (unsigned)s_monotonic_repair_count,
              (unsigned)s_last_packet_len, (unsigned)s_continuation_packet_count,
              (unsigned)s_continuation_transfer_count,
              (unsigned)s_continuation_header_error_count,
@@ -789,6 +1169,11 @@ static bool bno085_recover_if_stalled(void)
         ESP_LOGW(TAG, "BNO085 stall recovery enable failed: %s",
                  esp_err_to_name(err));
     }
+    err = bno085_enable_gyro_rv();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "BNO085 GyroRV stall recovery enable failed: %s",
+                 esp_err_to_name(err));
+    }
 
     s_last_progress_report_count = s_report_count;
     s_last_progress_ms = ticks_to_ms();
@@ -861,11 +1246,18 @@ static bool bno085_drain_startup_packets(void)
             }
         }
 
+        uint8_t packet_time_flags = 0;
+        uint32_t packet_hint_generation = 0;
+        const uint64_t packet_hint_ticks =
+            bno085_packet_hint_ticks(&packet_time_flags,
+                                     &packet_hint_generation);
         size_t packet_len = 0;
         const esp_err_t err = bno085_read_packet(packet, sizeof(packet),
                                                  &packet_len);
         if (err == ESP_OK) {
-            bno085_parse_packet(packet, packet_len);
+            bno085_consume_packet_hint(packet_hint_generation);
+            bno085_parse_packet(packet, packet_len, packet_hint_ticks,
+                                packet_time_flags);
             continue;
         }
         if (s_int_irq_enabled) {
@@ -927,11 +1319,18 @@ static void bno085_drain_ready_packets(uint8_t *packet, size_t packet_size)
 {
     const uint32_t start_ms = ticks_to_ms();
     for (uint32_t i = 0; i < BNO085_MAX_PACKETS_PER_WAKE; ++i) {
+        uint8_t packet_time_flags = 0;
+        uint32_t packet_hint_generation = 0;
+        const uint64_t packet_hint_ticks =
+            bno085_packet_hint_ticks(&packet_time_flags,
+                                     &packet_hint_generation);
         size_t packet_len = 0;
         const esp_err_t err = bno085_read_packet(packet, packet_size,
                                                  &packet_len);
         if (err == ESP_OK) {
-            bno085_parse_packet(packet, packet_len);
+            bno085_consume_packet_hint(packet_hint_generation);
+            bno085_parse_packet(packet, packet_len, packet_hint_ticks,
+                                packet_time_flags);
 
             if (bno085_high_rate_mode() &&
                 (uint32_t)(ticks_to_ms() - start_ms) <
@@ -962,6 +1361,33 @@ static void bno085_task(void *arg)
     const uint32_t log_interval_ms = bno085_log_interval_ms();
     s_i2c_scl_measure_count = 0;
 
+    esp_err_t err = bno085_fusion_timer_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "BNO085 fusion clock init failed: %s",
+                 esp_err_to_name(err));
+        bno085_task_finish(true);
+        return;
+    }
+    err = bno085_sample_ring_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "BNO085 sample ring init failed: %s",
+                 esp_err_to_name(err));
+        bno085_task_finish(true);
+        return;
+    }
+    portENTER_CRITICAL(&s_sample_lock);
+    s_sample_ring_count = 0;
+    s_sample_ring_write = 0;
+    s_gyro_rv_ring_count = 0;
+    s_gyro_rv_ring_write = 0;
+    s_last_fusion_time_ticks = 0;
+    portEXIT_CRITICAL(&s_sample_lock);
+    portENTER_CRITICAL(&s_hint_lock);
+    s_consumed_hint_generation = s_hint_generation;
+    portEXIT_CRITICAL(&s_hint_lock);
+    s_batch_timebase_valid = false;
+    s_last_telemetry_ticks = 0;
+
     ESP_LOGI(TAG,
              "BNO085 accelerometer test enabled: SDA=%d SCL=%d RST=%d INT=%d addr=0x%02X clock=%u Hz sample=%u ms log=%u ms int_timeout=%u ms core=%d",
              BOARD_CONFIG_BNO085_SDA_GPIO, BOARD_CONFIG_BNO085_SCL_GPIO,
@@ -971,7 +1397,7 @@ static void bno085_task(void *arg)
              (unsigned)log_interval_ms,
              (unsigned)APP_BNO085_INT_WAIT_TIMEOUT_MS, BNO085_TASK_CORE);
 
-    esp_err_t err = bno085_configure_host_gpios();
+    err = bno085_configure_host_gpios();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "BNO085 GPIO init failed: %s", esp_err_to_name(err));
         bno085_task_finish(true);
@@ -1026,6 +1452,15 @@ static void bno085_task(void *arg)
         return;
     }
     ESP_LOGI(TAG, "BNO085 accelerometer enable command sent");
+    err = bno085_enable_gyro_rv();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "BNO085 GyroRV enable failed: %s",
+                 esp_err_to_name(err));
+        bno085_task_finish(true);
+        return;
+    }
+    ESP_LOGI(TAG, "BNO085 GyroRV enable command sent at %u Hz",
+             (unsigned)BNO085_GYRO_RV_RATE_HZ);
     s_last_progress_ms = ticks_to_ms();
     s_last_progress_report_count = s_report_count;
 
@@ -1091,11 +1526,81 @@ esp_err_t bno085_service_apply_runtime_config(void)
     return bno085_service_start();
 }
 
+size_t bno085_service_copy_accel_samples(uint32_t after_sequence,
+                                         bno085_accel_sample_t *samples,
+                                         size_t max_samples)
+{
+    if (samples == NULL || max_samples == 0 || s_sample_ring == NULL ||
+        s_sample_ring_capacity == 0) {
+        return 0;
+    }
+
+    if (max_samples > BNO085_COPY_MAX_SAMPLES) {
+        max_samples = BNO085_COPY_MAX_SAMPLES;
+    }
+
+    size_t copied = 0;
+    portENTER_CRITICAL(&s_sample_lock);
+    const size_t oldest =
+        (s_sample_ring_write + s_sample_ring_capacity - s_sample_ring_count) %
+        s_sample_ring_capacity;
+    for (size_t i = 0; i < s_sample_ring_count && copied < max_samples; ++i) {
+        const bno085_accel_sample_t *sample =
+            &s_sample_ring[(oldest + i) % s_sample_ring_capacity];
+        if ((int32_t)(sample->sequence - after_sequence) > 0) {
+            samples[copied++] = *sample;
+        }
+    }
+    portEXIT_CRITICAL(&s_sample_lock);
+    return copied;
+}
+
+size_t bno085_service_copy_gyro_rv_samples(uint32_t after_sequence,
+                                           bno085_gyro_rv_sample_t *samples,
+                                           size_t max_samples)
+{
+    if (samples == NULL || max_samples == 0 || s_gyro_rv_ring == NULL) {
+        return 0;
+    }
+
+    if (max_samples > BNO085_COPY_MAX_SAMPLES) {
+        max_samples = BNO085_COPY_MAX_SAMPLES;
+    }
+
+    size_t copied = 0;
+    portENTER_CRITICAL(&s_sample_lock);
+    const size_t oldest =
+        (s_gyro_rv_ring_write + BNO085_GYRO_RV_RING_CAPACITY -
+         s_gyro_rv_ring_count) %
+        BNO085_GYRO_RV_RING_CAPACITY;
+    for (size_t i = 0; i < s_gyro_rv_ring_count && copied < max_samples;
+         ++i) {
+        const bno085_gyro_rv_sample_t *sample =
+            &s_gyro_rv_ring[(oldest + i) % BNO085_GYRO_RV_RING_CAPACITY];
+        if ((int32_t)(sample->sequence - after_sequence) > 0) {
+            samples[copied++] = *sample;
+        }
+    }
+    portEXIT_CRITICAL(&s_sample_lock);
+    return copied;
+}
+
 void bno085_service_get_snapshot(bno085_service_snapshot_t *snapshot)
 {
     if (snapshot == NULL) {
         return;
     }
+
+    uint32_t sample_ring_capacity = 0;
+    uint32_t sample_ring_count = 0;
+    uint32_t gyro_rv_ring_count = 0;
+    uint64_t last_fusion_time_ticks = 0;
+    portENTER_CRITICAL(&s_sample_lock);
+    sample_ring_capacity = (uint32_t)s_sample_ring_capacity;
+    sample_ring_count = (uint32_t)s_sample_ring_count;
+    gyro_rv_ring_count = (uint32_t)s_gyro_rv_ring_count;
+    last_fusion_time_ticks = s_last_fusion_time_ticks;
+    portEXIT_CRITICAL(&s_sample_lock);
 
     *snapshot = (bno085_service_snapshot_t){
         .service_started = s_service_started,
@@ -1119,6 +1624,21 @@ void bno085_service_get_snapshot(bno085_service_snapshot_t *snapshot)
         .parse_error_count = s_parse_error_count,
         .int_irq_count = s_int_irq_count,
         .int_wait_timeout_count = s_int_wait_timeout_count,
+        .sample_ring_capacity = sample_ring_capacity,
+        .sample_ring_count = sample_ring_count,
+        .sample_overwrite_count = s_sample_overwrite_count,
+        .telemetry_submit_count = s_telemetry_submit_count,
+        .telemetry_drop_count = s_telemetry_drop_count,
+        .telemetry_decimated_count = s_telemetry_decimated_count,
+        .monotonic_repair_count = s_monotonic_repair_count,
+        .gyro_rv_report_count = s_gyro_rv_report_count,
+        .gyro_rv_ring_capacity = BNO085_GYRO_RV_RING_CAPACITY,
+        .gyro_rv_ring_count = gyro_rv_ring_count,
+        .gyro_rv_overwrite_count = s_gyro_rv_overwrite_count,
+        .gyro_rv_rate_hz = BNO085_GYRO_RV_RATE_HZ,
+        .telemetry_rate_hz = BNO085_TELEMETRY_RATE_HZ,
+        .fusion_timer_hz = BNO085_FUSION_TIMER_HZ,
+        .last_fusion_time_ticks = last_fusion_time_ticks,
         .last_packet_len = s_last_packet_len,
         .last_input_payload_len = s_last_input_payload_len,
         .last_x_mps2 = s_last_x_mps2,
