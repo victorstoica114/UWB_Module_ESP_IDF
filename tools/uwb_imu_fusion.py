@@ -112,12 +112,31 @@ class ImuSample:
     gyro_body_rps: Vector3 = (0.0, 0.0, 0.0)
     valid: bool = True
     module_id: int | None = None
+    sample_time_us: int | None = None
+    fusion_time_ticks: int | None = None
+    fusion_timer_hz: int | None = None
 
     def __post_init__(self) -> None:
         if self.uptime_ms < 0:
             raise ValueError("uptime_ms must be non-negative")
         if self.module_id is not None and self.module_id < 0:
             raise ValueError("module_id must be non-negative")
+        if self.sample_time_us is not None and self.sample_time_us < 0:
+            raise ValueError("sample_time_us must be non-negative")
+        if self.fusion_time_ticks is not None and self.fusion_time_ticks < 0:
+            raise ValueError("fusion_time_ticks must be non-negative")
+        if self.fusion_timer_hz is not None and self.fusion_timer_hz <= 0:
+            raise ValueError("fusion_timer_hz must be positive")
+
+    @property
+    def time_us(self) -> int:
+        """Hardware-derived sample time, with legacy millisecond fallback."""
+
+        if self.sample_time_us is not None:
+            return self.sample_time_us
+        if self.fusion_time_ticks is not None and self.fusion_timer_hz is not None:
+            return self.fusion_time_ticks * 1_000_000 // self.fusion_timer_hz
+        return self.uptime_ms * 1000
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "ImuSample":
@@ -154,6 +173,15 @@ class ImuSample:
             values, ("imu_valid", "valid"), required=False
         )
         module_value = _mapping_value(values, ("module_id",), required=False)
+        sample_time_value = _mapping_value(
+            values, ("sample_time_us",), required=False
+        )
+        fusion_ticks_value = _mapping_value(
+            values, ("fusion_time_ticks",), required=False
+        )
+        fusion_timer_hz_value = _mapping_value(
+            values, ("fusion_timer_hz",), required=False
+        )
         return cls(
             uptime_ms=uptime_ms,
             accel_body_mps2=accel,
@@ -161,6 +189,17 @@ class ImuSample:
             gyro_body_rps=gyro,
             valid=bool(valid_value) if valid_value is not None else True,
             module_id=int(module_value) if module_value is not None else None,
+            sample_time_us=(
+                int(sample_time_value) if sample_time_value is not None else None
+            ),
+            fusion_time_ticks=(
+                int(fusion_ticks_value) if fusion_ticks_value is not None else None
+            ),
+            fusion_timer_hz=(
+                int(fusion_timer_hz_value)
+                if fusion_timer_hz_value is not None
+                else None
+            ),
         )
 
 
@@ -174,6 +213,7 @@ class RawPosition:
     module_id: int | None = None
     sigma_m: float | None = None
     rms_m: float | None = None
+    sample_time_us: int | None = None
 
     def __post_init__(self) -> None:
         if self.uptime_ms < 0:
@@ -186,11 +226,21 @@ class RawPosition:
             raise ValueError("tag_id must be non-negative")
         if self.module_id is not None and self.module_id < 0:
             raise ValueError("module_id must be non-negative")
+        if self.sample_time_us is not None and self.sample_time_us < 0:
+            raise ValueError("sample_time_us must be non-negative")
         _finite(self.x_m, "raw_x")
         _finite(self.y_m, "raw_y")
         for name, value in (("sigma_m", self.sigma_m), ("rms_m", self.rms_m)):
             if value is not None and _finite(value, name) < 0.0:
                 raise ValueError(f"{name} must be non-negative")
+
+    @property
+    def time_us(self) -> int:
+        return (
+            self.sample_time_us
+            if self.sample_time_us is not None
+            else self.uptime_ms * 1000
+        )
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "RawPosition":
@@ -203,6 +253,9 @@ class RawPosition:
         )
         rms_value = _mapping_value(
             values, ("rms_m", "equation_rms_m"), required=False
+        )
+        sample_time_value = _mapping_value(
+            values, ("sample_time_us",), required=False
         )
         sigma_m = _finite(sigma_value, "sigma_m") if sigma_value is not None else None
         rms_m = _finite(rms_value, "rms_m") if rms_value is not None else None
@@ -225,6 +278,9 @@ class RawPosition:
             module_id=int(module_value) if module_value is not None else None,
             sigma_m=sigma_m,
             rms_m=rms_m,
+            sample_time_us=(
+                int(sample_time_value) if sample_time_value is not None else None
+            ),
         )
 
 
@@ -243,6 +299,7 @@ class FusionConfig:
     yaw_min_straightness: float = 0.95
     yaw_max_course_uncertainty_deg: float = 10.0
     yaw_max_innovation_deg: float = 20.0
+    yaw_alignment_max_age_ms: int = 10000
     yaw_min_segment_m: float = 0.02
     max_accel_integration_gap_ms: int = 50
     imu_gap_reset_ms: int = 300
@@ -250,7 +307,10 @@ class FusionConfig:
     reboot_backstep_ms: int = 50
     cross_stream_reorder_tolerance_ms: int = 50
     min_velocity_correction_dt_s: float = 0.005
-    max_horizontal_accel_mps2: float = 40.0
+    max_horizontal_accel_mps2: float = 15.0
+    high_dynamic_gyro_threshold_rps: float = 2.0
+    high_dynamic_cooldown_ms: int = 500
+    accel_prediction_max_uwb_age_ms: int = 150
     quaternion_soft_norm_min: float = 0.95
     quaternion_soft_norm_max: float = 1.05
     quaternion_hard_norm_min: float = 0.8
@@ -260,8 +320,26 @@ class FusionConfig:
     uwb_sigma_gate_multiplier: float = 4.0
     uwb_rms_gate_multiplier: float = 3.0
     max_velocity_mps: float = 5.0
-    position_reacquire_after_rejects: int = 3
-    position_reacquire_gap_ms: int = 2500
+    position_reacquire_after_rejects: int = 2
+    position_reacquire_gap_ms: int = 500
+    position_reacquire_max_speed_mps: float = 8.0
+    position_reacquire_min_step_gate_m: float = 0.12
+    position_reacquire_quality_multiplier: float = 2.0
+    position_reacquire_probation_positions: int = 3
+    process_accel_noise_mps2: float = 2.5
+    initial_velocity_std_mps: float = 1.0
+    uwb_default_std_m: float = 0.25
+    uwb_min_std_m: float = 0.02
+    uwb_measurement_std_scale: float = 0.6
+    uwb_nis_gate: float = 13.8155
+    stationary_accel_threshold_mps2: float = 0.35
+    stationary_gyro_threshold_rps: float = 0.12
+    stationary_max_speed_mps: float = 0.20
+    stationary_min_duration_ms: int = 400
+    stationary_uwb_window_ms: int = 600
+    stationary_uwb_extent_m: float = 0.12
+    stationary_bias_gain: float = 0.02
+    zupt_velocity_std_mps: float = 0.03
 
     def __post_init__(self) -> None:
         if not (0.0 < self.alpha <= 1.0):
@@ -284,6 +362,8 @@ class FusionConfig:
             raise ValueError("yaw_max_course_uncertainty_deg must be positive")
         if not (0.0 < self.yaw_max_innovation_deg < 180.0):
             raise ValueError("yaw_max_innovation_deg must be in (0, 180)")
+        if self.yaw_alignment_max_age_ms <= 0:
+            raise ValueError("yaw_alignment_max_age_ms must be positive")
         if self.max_accel_integration_gap_ms <= 0:
             raise ValueError("max_accel_integration_gap_ms must be positive")
         if self.imu_gap_reset_ms <= 0 or self.position_gap_reset_ms <= 0:
@@ -296,6 +376,12 @@ class FusionConfig:
             raise ValueError("cross-stream reorder tolerance must be non-negative")
         if self.max_horizontal_accel_mps2 <= 0.0:
             raise ValueError("max_horizontal_accel_mps2 must be positive")
+        if (
+            self.high_dynamic_gyro_threshold_rps <= 0.0
+            or self.high_dynamic_cooldown_ms <= 0
+            or self.accel_prediction_max_uwb_age_ms <= 0
+        ):
+            raise ValueError("high-dynamic thresholds are invalid")
         if not (
             0.0 < self.quaternion_hard_norm_min
             <= self.quaternion_soft_norm_min
@@ -315,6 +401,36 @@ class FusionConfig:
             raise ValueError("position_reacquire_after_rejects must be positive")
         if self.position_reacquire_gap_ms <= 0:
             raise ValueError("position_reacquire_gap_ms must be positive")
+        if (
+            self.position_reacquire_max_speed_mps <= 0.0
+            or self.position_reacquire_min_step_gate_m <= 0.0
+            or self.position_reacquire_quality_multiplier <= 0.0
+            or self.position_reacquire_probation_positions < 0
+        ):
+            raise ValueError("position reacquisition thresholds are invalid")
+        if self.process_accel_noise_mps2 <= 0.0:
+            raise ValueError("process_accel_noise_mps2 must be positive")
+        if self.initial_velocity_std_mps <= 0.0:
+            raise ValueError("initial_velocity_std_mps must be positive")
+        if not (0.0 < self.uwb_min_std_m <= self.uwb_default_std_m):
+            raise ValueError("UWB standard deviations are invalid")
+        if self.uwb_measurement_std_scale <= 0.0:
+            raise ValueError("uwb_measurement_std_scale must be positive")
+        if self.uwb_nis_gate <= 0.0:
+            raise ValueError("uwb_nis_gate must be positive")
+        if (
+            self.stationary_accel_threshold_mps2 <= 0.0
+            or self.stationary_gyro_threshold_rps <= 0.0
+            or self.stationary_max_speed_mps <= 0.0
+            or self.stationary_min_duration_ms <= 0
+            or self.stationary_uwb_window_ms < self.stationary_min_duration_ms
+            or self.stationary_uwb_extent_m <= 0.0
+        ):
+            raise ValueError("stationary thresholds are invalid")
+        if not (0.0 < self.stationary_bias_gain <= 1.0):
+            raise ValueError("stationary_bias_gain must be in (0, 1]")
+        if self.zupt_velocity_std_mps <= 0.0:
+            raise ValueError("zupt_velocity_std_mps must be positive")
 
 
 class UwbImuFusion:
@@ -337,12 +453,16 @@ class UwbImuFusion:
         self._y_m = 0.0
         self._vx_mps = 0.0
         self._vy_mps = 0.0
-        self._state_uptime_ms: int | None = None
+        self._covariance = [[0.0 for _ in range(4)] for _ in range(4)]
+        self._state_time_us: int | None = None
 
-        self._last_imu_uptime_ms: int | None = None
-        self._last_position_uptime_ms: int | None = None
-        self._last_accepted_position_uptime_ms: int | None = None
-        self._last_event_uptime_ms: int | None = None
+        self._last_imu_time_us: int | None = None
+        self._last_position_time_us: int | None = None
+        self._last_accepted_position_time_us: int | None = None
+        self._last_event_time_us: int | None = None
+        self._last_output_uptime_ms: int | None = None
+        self._last_fusion_time_ticks: int | None = None
+        self._last_fusion_timer_hz: int | None = None
         self._last_imu_yaw_ref_rad: float | None = None
         self._last_quaternion_norm: float | None = None
         self._last_linear_ref_mps2: Vector3 | None = None
@@ -354,6 +474,8 @@ class UwbImuFusion:
         self._yaw_alignment_valid = False
         self._yaw_alignment_rad = 0.0
         self._yaw_alignment_updates = 0
+        self._yaw_alignment_source: str | None = None
+        self._last_yaw_alignment_time_us: int | None = None
         self._yaw_window: list[tuple[int, float, float]] = []
         self._last_yaw_window_duration_s: float | None = None
         self._last_yaw_displacement_m: float | None = None
@@ -367,6 +489,22 @@ class UwbImuFusion:
         self._last_uwb_innovation_gate_m: float | None = None
         self._last_position_sigma_m: float | None = None
         self._last_position_rms_m: float | None = None
+        self._last_position_measurement_std_m: float | None = None
+        self._last_position_nis: float | None = None
+        self._accel_bias_ref_mps2: Vector3 = (0.0, 0.0, 0.0)
+        self._accel_bias_valid = False
+        self._stationary_candidate_since_us: int | None = None
+        self._stationary_candidate_sum: list[float] = [0.0, 0.0, 0.0]
+        self._stationary_candidate_count = 0
+        self._stationary = False
+        self._stationary_sample_count = 0
+        self._raw_position_window: list[tuple[int, float, float]] = []
+        self._last_raw_position: RawPosition | None = None
+        self._rejected_position_cluster: list[RawPosition] = []
+        self._reacquire_probation_remaining = 0
+        self._high_dynamic_until_us: int | None = None
+        self._bias_update_count = 0
+        self._zupt_count = 0
         self._last_reset_reason: str | None = None
         self._reset_count = 0
         self._imu_sample_count = 0
@@ -377,6 +515,7 @@ class UwbImuFusion:
         self._position_outlier_count = 0
         self._consecutive_position_outliers = 0
         self._position_reacquisition_count = 0
+        self._position_soft_reacquisition_count = 0
         self._velocity_clamp_count = 0
         self._ordering_reject_count = 0
         self._module_mismatch_count = 0
@@ -395,11 +534,15 @@ class UwbImuFusion:
         self._y_m = 0.0
         self._vx_mps = 0.0
         self._vy_mps = 0.0
-        self._state_uptime_ms = None
-        self._last_imu_uptime_ms = None
-        self._last_position_uptime_ms = None
-        self._last_accepted_position_uptime_ms = None
-        self._last_event_uptime_ms = None
+        self._covariance = [[0.0 for _ in range(4)] for _ in range(4)]
+        self._state_time_us = None
+        self._last_imu_time_us = None
+        self._last_position_time_us = None
+        self._last_accepted_position_time_us = None
+        self._last_event_time_us = None
+        self._last_output_uptime_ms = None
+        self._last_fusion_time_ticks = None
+        self._last_fusion_timer_hz = None
         self._last_imu_yaw_ref_rad = None
         self._last_quaternion_norm = None
         self._last_linear_ref_mps2 = None
@@ -410,6 +553,8 @@ class UwbImuFusion:
         self._yaw_alignment_valid = False
         self._yaw_alignment_rad = 0.0
         self._yaw_alignment_updates = 0
+        self._yaw_alignment_source = None
+        self._last_yaw_alignment_time_us = None
         self._yaw_window = []
         self._last_yaw_window_duration_s = None
         self._last_yaw_displacement_m = None
@@ -422,6 +567,20 @@ class UwbImuFusion:
         self._last_uwb_innovation_gate_m = None
         self._last_position_sigma_m = None
         self._last_position_rms_m = None
+        self._last_position_measurement_std_m = None
+        self._last_position_nis = None
+        self._accel_bias_ref_mps2 = (0.0, 0.0, 0.0)
+        self._accel_bias_valid = False
+        self._stationary_candidate_since_us = None
+        self._stationary_candidate_sum = [0.0, 0.0, 0.0]
+        self._stationary_candidate_count = 0
+        self._stationary = False
+        self._stationary_sample_count = 0
+        self._raw_position_window = []
+        self._last_raw_position = None
+        self._rejected_position_cluster = []
+        self._reacquire_probation_remaining = 0
+        self._high_dynamic_until_us = None
         self._consecutive_position_outliers = 0
         self._last_reset_reason = str(reason)
         self._reset_count += 1
@@ -448,19 +607,18 @@ class UwbImuFusion:
         return True
 
     def _verify_cross_stream_order(
-        self, uptime_ms: int, flags: list[str]
+        self, time_us: int, flags: list[str]
     ) -> bool:
+        tolerance_us = self.config.cross_stream_reorder_tolerance_ms * 1000
         if (
-            self._last_event_uptime_ms is not None
-            and uptime_ms
-            < self._last_event_uptime_ms
-            - self.config.cross_stream_reorder_tolerance_ms
+            self._last_event_time_us is not None
+            and time_us < self._last_event_time_us - tolerance_us
         ):
             self._ordering_reject_count += 1
             flags.append("event_out_of_order")
             return False
-        if self._last_event_uptime_ms is None or uptime_ms > self._last_event_uptime_ms:
-            self._last_event_uptime_ms = uptime_ms
+        if self._last_event_time_us is None or time_us > self._last_event_time_us:
+            self._last_event_time_us = time_us
         return True
 
     def _clamp_velocity(self, flags: list[str]) -> None:
@@ -490,6 +648,277 @@ class UwbImuFusion:
             self.config.uwb_default_innovation_gate_m,
         )
 
+    def _uwb_measurement_std(self, position: RawPosition) -> float:
+        candidates = [
+            value
+            for value in (position.sigma_m, position.rms_m)
+            if value is not None and value > 0.0
+        ]
+        estimate = max(candidates) if candidates else self.config.uwb_default_std_m
+        estimate *= self.config.uwb_measurement_std_scale
+        return max(self.config.uwb_min_std_m, estimate)
+
+    def _state_vector(self) -> list[float]:
+        return [self._x_m, self._y_m, self._vx_mps, self._vy_mps]
+
+    def _set_state_vector(self, state: Sequence[float]) -> None:
+        self._x_m, self._y_m, self._vx_mps, self._vy_mps = (
+            float(state[0]),
+            float(state[1]),
+            float(state[2]),
+            float(state[3]),
+        )
+
+    def _kalman_update_pair(
+        self,
+        indices: tuple[int, int],
+        residual: tuple[float, float],
+        variance: float,
+        *,
+        apply: bool,
+    ) -> float:
+        first, second = indices
+        covariance = self._covariance
+        s00 = covariance[first][first] + variance
+        s01 = covariance[first][second]
+        s10 = covariance[second][first]
+        s11 = covariance[second][second] + variance
+        determinant = s00 * s11 - s01 * s10
+        if determinant <= 1e-18:
+            return math.inf
+        inv00 = s11 / determinant
+        inv01 = -s01 / determinant
+        inv10 = -s10 / determinant
+        inv11 = s00 / determinant
+        rx, ry = residual
+        nis = rx * (inv00 * rx + inv01 * ry) + ry * (
+            inv10 * rx + inv11 * ry
+        )
+        if not apply:
+            return nis
+
+        gain = [[0.0, 0.0] for _ in range(4)]
+        for row in range(4):
+            p0 = covariance[row][first]
+            p1 = covariance[row][second]
+            gain[row][0] = p0 * inv00 + p1 * inv10
+            gain[row][1] = p0 * inv01 + p1 * inv11
+
+        state = self._state_vector()
+        for row in range(4):
+            state[row] += gain[row][0] * rx + gain[row][1] * ry
+        self._set_state_vector(state)
+
+        identity_minus_kh = [
+            [1.0 if row == column else 0.0 for column in range(4)]
+            for row in range(4)
+        ]
+        for row in range(4):
+            identity_minus_kh[row][first] -= gain[row][0]
+            identity_minus_kh[row][second] -= gain[row][1]
+        left = [
+            [
+                sum(identity_minus_kh[row][k] * covariance[k][column] for k in range(4))
+                for column in range(4)
+            ]
+            for row in range(4)
+        ]
+        joseph = [
+            [
+                sum(left[row][k] * identity_minus_kh[column][k] for k in range(4))
+                + variance
+                * (
+                    gain[row][0] * gain[column][0]
+                    + gain[row][1] * gain[column][1]
+                )
+                for column in range(4)
+            ]
+            for row in range(4)
+        ]
+        self._covariance = [
+            [
+                max(0.0, joseph[row][column])
+                if row == column
+                else 0.5 * (joseph[row][column] + joseph[column][row])
+                for column in range(4)
+            ]
+            for row in range(4)
+        ]
+        return nis
+
+    def _zero_velocity_update(self, flags: list[str]) -> None:
+        variance = self.config.zupt_velocity_std_mps**2
+        self._kalman_update_pair(
+            (2, 3), (-self._vx_mps, -self._vy_mps), variance, apply=True
+        )
+        self._zupt_count += 1
+        flags.append("zero_velocity_update")
+
+    def _append_raw_position(self, position: RawPosition) -> None:
+        point = (position.time_us, position.x_m, position.y_m)
+        self._raw_position_window.append(point)
+        cutoff_us = position.time_us - self.config.stationary_uwb_window_ms * 1000
+        while (
+            len(self._raw_position_window) > 1
+            and self._raw_position_window[0][0] < cutoff_us
+        ):
+            self._raw_position_window.pop(0)
+
+    def _uwb_confirms_stationary(self, time_us: int) -> bool:
+        if len(self._raw_position_window) < 2:
+            return False
+        first_time_us = self._raw_position_window[0][0]
+        latest_time_us = self._raw_position_window[-1][0]
+        if time_us - latest_time_us > self.config.stationary_uwb_window_ms * 1000:
+            return False
+        if (
+            latest_time_us - first_time_us
+            < self.config.stationary_min_duration_ms * 1000
+        ):
+            return False
+        xs = [point[1] for point in self._raw_position_window]
+        ys = [point[2] for point in self._raw_position_window]
+        return (
+            max(xs) - min(xs) <= self.config.stationary_uwb_extent_m
+            and max(ys) - min(ys) <= self.config.stationary_uwb_extent_m
+        )
+
+    @staticmethod
+    def _position_quality_m(position: RawPosition) -> float:
+        candidates = [
+            value
+            for value in (position.sigma_m, position.rms_m)
+            if value is not None and value > 0.0
+        ]
+        return max(candidates) if candidates else 0.0
+
+    def _rejected_cluster_is_coherent(self) -> bool:
+        required = self.config.position_reacquire_after_rejects
+        if len(self._rejected_position_cluster) < required:
+            return False
+        previous = self._rejected_position_cluster[-2]
+        current = self._rejected_position_cluster[-1]
+        delta_us = current.time_us - previous.time_us
+        if delta_us <= 0:
+            return False
+        step_m = math.hypot(
+            current.x_m - previous.x_m,
+            current.y_m - previous.y_m,
+        )
+        quality_gate_m = self.config.position_reacquire_quality_multiplier * max(
+            self._position_quality_m(previous),
+            self._position_quality_m(current),
+        )
+        step_gate_m = max(
+            self.config.position_reacquire_min_step_gate_m,
+            quality_gate_m,
+        )
+        implied_speed_mps = step_m / (delta_us / 1_000_000.0)
+        return (
+            step_m <= step_gate_m
+            and implied_speed_mps <= self.config.position_reacquire_max_speed_mps
+        )
+
+    def _soft_reacquire_position(
+        self, position: RawPosition, flags: list[str]
+    ) -> None:
+        """Re-anchor kinematics without discarding IMU calibration state."""
+
+        measurement_std_m = self._uwb_measurement_std(position)
+        position_variance = measurement_std_m**2
+        velocity_variance = self.config.initial_velocity_std_mps**2
+        self._x_m = position.x_m
+        self._y_m = position.y_m
+        # Two samples are enough to establish a coherent displaced cluster,
+        # but not a low-noise velocity at 20--100 Hz.  Re-anchor position and
+        # let subsequent accepted measurements rebuild velocity safely.
+        self._vx_mps = 0.0
+        self._vy_mps = 0.0
+        self._covariance = [
+            [position_variance, 0.0, 0.0, 0.0],
+            [0.0, position_variance, 0.0, 0.0],
+            [0.0, 0.0, velocity_variance, 0.0],
+            [0.0, 0.0, 0.0, velocity_variance],
+        ]
+        self._state_time_us = position.time_us
+        self._last_accepted_position_time_us = position.time_us
+        self._last_position_measurement_std_m = measurement_std_m
+        self._last_position_residual_m = 0.0
+        self._last_position_nis = 0.0
+        self._consecutive_position_outliers = 0
+        self._rejected_position_cluster = []
+        self._reacquire_probation_remaining = (
+            self.config.position_reacquire_probation_positions
+        )
+        # Preserve the learned yaw offset and accelerometer bias, but restart
+        # the motion-derived yaw window at the new coherent location.
+        self._yaw_window = [(position.time_us, position.x_m, position.y_m)]
+        self._position_accepted_count += 1
+        self._position_reacquisition_count += 1
+        self._position_soft_reacquisition_count += 1
+        flags.extend(("position_reacquired", "position_soft_reacquired"))
+
+    def _stationary_corrected_accel(
+        self,
+        time_us: int,
+        linear_ref: Vector3,
+        gyro: Vector3,
+        flags: list[str],
+    ) -> Vector3:
+        corrected_before = tuple(
+            linear_ref[index] - self._accel_bias_ref_mps2[index]
+            for index in range(3)
+        )
+        accel_magnitude = math.sqrt(sum(value * value for value in corrected_before))
+        gyro_magnitude = math.sqrt(sum(value * value for value in gyro))
+        stationary_candidate = (
+            accel_magnitude <= self.config.stationary_accel_threshold_mps2
+            and gyro_magnitude <= self.config.stationary_gyro_threshold_rps
+            and math.hypot(self._vx_mps, self._vy_mps)
+            <= self.config.stationary_max_speed_mps
+            and self._uwb_confirms_stationary(time_us)
+        )
+        if not stationary_candidate:
+            self._stationary_candidate_since_us = None
+            self._stationary_candidate_sum = [0.0, 0.0, 0.0]
+            self._stationary_candidate_count = 0
+            self._stationary = False
+            flags.append("motion_detected")
+            return corrected_before  # type: ignore[return-value]
+
+        if self._stationary_candidate_since_us is None:
+            self._stationary_candidate_since_us = time_us
+            self._stationary_candidate_sum = list(linear_ref)
+            self._stationary_candidate_count = 1
+        else:
+            for index in range(3):
+                self._stationary_candidate_sum[index] += linear_ref[index]
+            self._stationary_candidate_count += 1
+        duration_us = time_us - self._stationary_candidate_since_us
+        if duration_us < self.config.stationary_min_duration_ms * 1000:
+            flags.append("stationary_pending")
+            return corrected_before  # type: ignore[return-value]
+
+        if not self._stationary:
+            count = max(1, self._stationary_candidate_count)
+            self._accel_bias_ref_mps2 = tuple(
+                value / count for value in self._stationary_candidate_sum
+            )  # type: ignore[assignment]
+            self._accel_bias_valid = True
+            self._stationary = True
+            flags.append("stationary_initialized")
+        else:
+            gain = self.config.stationary_bias_gain
+            self._accel_bias_ref_mps2 = tuple(
+                (1.0 - gain) * self._accel_bias_ref_mps2[index]
+                + gain * linear_ref[index]
+                for index in range(3)
+            )  # type: ignore[assignment]
+        self._stationary_sample_count += 1
+        self._bias_update_count += 1
+        flags.extend(("stationary", "accel_bias_updated"))
+        return (0.0, 0.0, 0.0)
+
     def _initialize_position(
         self, position: RawPosition, flags: list[str]
     ) -> None:
@@ -497,46 +926,101 @@ class UwbImuFusion:
 
         self._protocol = position.protocol
         self._tag_id = position.tag_id
-        self._last_position_uptime_ms = position.uptime_ms
+        self._last_position_time_us = position.time_us
         self._last_position_sigma_m = position.sigma_m
         self._last_position_rms_m = position.rms_m
+        self._last_position_measurement_std_m = self._uwb_measurement_std(position)
         self._last_uwb_innovation_gate_m = self._uwb_innovation_gate(position)
         self._x_m = position.x_m
         self._y_m = position.y_m
         self._vx_mps = 0.0
         self._vy_mps = 0.0
-        self._state_uptime_ms = position.uptime_ms
-        self._last_event_uptime_ms = position.uptime_ms
+        position_variance = self._last_position_measurement_std_m**2
+        velocity_variance = self.config.initial_velocity_std_mps**2
+        self._covariance = [
+            [position_variance, 0.0, 0.0, 0.0],
+            [0.0, position_variance, 0.0, 0.0],
+            [0.0, 0.0, velocity_variance, 0.0],
+            [0.0, 0.0, 0.0, velocity_variance],
+        ]
+        self._state_time_us = position.time_us
+        self._last_event_time_us = position.time_us
+        self._last_output_uptime_ms = position.uptime_ms
         self._ready = True
-        self._last_accepted_position_uptime_ms = position.uptime_ms
+        self._last_accepted_position_time_us = position.time_us
         self._last_position_dt_s = None
         self._last_position_residual_m = 0.0
+        self._last_position_nis = 0.0
         self._consecutive_position_outliers = 0
+        self._rejected_position_cluster = []
+        self._reacquire_probation_remaining = 0
         self._position_accepted_count += 1
         self._update_yaw_alignment(position, flags)
         flags.append("position_initialized")
 
     def _predict_to(
         self,
-        uptime_ms: int,
+        time_us: int,
         acceleration_uwb_mps2: tuple[float, float] | None,
     ) -> bool:
         if not self._ready:
             return False
-        if self._state_uptime_ms is None:
-            self._state_uptime_ms = uptime_ms
+        if self._state_time_us is None:
+            self._state_time_us = time_us
             return False
-        delta_ms = uptime_ms - self._state_uptime_ms
-        if delta_ms <= 0:
+        delta_us = time_us - self._state_time_us
+        if delta_us <= 0:
             return False
 
-        dt = delta_ms / 1000.0
+        dt = delta_us / 1_000_000.0
         ax, ay = acceleration_uwb_mps2 or (0.0, 0.0)
         self._x_m += self._vx_mps * dt + 0.5 * ax * dt * dt
         self._y_m += self._vy_mps * dt + 0.5 * ay * dt * dt
         self._vx_mps += ax * dt
         self._vy_mps += ay * dt
-        self._state_uptime_ms = uptime_ms
+        transition = [
+            [1.0, 0.0, dt, 0.0],
+            [0.0, 1.0, 0.0, dt],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+        covariance = self._covariance
+        left = [
+            [
+                sum(transition[row][k] * covariance[k][column] for k in range(4))
+                for column in range(4)
+            ]
+            for row in range(4)
+        ]
+        predicted = [
+            [
+                sum(left[row][k] * transition[column][k] for k in range(4))
+                for column in range(4)
+            ]
+            for row in range(4)
+        ]
+        accel_variance = self.config.process_accel_noise_mps2**2
+        half_dt_squared = 0.5 * dt * dt
+        noise_vectors = (
+            (half_dt_squared, 0.0, dt, 0.0),
+            (0.0, half_dt_squared, 0.0, dt),
+        )
+        for noise in noise_vectors:
+            for row in range(4):
+                for column in range(4):
+                    predicted[row][column] += (
+                        accel_variance * noise[row] * noise[column]
+                    )
+        self._covariance = [
+            [
+                max(0.0, predicted[row][column])
+                if row == column
+                else 0.5 * (predicted[row][column] + predicted[column][row])
+                for column in range(4)
+            ]
+            for row in range(4)
+        ]
+        self._state_time_us = time_us
         return acceleration_uwb_mps2 is not None
 
     def _aligned_horizontal_accel(self, linear_ref: Vector3) -> Vector3:
@@ -552,42 +1036,48 @@ class UwbImuFusion:
         imu = sample if isinstance(sample, ImuSample) else ImuSample.from_mapping(sample)
         flags: list[str] = []
         self._imu_sample_count += 1
+        imu_time_us = imu.time_us
+        self._last_output_uptime_ms = imu.uptime_ms
 
         if not self._verify_module(imu.module_id, flags):
             return self._output(imu.uptime_ms, flags)
 
-        if self._last_imu_uptime_ms is not None:
-            backstep_ms = self._last_imu_uptime_ms - imu.uptime_ms
-            if backstep_ms > self.config.reboot_backstep_ms:
-                flags.extend(self._reset_state("imu_uptime_reboot"))
-            elif backstep_ms > 0:
+        if self._last_imu_time_us is not None:
+            backstep_us = self._last_imu_time_us - imu_time_us
+            if backstep_us > self.config.reboot_backstep_ms * 1000:
+                flags.extend(self._reset_state("imu_time_reboot"))
+                self._last_output_uptime_ms = imu.uptime_ms
+            elif backstep_us > 0:
                 self._ordering_reject_count += 1
                 flags.append("imu_out_of_order")
                 return self._output(imu.uptime_ms, flags)
-            elif backstep_ms == 0:
+            elif backstep_us == 0:
                 self._ordering_reject_count += 1
-                flags.append("imu_duplicate_uptime")
+                flags.append("imu_duplicate_time")
                 return self._output(imu.uptime_ms, flags)
 
-        if self._last_imu_uptime_ms is not None:
-            gap_ms = imu.uptime_ms - self._last_imu_uptime_ms
-            if gap_ms > self.config.imu_gap_reset_ms:
+        if self._last_imu_time_us is not None:
+            gap_us = imu_time_us - self._last_imu_time_us
+            if gap_us > self.config.imu_gap_reset_ms * 1000:
                 flags.extend(self._reset_state("imu_gap"))
+                self._last_output_uptime_ms = imu.uptime_ms
 
-        if not self._verify_cross_stream_order(imu.uptime_ms, flags):
+        if not self._verify_cross_stream_order(imu_time_us, flags):
             return self._output(imu.uptime_ms, flags)
 
-        previous_imu_ms = self._last_imu_uptime_ms
-        self._last_imu_uptime_ms = imu.uptime_ms
+        previous_imu_us = self._last_imu_time_us
+        self._last_imu_time_us = imu_time_us
+        self._last_fusion_time_ticks = imu.fusion_time_ticks
+        self._last_fusion_timer_hz = imu.fusion_timer_hz
         self._last_imu_dt_s = (
-            (imu.uptime_ms - previous_imu_ms) / 1000.0
-            if previous_imu_ms is not None
+            (imu_time_us - previous_imu_us) / 1_000_000.0
+            if previous_imu_us is not None
             else None
         )
 
         if not imu.valid:
             self._imu_invalid_count += 1
-            self._predict_to(imu.uptime_ms, None)
+            self._predict_to(imu_time_us, None)
             self._last_linear_ref_mps2 = None
             self._last_linear_uwb_mps2 = None
             flags.append("imu_invalid")
@@ -615,7 +1105,7 @@ class UwbImuFusion:
             )
         except ValueError:
             self._imu_invalid_count += 1
-            self._predict_to(imu.uptime_ms, None)
+            self._predict_to(imu_time_us, None)
             self._last_linear_ref_mps2 = None
             self._last_linear_uwb_mps2 = None
             flags.extend(
@@ -629,14 +1119,58 @@ class UwbImuFusion:
             <= self.config.quaternion_soft_norm_max
         ):
             flags.append("quaternion_norm_soft_warning")
-        self._last_linear_ref_mps2 = linear_ref
         self._last_gyro_body_rps = gyro  # type: ignore[assignment]
         self._last_imu_yaw_ref_rad = quaternion_yaw_radians(quaternion)
         flags.extend(("imu_valid", "orientation_valid"))
+        corrected_linear_ref = self._stationary_corrected_accel(
+            imu_time_us,
+            linear_ref,
+            gyro,  # type: ignore[arg-type]
+            flags,
+        )
+        self._last_linear_ref_mps2 = corrected_linear_ref
+
+        linear_accel_magnitude = math.sqrt(
+            sum(value * value for value in corrected_linear_ref)
+        )
+        gyro_magnitude = math.sqrt(sum(value * value for value in gyro))
+        if (
+            linear_accel_magnitude > self.config.max_horizontal_accel_mps2
+            or gyro_magnitude > self.config.high_dynamic_gyro_threshold_rps
+        ):
+            self._high_dynamic_until_us = max(
+                self._high_dynamic_until_us or 0,
+                imu_time_us + self.config.high_dynamic_cooldown_ms * 1000,
+            )
+            flags.append("high_dynamic_detected")
+        high_dynamic = (
+            self._high_dynamic_until_us is not None
+            and imu_time_us < self._high_dynamic_until_us
+        )
+
+        yaw_recent = (
+            self._last_yaw_alignment_time_us is not None
+            and imu_time_us - self._last_yaw_alignment_time_us
+            <= self.config.yaw_alignment_max_age_ms * 1000
+        )
+        uwb_recent = (
+            self._last_accepted_position_time_us is not None
+            and 0
+            <= imu_time_us - self._last_accepted_position_time_us
+            <= self.config.accel_prediction_max_uwb_age_ms * 1000
+        )
+        accel_confident = (
+            self._yaw_alignment_valid
+            and yaw_recent
+            and self._accel_bias_valid
+            and uwb_recent
+            and self._reacquire_probation_remaining == 0
+            and not high_dynamic
+        )
 
         aligned: Vector3 | None = None
-        if self._yaw_alignment_valid:
-            candidate = self._aligned_horizontal_accel(linear_ref)
+        if accel_confident:
+            candidate = self._aligned_horizontal_accel(corrected_linear_ref)
             horizontal_magnitude = math.hypot(candidate[0], candidate[1])
             if horizontal_magnitude <= self.config.max_horizontal_accel_mps2:
                 aligned = candidate
@@ -647,45 +1181,58 @@ class UwbImuFusion:
                 flags.append("accel_rejected_limit")
         else:
             self._last_linear_uwb_mps2 = None
-            flags.append("yaw_unaligned")
+            if not self._yaw_alignment_valid:
+                flags.append("yaw_unaligned")
+            elif not yaw_recent:
+                flags.append("accel_blocked_yaw_stale")
+            elif not self._accel_bias_valid:
+                flags.append("accel_blocked_bias_uncalibrated")
+            elif not uwb_recent:
+                flags.append("accel_blocked_uwb_stale")
+            elif self._reacquire_probation_remaining > 0:
+                flags.append("accel_blocked_reacquire_probation")
+            elif high_dynamic:
+                flags.append("accel_blocked_high_dynamic")
 
-        imu_delta_ms = (
-            imu.uptime_ms - previous_imu_ms if previous_imu_ms is not None else None
+        imu_delta_us = (
+            imu_time_us - previous_imu_us if previous_imu_us is not None else None
         )
         accel_gap_valid = (
-            imu_delta_ms is not None
-            and 0 < imu_delta_ms <= self.config.max_accel_integration_gap_ms
+            imu_delta_us is not None
+            and 0 < imu_delta_us <= self.config.max_accel_integration_gap_ms * 1000
         )
         acceleration_xy = (
             (aligned[0], aligned[1])
             if aligned is not None and accel_gap_valid
             else None
         )
-        if self._predict_to(imu.uptime_ms, acceleration_xy):
+        if self._predict_to(imu_time_us, acceleration_xy):
             flags.append("imu_propagated")
         elif self._ready:
             flags.append("constant_velocity_propagated")
-            if previous_imu_ms is None:
+            if previous_imu_us is None:
                 flags.append("imu_accel_warmup_cv_only")
             elif not accel_gap_valid:
                 flags.append("imu_accel_gap_cv_only")
+        if self._stationary and self._ready:
+            self._zero_velocity_update(flags)
         self._clamp_velocity(flags)
         return self._output(imu.uptime_ms, flags)
 
     def _update_yaw_alignment(
         self, position: RawPosition, flags: list[str]
     ) -> None:
-        point = (position.uptime_ms, position.x_m, position.y_m)
+        point = (position.time_us, position.x_m, position.y_m)
         self._yaw_window.append(point)
-        cutoff_ms = position.uptime_ms - self.config.yaw_max_window_ms
-        while len(self._yaw_window) > 1 and self._yaw_window[0][0] < cutoff_ms:
+        cutoff_us = position.time_us - self.config.yaw_max_window_ms * 1000
+        while len(self._yaw_window) > 1 and self._yaw_window[0][0] < cutoff_us:
             self._yaw_window.pop(0)
         if len(self._yaw_window) < 2:
             flags.append("yaw_anchor_initialized")
             return
 
         first = self._yaw_window[0]
-        duration_s = (position.uptime_ms - first[0]) / 1000.0
+        duration_s = (position.time_us - first[0]) / 1_000_000.0
         dx = position.x_m - first[1]
         dy = position.y_m - first[2]
         displacement = math.hypot(dx, dy)
@@ -740,10 +1287,10 @@ class UwbImuFusion:
             return
 
         imu_fresh = (
-            self._last_imu_uptime_ms is not None
+            self._last_imu_time_us is not None
             and self._last_imu_yaw_ref_rad is not None
-            and abs(position.uptime_ms - self._last_imu_uptime_ms)
-            <= self.config.yaw_max_imu_age_ms
+            and abs(position.time_us - self._last_imu_time_us)
+            <= self.config.yaw_max_imu_age_ms * 1000
         )
         if not imu_fresh:
             reject("stale_imu")
@@ -775,9 +1322,55 @@ class UwbImuFusion:
             self._yaw_alignment_valid = True
             flags.append("yaw_alignment_initialized")
         self._yaw_alignment_updates += 1
+        self._yaw_alignment_source = "uwb_motion"
+        self._last_yaw_alignment_time_us = position.time_us
         self._last_yaw_reject_reason = None
         self._yaw_window = [point]
         flags.extend(("yaw_aligned", "yaw_motion_assumes_body_forward_x"))
+
+    def align_yaw_from_heading(
+        self, uwb_heading_rad: float, *, source: str = "external_heading"
+    ) -> dict[str, Any]:
+        """Align BNO reference yaw to an absolute heading in the UWB frame."""
+
+        flags: list[str] = []
+        heading = _finite(uwb_heading_rad, "uwb_heading_rad")
+        if self._last_imu_yaw_ref_rad is None:
+            flags.append("yaw_reference_rejected:no_imu")
+            return self._output(self._last_output_uptime_ms, flags)
+        if (
+            self._last_gyro_body_rps is None
+            or abs(self._last_gyro_body_rps[2])
+            >= self.config.yaw_max_abs_gyro_z_rps
+        ):
+            flags.append("yaw_reference_rejected:gyro_z")
+            return self._output(self._last_output_uptime_ms, flags)
+
+        candidate = wrap_angle_radians(
+            heading - self._last_imu_yaw_ref_rad
+        )
+        if self._yaw_alignment_valid:
+            error = wrap_angle_radians(candidate - self._yaw_alignment_rad)
+            self._last_yaw_innovation_deg = abs(math.degrees(error))
+            if self._last_yaw_innovation_deg > self.config.yaw_max_innovation_deg:
+                flags.append("yaw_reference_rejected:innovation")
+                return self._output(self._last_output_uptime_ms, flags)
+            self._yaw_alignment_rad = wrap_angle_radians(
+                self._yaw_alignment_rad
+                + self.config.yaw_alignment_gain * error
+            )
+            flags.append("yaw_alignment_updated")
+        else:
+            self._yaw_alignment_rad = candidate
+            self._yaw_alignment_valid = True
+            self._last_yaw_innovation_deg = 0.0
+            flags.append("yaw_alignment_initialized")
+        self._yaw_alignment_updates += 1
+        self._yaw_alignment_source = str(source)
+        self._last_yaw_alignment_time_us = self._last_imu_time_us
+        self._last_yaw_reject_reason = None
+        flags.extend(("yaw_aligned", f"yaw_source:{source}"))
+        return self._output(self._last_output_uptime_ms, flags)
 
     def update_position(
         self, sample: RawPosition | Mapping[str, Any]
@@ -789,21 +1382,24 @@ class UwbImuFusion:
         )
         flags: list[str] = []
         self._position_sample_count += 1
+        position_time_us = position.time_us
+        self._last_output_uptime_ms = position.uptime_ms
 
         if not self._verify_module(position.module_id, flags):
             return self._output(position.uptime_ms, flags)
 
-        if self._last_position_uptime_ms is not None:
-            backstep_ms = self._last_position_uptime_ms - position.uptime_ms
-            if backstep_ms > self.config.reboot_backstep_ms:
-                flags.extend(self._reset_state("position_uptime_reboot"))
-            elif backstep_ms > 0:
+        if self._last_position_time_us is not None:
+            backstep_us = self._last_position_time_us - position_time_us
+            if backstep_us > self.config.reboot_backstep_ms * 1000:
+                flags.extend(self._reset_state("position_time_reboot"))
+                self._last_output_uptime_ms = position.uptime_ms
+            elif backstep_us > 0:
                 self._ordering_reject_count += 1
                 flags.append("position_out_of_order")
                 return self._output(position.uptime_ms, flags)
-            elif backstep_ms == 0:
+            elif backstep_us == 0:
                 self._ordering_reject_count += 1
-                flags.append("position_duplicate_uptime")
+                flags.append("position_duplicate_time")
                 return self._output(position.uptime_ms, flags)
 
         if self._protocol is not None and position.protocol != self._protocol:
@@ -811,87 +1407,132 @@ class UwbImuFusion:
         elif self._tag_id is not None and position.tag_id != self._tag_id:
             flags.extend(self._reset_state("tag_changed"))
 
-        if self._last_position_uptime_ms is not None:
-            gap_ms = position.uptime_ms - self._last_position_uptime_ms
-            if gap_ms > self.config.position_gap_reset_ms:
+        if self._last_position_time_us is not None:
+            gap_us = position_time_us - self._last_position_time_us
+            if gap_us > self.config.position_gap_reset_ms * 1000:
                 flags.extend(self._reset_state("position_gap"))
+                self._last_output_uptime_ms = position.uptime_ms
 
-        if not self._verify_cross_stream_order(position.uptime_ms, flags):
+        if not self._verify_cross_stream_order(position_time_us, flags):
             return self._output(position.uptime_ms, flags)
 
         self._protocol = position.protocol
         self._tag_id = position.tag_id
-        self._last_position_uptime_ms = position.uptime_ms
+        previous_raw_position = self._last_raw_position
+        self._last_raw_position = position
+        self._append_raw_position(position)
+        self._last_position_time_us = position_time_us
         self._last_position_sigma_m = position.sigma_m
         self._last_position_rms_m = position.rms_m
+        self._last_position_measurement_std_m = self._uwb_measurement_std(position)
         self._last_uwb_innovation_gate_m = self._uwb_innovation_gate(position)
 
         if not self._ready:
             self._initialize_position(position, flags)
             return self._output(position.uptime_ms, flags)
 
-        self._predict_to(position.uptime_ms, None)
+        self._predict_to(position_time_us, None)
         residual_x = position.x_m - self._x_m
         residual_y = position.y_m - self._y_m
         self._last_position_residual_m = math.hypot(residual_x, residual_y)
-        if self._last_position_residual_m > self._last_uwb_innovation_gate_m:
+        measurement_variance = self._last_position_measurement_std_m**2
+        self._last_position_nis = self._kalman_update_pair(
+            (0, 1),
+            (residual_x, residual_y),
+            measurement_variance,
+            apply=False,
+        )
+        if (
+            self._last_position_residual_m > self._last_uwb_innovation_gate_m
+            or self._last_position_nis > self.config.uwb_nis_gate
+        ):
             self._position_outlier_count += 1
             self._consecutive_position_outliers += 1
+            if (
+                not self._rejected_position_cluster
+                and previous_raw_position is not None
+            ):
+                self._rejected_position_cluster.append(previous_raw_position)
+            self._rejected_position_cluster.append(position)
+            keep = max(2, self.config.position_reacquire_after_rejects)
+            if len(self._rejected_position_cluster) > keep:
+                self._rejected_position_cluster = self._rejected_position_cluster[-keep:]
             flags.extend(("uwb_outlier_rejected", "position_prediction_only"))
-            accepted_gap_ms = (
-                position.uptime_ms - self._last_accepted_position_uptime_ms
-                if self._last_accepted_position_uptime_ms is not None
+            accepted_gap_us = (
+                position_time_us - self._last_accepted_position_time_us
+                if self._last_accepted_position_time_us is not None
                 else None
             )
-            reacquire_reason = None
-            if (
+            cluster_ready = (
                 self._consecutive_position_outliers
                 >= self.config.position_reacquire_after_rejects
-            ):
-                reacquire_reason = "position_outlier_streak"
-            elif (
-                accepted_gap_ms is not None
-                and accepted_gap_ms >= self.config.position_reacquire_gap_ms
-            ):
-                reacquire_reason = "position_acceptance_gap"
-            if reacquire_reason is not None:
-                # The gate still identifies and counts the incompatible
-                # measurement.  Once the prediction has repeatedly disagreed
-                # with UWB, however, retaining it indefinitely is less safe
-                # than re-acquiring the measured track with zero velocity.
-                self._position_reacquisition_count += 1
-                flags.extend(self._reset_state(reacquire_reason))
-                self._initialize_position(position, flags)
-                flags.extend(("position_reacquired", f"reacquire:{reacquire_reason}"))
+                and self._rejected_cluster_is_coherent()
+            )
+            acceptance_gap_ready = (
+                accepted_gap_us is not None
+                and accepted_gap_us >= self.config.position_reacquire_gap_ms * 1000
+            )
+            if cluster_ready or acceptance_gap_ready:
+                reason = (
+                    "position_acceptance_gap"
+                    if acceptance_gap_ready
+                    else "coherent_outlier_cluster"
+                )
+                self._soft_reacquire_position(position, flags)
+                flags.append(f"reacquire:{reason}")
                 return self._output(position.uptime_ms, flags)
             self._clamp_velocity(flags)
+            if not self._stationary:
+                # Keep the public correction sample equal to the raw dynamic
+                # measurement while retaining the rejected prediction only as
+                # internal state.  This guarantees that fusion cannot amplify
+                # a disputed sample; prediction still fills the radio gap.
+                flags.append("moving_uwb_position_authoritative")
+                output = self._output(position.uptime_ms, flags)
+                output["x"] = position.x_m
+                output["y"] = position.y_m
+                return output
             return self._output(position.uptime_ms, flags)
 
         self._consecutive_position_outliers = 0
-        previous_accepted_ms = self._last_accepted_position_uptime_ms
-        self._last_accepted_position_uptime_ms = position.uptime_ms
+        self._rejected_position_cluster = []
+        if self._reacquire_probation_remaining > 0:
+            self._reacquire_probation_remaining -= 1
+        previous_accepted_us = self._last_accepted_position_time_us
+        self._last_accepted_position_time_us = position_time_us
         self._last_position_dt_s = (
-            (position.uptime_ms - previous_accepted_ms) / 1000.0
-            if previous_accepted_ms is not None
+            (position_time_us - previous_accepted_us) / 1_000_000.0
+            if previous_accepted_us is not None
             else None
         )
         self._position_accepted_count += 1
         self._update_yaw_alignment(position, flags)
-        self._x_m += self.config.alpha * residual_x
-        self._y_m += self.config.alpha * residual_y
-        correction_dt = self._last_position_dt_s
+        previous_velocity = (self._vx_mps, self._vy_mps)
+        self._kalman_update_pair(
+            (0, 1),
+            (residual_x, residual_y),
+            measurement_variance,
+            apply=True,
+        )
         if (
-            correction_dt is not None
-            and correction_dt >= self.config.min_velocity_correction_dt_s
+            abs(self._vx_mps - previous_velocity[0]) > 1e-12
+            or abs(self._vy_mps - previous_velocity[1]) > 1e-12
         ):
-            self._vx_mps += self.config.beta * residual_x / correction_dt
-            self._vy_mps += self.config.beta * residual_y / correction_dt
             flags.append("velocity_corrected")
         else:
-            flags.append("velocity_correction_skipped_dt")
+            flags.append("velocity_correction_negligible")
         self._clamp_velocity(flags)
+        if not self._stationary:
+            # A causal low-pass position state necessarily lags a moving tag.
+            # Keep every accepted raw UWB correction authoritative while the
+            # IMU/CV state bridges only the intervals between corrections.
+            # Once UWB independently confirms rest, retain the EKF correction
+            # so the static cloud still benefits from noise reduction.
+            self._x_m = position.x_m
+            self._y_m = position.y_m
+            flags.append("moving_uwb_position_authoritative")
         self._position_correction_count += 1
-        flags.append("position_corrected")
+        flags.extend(("position_corrected", "ekf_corrected"))
         if self._yaw_alignment_valid:
             flags.append("yaw_aligned")
         return self._output(position.uptime_ms, flags)
@@ -899,11 +1540,12 @@ class UwbImuFusion:
     def snapshot(self) -> dict[str, Any]:
         """Return the current fused state without advancing it."""
 
-        return self._output(self._state_uptime_ms, ["snapshot"])
+        return self._output(self._last_output_uptime_ms, ["snapshot"])
 
     def _diagnostics(self) -> dict[str, Any]:
         return {
             "ready": self._ready,
+            "filter": "ekf_cv_accel_zupt",
             "frame": "UWB horizontal; BNO reference yaw-aligned, not ENU-calibrated",
             "yaw_alignment_assumption": "body +X follows UWB displacement",
             "module_id": self._module_id,
@@ -917,6 +1559,12 @@ class UwbImuFusion:
             "position_outliers": self._position_outlier_count,
             "consecutive_position_outliers": self._consecutive_position_outliers,
             "position_reacquisitions": self._position_reacquisition_count,
+            "position_soft_reacquisitions": (
+                self._position_soft_reacquisition_count
+            ),
+            "reacquire_probation_remaining": (
+                self._reacquire_probation_remaining
+            ),
             "velocity_clamps": self._velocity_clamp_count,
             "ordering_rejects": self._ordering_reject_count,
             "module_mismatches": self._module_mismatch_count,
@@ -932,6 +1580,8 @@ class UwbImuFusion:
                 else None
             ),
             "yaw_alignment_updates": self._yaw_alignment_updates,
+            "yaw_alignment_source": self._yaw_alignment_source,
+            "last_yaw_alignment_time_us": self._last_yaw_alignment_time_us,
             "last_yaw_window_duration_s": self._last_yaw_window_duration_s,
             "last_yaw_displacement_m": self._last_yaw_displacement_m,
             "last_yaw_speed_mps": self._last_yaw_speed_mps,
@@ -951,6 +1601,23 @@ class UwbImuFusion:
             "last_uwb_innovation_gate_m": self._last_uwb_innovation_gate_m,
             "last_position_sigma_m": self._last_position_sigma_m,
             "last_position_rms_m": self._last_position_rms_m,
+            "last_position_measurement_std_m": (
+                self._last_position_measurement_std_m
+            ),
+            "last_position_nis": self._last_position_nis,
+            "covariance_diagonal": [
+                self._covariance[index][index] for index in range(4)
+            ],
+            "accel_bias_ref_mps2": list(self._accel_bias_ref_mps2),
+            "accel_bias_valid": self._accel_bias_valid,
+            "stationary": self._stationary,
+            "stationary_samples": self._stationary_sample_count,
+            "accel_bias_updates": self._bias_update_count,
+            "zero_velocity_updates": self._zupt_count,
+            "high_dynamic_until_us": self._high_dynamic_until_us,
+            "state_time_us": self._state_time_us,
+            "last_fusion_time_ticks": self._last_fusion_time_ticks,
+            "fusion_timer_hz": self._last_fusion_timer_hz,
         }
 
     def _output(
@@ -959,6 +1626,9 @@ class UwbImuFusion:
         return {
             "stream": "fused",
             "uptime_ms": uptime_ms,
+            "sample_time_us": self._state_time_us,
+            "fusion_time_ticks": self._last_fusion_time_ticks,
+            "fusion_timer_hz": self._last_fusion_timer_hz,
             "module_id": self._module_id,
             "protocol": self._protocol,
             "tag_id": self._tag_id,

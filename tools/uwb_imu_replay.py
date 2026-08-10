@@ -12,7 +12,7 @@ import pathlib
 import statistics
 import sys
 from dataclasses import asdict, dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from uwb_imu_fusion import FusionConfig, UwbImuFusion
 
@@ -57,6 +57,16 @@ class RigidTransform2D:
             self.cosine * east_m - self.sine * north_m + self.translate_x_m,
             self.sine * east_m + self.cosine * north_m + self.translate_y_m,
         )
+
+    def course_to_uwb_heading(self, course_deg: float) -> float:
+        """Rotate an NMEA course (north, clockwise) into the UWB frame."""
+
+        course_rad = math.radians(course_deg)
+        east = math.sin(course_rad)
+        north = math.cos(course_rad)
+        direction_x = self.cosine * east - self.sine * north
+        direction_y = self.sine * east + self.cosine * north
+        return math.atan2(direction_y, direction_x)
 
 
 def normalize_protocol(value: Any) -> str:
@@ -134,6 +144,17 @@ def position_track(record: dict[str, Any]) -> TrackKey | None:
     ):
         return None
     protocol = record_protocol(record)
+    # Passive DS-TWR can emit overlapping rolling-window solutions between
+    # complete coherent stars.  Those rows are useful live continuity
+    # diagnostics, but they are strongly correlated and must not be counted as
+    # independent position measurements by the offline accuracy benchmark.
+    solution_kind = str(record.get("solution_kind") or "")
+    if (
+        protocol == "passive_ds"
+        and solution_kind
+        and solution_kind != "independent_frame"
+    ):
+        return None
     tag_id = int(record.get("tag_id") or record.get("tag") or 0)
     module_id = int(record.get("module_id") or tag_id)
     if protocol not in PROTOCOL_ALIASES.values() or tag_id <= 0 or module_id <= 0:
@@ -438,11 +459,12 @@ def error_metrics(values: Sequence[float]) -> dict[str, Any] | None:
         "mean_m": statistics.fmean(values),
         "median_m": statistics.median(values),
         "p95_m": percentile(values, 95.0),
+        "p99_m": percentile(values, 99.0),
         "max_m": max(values),
     }
 
 
-def timing_metrics(values_ms: Sequence[int], gap_ms: float | None) -> dict[str, Any]:
+def timing_metrics(values_ms: Sequence[float], gap_ms: float | None) -> dict[str, Any]:
     ordered = sorted(values_ms)
     intervals = [
         float(later - earlier)
@@ -470,6 +492,76 @@ def timing_metrics(values_ms: Sequence[int], gap_ms: float | None) -> dict[str, 
     }
 
 
+def fusion_acceptance(
+    raw_metrics: Mapping[str, Any] | None,
+    fused_metrics: Mapping[str, Any] | None,
+    raw_timing: Mapping[str, Any],
+    fused_timing: Mapping[str, Any],
+    overshoot_tolerance_m: float,
+) -> dict[str, Any]:
+    """Apply the field acceptance contract without hiding missing evidence."""
+
+    accuracy_available = raw_metrics is not None and fused_metrics is not None
+    raw_gap_count = int(raw_timing.get("gap_count") or 0)
+    fused_gap_count = int(fused_timing.get("gap_count") or 0)
+    checks: dict[str, bool | None] = {
+        "rmse_reduced": (
+            float(fused_metrics["rmse_m"]) < float(raw_metrics["rmse_m"])
+            if accuracy_available
+            else None
+        ),
+        "p95_reduced": (
+            float(fused_metrics["p95_m"]) < float(raw_metrics["p95_m"])
+            if accuracy_available
+            else None
+        ),
+        # If raw already has no detected dead zone, fusion must keep it at zero.
+        "dead_zones_reduced_or_absent": (
+            fused_gap_count < raw_gap_count
+            if raw_gap_count > 0
+            else fused_gap_count == 0
+        ),
+        "no_overshoot": (
+            float(fused_metrics["max_m"])
+            <= float(raw_metrics["max_m"]) + overshoot_tolerance_m
+            and float(fused_metrics["p99_m"])
+            <= float(raw_metrics["p99_m"]) + overshoot_tolerance_m
+            if accuracy_available
+            else None
+        ),
+    }
+    accepted = accuracy_available and all(value is True for value in checks.values())
+    return {
+        "accepted": accepted,
+        "accuracy_evidence_available": accuracy_available,
+        "overshoot_tolerance_m": overshoot_tolerance_m,
+        "checks": checks,
+        "deltas": {
+            "rmse_m": (
+                float(fused_metrics["rmse_m"]) - float(raw_metrics["rmse_m"])
+                if accuracy_available
+                else None
+            ),
+            "p95_m": (
+                float(fused_metrics["p95_m"]) - float(raw_metrics["p95_m"])
+                if accuracy_available
+                else None
+            ),
+            "p99_m": (
+                float(fused_metrics["p99_m"]) - float(raw_metrics["p99_m"])
+                if accuracy_available
+                else None
+            ),
+            "max_m": (
+                float(fused_metrics["max_m"]) - float(raw_metrics["max_m"])
+                if accuracy_available
+                else None
+            ),
+            "gap_count": fused_gap_count - raw_gap_count,
+        },
+    }
+
+
 def ordered_track_events(
     records: Sequence[dict[str, Any]], key: TrackKey
 ) -> list[dict[str, Any]]:
@@ -485,6 +577,9 @@ def ordered_track_events(
             continue
         try:
             uptime_ms = int(record["uptime_ms"])
+            sample_time_us = int(
+                record.get("sample_time_us") or uptime_ms * 1000
+            )
         except (KeyError, TypeError, ValueError):
             continue
         selected.append(
@@ -492,6 +587,7 @@ def ordered_track_events(
                 "record": record,
                 "event_kind": event_kind,
                 "uptime_ms": uptime_ms,
+                "sample_time_us": sample_time_us,
                 "input_index": int(record.get("_input_index") or 0),
             }
         )
@@ -500,23 +596,26 @@ def ordered_track_events(
     # timestamp with a position timestamp can otherwise invent alternating
     # reboot epochs and add repeated 2^32-ms jumps.
     epochs = {"imu": 0, "position": 0}
-    previous_ms: dict[str, int | None] = {"imu": None, "position": None}
+    previous_us: dict[str, int | None] = {"imu": None, "position": None}
     for event in sorted(selected, key=lambda item: item["input_index"]):
         event_kind = str(event["event_kind"])
-        uptime_ms = int(event["uptime_ms"])
-        previous = previous_ms[event_kind]
-        if previous is not None and uptime_ms + 1000 < previous:
+        sample_time_us = int(event["sample_time_us"])
+        previous = previous_us[event_kind]
+        if previous is not None and sample_time_us + 1_000_000 < previous:
             epochs[event_kind] += 1
-            previous_ms[event_kind] = uptime_ms
-        elif previous is None or uptime_ms > previous:
+            previous_us[event_kind] = sample_time_us
+        elif previous is None or sample_time_us > previous:
             # Ignore small backwards steps caused by polling order; retaining
             # the high-water mark keeps reboot detection stable.
-            previous_ms[event_kind] = uptime_ms
-        event["sort_ms"] = epochs[event_kind] * (1 << 32) + uptime_ms
+            previous_us[event_kind] = sample_time_us
+        event["sort_us"] = (
+            epochs[event_kind] * (1 << 32) * 1000 + sample_time_us
+        )
+        event["sort_ms"] = event["sort_us"] / 1000.0
     return sorted(
         selected,
         key=lambda item: (
-            item["sort_ms"],
+            item["sort_us"],
             0 if item["event_kind"] == "imu" else 1,
             item["input_index"],
         ),
@@ -538,6 +637,118 @@ def nearest_tag_rtk(
     return (nearest, age_ms) if age_ms <= max_age_ms else (None, age_ms)
 
 
+def interpolate_track_at_rtk_fixes(
+    position_samples: Sequence[dict[str, Any]],
+    gps_rows: Sequence[dict[str, Any]],
+    transform: RigidTransform2D | None,
+    max_bracket_age_ms: float,
+) -> list[dict[str, Any]]:
+    """Interpolate raw and fused UWB at each unique RTK measurement time."""
+
+    if transform is None:
+        return []
+    positions = sorted(
+        [
+            sample
+            for sample in position_samples
+            if int(sample.get("position_wall_ns") or 0) > 0
+            and finite_float(sample.get("raw_x_m")) is not None
+            and finite_float(sample.get("raw_y_m")) is not None
+            and finite_float(sample.get("fused_x_m")) is not None
+            and finite_float(sample.get("fused_y_m")) is not None
+        ],
+        key=lambda sample: int(sample["position_wall_ns"]),
+    )
+    if not positions:
+        return []
+    position_times = [int(sample["position_wall_ns"]) for sample in positions]
+    comparisons = []
+    seen_fixes: set[tuple[int, int]] = set()
+    max_age_ns = int(max_bracket_age_ms * 1_000_000.0)
+    for gps in gps_rows:
+        fix_time_ns = gps_wall_ns(gps)
+        fix_key = (fix_time_ns, int(gps.get("gps_gga_count") or 0))
+        if fix_time_ns <= 0 or fix_key in seen_fixes:
+            continue
+        seen_fixes.add(fix_key)
+        after_index = bisect.bisect_left(position_times, fix_time_ns)
+        exact = (
+            after_index < len(positions)
+            and position_times[after_index] == fix_time_ns
+        )
+        if exact:
+            before = positions[after_index]
+            after = before
+        else:
+            if after_index <= 0:
+                before = positions[0]
+                after = before
+            elif after_index >= len(positions):
+                before = positions[-1]
+                after = before
+            else:
+                before = positions[after_index - 1]
+                after = positions[after_index]
+        before_time_ns = int(before["position_wall_ns"])
+        after_time_ns = int(after["position_wall_ns"])
+        single_point = before is after
+        if single_point:
+            before_age_ns = abs(fix_time_ns - before_time_ns)
+            after_age_ns = before_age_ns
+        else:
+            before_age_ns = fix_time_ns - before_time_ns
+            after_age_ns = after_time_ns - fix_time_ns
+        span_ns = after_time_ns - before_time_ns
+        if (
+            before_age_ns < 0
+            or after_age_ns < 0
+            or before_age_ns > max_age_ns
+            or after_age_ns > max_age_ns
+        ):
+            continue
+        weight = 0.0 if span_ns <= 0 else before_age_ns / span_ns
+
+        def interpolate(name: str) -> float:
+            start = float(before[name])
+            return start + weight * (float(after[name]) - start)
+
+        raw_x = interpolate("raw_x_m")
+        raw_y = interpolate("raw_y_m")
+        fused_x = interpolate("fused_x_m")
+        fused_y = interpolate("fused_y_m")
+        rtk_x, rtk_y = transform.gps_to_uwb(
+            float(gps["gps_latitude_deg"]),
+            float(gps["gps_longitude_deg"]),
+        )
+        raw_error = math.hypot(raw_x - rtk_x, raw_y - rtk_y)
+        fused_error = math.hypot(fused_x - rtk_x, fused_y - rtk_y)
+        comparisons.append(
+            {
+                "schema_version": 1,
+                "kind": "replay_rtk_comparison",
+                "protocol": before.get("protocol"),
+                "tag_id": before.get("tag_id"),
+                "module_id": before.get("module_id"),
+                "rtk_wall_ns": fix_time_ns,
+                "rtk_gga_count": fix_key[1],
+                "rtk_x_m": rtk_x,
+                "rtk_y_m": rtk_y,
+                "raw_x_m": raw_x,
+                "raw_y_m": raw_y,
+                "fused_x_m": fused_x,
+                "fused_y_m": fused_y,
+                "raw_error_m": raw_error,
+                "fused_error_m": fused_error,
+                "before_position_wall_ns": before_time_ns,
+                "after_position_wall_ns": after_time_ns,
+                "before_age_ms": before_age_ns / 1_000_000.0,
+                "after_age_ms": after_age_ns / 1_000_000.0,
+                "interpolation_weight": weight,
+            }
+        )
+    return comparisons
+
+
 def replay_track(
     records: Sequence[dict[str, Any]],
     key: TrackKey,
@@ -545,6 +756,7 @@ def replay_track(
     config: FusionConfig,
     rtk_max_age_ms: float,
     gap_ms: float | None,
+    overshoot_tolerance_m: float,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     fusion = UwbImuFusion(config)
     events = ordered_track_events(records, key)
@@ -560,11 +772,35 @@ def replay_track(
     samples = []
     imu_times = []
     position_times = []
+    fused_stream_times = []
+    fused_stream_time_keys: set[int] = set()
     gps_times = [gps_wall_ns(record) // 1_000_000 for record in tag_gps]
-    raw_errors = []
-    fused_errors = []
     imu_missing_orientation = 0
     imu_used = 0
+    rtk_yaw_alignment_attempts = 0
+    rtk_yaw_alignment_updates = 0
+    last_yaw_gps_wall_ns = 0
+    fusion_flag_counts: collections.Counter[str] = collections.Counter()
+
+    def record_fused_stream_time(
+        output: Mapping[str, Any], event: Mapping[str, Any]
+    ) -> None:
+        flags = {str(value) for value in output.get("flags", [])}
+        if not bool(output.get("ready")) or flags & {
+            "module_mismatch",
+            "event_out_of_order",
+            "imu_out_of_order",
+            "imu_duplicate_time",
+            "position_out_of_order",
+            "position_duplicate_time",
+        }:
+            return
+        sort_us = int(event["sort_us"])
+        if sort_us in fused_stream_time_keys:
+            return
+        fused_stream_time_keys.add(sort_us)
+        fused_stream_times.append(sort_us / 1000.0)
+
     for event in events:
         record = event["record"]
         if event["event_kind"] == "imu":
@@ -575,23 +811,56 @@ def replay_track(
                 imu_missing_orientation += 1
                 continue
             try:
-                fusion.update_imu(record)
+                output = fusion.update_imu(record)
             except (TypeError, ValueError):
                 imu_missing_orientation += 1
                 continue
             imu_used += 1
-            imu_times.append(int(event["sort_ms"]))
+            fusion_flag_counts.update(str(value) for value in output.get("flags", ()))
+            imu_times.append(float(event["sort_ms"]))
+            record_fused_stream_time(output, event)
+            imu_wall_ns = collector_wall_ns(record)
+            yaw_gps, _ = nearest_tag_rtk(
+                tag_gps, imu_wall_ns, rtk_max_age_ms
+            )
+            if transform is not None and yaw_gps is not None:
+                yaw_gps_wall_ns = gps_wall_ns(yaw_gps)
+                speed_mps = finite_float(yaw_gps.get("gps_speed_mps"))
+                course_deg = finite_float(yaw_gps.get("gps_course_deg"))
+                is_new_fix = yaw_gps_wall_ns > last_yaw_gps_wall_ns
+                if is_new_fix:
+                    # A rejected RTK fix is still consumed once.  Retrying the
+                    # same course at every 100 Hz IMU sample overweights it and
+                    # hides the actual yaw rejection reasons.
+                    last_yaw_gps_wall_ns = yaw_gps_wall_ns
+                if (
+                    is_new_fix
+                    and speed_mps is not None
+                    and speed_mps >= config.yaw_min_speed_mps
+                    and course_deg is not None
+                ):
+                    rtk_yaw_alignment_attempts += 1
+                    yaw_output = fusion.align_yaw_from_heading(
+                        transform.course_to_uwb_heading(course_deg),
+                        source="rtk_course",
+                    )
+                    fusion_flag_counts.update(
+                        str(value) for value in yaw_output.get("flags", ())
+                    )
+                    if "yaw_aligned" in yaw_output.get("flags", ()):
+                        rtk_yaw_alignment_updates += 1
             continue
         xy = raw_position_xy(record)
         if xy is None:
             continue
-        position_times.append(int(event["sort_ms"]))
+        position_times.append(float(event["sort_ms"]))
         output = fusion.update_position(
             {
                 "uptime_ms": int(record["uptime_ms"]),
                 "protocol": key.protocol,
                 "tag_id": key.tag_id,
                 "module_id": key.module_id,
+                "sample_time_us": record.get("sample_time_us"),
                 "raw_x_m": xy[0],
                 "raw_y_m": xy[1],
                 "sigma_m": record.get("sigma_m"),
@@ -600,6 +869,8 @@ def replay_track(
         )
         fused_x = finite_float(output.get("x"))
         fused_y = finite_float(output.get("y"))
+        fusion_flag_counts.update(str(value) for value in output.get("flags", ()))
+        record_fused_stream_time(output, event)
         collector_ns = collector_wall_ns(record)
         wall_ns = position_wall_ns(record)
         rtk_row, rtk_age_ms = nearest_tag_rtk(tag_gps, wall_ns, rtk_max_age_ms)
@@ -611,12 +882,14 @@ def replay_track(
             )
         raw_error = None
         fused_error = None
+        rtk_fix_wall_ns = None
+        rtk_gga_count = None
         if rtk_xy is not None:
             raw_error = math.hypot(xy[0] - rtk_xy[0], xy[1] - rtk_xy[1])
-            raw_errors.append(raw_error)
             if fused_x is not None and fused_y is not None:
                 fused_error = math.hypot(fused_x - rtk_xy[0], fused_y - rtk_xy[1])
-                fused_errors.append(fused_error)
+            rtk_fix_wall_ns = gps_wall_ns(rtk_row)
+            rtk_gga_count = int(rtk_row.get("gps_gga_count") or 0)
         samples.append(
             {
                 "schema_version": 1,
@@ -635,17 +908,35 @@ def replay_track(
                 "fused_y_m": fused_y,
                 "rtk_x_m": rtk_xy[0] if rtk_xy is not None else None,
                 "rtk_y_m": rtk_xy[1] if rtk_xy is not None else None,
+                "rtk_wall_ns": rtk_fix_wall_ns,
+                "rtk_gga_count": rtk_gga_count,
                 "rtk_time_delta_ms": rtk_age_ms,
+                # Filled after the nearest UWB correction for each unique RTK
+                # fix is known.  Other rows retain RTK coordinates for plots,
+                # but do not multiply one slow GNSS fix into many samples.
+                "rtk_match_selected": False,
                 "raw_error_m": raw_error,
                 "fused_error_m": fused_error,
                 "fusion_flags": output.get("flags") or [],
             }
         )
+    rtk_comparisons = interpolate_track_at_rtk_fixes(
+        samples, tag_gps, transform, rtk_max_age_ms
+    )
+    raw_errors = [float(sample["raw_error_m"]) for sample in rtk_comparisons]
+    fused_errors = [
+        float(sample["fused_error_m"]) for sample in rtk_comparisons
+    ]
     raw_metrics = error_metrics(raw_errors)
     fused_metrics = error_metrics(fused_errors)
     delta_rmse_m = None
     if raw_metrics is not None and fused_metrics is not None:
         delta_rmse_m = fused_metrics["rmse_m"] - raw_metrics["rmse_m"]
+    raw_timing = timing_metrics(position_times, gap_ms)
+    # Dead-zone counts must use the exact same physical threshold.  Let the
+    # raw UWB cadence select it once when the caller did not provide one.
+    shared_gap_ms = float(raw_timing["gap_threshold_ms"])
+    fused_stream_timing = timing_metrics(fused_stream_times, shared_gap_ms)
     report = {
         "protocol": key.protocol,
         "tag_id": key.tag_id,
@@ -657,12 +948,17 @@ def replay_track(
             "positions": len(position_times),
             "rtk_fixed_fixes": len(tag_gps),
             "rtk_matches": len(raw_errors),
+            "rtk_yaw_alignment_attempts": rtk_yaw_alignment_attempts,
+            "rtk_yaw_alignment_updates": rtk_yaw_alignment_updates,
         },
         "timing": {
             "imu_used": timing_metrics(imu_times, gap_ms),
-            "raw_position": timing_metrics(position_times, gap_ms),
-            # UwbImuFusion emits one corrected state for every raw position.
+            "raw_position": raw_timing,
+            # Correction-only cadence is retained for backward compatibility.
             "fused_position": timing_metrics(position_times, gap_ms),
+            # Actual EKF output includes high-rate IMU predictions between UWB
+            # corrections and is the relevant signal for dead-zone coverage.
+            "fused_stream": fused_stream_timing,
             "rtk_fixed": timing_metrics(gps_times, gap_ms),
         },
         "metrics": {
@@ -670,6 +966,15 @@ def replay_track(
             "fused_vs_rtk": fused_metrics,
             "fused_minus_raw_rmse_m": delta_rmse_m,
         },
+        "rtk_comparisons": rtk_comparisons,
+        "acceptance": fusion_acceptance(
+            raw_metrics,
+            fused_metrics,
+            raw_timing,
+            fused_stream_timing,
+            overshoot_tolerance_m,
+        ),
+        "fusion_flag_counts": dict(sorted(fusion_flag_counts.items())),
         "fusion_final": fusion.snapshot(),
     }
     return report, samples
@@ -682,6 +987,7 @@ def replay_capture(
     config: FusionConfig | None = None,
     rtk_max_age_ms: float = 250.0,
     gap_ms: float | None = None,
+    overshoot_tolerance_m: float = 0.05,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     selected_protocol = normalize_protocol(protocol) if protocol else None
     tracks = sorted(
@@ -710,6 +1016,7 @@ def replay_capture(
             config or FusionConfig(),
             rtk_max_age_ms,
             gap_ms,
+            overshoot_tolerance_m,
         )
         report["rtk_alignment"] = alignment
         reports.append(report)
@@ -734,11 +1041,20 @@ def replay_capture(
                 "raw_vs_rtk": error_metrics(raw_errors),
                 "fused_vs_rtk": error_metrics(fused_errors),
             },
+            "fusion_acceptance": {
+                "accepted": bool(reports)
+                and all(track["acceptance"]["accepted"] for track in reports),
+                "accepted_tracks": sum(
+                    bool(track["acceptance"]["accepted"]) for track in reports
+                ),
+                "total_tracks": len(reports),
+            },
             "limitations": [
                 "RTK association compares dashboard telemetry receive time with GPS measurement time estimated from the reported fix age.",
                 "RTK-to-UWB alignment uses anchor geometry, never the tag trajectory.",
                 "Only RTK-fixed quality 4 fixes enter accuracy metrics.",
-                "UwbImuFusion yaw assumes body +X follows the direction of travel.",
+                "RMSE/P95/P99 compare raw and fused states at identical UWB correction timestamps; fused_stream timing separately measures IMU dead-zone coverage.",
+                "RTK course initializes IMU-to-UWB yaw while moving; UWB straight-line motion can refine it and assumes body +X follows travel.",
             ],
         },
         all_samples,
@@ -755,8 +1071,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples-output", type=pathlib.Path)
     parser.add_argument("--rtk-max-age-ms", type=float, default=250.0)
     parser.add_argument("--gap-ms", type=float)
+    parser.add_argument("--overshoot-tolerance-m", type=float, default=0.05)
     parser.add_argument("--alpha", type=float, default=FusionConfig.alpha)
     parser.add_argument("--beta", type=float, default=FusionConfig.beta)
+    parser.add_argument(
+        "--process-accel-noise",
+        type=float,
+        default=FusionConfig.process_accel_noise_mps2,
+    )
+    parser.add_argument(
+        "--uwb-std-scale",
+        type=float,
+        default=FusionConfig.uwb_measurement_std_scale,
+    )
     parser.add_argument(
         "--yaw-min-displacement-m",
         type=float,
@@ -772,7 +1099,11 @@ def main() -> int:
     if missing:
         print(f"missing input: {missing[0]}", file=sys.stderr)
         return 2
-    if args.rtk_max_age_ms <= 0 or (args.gap_ms is not None and args.gap_ms <= 0):
+    if (
+        args.rtk_max_age_ms <= 0
+        or (args.gap_ms is not None and args.gap_ms <= 0)
+        or args.overshoot_tolerance_m < 0
+    ):
         print("RTK age and gap thresholds must be positive", file=sys.stderr)
         return 2
     try:
@@ -780,6 +1111,8 @@ def main() -> int:
         config = FusionConfig(
             alpha=args.alpha,
             beta=args.beta,
+            process_accel_noise_mps2=args.process_accel_noise,
+            uwb_measurement_std_scale=args.uwb_std_scale,
             yaw_min_displacement_m=args.yaw_min_displacement_m,
         )
         report, samples = replay_capture(
@@ -788,6 +1121,7 @@ def main() -> int:
             config=config,
             rtk_max_age_ms=args.rtk_max_age_ms,
             gap_ms=args.gap_ms,
+            overshoot_tolerance_m=args.overshoot_tolerance_m,
         )
     except (OSError, ValueError) as exc:
         print(f"replay failed: {exc}", file=sys.stderr)

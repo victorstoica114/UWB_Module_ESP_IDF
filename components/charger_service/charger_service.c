@@ -23,7 +23,9 @@
 static const char *TAG = "charger_service";
 
 enum {
-    CHARGER_TASK_STACK_WORDS = 3072,
+    /* ESP-IDF task stack sizes are bytes.  The saved-policy path nests
+     * several register-write helpers and can exceed the old 3 KiB stack. */
+    CHARGER_TASK_STACK_BYTES = 6144,
     CHARGER_TASK_PRIORITY = 4,
     CHARGER_I2C_TIMEOUT_MS = APP_BQ25792_I2C_TRANSACTION_TIMEOUT_MS,
     CHARGER_I2C_PROBE_TIMEOUT_MS = APP_BQ25792_I2C_PROBE_TIMEOUT_MS,
@@ -1551,7 +1553,7 @@ esp_err_t charger_service_start(void)
     }
 
     const BaseType_t created = xTaskCreatePinnedToCore(
-        charger_task, "bq25792", CHARGER_TASK_STACK_WORDS, NULL,
+        charger_task, "bq25792", CHARGER_TASK_STACK_BYTES, NULL,
         CHARGER_TASK_PRIORITY, &s_task_handle, CHARGER_TASK_CORE);
     if (created != pdPASS) {
         ESP_LOGE(TAG, "Failed to create BQ25792 task");

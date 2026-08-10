@@ -15,6 +15,8 @@ from uwb_dynamic_capture import (
     accel_cursor,
     fetch_capture_snapshot,
     gps_records,
+    gps_cursor,
+    gps_telemetry_record,
     position_cursor,
     position_event_kind,
     write_position_event,
@@ -125,6 +127,28 @@ class PositionEventTest(unittest.TestCase):
 
 
 class GpsRecordTest(unittest.TestCase):
+    def test_high_rate_gps_cursor_and_record_mapping(self) -> None:
+        payload = {
+            "next_id": 10,
+            "samples": [
+                {
+                    "gps_event_id": 9,
+                    "module_id": 1,
+                    "gga_sequence": 101,
+                    "fix_valid": True,
+                    "fix_quality": 4,
+                    "latitude_deg": 44.4,
+                    "longitude_deg": 26.1,
+                    "estimated_measurement_wall_ns": 123,
+                }
+            ],
+        }
+        self.assertEqual(gps_cursor(payload), 9)
+        record = gps_telemetry_record(payload["samples"][0])
+        self.assertEqual(record["gps_gga_count"], 101)
+        self.assertEqual(record["gps_latitude_deg"], 44.4)
+        self.assertTrue(record["gps_fix_valid"])
+
     def test_deduplicates_gga_and_preserves_rtk_fields(self) -> None:
         snapshot = {
             "statuses": [

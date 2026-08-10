@@ -2417,12 +2417,21 @@ idf.py flash monitor
 ```
 
 If using plain CMD instead of the ESP-IDF terminal, the local wrapper uses the
-same IDF installation:
+installed ESP-IDF v6.0.2 environment, a repository-local ccache, and
+process-local Git safety settings:
 
 ```bat
 idf.bat set-target esp32s3
 idf.bat build
 idf.bat flash monitor
+```
+
+To keep an independent build directory, use the explicit launcher. The first
+argument is the build directory and the remaining arguments are passed to
+`idf.py`:
+
+```bat
+tools\idf-build.cmd build-imu-fusion build
 ```
 
 `idf.py monitor` needs a real interactive terminal because it handles keyboard
@@ -2541,6 +2550,32 @@ persisted in the browser. Calibration distances are entered in centimeters and
 rounded to the nearest millimeter before being sent to `/config/runtime`.
 Only one program can listen on TCP port 6055 at a time, so stop
 `wireless_log_listener.py` before starting the dashboard.
+
+### UWB + IMU fusion
+
+All three positioning protocols feed the same four-state `x/y/vx/vy` EKF in
+`tools/uwb_imu_fusion.py`. The dashboard always retains and draws the raw UWB
+track separately; the IMU prediction is an additional stream and never
+overwrites raw measurements. A protocol change reuses the physical tag's EKF
+instance and cumulative diagnostics, but resets its dynamic state because the
+radio protocol, measurement bias, and module uptime can all change at reboot.
+
+BNO085 samples carry the 64-bit 10 MHz GPTimer timestamp through binary
+telemetry and into the filter. Module uptime is used once to align the local
+timer to the position timeline; sample ordering, graph ordering, integration,
+and fused-stream decimation then use microsecond sample time. RTK course, when
+fixed, fresh, and moving, initializes the IMU-to-UWB yaw. Straight UWB motion
+can subsequently refine it. Stationary acceleration/gyro gates estimate the
+accelerometer bias and apply zero-velocity updates.
+
+Offline replay enforces the field acceptance contract and reports it under
+`acceptance`: RMSE and P95 must both fall, dead zones must decrease (or remain
+absent), and P99/max error must stay within the configured overshoot tolerance.
+
+```bat
+python tools\uwb_imu_replay.py reports\capture.jsonl ^
+  --protocol flextdoa --overshoot-tolerance-m 0.05
+```
 
 On Linux systems with UFW enabled, open the high-rate telemetry port for the
 module subnet. In the current lab network, logs use `6055/tcp` and high-rate

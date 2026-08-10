@@ -44,9 +44,9 @@
 static const char *TAG = "ota_service";
 
 enum {
-    OTA_SERVICE_TASK_STACK_WORDS = 4096,
+    OTA_SERVICE_TASK_STACK_BYTES = 4096,
     OTA_SERVICE_TASK_PRIORITY = 5,
-    OTA_SERVICE_RESTART_TASK_STACK_WORDS = 2048,
+    OTA_SERVICE_RESTART_TASK_STACK_BYTES = 4096,
     OTA_SERVICE_RESTART_TASK_PRIORITY = 5,
     OTA_SERVICE_CHUNK_SIZE = 4096,
     OTA_SERVICE_WIFI_WAIT_MS = 500,
@@ -1585,6 +1585,19 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"bno085_parse_error_count\":%lu,"
         "\"bno085_int_irq_count\":%lu,"
         "\"bno085_int_wait_timeout_count\":%lu,"
+        "\"bno085_sample_ring_capacity\":%lu,"
+        "\"bno085_sample_ring_count\":%lu,"
+        "\"bno085_sample_overwrite_count\":%lu,"
+        "\"bno085_telemetry_submit_count\":%lu,"
+        "\"bno085_telemetry_drop_count\":%lu,"
+        "\"bno085_telemetry_decimated_count\":%lu,"
+        "\"bno085_monotonic_repair_count\":%lu,"
+        "\"bno085_gyro_rv_ring_capacity\":%lu,"
+        "\"bno085_gyro_rv_ring_count\":%lu,"
+        "\"bno085_gyro_rv_overwrite_count\":%lu,"
+        "\"bno085_gyro_rv_rate_hz\":%lu,"
+        "\"bno085_telemetry_rate_hz\":%lu,"
+        "\"bno085_fusion_timer_hz\":%lu,"
         "\"bno085_last_packet_len\":%lu,"
         "\"bno085_last_input_payload_len\":%lu,"
         "\"bno085_last_x_mps2\":%.3f,"
@@ -2162,6 +2175,19 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         (unsigned long)bno_snapshot.parse_error_count,
         (unsigned long)bno_snapshot.int_irq_count,
         (unsigned long)bno_snapshot.int_wait_timeout_count,
+        (unsigned long)bno_snapshot.sample_ring_capacity,
+        (unsigned long)bno_snapshot.sample_ring_count,
+        (unsigned long)bno_snapshot.sample_overwrite_count,
+        (unsigned long)bno_snapshot.telemetry_submit_count,
+        (unsigned long)bno_snapshot.telemetry_drop_count,
+        (unsigned long)bno_snapshot.telemetry_decimated_count,
+        (unsigned long)bno_snapshot.monotonic_repair_count,
+        (unsigned long)bno_snapshot.gyro_rv_ring_capacity,
+        (unsigned long)bno_snapshot.gyro_rv_ring_count,
+        (unsigned long)bno_snapshot.gyro_rv_overwrite_count,
+        (unsigned long)bno_snapshot.gyro_rv_rate_hz,
+        (unsigned long)bno_snapshot.telemetry_rate_hz,
+        (unsigned long)bno_snapshot.fusion_timer_hz,
         (unsigned long)bno_snapshot.last_packet_len,
         (unsigned long)bno_snapshot.last_input_payload_len,
         (double)bno_snapshot.last_x_mps2,
@@ -2738,7 +2764,7 @@ static esp_err_t antenna_delay_post_handler(httpd_req_t *req)
 
     if (reboot_requested) {
         xTaskCreate(reboot_task, "cfg_reboot",
-                    OTA_SERVICE_RESTART_TASK_STACK_WORDS, NULL,
+                    OTA_SERVICE_RESTART_TASK_STACK_BYTES, NULL,
                     OTA_SERVICE_RESTART_TASK_PRIORITY, NULL);
     }
 
@@ -4676,7 +4702,7 @@ static esp_err_t runtime_config_post_handler(httpd_req_t *req)
     if (reboot_requested) {
         s_status = OTA_SERVICE_STATUS_REBOOTING;
         xTaskCreate(reboot_task, "runtime_reboot",
-                    OTA_SERVICE_RESTART_TASK_STACK_WORDS, NULL,
+                    OTA_SERVICE_RESTART_TASK_STACK_BYTES, NULL,
                     OTA_SERVICE_RESTART_TASK_PRIORITY, NULL);
     }
 
@@ -4746,7 +4772,7 @@ static esp_err_t recovery_config_post_handler(httpd_req_t *req)
     if (reboot_requested) {
         s_status = OTA_SERVICE_STATUS_REBOOTING;
         xTaskCreate(reboot_task, "recovery_reboot",
-                    OTA_SERVICE_RESTART_TASK_STACK_WORDS, NULL,
+                    OTA_SERVICE_RESTART_TASK_STACK_BYTES, NULL,
                     OTA_SERVICE_RESTART_TASK_PRIORITY, NULL);
     }
 
@@ -4905,7 +4931,7 @@ static esp_err_t ota_post_handler(httpd_req_t *req)
     const esp_err_t response_err =
         httpd_resp_sendstr(req, "{\"ok\":true,\"rebooting\":true}\n");
 
-    xTaskCreate(reboot_task, "ota_reboot", OTA_SERVICE_RESTART_TASK_STACK_WORDS,
+    xTaskCreate(reboot_task, "ota_reboot", OTA_SERVICE_RESTART_TASK_STACK_BYTES,
                 NULL, OTA_SERVICE_RESTART_TASK_PRIORITY, NULL);
 
     return response_err;
@@ -5159,7 +5185,10 @@ static esp_err_t start_http_server(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.stack_size = 8192;
+    /* Status/config handlers format large diagnostic JSON documents.  With
+     * the IDF 6.0.2 Picolibc build, 8 KiB can overflow while the dashboard
+     * polls /status during pending-verify startup. */
+    config.stack_size = 16384;
     config.core_id = OTA_SERVICE_HTTPD_TASK_CORE;
     config.max_uri_handlers = 11;
 
@@ -5304,7 +5333,7 @@ esp_err_t ota_service_start(void)
     }
 
     const BaseType_t created = xTaskCreatePinnedToCore(
-        ota_service_task, "ota_service", OTA_SERVICE_TASK_STACK_WORDS, NULL,
+        ota_service_task, "ota_service", OTA_SERVICE_TASK_STACK_BYTES, NULL,
         OTA_SERVICE_TASK_PRIORITY, NULL, 0);
     if (created != pdPASS) {
         s_status = OTA_SERVICE_STATUS_FAILED;

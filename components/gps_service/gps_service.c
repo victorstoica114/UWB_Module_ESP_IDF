@@ -21,6 +21,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
+#include "wireless_telemetry_service.h"
 
 static const char *TAG = "gps_service";
 
@@ -59,6 +60,23 @@ static uint32_t s_last_rx_timestamp_ms;
 static uint32_t s_last_fix_timestamp_ms;
 static int64_t s_last_fix_timestamp_us;
 static gps_service_snapshot_t s_snapshot;
+static bool s_speed_valid;
+static bool s_course_valid;
+static uint32_t s_gga_telemetry_sequence;
+
+enum {
+    GPS_TELEMETRY_POSITION_PARSED = 1U << 0,
+    GPS_TELEMETRY_FIX_VALID = 1U << 1,
+    GPS_TELEMETRY_UTC_VALID = 1U << 2,
+    GPS_TELEMETRY_DATE_VALID = 1U << 3,
+    GPS_TELEMETRY_ALTITUDE_VALID = 1U << 4,
+    GPS_TELEMETRY_HDOP_VALID = 1U << 5,
+    GPS_TELEMETRY_SATELLITES_VALID = 1U << 6,
+    GPS_TELEMETRY_QUALITY_VALID = 1U << 7,
+    GPS_TELEMETRY_SPEED_VALID = 1U << 8,
+    GPS_TELEMETRY_COURSE_VALID = 1U << 9,
+    GPS_TELEMETRY_RMC_ACTIVE = 1U << 10,
+};
 
 typedef struct {
     char talker[3];
@@ -308,6 +326,58 @@ static bool parse_int_field(const char *field, int *value)
     return true;
 }
 
+static int64_t gps_round_i64(double value)
+{
+    return (int64_t)(value >= 0.0 ? value + 0.5 : value - 0.5);
+}
+
+static int32_t gps_round_i32(double value)
+{
+    return (int32_t)(value >= 0.0 ? value + 0.5 : value - 0.5);
+}
+
+static uint32_t gps_parse_utc_ms_of_day(const char *field, bool *valid)
+{
+    double raw = 0.0;
+    if (valid != NULL) {
+        *valid = false;
+    }
+    if (!parse_double_field(field, &raw) || raw < 0.0) {
+        return UINT32_MAX;
+    }
+    const uint32_t whole = (uint32_t)raw;
+    const uint32_t hour = whole / 10000U;
+    const uint32_t minute = (whole / 100U) % 100U;
+    const double seconds = raw - (double)(hour * 10000U + minute * 100U);
+    if (hour >= 24U || minute >= 60U || seconds < 0.0 || seconds >= 60.0) {
+        return UINT32_MAX;
+    }
+    if (valid != NULL) {
+        *valid = true;
+    }
+    return (hour * 3600U + minute * 60U) * 1000U +
+           (uint32_t)(seconds * 1000.0 + 0.5);
+}
+
+static uint32_t gps_parse_date_ddmmyy(const char *field, bool *valid)
+{
+    if (valid != NULL) {
+        *valid = false;
+    }
+    if (field == NULL || strlen(field) != 6U) {
+        return UINT32_MAX;
+    }
+    char *end = NULL;
+    const unsigned long parsed = strtoul(field, &end, 10);
+    if (end == field || *end != '\0' || parsed > UINT32_MAX) {
+        return UINT32_MAX;
+    }
+    if (valid != NULL) {
+        *valid = true;
+    }
+    return (uint32_t)parsed;
+}
+
 static bool parse_nmea_degrees(const char *field, char hemisphere,
                                double *value)
 {
@@ -464,8 +534,24 @@ static void parse_gga(char *fields[], size_t count, uint32_t now_ms)
         parse_nmea_degrees(fields[2], fields[3][0], &latitude) &&
         parse_nmea_degrees(fields[4], fields[5][0], &longitude);
 
+    bool utc_valid = false;
+    const uint32_t utc_ms_of_day =
+        gps_parse_utc_ms_of_day(fields[1], &utc_valid);
+    uint32_t gga_sequence = 0;
+    uint32_t utc_date_ddmmyy = UINT32_MAX;
+    bool date_valid = false;
+    double speed_mps = 0.0;
+    double course_deg = 0.0;
+    char rmc_status = '\0';
+    char rmc_mode = '\0';
+    bool speed_valid = false;
+    bool course_valid = false;
+    uint64_t sample_monotonic_us = 0;
+    bool submit_sample = false;
+
     if (gps_lock(pdMS_TO_TICKS(20))) {
         s_snapshot.gga_count++;
+        gga_sequence = ++s_gga_telemetry_sequence;
         s_snapshot.last_rx_age_ms = 0;
         copy_field(s_snapshot.utc_time, sizeof(s_snapshot.utc_time), fields[1]);
         if (have_quality) {
@@ -493,7 +579,47 @@ static void parse_gga(char *fields[], size_t count, uint32_t now_ms)
         } else if (quality == 0) {
             s_snapshot.fix_valid = false;
         }
+        sample_monotonic_us = (uint64_t)esp_timer_get_time();
+        utc_date_ddmmyy =
+            gps_parse_date_ddmmyy(s_snapshot.utc_date, &date_valid);
+        speed_mps = s_snapshot.speed_mps;
+        course_deg = s_snapshot.course_deg;
+        speed_valid = s_speed_valid;
+        course_valid = s_course_valid;
+        rmc_status = s_snapshot.rmc_status;
+        rmc_mode = s_snapshot.rmc_mode;
+        submit_sample = true;
         gps_unlock();
+    }
+
+    if (submit_sample) {
+        uint16_t flags = 0;
+        if (have_position) flags |= GPS_TELEMETRY_POSITION_PARSED;
+        if (have_position && quality > 0) flags |= GPS_TELEMETRY_FIX_VALID;
+        if (utc_valid) flags |= GPS_TELEMETRY_UTC_VALID;
+        if (date_valid) flags |= GPS_TELEMETRY_DATE_VALID;
+        if (have_alt) flags |= GPS_TELEMETRY_ALTITUDE_VALID;
+        if (have_hdop) flags |= GPS_TELEMETRY_HDOP_VALID;
+        if (have_sats) flags |= GPS_TELEMETRY_SATELLITES_VALID;
+        if (have_quality) flags |= GPS_TELEMETRY_QUALITY_VALID;
+        if (speed_valid) flags |= GPS_TELEMETRY_SPEED_VALID;
+        if (course_valid) flags |= GPS_TELEMETRY_COURSE_VALID;
+        if (rmc_status == 'A') flags |= GPS_TELEMETRY_RMC_ACTIVE;
+        (void)wireless_telemetry_service_submit_gps_gga(
+            sample_monotonic_us, gga_sequence, utc_ms_of_day,
+            utc_date_ddmmyy,
+            have_position ? gps_round_i64(latitude * 1000000000.0)
+                          : INT64_MIN,
+            have_position ? gps_round_i64(longitude * 1000000000.0)
+                          : INT64_MIN,
+            have_alt ? gps_round_i32(altitude * 1000.0) : INT32_MIN,
+            speed_valid ? gps_round_i32(speed_mps * 1000.0) : INT32_MIN,
+            course_valid ? gps_round_i32(course_deg * 1000.0) : INT32_MIN,
+            have_hdop ? (uint16_t)(hdop * 100.0 + 0.5) : UINT16_MAX,
+            have_sats ? satellites : 0U,
+            have_quality && quality >= 0 && quality <= UINT8_MAX
+                ? (uint8_t)quality : 0U,
+            (uint8_t)rmc_status, (uint8_t)rmc_mode, flags);
     }
 
     (void)now_ms;
@@ -547,9 +673,11 @@ static void parse_rmc(char *fields[], size_t count, uint32_t now_ms)
         copy_field(s_snapshot.utc_date, sizeof(s_snapshot.utc_date), fields[9]);
         if (have_speed) {
             s_snapshot.speed_mps = speed_knots * 0.514444;
+            s_speed_valid = true;
         }
         if (have_course) {
             s_snapshot.course_deg = course;
+            s_course_valid = true;
         }
         if (status == 'A' && have_position) {
             s_snapshot.latitude_deg = latitude;
@@ -1009,6 +1137,8 @@ static void gps_task(void *arg)
         s_last_rx_timestamp_ms = 0;
         s_last_fix_timestamp_ms = 0;
         s_last_fix_timestamp_us = 0;
+        s_speed_valid = false;
+        s_course_valid = false;
         s_snapshot.runtime_enabled = true;
         s_snapshot.task_running = true;
         s_snapshot.last_rx_age_ms = UINT32_MAX;
@@ -1215,6 +1345,8 @@ esp_err_t gps_service_start(void)
 
     if (gps_lock(pdMS_TO_TICKS(50))) {
         memset(&s_snapshot, 0, sizeof(s_snapshot));
+        s_speed_valid = false;
+        s_course_valid = false;
         s_snapshot.runtime_enabled = app_runtime_config_get()->gps_enabled;
         s_snapshot.last_error = ESP_OK;
         s_snapshot.last_rx_age_ms = UINT32_MAX;

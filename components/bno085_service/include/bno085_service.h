@@ -24,6 +24,11 @@ typedef struct {
     int32_t x_milli_mps2;
     int32_t y_milli_mps2;
     int32_t z_milli_mps2;
+    /* Native BNO085 Q8 values; retained so telemetry compression is lossless
+     * relative to the sensor report. */
+    int16_t x_q8;
+    int16_t y_q8;
+    int16_t z_q8;
     uint16_t sensor_delay_100us;
     uint8_t accuracy;
     uint8_t time_flags;

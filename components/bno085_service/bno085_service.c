@@ -27,7 +27,9 @@ static const char *TAG = "bno085_service";
 
 enum {
     BNO085_I2C_PORT = 0,
-    BNO085_TASK_STACK_WORDS = 4096,
+    /* ESP-IDF task stack sizes are bytes.  Startup/reset and I2C error
+     * handling can nest deeply enough to exhaust the former 4 KiB stack. */
+    BNO085_TASK_STACK_BYTES = 8192,
     BNO085_TASK_PRIORITY = 5,
     BNO085_SHTP_HEADER_LEN = 4,
     BNO085_MAX_PACKET_LEN = 512,
@@ -56,18 +58,28 @@ enum {
     BNO085_REPORT_ACCELEROMETER = 0x01,
     BNO085_REPORT_GYRO_RV = 0x2A,
     BNO085_GYRO_RV_REPORT_LEN = 14,
-    BNO085_GYRO_RV_RATE_HZ = 100,
+    /* Leave enough SH2 processing budget for the 500 Hz accelerometer.  A
+     * 50 Hz orientation update is still inside the dashboard's 30 ms merge
+     * window, while 100 Hz reduced measured acceleration output to ~460 Hz. */
+    BNO085_GYRO_RV_RATE_HZ = 50,
     BNO085_GYRO_RV_INTERVAL_US = 1000000U / BNO085_GYRO_RV_RATE_HZ,
     BNO085_ACCEL_Q_POINT = 8,
     BNO085_NOTIFY_INT = 1U << 0,
     BNO085_NOTIFY_CONFIG = 1U << 1,
     BNO085_NOTIFY_STOP = 1U << 2,
-    BNO085_TELEMETRY_RATE_HZ = 100,
-    BNO085_HIGH_RATE_BATCH_INTERVAL_US = 10000,
+    BNO085_TELEMETRY_RATE_HZ = 500,
+    BNO085_CLOCK_ANCHOR_RATE_HZ = 1,
+    /* Zero requests immediate SH2 delivery.  This is the field-validated
+     * 500 Hz profile; a 10 ms SH2 batch reduced the observed rate to about
+     * 455 Hz even though the requested sample interval remained 2 ms. */
+    BNO085_HIGH_RATE_BATCH_INTERVAL_US = 0,
     BNO085_SAMPLE_RING_PSRAM_CAPACITY = 512,
     BNO085_SAMPLE_RING_INTERNAL_CAPACITY = 128,
     BNO085_GYRO_RV_RING_CAPACITY = 256,
     BNO085_COPY_MAX_SAMPLES = 32,
+    /* Estimate sensor-clock tolerance over about one second so I2C/SHTP
+     * packetization jitter cannot modulate individual sample timestamps. */
+    BNO085_TIMESTAMP_TRACK_MIN_REPORTS = 256,
 };
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
@@ -107,6 +119,7 @@ static uint8_t s_last_accuracy;
 static uint32_t s_last_log_ms;
 static uint32_t s_last_read_warning_ms;
 static uint32_t s_configured_accel_interval_ms;
+static uint32_t s_effective_accel_period_us;
 static uint32_t s_last_reconfigure_warning_ms;
 static uint32_t s_last_progress_ms;
 static uint32_t s_last_progress_report_count;
@@ -130,6 +143,10 @@ static uint32_t s_telemetry_decimated_count;
 static uint32_t s_monotonic_repair_count;
 static uint64_t s_last_fusion_time_ticks;
 static uint64_t s_last_telemetry_ticks;
+static uint64_t s_last_clock_anchor_ticks;
+static uint32_t s_timestamp_period_ticks;
+static uint64_t s_timestamp_anchor_hint_ticks;
+static uint32_t s_timestamp_anchor_report_count;
 static bool s_batch_timebase_valid;
 static uint64_t s_batch_hint_ticks;
 static int32_t s_batch_base_delta_100us;
@@ -147,6 +164,7 @@ static uint32_t s_gyro_rv_overwrite_count;
 
 static esp_err_t bno085_hold_in_reset(void);
 static bool bno085_drain_startup_packets(void);
+static esp_err_t bno085_rebind_i2c_device(void);
 
 static void bno085_notify_task(uint32_t bits)
 {
@@ -366,7 +384,7 @@ static uint32_t bno085_accel_interval_ms(void)
     return APP_BNO085_ACCEL_INTERVAL_MS;
 }
 
-static uint32_t bno085_accel_period_us(void)
+static uint32_t bno085_requested_accel_period_us(void)
 {
     const uint32_t interval_ms = bno085_accel_interval_ms();
     if (interval_ms > UINT32_MAX / 1000U) {
@@ -375,9 +393,20 @@ static uint32_t bno085_accel_period_us(void)
     return interval_ms * 1000U;
 }
 
+static uint32_t bno085_accel_period_us(void)
+{
+    return s_effective_accel_period_us > 0
+               ? s_effective_accel_period_us
+               : bno085_requested_accel_period_us();
+}
+
 static void bno085_update_i2c_realtime_period(void)
 {
-    i2c_bus_service_set_realtime_period_us(bno085_accel_period_us());
+    const uint32_t sample_period_us = bno085_accel_period_us();
+    /* Immediate SH2 delivery means the shared-bus scheduler must reserve the
+     * actual sample cadence.  The same 2 ms reservation was previously
+     * validated with BQ25792 and MAX77958 active on all five modules. */
+    i2c_bus_service_set_realtime_period_us(sample_period_us);
 }
 
 static uint32_t bno085_log_interval_ms(void)
@@ -755,11 +784,16 @@ static esp_err_t bno085_enable_accelerometer(void)
         0x00,
     };
 
+    const uint32_t previous_effective_period_us =
+        s_effective_accel_period_us;
+    s_effective_accel_period_us = interval_us;
     const esp_err_t err =
         bno085_send_packet(BNO085_CHANNEL_CONTROL, payload, sizeof(payload));
     if (err == ESP_OK) {
         s_configured_accel_interval_ms = interval_ms;
         bno085_update_i2c_realtime_period();
+    } else {
+        s_effective_accel_period_us = previous_effective_period_us;
     }
     return err;
 }
@@ -824,34 +858,53 @@ static esp_err_t bno085_soft_reset(void)
 
 static void bno085_emit_telemetry(const bno085_accel_sample_t *sample)
 {
-    if (!bno085_timing_due(s_last_telemetry_ticks,
-                           sample->fusion_time_ticks,
-                           BNO085_TELEMETRY_RATE_HZ)) {
-        s_telemetry_decimated_count++;
+    /* Forward every report generated by SH2.  The sensor itself enforces its
+     * configured/max rate; an additional host-side 500 Hz gate can discard
+     * valid reports when the discrete BNO clock is slightly faster than the
+     * nominal 2 ms interval. */
+    s_last_telemetry_ticks = sample->fusion_time_ticks;
+    const uint64_t anchor_period_ticks =
+        BNO085_FUSION_TIMER_HZ / BNO085_CLOCK_ANCHOR_RATE_HZ;
+    if (s_last_clock_anchor_ticks == 0 ||
+        sample->fusion_time_ticks - s_last_clock_anchor_ticks >=
+            anchor_period_ticks) {
+        const int64_t esp_before_us = esp_timer_get_time();
+        uint64_t anchor_ticks = 0;
+        const esp_err_t anchor_err =
+            gptimer_get_raw_count(s_fusion_timer, &anchor_ticks);
+        const int64_t esp_after_us = esp_timer_get_time();
+        if (anchor_err == ESP_OK) {
+            const uint64_t esp_mid_us =
+                (uint64_t)(esp_before_us +
+                           (esp_after_us - esp_before_us) / 2);
+            (void)wireless_telemetry_service_submit_bno085_clock_anchor(
+                anchor_ticks, esp_mid_us);
+            s_last_clock_anchor_ticks = anchor_ticks;
+        }
+    }
+    if (wireless_telemetry_service_submit_bno085_accel_compact(
+            sample->fusion_time_ticks, sample->sequence,
+            sample->x_q8, sample->y_q8, sample->z_q8,
+            sample->sensor_delay_100us, sample->accuracy,
+            sample->time_flags)) {
+        s_telemetry_submit_count++;
+    } else {
+        s_telemetry_drop_count++;
+    }
+}
+
+static void bno085_emit_orientation_telemetry(
+    const bno085_gyro_rv_sample_t *sample)
+{
+    if (sample == NULL) {
         return;
     }
-
-    s_last_telemetry_ticks = sample->fusion_time_ticks;
-    bno085_gyro_rv_sample_t gyro_rv = {0};
-    bool gyro_rv_valid = false;
-    portENTER_CRITICAL(&s_sample_lock);
-    if (s_gyro_rv_ring_count > 0) {
-        const size_t latest =
-            (s_gyro_rv_ring_write + BNO085_GYRO_RV_RING_CAPACITY - 1U) %
-            BNO085_GYRO_RV_RING_CAPACITY;
-        gyro_rv = s_gyro_rv_ring[latest];
-        gyro_rv_valid = gyro_rv.sequence != 0;
-    }
-    portEXIT_CRITICAL(&s_sample_lock);
-
-    if (wireless_telemetry_service_submit_bno085_imu(
-            sample->x_milli_mps2, sample->y_milli_mps2,
-            sample->z_milli_mps2, sample->sequence, sample->accuracy,
-            sample->time_flags, gyro_rv.sequence, gyro_rv.quat_i_q14,
-            gyro_rv.quat_j_q14, gyro_rv.quat_k_q14,
-            gyro_rv.quat_real_q14, gyro_rv.gyro_x_q10,
-            gyro_rv.gyro_y_q10, gyro_rv.gyro_z_q10,
-            gyro_rv.time_flags, gyro_rv_valid)) {
+    if (wireless_telemetry_service_submit_bno085_orientation(
+            sample->fusion_time_ticks, sample->sequence,
+            sample->quat_i_q14, sample->quat_j_q14,
+            sample->quat_k_q14, sample->quat_real_q14,
+            sample->gyro_x_q10, sample->gyro_y_q10,
+            sample->gyro_z_q10, sample->time_flags)) {
         s_telemetry_submit_count++;
     } else {
         s_telemetry_drop_count++;
@@ -886,6 +939,46 @@ static uint64_t bno085_packet_hint_ticks(uint8_t *time_flags,
         *time_flags = BNO085_ACCEL_TIME_HINT_ESTIMATED;
     }
     return bno085_service_fusion_time_ticks();
+}
+
+static uint32_t bno085_nominal_period_ticks(void)
+{
+    return bno085_accel_period_us() *
+           (BNO085_FUSION_TIMER_HZ / 1000000U);
+}
+
+static uint32_t bno085_timestamp_period_ticks(void)
+{
+    return s_timestamp_period_ticks != 0 ? s_timestamp_period_ticks
+                                         : bno085_nominal_period_ticks();
+}
+
+static void bno085_track_timestamp_period(uint64_t packet_hint_ticks,
+                                          uint8_t packet_time_flags)
+{
+    if ((packet_time_flags & BNO085_ACCEL_TIME_HINT_EXACT) == 0 ||
+        packet_hint_ticks == 0) {
+        return;
+    }
+
+    if (s_timestamp_anchor_hint_ticks == 0) {
+        s_timestamp_anchor_hint_ticks = packet_hint_ticks;
+        s_timestamp_anchor_report_count = s_report_count;
+        return;
+    }
+
+    const uint32_t report_delta =
+        s_report_count - s_timestamp_anchor_report_count;
+    if (packet_hint_ticks > s_timestamp_anchor_hint_ticks &&
+        report_delta >= BNO085_TIMESTAMP_TRACK_MIN_REPORTS) {
+        s_timestamp_period_ticks = bno085_timing_track_period(
+            s_timestamp_period_ticks,
+            packet_hint_ticks - s_timestamp_anchor_hint_ticks,
+            report_delta,
+            bno085_nominal_period_ticks());
+        s_timestamp_anchor_hint_ticks = packet_hint_ticks;
+        s_timestamp_anchor_report_count = s_report_count;
+    }
 }
 
 static void bno085_consume_packet_hint(uint32_t hint_generation)
@@ -964,8 +1057,7 @@ static void bno085_parse_input_reports(const uint8_t *payload, size_t len,
             portEXIT_CRITICAL(&s_sample_lock);
             if (sample_ticks <= previous_sample_ticks) {
                 sample_ticks = previous_sample_ticks +
-                               (uint64_t)bno085_accel_period_us() *
-                                   (BNO085_FUSION_TIMER_HZ / 1000000U);
+                               bno085_timestamp_period_ticks();
                 time_flags |= BNO085_ACCEL_TIME_MONOTONIC_REPAIRED;
                 s_monotonic_repair_count++;
             }
@@ -975,6 +1067,9 @@ static void bno085_parse_input_reports(const uint8_t *payload, size_t len,
                 .x_milli_mps2 = float_to_milli(s_last_x_mps2),
                 .y_milli_mps2 = float_to_milli(s_last_y_mps2),
                 .z_milli_mps2 = float_to_milli(s_last_z_mps2),
+                .x_q8 = raw_x,
+                .y_q8 = raw_y,
+                .z_q8 = raw_z,
                 .sensor_delay_100us = delay_100us,
                 .accuracy = status,
                 .time_flags = time_flags,
@@ -1010,6 +1105,7 @@ static void bno085_parse_packet(const uint8_t *packet, size_t packet_len,
         bno085_parse_input_reports(payload, payload_len, packet_hint_ticks,
                                    packet_time_flags);
         const uint32_t reports_in_packet = s_report_count - before;
+        bno085_track_timestamp_period(packet_hint_ticks, packet_time_flags);
         if (reports_in_packet > s_max_reports_per_packet) {
             s_max_reports_per_packet = reports_in_packet;
         }
@@ -1048,6 +1144,7 @@ static void bno085_parse_packet(const uint8_t *packet, size_t packet_len,
                 .time_flags = packet_time_flags,
             };
             bno085_store_gyro_rv_sample(&sample);
+            bno085_emit_orientation_telemetry(&sample);
         }
         return;
     }
@@ -1057,6 +1154,13 @@ static void bno085_parse_packet(const uint8_t *packet, size_t packet_len,
         payload[1] == BNO085_REPORT_ACCELEROMETER) {
         const uint32_t interval_us = read_le_u32(&payload[5]);
         const uint32_t batch_interval_us = read_le_u32(&payload[9]);
+        if (interval_us > 0) {
+            s_effective_accel_period_us = interval_us;
+            s_timestamp_period_ticks = 0;
+            s_timestamp_anchor_hint_ticks = 0;
+            s_timestamp_anchor_report_count = 0;
+            bno085_update_i2c_realtime_period();
+        }
         ESP_LOGI(TAG,
                  "BNO085 accelerometer feature accepted: interval=%u us batch=%u us",
                  (unsigned)interval_us, (unsigned)batch_interval_us);
@@ -1080,11 +1184,13 @@ static void bno085_log_status(void)
     s_last_log_ms = now_ms;
 
     ESP_LOGI(TAG,
-             "BNO085 summary x=%.2f y=%.2f z=%.2f acc=%u rep=%u gyro=%u ms=%u pkt=%u in=%u tb=%u max=%u ring=%u/%u ovw=%u telem=%u/%u dec=%u fix=%u len=%u cont=%u/%u cerr=%u hp=%u null=%u err=%u/%u irq=%u il=%d wt=%u",
+             "BNO085 summary x=%.2f y=%.2f z=%.2f acc=%u rep=%u gyro=%u req=%ums eff=%uus ts=%u ticks pkt=%u in=%u tb=%u max=%u ring=%u/%u ovw=%u telem=%u/%u dec=%u fix=%u len=%u cont=%u/%u cerr=%u hp=%u null=%u err=%u/%u irq=%u il=%d wt=%u",
              (double)s_last_x_mps2, (double)s_last_y_mps2,
              (double)s_last_z_mps2, (unsigned)s_last_accuracy,
              (unsigned)s_report_count, (unsigned)s_gyro_rv_report_count,
              (unsigned)bno085_accel_interval_ms(),
+              (unsigned)bno085_accel_period_us(),
+              (unsigned)bno085_timestamp_period_ticks(),
              (unsigned)s_packet_count, (unsigned)s_input_packet_count,
              (unsigned)s_timebase_count, (unsigned)s_max_reports_per_packet,
              (unsigned)s_sample_ring_count,
@@ -1150,6 +1256,12 @@ static bool bno085_recover_if_stalled(void)
     esp_err_t err = bno085_soft_reset();
     if (err == ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(50));
+        err = bno085_rebind_i2c_device();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "BNO085 stall reset address detection failed: %s",
+                     esp_err_to_name(err));
+            return false;
+        }
         if (!bno085_drain_startup_packets()) {
             return false;
         }
@@ -1162,16 +1274,16 @@ static bool bno085_recover_if_stalled(void)
                  esp_err_to_name(err));
     }
 
+    err = bno085_enable_gyro_rv();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "BNO085 GyroRV stall recovery enable failed: %s",
+                 esp_err_to_name(err));
+    }
     err = bno085_enable_accelerometer();
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "BNO085 accelerometer re-enabled after stall");
     } else {
         ESP_LOGW(TAG, "BNO085 stall recovery enable failed: %s",
-                 esp_err_to_name(err));
-    }
-    err = bno085_enable_gyro_rv();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "BNO085 GyroRV stall recovery enable failed: %s",
                  esp_err_to_name(err));
     }
 
@@ -1187,9 +1299,30 @@ static esp_err_t bno085_i2c_init(void)
         return err;
     }
 
+    uint8_t device_address = APP_BNO085_I2C_ADDRESS;
+    err = i2c_master_probe(s_i2c_bus, device_address, 100);
+    if (err != ESP_OK) {
+        const uint8_t alternate_address =
+            device_address == 0x4A ? 0x4B : 0x4A;
+        const esp_err_t alternate_err =
+            i2c_master_probe(s_i2c_bus, alternate_address, 100);
+        if (alternate_err != ESP_OK) {
+            ESP_LOGE(TAG,
+                     "BNO085 not found at preferred address 0x%02X (%s) or alternate 0x%02X (%s)",
+                     device_address, esp_err_to_name(err), alternate_address,
+                     esp_err_to_name(alternate_err));
+            return err;
+        }
+
+        ESP_LOGW(TAG,
+                 "BNO085 detected at alternate address 0x%02X (preferred 0x%02X did not respond)",
+                 alternate_address, device_address);
+        device_address = alternate_address;
+    }
+
     const i2c_device_config_t dev_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = APP_BNO085_I2C_ADDRESS,
+        .device_address = device_address,
         .scl_speed_hz = APP_BNO085_I2C_CLOCK_HZ,
         .scl_wait_us = 20000,
     };
@@ -1198,12 +1331,14 @@ static esp_err_t bno085_i2c_init(void)
         return err;
     }
 
-    err = i2c_master_probe(s_i2c_bus, APP_BNO085_I2C_ADDRESS, 100);
-    if (err != ESP_OK) {
-        return err;
-    }
-
+    ESP_LOGI(TAG, "BNO085 I2C device ready at 0x%02X", device_address);
     return ESP_OK;
+}
+
+static esp_err_t bno085_rebind_i2c_device(void)
+{
+    bno085_release_i2c_device();
+    return bno085_i2c_init();
 }
 
 static uint32_t bno085_wait_notify_bits(uint32_t timeout_ms)
@@ -1359,6 +1494,7 @@ static void bno085_task(void *arg)
     s_task_handle = xTaskGetCurrentTaskHandle();
     const uint32_t accel_interval_ms = bno085_accel_interval_ms();
     const uint32_t log_interval_ms = bno085_log_interval_ms();
+    s_effective_accel_period_us = bno085_requested_accel_period_us();
     s_i2c_scl_measure_count = 0;
 
     esp_err_t err = bno085_fusion_timer_init();
@@ -1387,9 +1523,13 @@ static void bno085_task(void *arg)
     portEXIT_CRITICAL(&s_hint_lock);
     s_batch_timebase_valid = false;
     s_last_telemetry_ticks = 0;
+    s_last_clock_anchor_ticks = 0;
+    s_timestamp_period_ticks = 0;
+    s_timestamp_anchor_hint_ticks = 0;
+    s_timestamp_anchor_report_count = 0;
 
     ESP_LOGI(TAG,
-             "BNO085 accelerometer test enabled: SDA=%d SCL=%d RST=%d INT=%d addr=0x%02X clock=%u Hz sample=%u ms log=%u ms int_timeout=%u ms core=%d",
+             "BNO085 accelerometer test enabled: SDA=%d SCL=%d RST=%d INT=%d preferred_addr=0x%02X clock=%u Hz sample=%u ms log=%u ms int_timeout=%u ms core=%d",
              BOARD_CONFIG_BNO085_SDA_GPIO, BOARD_CONFIG_BNO085_SCL_GPIO,
              BOARD_CONFIG_BNO085_RST_GPIO, BOARD_CONFIG_BNO085_INT_GPIO,
              APP_BNO085_I2C_ADDRESS, (unsigned)APP_BNO085_I2C_CLOCK_HZ,
@@ -1429,6 +1569,13 @@ static void bno085_task(void *arg)
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "BNO085 soft reset command sent");
         vTaskDelay(pdMS_TO_TICKS(50));
+        err = bno085_rebind_i2c_device();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "BNO085 post-reset address detection failed: %s",
+                     esp_err_to_name(err));
+            bno085_task_finish(true);
+            return;
+        }
         if (!bno085_drain_startup_packets()) {
             ESP_LOGI(TAG, "BNO085 stop requested during startup");
             bno085_task_finish(true);
@@ -1444,14 +1591,6 @@ static void bno085_task(void *arg)
         ESP_LOGW(TAG, "BNO085 soft reset failed: %s", esp_err_to_name(err));
     }
 
-    err = bno085_enable_accelerometer();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "BNO085 accelerometer enable failed: %s",
-                 esp_err_to_name(err));
-        bno085_task_finish(true);
-        return;
-    }
-    ESP_LOGI(TAG, "BNO085 accelerometer enable command sent");
     err = bno085_enable_gyro_rv();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "BNO085 GyroRV enable failed: %s",
@@ -1461,6 +1600,14 @@ static void bno085_task(void *arg)
     }
     ESP_LOGI(TAG, "BNO085 GyroRV enable command sent at %u Hz",
              (unsigned)BNO085_GYRO_RV_RATE_HZ);
+    err = bno085_enable_accelerometer();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "BNO085 accelerometer enable failed: %s",
+                 esp_err_to_name(err));
+        bno085_task_finish(true);
+        return;
+    }
+    ESP_LOGI(TAG, "BNO085 accelerometer enable command sent last");
     s_last_progress_ms = ticks_to_ms();
     s_last_progress_report_count = s_report_count;
 
@@ -1507,7 +1654,7 @@ esp_err_t bno085_service_start(void)
     s_service_started = true;
     const BaseType_t created = xTaskCreatePinnedToCore(bno085_task,
                                                        "bno085",
-                                                       BNO085_TASK_STACK_WORDS,
+                                                       BNO085_TASK_STACK_BYTES,
                                                        NULL,
                                                        BNO085_TASK_PRIORITY,
                                                        &s_task_handle,

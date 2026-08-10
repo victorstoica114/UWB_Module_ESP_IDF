@@ -22,6 +22,17 @@ int main(void)
     assert(bno085_timing_due(100000, 200000, 100));
     assert(!bno085_timing_due(100000, 200000, 0));
 
+    assert(bno085_timing_advance(0, 40000, 100) == 40000);
+    assert(bno085_timing_advance(40000, 120000, 100) == 40000);
+    assert(bno085_timing_advance(40000, 160000, 100) == 140000);
+    assert(bno085_timing_advance(140000, 200000, 100) == 140000);
+    assert(bno085_timing_advance(140000, 240000, 100) == 240000);
+
+    assert(bno085_timing_track_period(0, 390000, 10, 40000) == 39000);
+    assert(bno085_timing_track_period(40000, 390000, 10, 40000) == 39875);
+    assert(bno085_timing_track_period(39875, 1000, 10, 40000) == 39875);
+    assert(bno085_timing_track_period(0, 0, 0, 40000) == 40000);
+
     puts("bno085 timing tests passed");
     return 0;
 }

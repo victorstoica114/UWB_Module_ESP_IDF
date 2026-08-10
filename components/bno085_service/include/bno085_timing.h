@@ -21,6 +21,12 @@ uint64_t bno085_timing_reconstruct_ticks(uint64_t hint_ticks,
                                          uint16_t report_delay_100us);
 bool bno085_timing_due(uint64_t previous_ticks, uint64_t current_ticks,
                        uint32_t rate_hz);
+uint64_t bno085_timing_advance(uint64_t previous_ticks,
+                               uint64_t current_ticks, uint32_t rate_hz);
+uint32_t bno085_timing_track_period(uint32_t previous_period_ticks,
+                                    uint64_t hint_delta_ticks,
+                                    uint32_t report_delta,
+                                    uint32_t nominal_period_ticks);
 
 #ifdef __cplusplus
 }

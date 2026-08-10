@@ -34,9 +34,9 @@
 static const char *TAG = "app_manager";
 
 enum {
-    STATUS_LED_TASK_STACK_WORDS = 2048,
+    STATUS_LED_TASK_STACK_BYTES = 4096,
     STATUS_LED_TASK_PRIORITY = 5,
-    BOOT_GUARD_TASK_STACK_WORDS = 3072,
+    BOOT_GUARD_TASK_STACK_BYTES = 3072,
     BOOT_GUARD_TASK_PRIORITY = 4,
     BOOT_GUARD_OTA_WAIT_MS = 500,
 };
@@ -86,7 +86,7 @@ static void boot_guard_start_stability_task(void)
 {
     const BaseType_t created =
         xTaskCreate(boot_guard_stability_task, "boot_guard",
-                    BOOT_GUARD_TASK_STACK_WORDS, NULL,
+                    BOOT_GUARD_TASK_STACK_BYTES, NULL,
                     BOOT_GUARD_TASK_PRIORITY, NULL);
     if (created != pdPASS) {
         ESP_LOGE(TAG, "Failed to create boot guard stability task");
@@ -236,7 +236,7 @@ void app_manager_start(void)
 
     const BaseType_t created = xTaskCreatePinnedToCore(status_led_task,
                                                        "status_led",
-                                                       STATUS_LED_TASK_STACK_WORDS,
+                                                       STATUS_LED_TASK_STACK_BYTES,
                                                        NULL,
                                                        STATUS_LED_TASK_PRIORITY,
                                                        NULL,

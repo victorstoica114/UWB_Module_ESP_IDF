@@ -13,6 +13,7 @@ from uwb_imu_replay import (
     DEG_TO_RAD,
     EARTH_RADIUS_M,
     TrackKey,
+    fusion_acceptance,
     ordered_track_events,
     raw_position_xy,
     replay_capture,
@@ -42,9 +43,11 @@ def gps_record(
     north: float,
     *,
     measurement_wall_ns: int | None = None,
+    speed_mps: float | None = None,
+    course_deg: float | None = None,
 ) -> dict:
     latitude, longitude = gps_from_enu(east, north)
-    return {
+    record = {
         "kind": "gps_fix",
         "protocol": "flextdoa",
         "module_id": module_id,
@@ -57,6 +60,11 @@ def gps_record(
         "gps_latitude_deg": latitude,
         "gps_longitude_deg": longitude,
     }
+    if speed_mps is not None:
+        record["gps_speed_mps"] = speed_mps
+    if course_deg is not None:
+        record["gps_course_deg"] = course_deg
+    return record
 
 
 def imu_record(module_id: int, uptime_ms: int, wall_ns: int) -> dict:
@@ -172,10 +180,24 @@ class ReplayTest(unittest.TestCase):
             # IMU from module 2 must never feed the tag-1/module-1 track.
             imu_record(2, 1900, 1_900_000_000),
             imu_record(1, 1900, 1_900_000_000),
-            gps_record(1, 2_000_000_000, 1.0, 2.0),
+            gps_record(
+                1,
+                2_000_000_000,
+                1.0,
+                2.0,
+                speed_mps=1.0,
+                course_deg=90.0,
+            ),
             position_record(2000, 2_000_000_000, 1.0, 2.0),
             imu_record(1, 2500, 2_500_000_000),
-            gps_record(1, 3_000_000_000, 2.0, 2.0),
+            gps_record(
+                1,
+                3_000_000_000,
+                2.0,
+                2.0,
+                speed_mps=1.0,
+                course_deg=90.0,
+            ),
             position_record(3000, 3_000_000_000, 2.0, 2.0),
         ]
         for index, record in enumerate(records):
@@ -190,7 +212,7 @@ class ReplayTest(unittest.TestCase):
                 imu_gap_reset_ms=2000,
                 position_gap_reset_ms=5000,
             ),
-            rtk_max_age_ms=10.0,
+            rtk_max_age_ms=600.0,
             gap_ms=900.0,
         )
 
@@ -201,13 +223,65 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual(track["input_counts"]["rtk_matches"], 2)
         self.assertTrue(track["rtk_alignment"]["available"])
         self.assertLess(track["metrics"]["raw_vs_rtk"]["rmse_m"], 1e-5)
-        self.assertLess(track["metrics"]["fused_vs_rtk"]["rmse_m"], 1e-5)
+        self.assertLess(track["metrics"]["fused_vs_rtk"]["rmse_m"], 0.5)
         self.assertEqual(track["timing"]["raw_position"]["gap_count"], 1)
         self.assertEqual(
             track["timing"]["fused_position"]["rate_hz"],
             track["timing"]["raw_position"]["rate_hz"],
         )
+        self.assertEqual(track["timing"]["fused_stream"]["gap_count"], 0)
+        self.assertGreater(
+            track["timing"]["fused_stream"]["rate_hz"],
+            track["timing"]["raw_position"]["rate_hz"],
+        )
+        self.assertGreaterEqual(
+            track["input_counts"]["rtk_yaw_alignment_updates"], 1
+        )
+        self.assertEqual(
+            track["fusion_final"]["diagnostics"]["yaw_alignment_source"],
+            "rtk_course",
+        )
         self.assertEqual(len(samples), 2)
+
+    def test_acceptance_requires_accuracy_coverage_and_no_overshoot(self) -> None:
+        accepted = fusion_acceptance(
+            {
+                "rmse_m": 0.20,
+                "p95_m": 0.30,
+                "p99_m": 0.40,
+                "max_m": 0.50,
+            },
+            {
+                "rmse_m": 0.12,
+                "p95_m": 0.20,
+                "p99_m": 0.42,
+                "max_m": 0.53,
+            },
+            {"gap_count": 3},
+            {"gap_count": 1},
+            0.05,
+        )
+        rejected = fusion_acceptance(
+            {
+                "rmse_m": 0.20,
+                "p95_m": 0.30,
+                "p99_m": 0.40,
+                "max_m": 0.50,
+            },
+            {
+                "rmse_m": 0.10,
+                "p95_m": 0.20,
+                "p99_m": 0.60,
+                "max_m": 0.70,
+            },
+            {"gap_count": 2},
+            {"gap_count": 0},
+            0.05,
+        )
+
+        self.assertTrue(accepted["accepted"])
+        self.assertFalse(rejected["accepted"])
+        self.assertFalse(rejected["checks"]["no_overshoot"])
 
     def test_reboot_epochs_are_detected_independently_per_event_kind(self) -> None:
         records = [

@@ -22,7 +22,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 try:
     from uwb_imu_fusion import UwbImuFusion
@@ -35,9 +35,9 @@ IMU_FUSION_NON_ADVANCING_FLAGS = frozenset(
         "module_mismatch",
         "event_out_of_order",
         "imu_out_of_order",
-        "imu_duplicate_uptime",
+        "imu_duplicate_time",
         "position_out_of_order",
-        "position_duplicate_uptime",
+        "position_duplicate_time",
     }
 )
 
@@ -133,8 +133,18 @@ TELEMETRY_STREAM_NATIVE_DS_GEOMETRY = 16
 TELEMETRY_STREAM_FLEX_GEOMETRY = 17
 TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2 = 18
 TELEMETRY_STREAM_BNO085_IMU = 19
+TELEMETRY_STREAM_BNO085_IMU_V2 = 20
+TELEMETRY_STREAM_GPS_GGA = 21
+TELEMETRY_STREAM_BNO085_ACCEL_COMPACT = 22
+TELEMETRY_STREAM_BNO085_ORIENTATION = 23
+TELEMETRY_STREAM_BNO085_CLOCK = 24
 TELEMETRY_ACCEL_SAMPLE_LEN = 21
 TELEMETRY_IMU_SAMPLE_LEN = 42
+TELEMETRY_IMU_V2_SAMPLE_LEN = 50
+TELEMETRY_GPS_GGA_SAMPLE_LEN = 60
+TELEMETRY_IMU_ACCEL_COMPACT_SAMPLE_LEN = 26
+TELEMETRY_IMU_ORIENTATION_SAMPLE_LEN = 32
+TELEMETRY_IMU_CLOCK_SAMPLE_LEN = 20
 TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26
 TELEMETRY_FLEX_OBSERVATION_V2_SAMPLE_LEN = 49
 TELEMETRY_FLEX_ANCHOR_RANGE_SAMPLE_LEN = 20
@@ -146,6 +156,11 @@ TELEMETRY_PASSIVE_DS_POSITION_V4_SAMPLE_LEN = 63
 TELEMETRY_PASSIVE_DS_GEOMETRY_SAMPLE_LEN = 24
 TELEMETRY_ACCEL_STRUCT = struct.Struct("<IIiiiB")
 TELEMETRY_IMU_STRUCT = struct.Struct("<IIiiiIhhhhhhhBBBB")
+TELEMETRY_IMU_V2_STRUCT = struct.Struct("<IQIiiiIhhhhhhhBBBB")
+TELEMETRY_GPS_GGA_STRUCT = struct.Struct("<IQIIIqqiiiHBBBBH")
+TELEMETRY_IMU_ACCEL_COMPACT_STRUCT = struct.Struct("<IQIhhhHBB")
+TELEMETRY_IMU_ORIENTATION_STRUCT = struct.Struct("<IQIhhhhhhhBB")
+TELEMETRY_IMU_CLOCK_STRUCT = struct.Struct("<IQQ")
 TELEMETRY_FLEX_OBSERVATION_STRUCT = struct.Struct("<IIiiiHBBBB")
 TELEMETRY_FLEX_OBSERVATION_V2_STRUCT = struct.Struct(
     "<IIiiiiiiiIHBBBBHB"
@@ -169,6 +184,13 @@ ANCHOR_RANGE_HISTORY_MAX_AGE_SEC = 30.0
 TELEMETRY_STREAM_SAMPLE_SIZES = {
     TELEMETRY_STREAM_BNO085_ACCEL: TELEMETRY_ACCEL_SAMPLE_LEN,
     TELEMETRY_STREAM_BNO085_IMU: TELEMETRY_IMU_SAMPLE_LEN,
+    TELEMETRY_STREAM_BNO085_IMU_V2: TELEMETRY_IMU_V2_SAMPLE_LEN,
+    TELEMETRY_STREAM_GPS_GGA: TELEMETRY_GPS_GGA_SAMPLE_LEN,
+    TELEMETRY_STREAM_BNO085_ACCEL_COMPACT:
+        TELEMETRY_IMU_ACCEL_COMPACT_SAMPLE_LEN,
+    TELEMETRY_STREAM_BNO085_ORIENTATION:
+        TELEMETRY_IMU_ORIENTATION_SAMPLE_LEN,
+    TELEMETRY_STREAM_BNO085_CLOCK: TELEMETRY_IMU_CLOCK_SAMPLE_LEN,
     TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION:
         TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN,
     TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2:
@@ -618,6 +640,76 @@ def solve_least_squares(
     return solve_linear_system(normal, rhs)
 
 
+def rtk_course_to_uwb_heading(
+    geometry_anchors: Mapping[str, Any],
+    status_by_module: Mapping[int, Mapping[str, Any]],
+    course_deg: float,
+) -> tuple[float, float] | None:
+    """Return UWB-frame heading and anchor registration RMS for an RTK course."""
+
+    points: list[tuple[float, float, float, float]] = []
+    for raw_id, anchor in geometry_anchors.items():
+        try:
+            anchor_id = int(raw_id)
+            status = status_by_module[anchor_id]
+            if (
+                not bool(status.get("gps_fix_valid"))
+                or int(status.get("gps_fix_quality") or 0) != 4
+            ):
+                continue
+            latitude = float(status["gps_latitude_deg"])
+            longitude = float(status["gps_longitude_deg"])
+            x_m = float(anchor["x"])
+            y_m = float(anchor["y"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if all(math.isfinite(value) for value in (latitude, longitude, x_m, y_m)):
+            points.append((latitude, longitude, x_m, y_m))
+    if len(points) < 3 or not math.isfinite(course_deg):
+        return None
+
+    mean_latitude = sum(point[0] for point in points) / len(points)
+    mean_longitude = sum(point[1] for point in points) / len(points)
+    latitude_scale = 6378137.0 * math.pi / 180.0
+    longitude_scale = latitude_scale * math.cos(math.radians(mean_latitude))
+    local = [
+        (
+            (longitude - mean_longitude) * longitude_scale,
+            (latitude - mean_latitude) * latitude_scale,
+            x_m,
+            y_m,
+        )
+        for latitude, longitude, x_m, y_m in points
+    ]
+    center_x = sum(point[2] for point in local) / len(local)
+    center_y = sum(point[3] for point in local) / len(local)
+    dot = 0.0
+    cross = 0.0
+    for east_m, north_m, x_m, y_m in local:
+        x_centered = x_m - center_x
+        y_centered = y_m - center_y
+        dot += east_m * x_centered + north_m * y_centered
+        cross += east_m * y_centered - north_m * x_centered
+    if math.hypot(dot, cross) < 1e-9:
+        return None
+    rotation = math.atan2(cross, dot)
+    cosine = math.cos(rotation)
+    sine = math.sin(rotation)
+    squared_error = 0.0
+    for east_m, north_m, x_m, y_m in local:
+        projected_x = cosine * east_m - sine * north_m + center_x
+        projected_y = sine * east_m + cosine * north_m + center_y
+        squared_error += (projected_x - x_m) ** 2 + (projected_y - y_m) ** 2
+    fit_rms_m = math.sqrt(squared_error / len(local))
+
+    course_rad = math.radians(course_deg)
+    east = math.sin(course_rad)
+    north = math.cos(course_rad)
+    direction_x = cosine * east - sine * north
+    direction_y = sine * east + cosine * north
+    return math.atan2(direction_y, direction_x), fit_rms_m
+
+
 def parse_port_list(text: str) -> list[int]:
     ports: list[int] = []
     for raw in re.split(r"[\s,]+", str(text or "")):
@@ -700,9 +792,18 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "reports": int(reports),
                 }
             )
-        elif stream_type == TELEMETRY_STREAM_BNO085_IMU:
+        elif stream_type in (
+            TELEMETRY_STREAM_BNO085_IMU,
+            TELEMETRY_STREAM_BNO085_IMU_V2,
+        ):
+            fusion_time_ticks: int | None = None
+            if stream_type == TELEMETRY_STREAM_BNO085_IMU_V2:
+                values = TELEMETRY_IMU_V2_STRUCT.unpack_from(frame, offset)
+                uptime_ms, fusion_time_ticks, *imu_values = values
+            else:
+                values = TELEMETRY_IMU_STRUCT.unpack_from(frame, offset)
+                uptime_ms, *imu_values = values
             (
-                uptime_ms,
                 accel_reports,
                 x,
                 y,
@@ -719,11 +820,25 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                 accel_time_flags,
                 gyro_time_flags,
                 imu_flags,
-            ) = TELEMETRY_IMU_STRUCT.unpack_from(frame, offset)
+            ) = imu_values
             samples.append(
                 {
                     **common,
                     "uptime_ms": int(uptime_ms),
+                    "fusion_time_ticks": fusion_time_ticks,
+                    "fusion_timer_hz": (
+                        10_000_000 if fusion_time_ticks is not None else None
+                    ),
+                    "fusion_time_us": (
+                        int(fusion_time_ticks) // 10
+                        if fusion_time_ticks is not None
+                        else None
+                    ),
+                    "sample_time_us": (
+                        None
+                        if fusion_time_ticks is not None
+                        else int(uptime_ms) * 1000
+                    ),
                     # Keep the established acceleration topic so storage, the
                     # /api/accel endpoint and graph history remain unchanged.
                     "topic": "bno085.accel",
@@ -744,6 +859,161 @@ def parse_binary_telemetry_frame(frame: bytes) -> list[dict[str, Any]]:
                     "gyro_time_flags": int(gyro_time_flags),
                     "imu_flags": int(imu_flags),
                     "imu_valid": bool(imu_flags & 1),
+                }
+            )
+        elif stream_type == TELEMETRY_STREAM_GPS_GGA:
+            (
+                uptime_ms,
+                sample_monotonic_us,
+                gga_sequence,
+                utc_ms_of_day,
+                utc_date_ddmmyy,
+                latitude_nanodeg,
+                longitude_nanodeg,
+                altitude_mm,
+                speed_mmps,
+                course_millideg,
+                hdop_centi,
+                satellites,
+                fix_quality,
+                rmc_status,
+                rmc_mode,
+                gps_flags,
+            ) = TELEMETRY_GPS_GGA_STRUCT.unpack_from(frame, offset)
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "topic": "gps.gga",
+                    "sample_monotonic_us": int(sample_monotonic_us),
+                    "gga_sequence": int(gga_sequence),
+                    "utc_ms_of_day": (
+                        int(utc_ms_of_day)
+                        if gps_flags & (1 << 2) else None
+                    ),
+                    "utc_date_ddmmyy": (
+                        int(utc_date_ddmmyy)
+                        if gps_flags & (1 << 3) else None
+                    ),
+                    "latitude_deg": (
+                        latitude_nanodeg / 1_000_000_000.0
+                        if gps_flags & 1 else None
+                    ),
+                    "longitude_deg": (
+                        longitude_nanodeg / 1_000_000_000.0
+                        if gps_flags & 1 else None
+                    ),
+                    "altitude_m": (
+                        altitude_mm / 1000.0
+                        if gps_flags & (1 << 4) else None
+                    ),
+                    "speed_mps": (
+                        speed_mmps / 1000.0
+                        if gps_flags & (1 << 8) else None
+                    ),
+                    "course_deg": (
+                        course_millideg / 1000.0
+                        if gps_flags & (1 << 9) else None
+                    ),
+                    "hdop": (
+                        hdop_centi / 100.0
+                        if gps_flags & (1 << 5) else None
+                    ),
+                    "satellites": (
+                        int(satellites)
+                        if gps_flags & (1 << 6) else None
+                    ),
+                    "fix_quality": int(fix_quality),
+                    "fix_valid": bool(gps_flags & (1 << 1)),
+                    "rmc_status": chr(rmc_status) if rmc_status else "",
+                    "rmc_mode": chr(rmc_mode) if rmc_mode else "",
+                    "gps_flags": int(gps_flags),
+                }
+            )
+        elif stream_type == TELEMETRY_STREAM_BNO085_ACCEL_COMPACT:
+            (
+                uptime_ms,
+                fusion_time_ticks,
+                accel_reports,
+                x_q8,
+                y_q8,
+                z_q8,
+                sensor_delay_100us,
+                accuracy,
+                accel_time_flags,
+            ) = TELEMETRY_IMU_ACCEL_COMPACT_STRUCT.unpack_from(frame, offset)
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "fusion_time_ticks": int(fusion_time_ticks),
+                    "fusion_timer_hz": 10_000_000,
+                    "fusion_time_us": int(fusion_time_ticks) // 10,
+                    "sample_time_us": None,
+                    "topic": "bno085.accel",
+                    "x": x_q8 / 256.0,
+                    "y": y_q8 / 256.0,
+                    "z": z_q8 / 256.0,
+                    "x_q8": int(x_q8),
+                    "y_q8": int(y_q8),
+                    "z_q8": int(z_q8),
+                    "accuracy": int(accuracy),
+                    "reports": int(accel_reports),
+                    "sensor_delay_100us": int(sensor_delay_100us),
+                    "accel_time_flags": int(accel_time_flags),
+                    "imu_compact": True,
+                }
+            )
+        elif stream_type == TELEMETRY_STREAM_BNO085_ORIENTATION:
+            (
+                uptime_ms,
+                fusion_time_ticks,
+                gyro_reports,
+                quat_i_q14,
+                quat_j_q14,
+                quat_k_q14,
+                quat_real_q14,
+                gyro_x_q10,
+                gyro_y_q10,
+                gyro_z_q10,
+                gyro_time_flags,
+                orientation_flags,
+            ) = TELEMETRY_IMU_ORIENTATION_STRUCT.unpack_from(frame, offset)
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "fusion_time_ticks": int(fusion_time_ticks),
+                    "fusion_timer_hz": 10_000_000,
+                    "fusion_time_us": int(fusion_time_ticks) // 10,
+                    "sample_time_us": None,
+                    "topic": "bno085.orientation",
+                    "gyro_reports": int(gyro_reports),
+                    "quat_i": quat_i_q14 / 16384.0,
+                    "quat_j": quat_j_q14 / 16384.0,
+                    "quat_k": quat_k_q14 / 16384.0,
+                    "quat_real": quat_real_q14 / 16384.0,
+                    "gyro_x": gyro_x_q10 / 1024.0,
+                    "gyro_y": gyro_y_q10 / 1024.0,
+                    "gyro_z": gyro_z_q10 / 1024.0,
+                    "gyro_time_flags": int(gyro_time_flags),
+                    "orientation_flags": int(orientation_flags),
+                }
+            )
+        elif stream_type == TELEMETRY_STREAM_BNO085_CLOCK:
+            (
+                uptime_ms,
+                fusion_time_ticks,
+                esp_timer_us,
+            ) = TELEMETRY_IMU_CLOCK_STRUCT.unpack_from(frame, offset)
+            samples.append(
+                {
+                    **common,
+                    "uptime_ms": int(uptime_ms),
+                    "fusion_time_ticks": int(fusion_time_ticks),
+                    "fusion_timer_hz": 10_000_000,
+                    "esp_timer_us": int(esp_timer_us),
+                    "topic": "bno085.clock",
                 }
             )
         elif stream_type == TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2:
@@ -1191,8 +1461,12 @@ class DashboardState:
         self.status_online_max_age_sec = 6.0
         self.logs: deque[dict[str, Any]] = deque(maxlen=max_logs)
         self.accel_history: dict[int, deque[dict[str, Any]]] = {}
-        self.max_accel_samples = 30000
+        self.max_accel_samples = 6000
         self.accel_samples: deque[dict[str, Any]] = deque(maxlen=120000)
+        self.raw_accel_samples: deque[dict[str, Any]] = deque(maxlen=120000)
+        self.last_accel_ui_time_us: dict[int, int] = {}
+        self.accel_ui_interval_us = 10_000
+        self.gps_samples: deque[dict[str, Any]] = deque(maxlen=30000)
         self.ranging_distances: dict[tuple[int, int], dict[str, Any]] = {}
         self.ranging_history: dict[tuple[int, int], deque[dict[str, Any]]] = {}
         self.max_ranging_samples = 200
@@ -1208,6 +1482,7 @@ class DashboardState:
         self.max_tdoa_samples = 200
         self.next_log_id = 1
         self.next_accel_id = 1
+        self.next_gps_id = 1
         self.client_count = 0
         self.telemetry_client_count = 0
         self.client_counts: dict[str, int] = {}
@@ -1218,10 +1493,18 @@ class DashboardState:
         self.status_errors: dict[str, str] = {}
         self.passive_ds_tag_diagnostics: dict[int, dict[str, Any]] = {}
         self.latest_imu_by_module: dict[int, dict[str, Any]] = {}
+        self.latest_orientation_by_module: dict[int, dict[str, Any]] = {}
+        self.telemetry_sequence_stats: dict[str, dict[str, int]] = {}
+        self.imu_clock_alignment: dict[int, dict[str, int]] = {}
         self.imu_fusions: dict[tuple[int, str, int], UwbImuFusion] = {}
         self.imu_fusion_latest: dict[str, dict[str, Any]] = {}
-        self.imu_fusion_last_emit_ms: dict[tuple[int, str, int], int] = {}
-        self.imu_fusion_emit_interval_ms = 20
+        self.imu_fusion_last_emit_time_us: dict[
+            tuple[int, str, int], int
+        ] = {}
+        self.imu_fusion_last_rtk_yaw_status_at: dict[
+            tuple[int, str, int], float
+        ] = {}
+        self.imu_fusion_emit_interval_us = 20_000
 
     def add_log(self, line: str, addr: tuple[str, int]) -> None:
         parsed = self.parse_line(line)
@@ -1264,8 +1547,23 @@ class DashboardState:
                 sample["received_at"] = now
                 sample["client"] = client
                 topic = str(sample.get("topic") or "")
+                sequence_field = {
+                    "bno085.accel": "reports",
+                    "bno085.orientation": "gyro_reports",
+                    "gps.gga": "gga_sequence",
+                }.get(topic)
+                if sequence_field is not None:
+                    self._record_telemetry_sequence_locked(
+                        sample, topic, sequence_field
+                    )
                 if topic == "bno085.accel":
                     self.record_accel_sample_locked(sample)
+                elif topic == "bno085.orientation":
+                    self.record_orientation_sample_locked(sample)
+                elif topic == "bno085.clock":
+                    self.record_imu_clock_anchor_locked(sample)
+                elif topic == "gps.gga":
+                    self.record_gps_sample_locked(sample)
                 elif topic in (
                     "uwb.flex_tdoa.observation",
                     "uwb.passive_ds.observation",
@@ -1291,6 +1589,50 @@ class DashboardState:
                     "uwb.native_ds.geometry",
                 ):
                     self.record_passive_ds_geometry_sample_locked(sample)
+
+    def _record_telemetry_sequence_locked(
+        self, sample: dict[str, Any], topic: str, field: str
+    ) -> None:
+        try:
+            module_id = int(sample.get("module_id") or 0)
+            sequence = int(sample.get(field) or 0) & 0xFFFFFFFF
+            uptime_ms = int(sample.get("uptime_ms") or 0)
+        except (TypeError, ValueError):
+            return
+        if module_id <= 0 or sequence == 0:
+            return
+        key = f"{module_id}:{topic}"
+        stats = self.telemetry_sequence_stats.setdefault(
+            key,
+            {
+                "received": 0,
+                "missing": 0,
+                "duplicates": 0,
+                "out_of_order": 0,
+                "resets": 0,
+                "last_sequence": 0,
+                "last_uptime_ms": 0,
+            },
+        )
+        last = int(stats["last_sequence"])
+        last_uptime_ms = int(stats["last_uptime_ms"])
+        stats["received"] += 1
+        if last:
+            if sequence == last:
+                stats["duplicates"] += 1
+            elif uptime_ms + 1000 < last_uptime_ms:
+                stats["resets"] += 1
+            else:
+                delta = (sequence - last) & 0xFFFFFFFF
+                if 0 < delta < 0x80000000:
+                    if delta > 1:
+                        missing = delta - 1
+                        stats["missing"] += missing
+                        sample["sequence_gap"] = missing
+                else:
+                    stats["out_of_order"] += 1
+        stats["last_sequence"] = sequence
+        stats["last_uptime_ms"] = uptime_ms
 
     def record_passive_ds_geometry_sample_locked(
         self, item: dict[str, Any]
@@ -1376,26 +1718,44 @@ class DashboardState:
         imu_module_id = tag_id
         fusion_key = (imu_module_id, protocol, tag_id)
         stored["imu_fusion_module_id"] = imu_module_id
+        fusion = self.imu_fusions.get(fusion_key)
+        reused_fusion = False
         for stale_key in list(self.imu_fusions):
             if stale_key[0] != imu_module_id or stale_key == fusion_key:
                 continue
-            self.imu_fusions.pop(stale_key, None)
-            self.imu_fusion_last_emit_ms.pop(stale_key, None)
+            candidate = self.imu_fusions.pop(stale_key, None)
+            if fusion is None and stale_key[2] == tag_id:
+                fusion = candidate
+                reused_fusion = fusion is not None
+            self.imu_fusion_last_emit_time_us.pop(stale_key, None)
+            self.imu_fusion_last_rtk_yaw_status_at.pop(stale_key, None)
             self.imu_fusion_latest.pop(self._fusion_key_text(stale_key), None)
-        fusion = self.imu_fusions.get(fusion_key)
         if fusion is None:
             fusion = UwbImuFusion()
-            self.imu_fusions[fusion_key] = fusion
+        elif reused_fusion:
+            # One EKF instance follows a physical tag across all protocols.
+            # Protocols retain different biases/timing, so retain cumulative
+            # diagnostics but deliberately reinitialize the dynamic state.
+            fusion.reset("protocol_changed")
+        self.imu_fusions[fusion_key] = fusion
+        if reused_fusion or fusion.snapshot()["diagnostics"]["imu_samples"] == 0:
             latest_imu = self.latest_imu_by_module.get(imu_module_id)
             if (
                 latest_imu is not None
-                and int(latest_imu.get("uptime_ms") or 0)
-                <= int(item.get("uptime_ms") or 0)
+                and int(
+                    latest_imu.get("sample_time_us")
+                    or int(latest_imu.get("uptime_ms") or 0) * 1000
+                )
+                <= int(
+                    item.get("sample_time_us")
+                    or int(item.get("uptime_ms") or 0) * 1000
+                )
             ):
                 try:
                     fusion.update_imu(latest_imu)
                 except (TypeError, ValueError):
                     pass
+        self._try_rtk_yaw_alignment_locked(fusion_key, fusion)
         try:
             fusion_position = {
                 **stored,
@@ -1421,6 +1781,59 @@ class DashboardState:
     def _fusion_key_text(key: tuple[int, str, int]) -> str:
         module_id, protocol, tag_id = key
         return f"{module_id}:{protocol}:{tag_id}"
+
+    def _try_rtk_yaw_alignment_locked(
+        self,
+        key: tuple[int, str, int],
+        fusion: UwbImuFusion,
+    ) -> None:
+        module_id, protocol, tag_id = key
+        status = self.status_by_module.get(module_id)
+        geometry = self.tdoa_local_geometries.get(f"{protocol}:{tag_id}")
+        if status is None or geometry is None or not bool(geometry.get("complete")):
+            return
+        try:
+            status_updated_at = float(status.get("status_updated_at") or 0.0)
+            gps_updated_at = float(
+                status.get("gps_telemetry_received_at")
+                or status_updated_at
+            )
+            raw_fix_age_ms = status.get("gps_last_fix_age_ms")
+            fix_age_ms = (
+                float(raw_fix_age_ms)
+                if raw_fix_age_ms is not None
+                else math.inf
+            )
+            speed_mps = float(status.get("gps_speed_mps") or 0.0)
+            course_deg = float(status["gps_course_deg"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if (
+            not bool(status.get("gps_fix_valid"))
+            or int(status.get("gps_fix_quality") or 0) != 4
+            or time.time() - gps_updated_at > 3.0
+            or fix_age_ms > 1500.0
+            or speed_mps < 0.5
+            or not math.isfinite(course_deg)
+            or gps_updated_at
+            <= self.imu_fusion_last_rtk_yaw_status_at.get(key, 0.0)
+        ):
+            return
+        alignment = rtk_course_to_uwb_heading(
+            geometry.get("anchors") or {},
+            self.status_by_module,
+            course_deg,
+        )
+        if alignment is None:
+            return
+        heading_rad, fit_rms_m = alignment
+        if fit_rms_m > 0.35:
+            return
+        fused = fusion.align_yaw_from_heading(
+            heading_rad, source="rtk_course"
+        )
+        if "yaw_aligned" in fused.get("flags", ()):
+            self.imu_fusion_last_rtk_yaw_status_at[key] = gps_updated_at
 
     def _attach_imu_fusion_locked(
         self,
@@ -1470,12 +1883,18 @@ class DashboardState:
         if not ready and not reset_event:
             return
         uptime_ms = int(fused.get("uptime_ms") or 0)
-        previous_ms = self.imu_fusion_last_emit_ms.get(key)
+        sample_time_value = fused.get("sample_time_us")
+        sample_time_us = (
+            int(sample_time_value) if sample_time_value is not None else None
+        )
+        previous_time_us = self.imu_fusion_last_emit_time_us.get(key)
         if (
             not force
             and not reset_event
-            and previous_ms is not None
-            and uptime_ms - previous_ms < self.imu_fusion_emit_interval_ms
+            and sample_time_us is not None
+            and previous_time_us is not None
+            and sample_time_us - previous_time_us
+            < self.imu_fusion_emit_interval_us
         ):
             return
         module_id, protocol, tag_id = key
@@ -1493,12 +1912,15 @@ class DashboardState:
             "module_id": module_id,
             "tag_id": tag_id,
             "uptime_ms": uptime_ms,
+            "sample_time_us": sample_time_us,
+            "fusion_time_ticks": fused.get("fusion_time_ticks"),
+            "fusion_timer_hz": fused.get("fusion_timer_hz"),
             "received_at": float(received_at),
             "tdoa_protocol": protocol,
             "position_stream_type": f"{protocol}_imu_fused_position",
             "position_event_id": self.next_position_event_id,
             "position_stream_event_id": self.next_position_stream_event_id,
-            "position_filter": "imu_alpha_beta",
+            "position_filter": "imu_ekf_cv_accel_zupt",
             "solver_location": "raspberry_pi",
             "solution_kind": "imu_prediction" if ready else "imu_reset",
             "independent_frame": False,
@@ -1514,10 +1936,10 @@ class DashboardState:
             event["y_m"] = float(y_m)
         self.next_position_event_id += 1
         self.next_position_stream_event_id += 1
-        if uptime_ms > 0:
-            self.imu_fusion_last_emit_ms[key] = uptime_ms
+        if sample_time_us is not None:
+            self.imu_fusion_last_emit_time_us[key] = sample_time_us
         elif reset_event:
-            self.imu_fusion_last_emit_ms.pop(key, None)
+            self.imu_fusion_last_emit_time_us.pop(key, None)
         self.tdoa_position_events.append(event)
         self.position_condition.notify_all()
 
@@ -1685,15 +2107,150 @@ class DashboardState:
         except ValueError:
             return None
 
+    def record_orientation_sample_locked(self, sample: dict[str, Any]) -> None:
+        module_id = int(sample["module_id"])
+        self._align_imu_sample_time_locked(sample, module_id)
+        self.latest_orientation_by_module[module_id] = dict(sample)
+
+    def record_imu_clock_anchor_locked(self, sample: dict[str, Any]) -> None:
+        try:
+            module_id = int(sample["module_id"])
+            fusion_ticks = int(sample["fusion_time_ticks"])
+            fusion_timer_hz = int(sample.get("fusion_timer_hz") or 10_000_000)
+            esp_timer_us = int(sample["esp_timer_us"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if module_id <= 0 or fusion_ticks < 0 or fusion_timer_hz <= 0:
+            return
+        fusion_time_us = fusion_ticks * 1_000_000 // fusion_timer_hz
+        previous = self.imu_clock_alignment.get(module_id)
+        rebooted = (
+            previous is not None
+            and fusion_ticks + fusion_timer_hz
+            < int(previous["last_fusion_ticks"])
+        )
+        generation = (
+            1
+            if previous is None
+            else int(previous["generation"]) + (1 if rebooted else 0)
+        )
+        self.imu_clock_alignment[module_id] = {
+            "offset_us": esp_timer_us - fusion_time_us,
+            "last_fusion_ticks": fusion_ticks,
+            "last_uptime_ms": int(sample.get("uptime_ms") or 0),
+            "generation": generation,
+            "anchor_esp_timer_us": esp_timer_us,
+        }
+
+    def record_gps_sample_locked(self, sample: dict[str, Any]) -> None:
+        module_id = int(sample["module_id"])
+        sample["gps_event_id"] = self.next_gps_id
+        self.next_gps_id += 1
+        received_at = float(sample.get("received_at") or time.time())
+        try:
+            transport_age_us = max(
+                0,
+                int(sample.get("uptime_ms") or 0) * 1000
+                - int(sample.get("sample_monotonic_us") or 0),
+            )
+        except (TypeError, ValueError):
+            transport_age_us = 0
+        sample["estimated_measurement_wall_ns"] = (
+            int(received_at * 1_000_000_000) - transport_age_us * 1000
+        )
+        sample["measurement_time_source"] = (
+            "telemetry_wall_minus_module_monotonic_age"
+        )
+        self.gps_samples.append(sample)
+
+        status = self.status_by_module.setdefault(
+            module_id,
+            {
+                "module_id": module_id,
+                "hostname": f"uwb-module-{module_id}",
+            },
+        )
+        status.update(
+            {
+                "gps_gga_count": int(sample.get("gga_sequence") or 0),
+                "gps_fix_valid": bool(sample.get("fix_valid")),
+                "gps_fix_quality": int(sample.get("fix_quality") or 0),
+                "gps_fix_quality_text": {
+                    4: "rtk_fixed",
+                    5: "rtk_float",
+                }.get(int(sample.get("fix_quality") or 0), "other"),
+                "gps_latitude_deg": sample.get("latitude_deg"),
+                "gps_longitude_deg": sample.get("longitude_deg"),
+                "gps_altitude_m": sample.get("altitude_m"),
+                "gps_speed_mps": sample.get("speed_mps"),
+                "gps_course_deg": sample.get("course_deg"),
+                "gps_hdop": sample.get("hdop"),
+                "gps_satellites": sample.get("satellites"),
+                "gps_last_fix_age_ms": 0,
+                "gps_telemetry_received_at": received_at,
+                "gps_sample_monotonic_us": sample.get(
+                    "sample_monotonic_us"
+                ),
+                "gps_utc_ms_of_day": sample.get("utc_ms_of_day"),
+                "gps_utc_date_ddmmyy": sample.get("utc_date_ddmmyy"),
+            }
+        )
+
     def record_accel_sample_locked(self, sample: dict[str, Any]) -> None:
         module_id = int(sample["module_id"])
+        self._align_imu_sample_time_locked(sample, module_id)
+        if bool(sample.get("imu_compact")):
+            orientation = self.latest_orientation_by_module.get(module_id)
+            sample_time_us = int(sample.get("sample_time_us") or 0)
+            orientation_time_us = int(
+                (orientation or {}).get("sample_time_us") or 0
+            )
+            orientation_age_us = sample_time_us - orientation_time_us
+            orientation_valid = (
+                orientation is not None
+                and -2_000 <= orientation_age_us <= 30_000
+                and orientation.get("fusion_clock_generation")
+                == sample.get("fusion_clock_generation")
+            )
+            if orientation_valid:
+                for key in (
+                    "gyro_reports", "quat_i", "quat_j", "quat_k",
+                    "quat_real", "gyro_x", "gyro_y", "gyro_z",
+                    "gyro_time_flags",
+                ):
+                    sample[key] = orientation.get(key)
+            sample["imu_valid"] = orientation_valid
+            sample["orientation_age_us"] = (
+                orientation_age_us if orientation_valid else None
+            )
         sample["sample_id"] = self.next_accel_id
         self.next_accel_id += 1
+        self.raw_accel_samples.append(sample)
+        sample_time_us = int(
+            sample.get("sample_time_us")
+            or int(sample.get("uptime_ms") or 0) * 1000
+        )
+        previous_ui_time_us = self.last_accel_ui_time_us.get(module_id, 0)
+        ui_due = (
+            previous_ui_time_us == 0
+            or sample_time_us < previous_ui_time_us
+            or sample_time_us - previous_ui_time_us
+            >= self.accel_ui_interval_us
+        )
         history = self.accel_history.setdefault(
             module_id, deque(maxlen=self.max_accel_samples)
         )
-        history.append(sample)
-        self.accel_samples.append(sample)
+        if ui_due and history and (
+            sample.get("fusion_clock_generation") is not None
+            and history[-1].get("fusion_clock_generation") is not None
+            and int(sample["fusion_clock_generation"])
+            != int(history[-1]["fusion_clock_generation"])
+        ):
+            history.clear()
+        if ui_due:
+            self.last_accel_ui_time_us[module_id] = sample_time_us
+            history.append(sample)
+            self.accel_samples.append(sample)
         # Legacy acceleration-only telemetry has no orientation and cannot be
         # fused.  A full IMU sample marked invalid must still reach an active
         # fusion so it can stop integrating stale acceleration safely.
@@ -1715,6 +2272,73 @@ class DashboardState:
             self._emit_imu_fusion_event_locked(
                 key, fused, received_at, force=False
             )
+
+    def _align_imu_sample_time_locked(
+        self, sample: dict[str, Any], module_id: int
+    ) -> None:
+        """Map a module-local 10 MHz GPTimer onto its uptime timeline.
+
+        The millisecond uptime and GPTimer timestamp are captured together by
+        the firmware.  We use their first offset after boot once, then keep it
+        fixed so subsequent samples retain GPTimer resolution instead of
+        being quantized back to FreeRTOS milliseconds.
+        """
+        try:
+            uptime_ms = int(sample.get("uptime_ms") or 0)
+        except (TypeError, ValueError):
+            return
+
+        fusion_ticks_value = sample.get("fusion_time_ticks")
+        if fusion_ticks_value is None:
+            sample.setdefault("sample_time_us", uptime_ms * 1000)
+            sample.setdefault("sample_time_source", "uptime_ms")
+            return
+
+        try:
+            fusion_ticks = int(fusion_ticks_value)
+        except (TypeError, ValueError):
+            return
+        if fusion_ticks < 0:
+            return
+
+        try:
+            fusion_timer_hz = int(sample.get("fusion_timer_hz") or 10_000_000)
+        except (TypeError, ValueError):
+            return
+        if fusion_timer_hz <= 0:
+            return
+        fusion_time_us = fusion_ticks * 1_000_000 // fusion_timer_hz
+        alignment = self.imu_clock_alignment.get(module_id)
+        # Split accel/orientation streams may arrive a few milliseconds out
+        # of timestamp order.  Only a large regression denotes a reboot.
+        rebooted = (
+            alignment is not None
+            and fusion_ticks + fusion_timer_hz
+            < alignment["last_fusion_ticks"]
+        )
+        if alignment is None or rebooted:
+            alignment = {
+                "offset_us": uptime_ms * 1000 - fusion_time_us,
+                "last_fusion_ticks": fusion_ticks,
+                "last_uptime_ms": uptime_ms,
+                "generation": (
+                    1 if alignment is None else alignment["generation"] + 1
+                ),
+            }
+            self.imu_clock_alignment[module_id] = alignment
+        else:
+            alignment["last_fusion_ticks"] = max(
+                alignment["last_fusion_ticks"], fusion_ticks
+            )
+            alignment["last_uptime_ms"] = max(
+                alignment["last_uptime_ms"], uptime_ms
+            )
+
+        sample["fusion_time_us"] = fusion_time_us
+        sample["fusion_uptime_offset_us"] = alignment["offset_us"]
+        sample["fusion_clock_generation"] = alignment["generation"]
+        sample["sample_time_us"] = fusion_time_us + alignment["offset_us"]
+        sample["sample_time_source"] = "gptimer64_aligned"
 
     def record_ranging_locked(self, item: dict[str, Any]) -> None:
         raw_message = str(item.get("message") or item.get("raw") or "")
@@ -2446,6 +3070,13 @@ class DashboardState:
     def set_status(self, module_id: int, status: dict[str, Any]) -> None:
         status["status_updated_at"] = time.time()
         with self.lock:
+            previous = self.status_by_module.get(module_id)
+            if previous is not None and previous.get(
+                "gps_telemetry_received_at"
+            ) is not None:
+                for key, value in previous.items():
+                    if key.startswith("gps_"):
+                        status[key] = value
             self.status_by_module[module_id] = status
             target = status.get("target")
             if isinstance(target, str):
@@ -2479,6 +3110,40 @@ class DashboardState:
             "next_id": next_id,
             "telemetry_client_count": telemetry_client_count,
         }
+
+    def raw_accel_after(self, after_id: int, limit: int) -> dict[str, Any]:
+        with self.lock:
+            samples = [
+                sample
+                for sample in self.raw_accel_samples
+                if int(sample.get("sample_id") or 0) > after_id
+            ]
+            if len(samples) > limit:
+                samples = samples[-limit:]
+            next_id = self.next_accel_id
+        return {"samples": samples, "next_id": next_id}
+
+    def gps_after(self, after_id: int, limit: int) -> dict[str, Any]:
+        with self.lock:
+            samples = [
+                sample
+                for sample in self.gps_samples
+                if int(sample.get("gps_event_id") or 0) > after_id
+            ]
+            if len(samples) > limit:
+                samples = samples[-limit:]
+            next_id = self.next_gps_id
+        return {"samples": samples, "next_id": next_id}
+
+    def telemetry_stats(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "sequence": {
+                    key: dict(value)
+                    for key, value in self.telemetry_sequence_stats.items()
+                },
+                "telemetry_client_count": self.telemetry_client_count,
+            }
 
     def capture_snapshot(self) -> dict[str, Any]:
         """Return current collector inputs without large recent histories."""
@@ -6082,6 +6747,23 @@ function accelSamples(moduleId) {
   return state.accelHistory[String(moduleId)] || state.accelHistory[moduleId] || [];
 }
 
+function imuSampleTimeUs(sample) {
+  if (!sample) return null;
+  if (sample.sample_time_us !== null && sample.sample_time_us !== undefined) {
+    const alignedUs = Number(sample.sample_time_us);
+    if (Number.isFinite(alignedUs)) return alignedUs;
+  }
+  if (sample.fusion_time_ticks !== null && sample.fusion_time_ticks !== undefined) {
+    const ticks = Number(sample.fusion_time_ticks);
+    const timerHz = Number(sample.fusion_timer_hz);
+    if (Number.isFinite(ticks) && Number.isFinite(timerHz) && timerHz > 0) {
+      return ticks * 1000000 / timerHz;
+    }
+  }
+  const uptimeMs = Number(sample.uptime_ms);
+  return Number.isFinite(uptimeMs) ? uptimeMs * 1000 : null;
+}
+
 function mergeAccelSample(sample) {
   const moduleId = Number(sample.module_id);
   if (!moduleId) return;
@@ -6091,12 +6773,26 @@ function mergeAccelSample(sample) {
   if (seenKey) state.accelSeen.add(seenKey);
   if (!state.accelHistory[key]) state.accelHistory[key] = [];
   const history = state.accelHistory[key];
-  const previous = history[history.length - 1];
   sample.uptime_ms = Number(sample.uptime_ms);
+  if (sample.sample_time_us !== null && sample.sample_time_us !== undefined) {
+    sample.sample_time_us = Number(sample.sample_time_us);
+  }
+  if (sample.fusion_time_ticks !== null && sample.fusion_time_ticks !== undefined) {
+    sample.fusion_time_ticks = Number(sample.fusion_time_ticks);
+  }
   sample.received_at = Number(sample.received_at);
+  const previous = history[history.length - 1];
+  if (previous && sample.fusion_clock_generation !== null &&
+      sample.fusion_clock_generation !== undefined &&
+      previous.fusion_clock_generation !== null &&
+      previous.fusion_clock_generation !== undefined &&
+      Number(sample.fusion_clock_generation) !==
+        Number(previous.fusion_clock_generation)) {
+    history.length = 0;
+  }
   history.push(sample);
-  if (previous && Number(previous.uptime_ms || 0) > Number(sample.uptime_ms || 0)) {
-    history.sort((a, b) => Number(a.uptime_ms || 0) - Number(b.uptime_ms || 0));
+  if (previous && imuSampleTimeUs(previous) > imuSampleTimeUs(sample)) {
+    history.sort((a, b) => imuSampleTimeUs(a) - imuSampleTimeUs(b));
   }
   if (history.length > maxAccelSamples) {
     history.splice(0, history.length - maxAccelSamples);
@@ -6196,21 +6892,21 @@ function intervalMsToHz(ms) {
 function accelRate(samples, horizonSec = 1.0) {
   if (samples.length < 2) return null;
   const latest = samples[samples.length - 1];
-  const latestUptimeMs = Number(latest.uptime_ms);
-  if (!Number.isFinite(latestUptimeMs)) return null;
-  const cutoffMs = latestUptimeMs - horizonSec * 1000;
+  const latestTimeUs = imuSampleTimeUs(latest);
+  if (!Number.isFinite(latestTimeUs)) return null;
+  const cutoffUs = latestTimeUs - horizonSec * 1000000;
   let first = null;
   let count = 0;
   for (let index = samples.length - 1; index >= 0; index--) {
     const sample = samples[index];
-    const uptimeMs = Number(sample.uptime_ms);
-    if (!Number.isFinite(uptimeMs) || uptimeMs > latestUptimeMs) continue;
-    if (uptimeMs < cutoffMs) break;
+    const sampleTimeUs = imuSampleTimeUs(sample);
+    if (!Number.isFinite(sampleTimeUs) || sampleTimeUs > latestTimeUs) continue;
+    if (sampleTimeUs < cutoffUs) break;
     first = sample;
     count++;
   }
   if (!first || first === latest || count < 2) return null;
-  const dtSec = (latestUptimeMs - Number(first.uptime_ms)) / 1000;
+  const dtSec = (latestTimeUs - imuSampleTimeUs(first)) / 1000000;
   if (!Number.isFinite(dtSec) || dtSec <= 0) return null;
   const repDelta = Number(latest.reports) - Number(first.reports);
   return {
@@ -6221,14 +6917,14 @@ function accelRate(samples, horizonSec = 1.0) {
 
 function visibleAccelSamples(samples, latest, windowSec) {
   if (!latest) return [];
-  const latestUptimeMs = Number(latest.uptime_ms);
-  if (!Number.isFinite(latestUptimeMs)) return [];
-  const windowMs = windowSec * 1000;
+  const latestTimeUs = imuSampleTimeUs(latest);
+  if (!Number.isFinite(latestTimeUs)) return [];
+  const windowUs = windowSec * 1000000;
   return samples.filter(sample => {
-    const uptimeMs = Number(sample.uptime_ms);
-    return Number.isFinite(uptimeMs) &&
-      uptimeMs <= latestUptimeMs &&
-      latestUptimeMs - uptimeMs <= windowMs;
+    const sampleTimeUs = imuSampleTimeUs(sample);
+    return Number.isFinite(sampleTimeUs) &&
+      sampleTimeUs <= latestTimeUs &&
+      latestTimeUs - sampleTimeUs <= windowUs;
   });
 }
 
@@ -6265,7 +6961,7 @@ function downsampleSeries(samples, key) {
     }
     if (minSample === maxSample) {
       result.push(minSample);
-    } else if (Number(minSample.uptime_ms) <= Number(maxSample.uptime_ms)) {
+    } else if (imuSampleTimeUs(minSample) <= imuSampleTimeUs(maxSample)) {
       result.push(minSample, maxSample);
     } else {
       result.push(maxSample, minSample);
@@ -8282,7 +8978,7 @@ function applyImuFusionSnapshot(fusions, expectedProtocol) {
     const flags = Array.isArray(fused?.flags) ? fused.flags.map(String) : [];
     const snapshotToken = [
       protocol,
-      Number(fused?.uptime_ms || 0),
+      imuSampleTimeUs(fused) ?? 0,
       flags.join(","),
       Boolean(fused?.ready),
     ].join(":");
@@ -9744,12 +10440,12 @@ function canvasY(value, scale, plotArea) {
 }
 
 function canvasX(sample, latest, windowSec, plotArea) {
-  const latestUptimeMs = Number(latest?.uptime_ms);
-  const sampleUptimeMs = Number(sample.uptime_ms);
-  if (!Number.isFinite(latestUptimeMs) || !Number.isFinite(sampleUptimeMs)) {
+  const latestTimeUs = imuSampleTimeUs(latest);
+  const sampleTimeUs = imuSampleTimeUs(sample);
+  if (!Number.isFinite(latestTimeUs) || !Number.isFinite(sampleTimeUs)) {
     return plotArea.right;
   }
-  const ageSec = Math.max(0, (latestUptimeMs - sampleUptimeMs) / 1000);
+  const ageSec = Math.max(0, (latestTimeUs - sampleTimeUs) / 1000000);
   return plotArea.right - Math.min(1, ageSec / windowSec) * plotArea.width;
 }
 
@@ -15698,6 +16394,27 @@ class HttpHandler(BaseHTTPRequestHandler):
             after = int(query.get("after", ["0"])[0] or "0")
             limit = int(query.get("limit", ["8000"])[0] or "8000")
             self.send_json(self.server.state.accel_after(after, max(1, min(limit, 20000))))
+            return
+        if parsed.path == "/api/accel-raw":
+            query = urllib.parse.parse_qs(parsed.query)
+            after = int(query.get("after", ["0"])[0] or "0")
+            limit = int(query.get("limit", ["20000"])[0] or "20000")
+            self.send_json(
+                self.server.state.raw_accel_after(
+                    after, max(1, min(limit, 50000))
+                )
+            )
+            return
+        if parsed.path == "/api/gps-events":
+            query = urllib.parse.parse_qs(parsed.query)
+            after = int(query.get("after", ["0"])[0] or "0")
+            limit = int(query.get("limit", ["2000"])[0] or "2000")
+            self.send_json(
+                self.server.state.gps_after(after, max(1, min(limit, 10000)))
+            )
+            return
+        if parsed.path == "/api/telemetry-stats":
+            self.send_json(self.server.state.telemetry_stats())
             return
         if parsed.path == "/api/calibration-auto/status":
             query = urllib.parse.parse_qs(parsed.query)

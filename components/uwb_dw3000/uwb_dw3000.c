@@ -429,6 +429,7 @@ _Static_assert(UWB_DW3000_SPI_OPERATION_REQUEST_HZ <=
 #define UWB_FLEX_TDOA_CONFIG_FRAME_GAP_MS 10U
 #define UWB_FLEX_TDOA_BOOTSTRAP_LISTEN_US 2000000LL
 #define UWB_HOT_SWITCH_BOOTSTRAP_GUARD_US 150000LL
+#define UWB_FLEX_TDOA_EPOCH_BACKJUMP_FRAMES 8U
 // Host-only preparation lead. It must be shorter than one 4.80 ms slot so an
 // initiator keeps receiving the preceding slot while still programming its
 // own DW3000 delayed TX with comfortable margin.
@@ -6701,10 +6702,42 @@ static void uwb_flex_tdoa_tag_note_request_slot(uint32_t slot_id)
     if (s_flex_tdoa_tag_request_slot_valid) {
         const int32_t delta =
             (int32_t)(slot_id - s_flex_tdoa_tag_last_request_slot_id);
+        const app_runtime_config_t *config = app_runtime_config_get();
+        const uint32_t epoch_backjump_slots =
+            config != NULL && config->flex_tdoa_slot_count > 0U
+                ? (uint32_t)config->flex_tdoa_slot_count *
+                      UWB_FLEX_TDOA_EPOCH_BACKJUMP_FRAMES
+                : UWB_FLEX_TDOA_EPOCH_BACKJUMP_FRAMES;
+        const uint32_t backward_slots =
+            delta < 0 ? (uint32_t)(-(int64_t)delta) : 0U;
+        if (backward_slots >= epoch_backjump_slots) {
+            /* A distributed schedule that bootstraps again starts its slot
+             * IDs near zero.  Reset the tag-local frame epoch before this
+             * request is submitted; otherwise last_closed_frame rejects the
+             * new, valid stream forever after a staggered OTA rollout. */
+            (void)wireless_log_service_submit(
+                'W', TAG,
+                "FLEX_TDOA tag epoch reset slot=%lu->%lu back=%lu threshold=%lu",
+                (unsigned long)s_flex_tdoa_tag_last_request_slot_id,
+                (unsigned long)slot_id, (unsigned long)backward_slots,
+                (unsigned long)epoch_backjump_slots);
+            uwb_flex_tdoa_runtime_reset();
+            flextdoa_collector_reset(&s_flex_tdoa_tag_collection);
+            memset(s_flex_tdoa_tag_observations, 0,
+                   sizeof(s_flex_tdoa_tag_observations));
+            flextdoa_cfo_estimator_reset(&s_flex_tdoa_cfo_estimator);
+            if (config != NULL) {
+                flextdoa_cfo_estimator_configure(
+                    &s_flex_tdoa_cfo_estimator,
+                    config->flex_tdoa_config_generation);
+            }
+            s_flex_tdoa_tag_request_slot_valid = false;
+        }
         /* A forward gap is an exact count of requests not observed by the
          * passive tag. Ignore implausibly large jumps: distributed schedule
          * bootstrap intentionally restarts the slot sequence after resync. */
-        if (delta > 1 && delta <= 4096) {
+        if (s_flex_tdoa_tag_request_slot_valid &&
+            delta > 1 && delta <= 4096) {
             s_flex_tdoa_missed_requests_since_summary +=
                 (uint32_t)(delta - 1);
         }

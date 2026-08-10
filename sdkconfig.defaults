@@ -20,6 +20,10 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # module alive but unreachable.
 CONFIG_ESP_TASK_WDT_PANIC=y
 
+# Wi-Fi/IP callbacks log AP metadata from the default event loop.  The IDF
+# default (2304 bytes) is too tight with the selected libc/toolchain.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
 # Resource monitor: use the ESP timer as the FreeRTOS runtime-stats clock so
 # per-core load can be derived from IDLE0/IDLE1 runtime without extra timers.
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y

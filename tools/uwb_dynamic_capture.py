@@ -92,6 +92,38 @@ def position_cursor(payload: dict[str, Any], previous: int = 0) -> int:
     return candidate if candidate and candidate < previous else max(previous, candidate)
 
 
+def gps_cursor(payload: dict[str, Any], previous: int = 0) -> int:
+    event_ids = [
+        int(item.get("gps_event_id") or 0)
+        for item in payload.get("samples") or []
+    ]
+    candidate = max(event_ids + [max(0, int(payload.get("next_id") or 0) - 1)])
+    return candidate if candidate and candidate < previous else max(previous, candidate)
+
+
+def gps_telemetry_record(sample: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "module_id": int(sample.get("module_id") or 0),
+        "estimated_measurement_wall_ns": int(
+            sample.get("estimated_measurement_wall_ns") or 0
+        ),
+        "measurement_time_source": sample.get("measurement_time_source"),
+        "sample_monotonic_us": sample.get("sample_monotonic_us"),
+        "gps_gga_count": int(sample.get("gga_sequence") or 0),
+        "gps_fix_valid": bool(sample.get("fix_valid")),
+        "gps_fix_quality": int(sample.get("fix_quality") or 0),
+        "gps_latitude_deg": sample.get("latitude_deg"),
+        "gps_longitude_deg": sample.get("longitude_deg"),
+        "gps_altitude_m": sample.get("altitude_m"),
+        "gps_speed_mps": sample.get("speed_mps"),
+        "gps_course_deg": sample.get("course_deg"),
+        "gps_hdop": sample.get("hdop"),
+        "gps_satellites": sample.get("satellites"),
+        "gps_utc_ms_of_day": sample.get("utc_ms_of_day"),
+        "gps_utc_date_ddmmyy": sample.get("utc_date_ddmmyy"),
+    }
+
+
 def status_summary(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     keep = {
         "module_id", "hostname", "version", "http_status_online",
@@ -283,10 +315,14 @@ def main() -> int:
     try:
         initial, snapshot_path = fetch_capture_snapshot(base, args.timeout_sec)
         accel_initial = fetch_json(
-            endpoint(base, "/api/accel", after=0, limit=1), args.timeout_sec
+            endpoint(base, "/api/accel-raw", after=0, limit=1), args.timeout_sec
         )
         position_initial = fetch_json(
             endpoint(base, "/api/position-events", after=0, limit=1),
+            args.timeout_sec,
+        )
+        gps_initial = fetch_json(
+            endpoint(base, "/api/gps-events", after=0, limit=1),
             args.timeout_sec,
         )
     except (OSError, ValueError, urllib.error.URLError) as exc:
@@ -300,7 +336,7 @@ def main() -> int:
 
     accel_after = accel_cursor(accel_initial)
     position_after = position_cursor(position_initial)
-    seen_gps: set[tuple[int, int]] = set()
+    gps_after = gps_cursor(gps_initial)
     counts: collections.Counter[str] = collections.Counter()
     errors: collections.Counter[str] = collections.Counter()
     gps_quality: dict[int, collections.Counter[str]] = collections.defaultdict(
@@ -336,7 +372,7 @@ def main() -> int:
                     payload = fetch_json(
                         endpoint(
                             base,
-                            "/api/accel",
+                            "/api/accel-raw",
                             after=accel_after,
                             limit=20000,
                         ),
@@ -379,6 +415,37 @@ def main() -> int:
                     errors["position"] += 1
                     if errors["position"] <= 3:
                         print(f"position poll failed: {exc}", file=sys.stderr)
+                try:
+                    payload = fetch_json(
+                        endpoint(
+                            base,
+                            "/api/gps-events",
+                            after=gps_after,
+                            limit=10000,
+                        ),
+                        args.timeout_sec,
+                    )
+                    for sample in payload.get("samples") or []:
+                        record = gps_telemetry_record(dict(sample))
+                        module_id = int(record.get("module_id") or 0)
+                        gps_quality[module_id]["samples"] += 1
+                        if record.get("gps_fix_valid"):
+                            gps_quality[module_id]["valid"] += 1
+                        if int(record.get("gps_fix_quality") or 0) == 4:
+                            gps_quality[module_id]["rtk_fixed"] += 1
+                        write_record(
+                            handle,
+                            args.protocol,
+                            capture_id,
+                            "gps_fix",
+                            record,
+                            counts,
+                        )
+                    gps_after = gps_cursor(payload, gps_after)
+                except (OSError, ValueError, urllib.error.URLError) as exc:
+                    errors["gps"] += 1
+                    if errors["gps"] <= 3:
+                        print(f"gps poll failed: {exc}", file=sys.stderr)
                 now = time.monotonic()
                 if now >= next_snapshot:
                     try:
@@ -387,22 +454,6 @@ def main() -> int:
                             args.timeout_sec,
                             preferred_path=snapshot_path,
                         )
-                        wall_ns = time.time_ns()
-                        for record in gps_records(last_snapshot, seen_gps, wall_ns):
-                            module_id = int(record.get("module_id") or 0)
-                            gps_quality[module_id]["samples"] += 1
-                            if record.get("gps_fix_valid"):
-                                gps_quality[module_id]["valid"] += 1
-                            if int(record.get("gps_fix_quality") or 0) == 4:
-                                gps_quality[module_id]["rtk_fixed"] += 1
-                            write_record(
-                                handle,
-                                args.protocol,
-                                capture_id,
-                                "gps_fix",
-                                record,
-                                counts,
-                            )
                         if now >= next_status:
                             write_record(
                                 handle,

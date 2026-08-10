@@ -38,7 +38,11 @@ enum {
     WIRELESS_TELEMETRY_BATCH_MAX = 4096,
     WIRELESS_TELEMETRY_FRAME_HEADER_LEN = 12,
     WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN = 21,
-    WIRELESS_TELEMETRY_IMU_SAMPLE_LEN = 42,
+    WIRELESS_TELEMETRY_IMU_V2_SAMPLE_LEN = 50,
+    WIRELESS_TELEMETRY_GPS_GGA_SAMPLE_LEN = 60,
+    WIRELESS_TELEMETRY_IMU_ACCEL_COMPACT_SAMPLE_LEN = 26,
+    WIRELESS_TELEMETRY_IMU_ORIENTATION_SAMPLE_LEN = 32,
+    WIRELESS_TELEMETRY_IMU_CLOCK_SAMPLE_LEN = 20,
     WIRELESS_TELEMETRY_FLEX_OBSERVATION_SAMPLE_LEN = 26,
     WIRELESS_TELEMETRY_FLEX_OBSERVATION_V2_SAMPLE_LEN = 49,
     WIRELESS_TELEMETRY_PASSIVE_DS_OBSERVATION_V2_SAMPLE_LEN = 41,
@@ -68,11 +72,16 @@ enum {
     WIRELESS_TELEMETRY_STREAM_FLEX_GEOMETRY = 17,
     WIRELESS_TELEMETRY_STREAM_FLEX_TDOA_OBSERVATION_V2 = 18,
     WIRELESS_TELEMETRY_STREAM_BNO085_IMU = 19,
+    WIRELESS_TELEMETRY_STREAM_BNO085_IMU_V2 = 20,
+    WIRELESS_TELEMETRY_STREAM_GPS_GGA = 21,
+    WIRELESS_TELEMETRY_STREAM_BNO085_ACCEL_COMPACT = 22,
+    WIRELESS_TELEMETRY_STREAM_BNO085_ORIENTATION = 23,
+    WIRELESS_TELEMETRY_STREAM_BNO085_CLOCK = 24,
     WIRELESS_TELEMETRY_RECONNECT_MS = 2000,
     WIRELESS_TELEMETRY_WIFI_WAIT_MS = 500,
     WIRELESS_TELEMETRY_QUEUE_WAIT_MS = 20,
-    WIRELESS_TELEMETRY_ACCEL_COALESCE_MS = 30,
-    WIRELESS_TELEMETRY_ACCEL_COALESCE_SAMPLES = 4,
+    WIRELESS_TELEMETRY_ACCEL_COALESCE_MS = 20,
+    WIRELESS_TELEMETRY_ACCEL_COALESCE_SAMPLES = 16,
     WIRELESS_TELEMETRY_SEND_TIMEOUT_MS = 1000,
 };
 
@@ -98,6 +107,10 @@ typedef enum {
     WIRELESS_TELEMETRY_ITEM_NATIVE_DS_POSITION,
     WIRELESS_TELEMETRY_ITEM_NATIVE_DS_GEOMETRY,
     WIRELESS_TELEMETRY_ITEM_FLEX_GEOMETRY,
+    WIRELESS_TELEMETRY_ITEM_GPS_GGA,
+    WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL_COMPACT,
+    WIRELESS_TELEMETRY_ITEM_BNO085_ORIENTATION,
+    WIRELESS_TELEMETRY_ITEM_BNO085_CLOCK,
 } wireless_telemetry_item_type_t;
 
 typedef struct {
@@ -109,6 +122,8 @@ typedef struct {
 } wireless_telemetry_accel_t;
 
 typedef struct {
+    uint32_t fusion_time_ticks_low;
+    uint32_t fusion_time_ticks_high;
     int32_t accel_x_milli_mps2;
     int32_t accel_y_milli_mps2;
     int32_t accel_z_milli_mps2;
@@ -126,6 +141,53 @@ typedef struct {
     uint8_t gyro_time_flags;
     uint8_t flags;
 } wireless_telemetry_imu_t;
+
+typedef struct {
+    uint64_t fusion_time_ticks;
+    uint32_t sequence;
+    int16_t x_q8;
+    int16_t y_q8;
+    int16_t z_q8;
+    uint16_t sensor_delay_100us;
+    uint8_t accuracy;
+    uint8_t time_flags;
+} wireless_telemetry_accel_compact_t;
+
+typedef struct {
+    uint64_t fusion_time_ticks;
+    uint32_t sequence;
+    int16_t quat_i_q14;
+    int16_t quat_j_q14;
+    int16_t quat_k_q14;
+    int16_t quat_real_q14;
+    int16_t gyro_x_q10;
+    int16_t gyro_y_q10;
+    int16_t gyro_z_q10;
+    uint8_t time_flags;
+} wireless_telemetry_orientation_t;
+
+typedef struct {
+    uint64_t fusion_time_ticks;
+    uint64_t esp_timer_us;
+} wireless_telemetry_clock_t;
+
+typedef struct {
+    uint64_t sample_monotonic_us;
+    uint32_t gga_sequence;
+    uint32_t utc_ms_of_day;
+    uint32_t utc_date_ddmmyy;
+    int64_t latitude_nanodeg;
+    int64_t longitude_nanodeg;
+    int32_t altitude_mm;
+    int32_t speed_mmps;
+    int32_t course_millideg;
+    uint16_t hdop_centi;
+    uint8_t satellites;
+    uint8_t fix_quality;
+    uint8_t rmc_status;
+    uint8_t rmc_mode;
+    uint16_t flags;
+} wireless_telemetry_gps_gga_t;
 
 typedef struct {
     uint32_t slot_id;
@@ -200,6 +262,10 @@ typedef struct {
         char line[WIRELESS_TELEMETRY_LINE_MAX];
         wireless_telemetry_accel_t accel;
         wireless_telemetry_imu_t imu;
+        wireless_telemetry_accel_compact_t accel_compact;
+        wireless_telemetry_orientation_t orientation;
+        wireless_telemetry_clock_t clock;
+        wireless_telemetry_gps_gga_t gps_gga;
         wireless_telemetry_flex_observation_t flex_observation;
         wireless_telemetry_flex_anchor_range_t flex_anchor_range;
         wireless_telemetry_flex_position_t flex_position;
@@ -304,6 +370,27 @@ static void wireless_telemetry_delete_batch_buffer(void)
     }
 }
 
+static uint8_t wireless_telemetry_item_priority(
+    const wireless_telemetry_item_t *item)
+{
+    if (item == NULL) {
+        return 0;
+    }
+
+    switch (item->type) {
+    case WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL:
+    case WIRELESS_TELEMETRY_ITEM_BNO085_IMU:
+    case WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL_COMPACT:
+    case WIRELESS_TELEMETRY_ITEM_BNO085_ORIENTATION:
+    case WIRELESS_TELEMETRY_ITEM_BNO085_CLOCK:
+        return 0;
+    case WIRELESS_TELEMETRY_ITEM_GPS_GGA:
+        return 1;
+    default:
+        return 2;
+    }
+}
+
 static bool wireless_telemetry_enqueue(const wireless_telemetry_item_t *item)
 {
     if (s_ring_items == NULL || s_ring_items_ready == NULL || item == NULL ||
@@ -314,7 +401,39 @@ static bool wireless_telemetry_enqueue(const wireless_telemetry_item_t *item)
     taskENTER_CRITICAL(&s_ring_lock);
     const bool was_full = s_ring_count >= s_ring_capacity;
     if (was_full) {
-        s_ring_head = (s_ring_head + 1U) % s_ring_capacity;
+        const uint8_t incoming_priority =
+            wireless_telemetry_item_priority(item);
+        uint8_t lowest_priority = UINT8_MAX;
+        size_t victim_offset = s_ring_capacity;
+
+        /* A 500 Hz IMU stream must not evict a UWB solution when the TCP
+         * consumer briefly stalls.  Find the newest queued item in the
+         * lowest priority class.  Choosing the newest candidate minimizes
+         * the number of ring entries shifted while retaining FIFO order. */
+        for (size_t offset = 0; offset < s_ring_count; offset++) {
+            const size_t index = (s_ring_head + offset) % s_ring_capacity;
+            const uint8_t priority =
+                wireless_telemetry_item_priority(&s_ring_items[index]);
+            if (priority <= lowest_priority) {
+                lowest_priority = priority;
+                victim_offset = offset;
+            }
+        }
+
+        if (victim_offset >= s_ring_count ||
+            incoming_priority < lowest_priority) {
+            s_dropped_count++;
+            s_drop_full_count++;
+            taskEXIT_CRITICAL(&s_ring_lock);
+            return false;
+        }
+
+        for (size_t offset = victim_offset; offset + 1U < s_ring_count;
+             offset++) {
+            const size_t dst = (s_ring_head + offset) % s_ring_capacity;
+            const size_t src = (s_ring_head + offset + 1U) % s_ring_capacity;
+            s_ring_items[dst] = s_ring_items[src];
+        }
         s_ring_count--;
         s_dropped_count++;
         s_drop_full_count++;
@@ -529,6 +648,17 @@ static void wireless_telemetry_write_i32_le(uint8_t *dst, int32_t value)
     wireless_telemetry_write_u32_le(dst, (uint32_t)value);
 }
 
+static void wireless_telemetry_write_u64_le(uint8_t *dst, uint64_t value)
+{
+    wireless_telemetry_write_u32_le(dst, (uint32_t)value);
+    wireless_telemetry_write_u32_le(dst + 4, (uint32_t)(value >> 32));
+}
+
+static void wireless_telemetry_write_i64_le(uint8_t *dst, int64_t value)
+{
+    wireless_telemetry_write_u64_le(dst, (uint64_t)value);
+}
+
 static void wireless_telemetry_close_socket(int *sock)
 {
     if (*sock >= 0) {
@@ -571,8 +701,24 @@ static bool wireless_telemetry_binary_item_info(
         *sample_len = WIRELESS_TELEMETRY_ACCEL_SAMPLE_LEN;
         return true;
     case WIRELESS_TELEMETRY_ITEM_BNO085_IMU:
-        *stream_type = WIRELESS_TELEMETRY_STREAM_BNO085_IMU;
-        *sample_len = WIRELESS_TELEMETRY_IMU_SAMPLE_LEN;
+        *stream_type = WIRELESS_TELEMETRY_STREAM_BNO085_IMU_V2;
+        *sample_len = WIRELESS_TELEMETRY_IMU_V2_SAMPLE_LEN;
+        return true;
+    case WIRELESS_TELEMETRY_ITEM_GPS_GGA:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_GPS_GGA;
+        *sample_len = WIRELESS_TELEMETRY_GPS_GGA_SAMPLE_LEN;
+        return true;
+    case WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL_COMPACT:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_BNO085_ACCEL_COMPACT;
+        *sample_len = WIRELESS_TELEMETRY_IMU_ACCEL_COMPACT_SAMPLE_LEN;
+        return true;
+    case WIRELESS_TELEMETRY_ITEM_BNO085_ORIENTATION:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_BNO085_ORIENTATION;
+        *sample_len = WIRELESS_TELEMETRY_IMU_ORIENTATION_SAMPLE_LEN;
+        return true;
+    case WIRELESS_TELEMETRY_ITEM_BNO085_CLOCK:
+        *stream_type = WIRELESS_TELEMETRY_STREAM_BNO085_CLOCK;
+        *sample_len = WIRELESS_TELEMETRY_IMU_CLOCK_SAMPLE_LEN;
         return true;
     case WIRELESS_TELEMETRY_ITEM_FLEX_TDOA_OBSERVATION:
         *stream_type =
@@ -707,33 +853,109 @@ static bool wireless_telemetry_append_binary_sample(
         break;
     case WIRELESS_TELEMETRY_ITEM_BNO085_IMU:
         wireless_telemetry_write_u32_le(
-            &sample[4], item->data.imu.accel_sequence);
-        wireless_telemetry_write_i32_le(
-            &sample[8], item->data.imu.accel_x_milli_mps2);
-        wireless_telemetry_write_i32_le(
-            &sample[12], item->data.imu.accel_y_milli_mps2);
-        wireless_telemetry_write_i32_le(
-            &sample[16], item->data.imu.accel_z_milli_mps2);
+            &sample[4], item->data.imu.fusion_time_ticks_low);
         wireless_telemetry_write_u32_le(
-            &sample[20], item->data.imu.gyro_rv_sequence);
+            &sample[8], item->data.imu.fusion_time_ticks_high);
+        wireless_telemetry_write_u32_le(
+            &sample[12], item->data.imu.accel_sequence);
+        wireless_telemetry_write_i32_le(
+            &sample[16], item->data.imu.accel_x_milli_mps2);
+        wireless_telemetry_write_i32_le(
+            &sample[20], item->data.imu.accel_y_milli_mps2);
+        wireless_telemetry_write_i32_le(
+            &sample[24], item->data.imu.accel_z_milli_mps2);
+        wireless_telemetry_write_u32_le(
+            &sample[28], item->data.imu.gyro_rv_sequence);
         wireless_telemetry_write_u16_le(
-            &sample[24], (uint16_t)item->data.imu.quat_i_q14);
+            &sample[32], (uint16_t)item->data.imu.quat_i_q14);
         wireless_telemetry_write_u16_le(
-            &sample[26], (uint16_t)item->data.imu.quat_j_q14);
+            &sample[34], (uint16_t)item->data.imu.quat_j_q14);
         wireless_telemetry_write_u16_le(
-            &sample[28], (uint16_t)item->data.imu.quat_k_q14);
+            &sample[36], (uint16_t)item->data.imu.quat_k_q14);
         wireless_telemetry_write_u16_le(
-            &sample[30], (uint16_t)item->data.imu.quat_real_q14);
+            &sample[38], (uint16_t)item->data.imu.quat_real_q14);
         wireless_telemetry_write_u16_le(
-            &sample[32], (uint16_t)item->data.imu.gyro_x_q10);
+            &sample[40], (uint16_t)item->data.imu.gyro_x_q10);
         wireless_telemetry_write_u16_le(
-            &sample[34], (uint16_t)item->data.imu.gyro_y_q10);
+            &sample[42], (uint16_t)item->data.imu.gyro_y_q10);
         wireless_telemetry_write_u16_le(
-            &sample[36], (uint16_t)item->data.imu.gyro_z_q10);
-        sample[38] = item->data.imu.accel_accuracy;
-        sample[39] = item->data.imu.accel_time_flags;
-        sample[40] = item->data.imu.gyro_time_flags;
-        sample[41] = item->data.imu.flags;
+            &sample[44], (uint16_t)item->data.imu.gyro_z_q10);
+        sample[46] = item->data.imu.accel_accuracy;
+        sample[47] = item->data.imu.accel_time_flags;
+        sample[48] = item->data.imu.gyro_time_flags;
+        sample[49] = item->data.imu.flags;
+        break;
+    case WIRELESS_TELEMETRY_ITEM_GPS_GGA:
+        wireless_telemetry_write_u64_le(
+            &sample[4], item->data.gps_gga.sample_monotonic_us);
+        wireless_telemetry_write_u32_le(
+            &sample[12], item->data.gps_gga.gga_sequence);
+        wireless_telemetry_write_u32_le(
+            &sample[16], item->data.gps_gga.utc_ms_of_day);
+        wireless_telemetry_write_u32_le(
+            &sample[20], item->data.gps_gga.utc_date_ddmmyy);
+        wireless_telemetry_write_i64_le(
+            &sample[24], item->data.gps_gga.latitude_nanodeg);
+        wireless_telemetry_write_i64_le(
+            &sample[32], item->data.gps_gga.longitude_nanodeg);
+        wireless_telemetry_write_i32_le(
+            &sample[40], item->data.gps_gga.altitude_mm);
+        wireless_telemetry_write_i32_le(
+            &sample[44], item->data.gps_gga.speed_mmps);
+        wireless_telemetry_write_i32_le(
+            &sample[48], item->data.gps_gga.course_millideg);
+        wireless_telemetry_write_u16_le(
+            &sample[52], item->data.gps_gga.hdop_centi);
+        sample[54] = item->data.gps_gga.satellites;
+        sample[55] = item->data.gps_gga.fix_quality;
+        sample[56] = item->data.gps_gga.rmc_status;
+        sample[57] = item->data.gps_gga.rmc_mode;
+        wireless_telemetry_write_u16_le(
+            &sample[58], item->data.gps_gga.flags);
+        break;
+    case WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL_COMPACT:
+        wireless_telemetry_write_u64_le(
+            &sample[4], item->data.accel_compact.fusion_time_ticks);
+        wireless_telemetry_write_u32_le(
+            &sample[12], item->data.accel_compact.sequence);
+        wireless_telemetry_write_u16_le(
+            &sample[16], (uint16_t)item->data.accel_compact.x_q8);
+        wireless_telemetry_write_u16_le(
+            &sample[18], (uint16_t)item->data.accel_compact.y_q8);
+        wireless_telemetry_write_u16_le(
+            &sample[20], (uint16_t)item->data.accel_compact.z_q8);
+        wireless_telemetry_write_u16_le(
+            &sample[22], item->data.accel_compact.sensor_delay_100us);
+        sample[24] = item->data.accel_compact.accuracy;
+        sample[25] = item->data.accel_compact.time_flags;
+        break;
+    case WIRELESS_TELEMETRY_ITEM_BNO085_ORIENTATION:
+        wireless_telemetry_write_u64_le(
+            &sample[4], item->data.orientation.fusion_time_ticks);
+        wireless_telemetry_write_u32_le(
+            &sample[12], item->data.orientation.sequence);
+        wireless_telemetry_write_u16_le(
+            &sample[16], (uint16_t)item->data.orientation.quat_i_q14);
+        wireless_telemetry_write_u16_le(
+            &sample[18], (uint16_t)item->data.orientation.quat_j_q14);
+        wireless_telemetry_write_u16_le(
+            &sample[20], (uint16_t)item->data.orientation.quat_k_q14);
+        wireless_telemetry_write_u16_le(
+            &sample[22], (uint16_t)item->data.orientation.quat_real_q14);
+        wireless_telemetry_write_u16_le(
+            &sample[24], (uint16_t)item->data.orientation.gyro_x_q10);
+        wireless_telemetry_write_u16_le(
+            &sample[26], (uint16_t)item->data.orientation.gyro_y_q10);
+        wireless_telemetry_write_u16_le(
+            &sample[28], (uint16_t)item->data.orientation.gyro_z_q10);
+        sample[30] = item->data.orientation.time_flags;
+        sample[31] = 1U;
+        break;
+    case WIRELESS_TELEMETRY_ITEM_BNO085_CLOCK:
+        wireless_telemetry_write_u64_le(
+            &sample[4], item->data.clock.fusion_time_ticks);
+        wireless_telemetry_write_u64_le(
+            &sample[12], item->data.clock.esp_timer_us);
         break;
     case WIRELESS_TELEMETRY_ITEM_FLEX_TDOA_OBSERVATION:
         wireless_telemetry_write_u32_le(
@@ -940,7 +1162,8 @@ static bool wireless_telemetry_take_batch(
     uint8_t binary_sample_len = 0;
     const bool coalesce_accel =
         item.type == WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL ||
-        item.type == WIRELESS_TELEMETRY_ITEM_BNO085_IMU;
+        item.type == WIRELESS_TELEMETRY_ITEM_BNO085_IMU ||
+        item.type == WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL_COMPACT;
     const TickType_t coalesce_started = xTaskGetTickCount();
     uint32_t accel_samples = 0;
 
@@ -951,7 +1174,8 @@ static bool wireless_telemetry_take_batch(
             item.type, &item_stream_type, &item_sample_len);
         if (binary_item) {
             if (item.type == WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL ||
-                item.type == WIRELESS_TELEMETRY_ITEM_BNO085_IMU) {
+                item.type == WIRELESS_TELEMETRY_ITEM_BNO085_IMU ||
+                item.type == WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL_COMPACT) {
                 accel_samples++;
             }
             if (binary_frame_open &&
@@ -1387,7 +1611,8 @@ bool wireless_telemetry_service_submit_bno085_imu(
     uint32_t gyro_rv_sequence, int16_t quat_i_q14, int16_t quat_j_q14,
     int16_t quat_k_q14, int16_t quat_real_q14, int16_t gyro_x_q10,
     int16_t gyro_y_q10, int16_t gyro_z_q10, uint8_t gyro_time_flags,
-    bool gyro_rv_valid)
+    bool gyro_rv_valid, uint32_t fusion_time_ticks_low,
+    uint32_t fusion_time_ticks_high)
 {
     if (!s_connected) {
         return false;
@@ -1399,6 +1624,8 @@ bool wireless_telemetry_service_submit_bno085_imu(
             (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
         .data = {
             .imu = {
+                .fusion_time_ticks_low = fusion_time_ticks_low,
+                .fusion_time_ticks_high = fusion_time_ticks_high,
                 .accel_x_milli_mps2 = accel_x_milli_mps2,
                 .accel_y_milli_mps2 = accel_y_milli_mps2,
                 .accel_z_milli_mps2 = accel_z_milli_mps2,
@@ -1417,6 +1644,117 @@ bool wireless_telemetry_service_submit_bno085_imu(
                 .flags = gyro_rv_valid ? 1U : 0U,
             },
         },
+    };
+    return wireless_telemetry_enqueue(&item);
+}
+
+bool wireless_telemetry_service_submit_bno085_accel_compact(
+    uint64_t fusion_time_ticks, uint32_t accel_sequence,
+    int16_t accel_x_q8, int16_t accel_y_q8, int16_t accel_z_q8,
+    uint16_t sensor_delay_100us, uint8_t accuracy,
+    uint8_t time_flags)
+{
+    if (!s_connected) {
+        return false;
+    }
+    const wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL_COMPACT,
+        .uptime_ms =
+            (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
+        .data = {.accel_compact = {
+            .fusion_time_ticks = fusion_time_ticks,
+            .sequence = accel_sequence,
+            .x_q8 = accel_x_q8,
+            .y_q8 = accel_y_q8,
+            .z_q8 = accel_z_q8,
+            .sensor_delay_100us = sensor_delay_100us,
+            .accuracy = accuracy,
+            .time_flags = time_flags,
+        }},
+    };
+    return wireless_telemetry_enqueue(&item);
+}
+
+bool wireless_telemetry_service_submit_bno085_orientation(
+    uint64_t fusion_time_ticks, uint32_t gyro_rv_sequence,
+    int16_t quat_i_q14, int16_t quat_j_q14, int16_t quat_k_q14,
+    int16_t quat_real_q14, int16_t gyro_x_q10, int16_t gyro_y_q10,
+    int16_t gyro_z_q10, uint8_t time_flags)
+{
+    if (!s_connected) {
+        return false;
+    }
+    const wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_BNO085_ORIENTATION,
+        .uptime_ms =
+            (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
+        .data = {.orientation = {
+            .fusion_time_ticks = fusion_time_ticks,
+            .sequence = gyro_rv_sequence,
+            .quat_i_q14 = quat_i_q14,
+            .quat_j_q14 = quat_j_q14,
+            .quat_k_q14 = quat_k_q14,
+            .quat_real_q14 = quat_real_q14,
+            .gyro_x_q10 = gyro_x_q10,
+            .gyro_y_q10 = gyro_y_q10,
+            .gyro_z_q10 = gyro_z_q10,
+            .time_flags = time_flags,
+        }},
+    };
+    return wireless_telemetry_enqueue(&item);
+}
+
+bool wireless_telemetry_service_submit_bno085_clock_anchor(
+    uint64_t fusion_time_ticks, uint64_t esp_timer_us)
+{
+    if (!s_connected) {
+        return false;
+    }
+    const wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_BNO085_CLOCK,
+        .uptime_ms =
+            (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
+        .data = {.clock = {
+            .fusion_time_ticks = fusion_time_ticks,
+            .esp_timer_us = esp_timer_us,
+        }},
+    };
+    return wireless_telemetry_enqueue(&item);
+}
+
+bool wireless_telemetry_service_submit_gps_gga(
+    uint64_t sample_monotonic_us, uint32_t gga_sequence,
+    uint32_t utc_ms_of_day, uint32_t utc_date_ddmmyy,
+    int64_t latitude_nanodeg, int64_t longitude_nanodeg,
+    int32_t altitude_mm, int32_t speed_mmps,
+    int32_t course_millideg, uint16_t hdop_centi,
+    uint8_t satellites, uint8_t fix_quality, uint8_t rmc_status,
+    uint8_t rmc_mode, uint16_t flags)
+{
+    if (!s_connected) {
+        return false;
+    }
+    const wireless_telemetry_item_t item = {
+        .type = WIRELESS_TELEMETRY_ITEM_GPS_GGA,
+        .uptime_ms =
+            (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
+        .data = {.gps_gga = {
+            .sample_monotonic_us = sample_monotonic_us,
+            .gga_sequence = gga_sequence,
+            .utc_ms_of_day = utc_ms_of_day,
+            .utc_date_ddmmyy = utc_date_ddmmyy,
+            .latitude_nanodeg = latitude_nanodeg,
+            .longitude_nanodeg = longitude_nanodeg,
+            .altitude_mm = altitude_mm,
+            .speed_mmps = speed_mmps,
+            .course_millideg = course_millideg,
+            .hdop_centi = hdop_centi,
+            .satellites = satellites,
+            .fix_quality = fix_quality,
+            .rmc_status = rmc_status,
+            .rmc_mode = rmc_mode,
+            .flags = flags,
+        }},
     };
     return wireless_telemetry_enqueue(&item);
 }

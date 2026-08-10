@@ -3,7 +3,8 @@ build-*/
 build_*/
 firmware_images/
 managed_components/
-sdkconfig
+# sdkconfig is intentionally versioned so every worktree and CI build uses
+# the same ESP32-S3 target and hardware/runtime options.
 sdkconfig.old
 dependencies.lock
 tools/ota_targets.local.txt
@@ -20,6 +21,12 @@ reference/external/
 __pycache__/
 *.pyc
 logs/
+
+# Build tooling keeps ccache inside the repository so sandboxed and CI builds
+# never depend on a user-profile cache directory.
+.cache/
+.ccache-store/
+.ccache-tmp/
 
 # Raw field captures are large and locally reproducible. Keep curated
 # READMEs, summaries, tables, and final reports visible for versioning.

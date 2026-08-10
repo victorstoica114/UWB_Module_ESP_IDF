@@ -30,6 +30,9 @@ def imu_mapping(
     gyro: tuple[float, float, float] = (0.0, 0.0, 0.0),
     valid: bool = True,
     module_id: int | None = None,
+    sample_time_us: int | None = None,
+    fusion_time_ticks: int | None = None,
+    fusion_timer_hz: int | None = None,
 ) -> dict[str, object]:
     result: dict[str, object] = {
         "uptime_ms": uptime_ms,
@@ -47,6 +50,12 @@ def imu_mapping(
     }
     if module_id is not None:
         result["module_id"] = module_id
+    if sample_time_us is not None:
+        result["sample_time_us"] = sample_time_us
+    if fusion_time_ticks is not None:
+        result["fusion_time_ticks"] = fusion_time_ticks
+    if fusion_timer_hz is not None:
+        result["fusion_timer_hz"] = fusion_timer_hz
     return result
 
 
@@ -131,6 +140,83 @@ class QuaternionTest(unittest.TestCase):
 
 
 class FusionTest(unittest.TestCase):
+    def test_high_resolution_time_accepts_same_uptime_tick(self) -> None:
+        fusion = UwbImuFusion()
+        fusion.update_position(raw_position(100, 0.0, 0.0))
+
+        first = fusion.update_imu(
+            imu_mapping(110, sample_time_us=110_001)
+        )
+        second = fusion.update_imu(
+            imu_mapping(110, sample_time_us=115_001)
+        )
+
+        self.assertNotIn("imu_duplicate_time", first["flags"])
+        self.assertNotIn("imu_duplicate_time", second["flags"])
+        self.assertEqual(second["diagnostics"]["ordering_rejects"], 0)
+        self.assertAlmostEqual(second["diagnostics"]["last_imu_dt_s"], 0.005)
+
+    def test_gptimer_64_bit_value_reaches_filter_and_output(self) -> None:
+        fusion = UwbImuFusion()
+        ticks = (1 << 40) + 12345
+        mapping = imu_mapping(
+            110,
+            sample_time_us=110_001,
+            fusion_time_ticks=ticks,
+            fusion_timer_hz=10_000_000,
+        )
+
+        output = fusion.update_imu(mapping)
+
+        self.assertEqual(output["fusion_time_ticks"], ticks)
+        self.assertEqual(output["fusion_timer_hz"], 10_000_000)
+        self.assertEqual(
+            output["diagnostics"]["last_fusion_time_ticks"], ticks
+        )
+
+    def test_stationary_window_estimates_bias_and_applies_zupt(self) -> None:
+        fusion = UwbImuFusion(
+            FusionConfig(stationary_min_duration_ms=30)
+        )
+        fusion.update_position(raw_position(0, 0.0, 0.0))
+        biased_rest = (0.10, -0.05, GRAVITY + 0.02)
+
+        fusion.update_imu(imu_mapping(10, accel=biased_rest))
+        fusion.update_imu(imu_mapping(20, accel=biased_rest))
+        output = fusion.update_imu(imu_mapping(40, accel=biased_rest))
+
+        diagnostics = output["diagnostics"]
+        self.assertTrue(diagnostics["stationary"])
+        self.assertGreaterEqual(diagnostics["accel_bias_updates"], 1)
+        self.assertGreaterEqual(diagnostics["zero_velocity_updates"], 1)
+        self.assertIn("zero_velocity_update", output["flags"])
+        for actual, expected in zip(
+            diagnostics["accel_bias_ref_mps2"], (0.10, -0.05, 0.02)
+        ):
+            self.assertAlmostEqual(actual, expected, places=6)
+
+    def test_external_rtk_heading_initializes_yaw(self) -> None:
+        half_sqrt = math.sqrt(0.5)
+        fusion = UwbImuFusion()
+        fusion.update_position(raw_position(0, 0.0, 0.0))
+        fusion.update_imu(
+            imu_mapping(
+                10,
+                quaternion=(0.0, 0.0, half_sqrt, half_sqrt),
+            )
+        )
+
+        output = fusion.align_yaw_from_heading(0.0, source="rtk_course")
+
+        self.assertTrue(output["diagnostics"]["yaw_alignment_valid"])
+        self.assertAlmostEqual(
+            output["diagnostics"]["yaw_alignment_deg"], -90.0
+        )
+        self.assertEqual(
+            output["diagnostics"]["yaw_alignment_source"], "rtk_course"
+        )
+        self.assertIn("yaw_source:rtk_course", output["flags"])
+
     def test_combined_mapping_preserves_body_values(self) -> None:
         sample = ImuSample.from_mapping(
             imu_mapping(
@@ -145,7 +231,7 @@ class FusionTest(unittest.TestCase):
         self.assertEqual(sample.gyro_body_rps, (0.1, -0.2, 0.3))
         self.assertTrue(sample.valid)
 
-    def test_alpha_beta_position_correction_is_separate_from_raw(self) -> None:
+    def test_ekf_position_correction_is_separate_from_raw(self) -> None:
         config = FusionConfig(alpha=0.5, beta=0.25)
         fusion = UwbImuFusion(config)
         first_raw = raw_position(0, 0.0, 0.0)
@@ -155,11 +241,16 @@ class FusionTest(unittest.TestCase):
         corrected = fusion.update_position(second_raw)
 
         self.assertEqual(initialized["stream"], "fused")
-        self.assertAlmostEqual(corrected["x"], 1.0)
+        self.assertGreater(corrected["x"], 0.0)
+        self.assertLess(corrected["x"], 2.0)
         self.assertAlmostEqual(corrected["y"], 0.0)
-        self.assertAlmostEqual(corrected["vx"], 0.5)
+        self.assertGreater(corrected["vx"], 0.0)
         self.assertAlmostEqual(corrected["vy"], 0.0)
         self.assertIn("position_corrected", corrected["flags"])
+        self.assertIn("ekf_corrected", corrected["flags"])
+        self.assertEqual(
+            corrected["diagnostics"]["filter"], "ekf_cv_accel_zupt"
+        )
         self.assertEqual(second_raw["raw_x"], 2.0)
         self.assertNotIn("raw_x", corrected)
 
@@ -242,7 +333,13 @@ class FusionTest(unittest.TestCase):
         self.assertAlmostEqual(output["diagnostics"]["last_yaw_speed_mps"], 0.4)
 
     def test_yaw_rejects_turning_gyro(self) -> None:
-        fusion = UwbImuFusion(FusionConfig(imu_gap_reset_ms=3000))
+        fusion = UwbImuFusion(
+            FusionConfig(
+                imu_gap_reset_ms=3000,
+                uwb_nis_gate=1e9,
+                uwb_default_innovation_gate_m=20.0,
+            )
+        )
 
         output = align_east(fusion, gyro_z=0.35)
 
@@ -263,7 +360,13 @@ class FusionTest(unittest.TestCase):
         self.assertFalse(output["diagnostics"]["yaw_alignment_valid"])
 
     def test_yaw_rejects_nonstraight_path(self) -> None:
-        fusion = UwbImuFusion(FusionConfig(imu_gap_reset_ms=3000))
+        fusion = UwbImuFusion(
+            FusionConfig(
+                imu_gap_reset_ms=3000,
+                uwb_nis_gate=1e9,
+                uwb_default_innovation_gate_m=20.0,
+            )
+        )
         fusion.update_position(raw_position(0, 0.0, 0.0))
         fusion.update_position(raw_position(500, 0.3, 0.4))
         fusion.update_position(raw_position(1000, 0.6, -0.4))
@@ -433,7 +536,7 @@ class FusionTest(unittest.TestCase):
         self.assertAlmostEqual(reacquired["x"], 1.1)
         self.assertAlmostEqual(reacquired["vx"], 0.0)
 
-    def test_reacquisition_bounds_long_prediction_only_run(self) -> None:
+    def test_ekf_bounds_long_correction_run(self) -> None:
         fusion = UwbImuFusion(
             FusionConfig(
                 alpha=1.0,
@@ -447,21 +550,19 @@ class FusionTest(unittest.TestCase):
         accelerated = fusion.update_position(
             raw_position(10, 0.2, 0.0, rms_m=1.0)
         )
-        self.assertAlmostEqual(accelerated["vx"], 5.0)
+        self.assertGreater(accelerated["vx"], 0.0)
+        self.assertLessEqual(accelerated["vx"], 5.0)
 
         maximum_divergence = 0.0
-        reacquisitions = 0
         for uptime_ms in range(20, 2020, 10):
             output = fusion.update_position(
                 raw_position(uptime_ms, 0.0, 0.0, sigma_m=0.05)
             )
             maximum_divergence = max(maximum_divergence, abs(output["x"]))
-            reacquisitions = output["diagnostics"]["position_reacquisitions"]
 
-        self.assertGreaterEqual(reacquisitions, 1)
         self.assertLessEqual(maximum_divergence, 0.35)
         self.assertAlmostEqual(output["x"], 0.0)
-        self.assertAlmostEqual(output["vx"], 0.0)
+        self.assertAlmostEqual(output["vx"], 0.0, places=5)
 
     def test_velocity_correction_is_clamped(self) -> None:
         fusion = UwbImuFusion(
@@ -492,13 +593,13 @@ class FusionTest(unittest.TestCase):
         self.assertEqual(out_of_order["diagnostics"]["module_mismatches"], 1)
         self.assertEqual(out_of_order["diagnostics"]["ordering_rejects"], 1)
 
-    def test_duplicate_uptime_is_rejected_before_tag_switch(self) -> None:
+    def test_duplicate_time_is_rejected_before_tag_switch(self) -> None:
         fusion = UwbImuFusion()
         fusion.update_position(raw_position(100, 1.0, 1.0, tag_id=1))
 
         output = fusion.update_position(raw_position(100, 9.0, 9.0, tag_id=2))
 
-        self.assertIn("position_duplicate_uptime", output["flags"])
+        self.assertIn("position_duplicate_time", output["flags"])
         self.assertNotIn("reset:tag_changed", output["flags"])
         self.assertEqual(output["tag_id"], 1)
 
@@ -562,13 +663,13 @@ class FusionTest(unittest.TestCase):
         self.assertAlmostEqual(output["x"], 5.0)
         self.assertAlmostEqual(output["y"], 6.0)
 
-    def test_uptime_backstep_is_reported_as_reboot(self) -> None:
+    def test_time_backstep_is_reported_as_reboot(self) -> None:
         fusion = UwbImuFusion(FusionConfig(reboot_backstep_ms=20))
         fusion.update_position(raw_position(1000, 1.0, 1.0))
 
         output = fusion.update_position(raw_position(100, 2.0, 3.0))
 
-        self.assertIn("reset:position_uptime_reboot", output["flags"])
+        self.assertIn("reset:position_time_reboot", output["flags"])
         self.assertIn("position_initialized", output["flags"])
         self.assertAlmostEqual(output["x"], 2.0)
 

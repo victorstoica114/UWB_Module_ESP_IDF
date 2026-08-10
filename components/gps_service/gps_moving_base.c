@@ -37,6 +37,12 @@ enum {
      * delay is paid once and does not affect the 8 Hz moving-base stream. */
     GPS_MB_CONFIG_STEP_DELAY_MS = 5000,
     GPS_POSITION_UPDATE_RATE_HZ = 8,
+    GPS_MB_ROLE_ACK_GRACE_MS = 2000,
+    GPS_MB_RATE_READY_TIMEOUT_MS = 45000,
+    GPS_MB_RATE_VALIDATION_WINDOW_MS = 2000,
+    GPS_MB_RATE_RETRY_INTERVAL_MS = 3000,
+    GPS_MB_RATE_VALIDATION_MIN_GGA = 12,
+    GPS_MB_RATE_MAX_ATTEMPTS = 3,
 };
 
 typedef struct {
@@ -44,6 +50,19 @@ typedef struct {
     size_t length;
     size_t expected_length;
 } skytraq_stream_parser_t;
+
+typedef enum {
+    GPS_MB_RATE_WAIT_READY = 0,
+    GPS_MB_RATE_WAIT_RESULT,
+    GPS_MB_RATE_VALIDATED,
+    GPS_MB_RATE_FAILED,
+} gps_mb_rate_state_t;
+
+typedef enum {
+    GPS_MB_RATE_CONFIG_WAITING = 0,
+    GPS_MB_RATE_CONFIG_SUCCEEDED,
+    GPS_MB_RATE_CONFIG_FAILED,
+} gps_mb_rate_config_result_t;
 
 static uart_port_t s_primary_uart = UART_NUM_MAX;
 static uint8_t s_module_id;
@@ -59,6 +78,18 @@ static uint32_t s_last_downlink_sequence;
 static uint8_t s_config_step;
 static bool s_receiver_config_pending;
 static skytraq_stream_parser_t s_binary_parser;
+static gps_mb_rate_state_t s_rate_state;
+static uint32_t s_gga_count;
+static uint32_t s_last_gga_ms;
+static uint32_t s_rate_ready_started_ms;
+static uint32_t s_rate_ready_gga_count;
+static uint32_t s_rate_attempt_ms;
+static uint32_t s_rate_attempt_gga_count;
+static uint8_t s_rate_attempts;
+static bool s_rate_waits_for_role_ack;
+static bool s_role_command_ack_seen;
+static bool s_rate_command_ack_seen;
+static bool s_receiver_config_failed;
 
 static esp_err_t send_datagram(uint8_t kind, const uint8_t *payload,
                                size_t payload_length);
@@ -257,6 +288,114 @@ static esp_err_t configure_position_update_rate(void)
         0,    /* SRAM only */
     };
     return send_skytraq_payload(payload, sizeof(payload));
+}
+
+static void prepare_position_rate_configuration(uint32_t now_ms,
+                                                bool wait_for_role_ack)
+{
+    s_rate_state = GPS_MB_RATE_WAIT_READY;
+    s_rate_ready_started_ms = now_ms;
+    s_rate_ready_gga_count = s_gga_count;
+    s_rate_attempt_ms = 0;
+    s_rate_attempt_gga_count = 0;
+    s_rate_attempts = 0;
+    s_rate_waits_for_role_ack = wait_for_role_ack;
+    s_role_command_ack_seen = false;
+    s_rate_command_ack_seen = false;
+}
+
+static esp_err_t send_position_rate_attempt(uint32_t now_ms)
+{
+    s_rate_attempts++;
+    s_rate_attempt_ms = now_ms;
+    s_rate_attempt_gga_count = s_gga_count;
+    s_rate_command_ack_seen = false;
+
+    const esp_err_t err = configure_position_update_rate();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "Position-rate attempt %u/%u UART write failed: %s",
+                 (unsigned)s_rate_attempts,
+                 (unsigned)GPS_MB_RATE_MAX_ATTEMPTS,
+                 esp_err_to_name(err));
+    }
+    return err;
+}
+
+static gps_mb_rate_config_result_t poll_position_rate_configuration(
+    uint32_t now_ms)
+{
+    if (s_rate_state == GPS_MB_RATE_VALIDATED) {
+        return GPS_MB_RATE_CONFIG_SUCCEEDED;
+    }
+    if (s_rate_state == GPS_MB_RATE_FAILED) {
+        return GPS_MB_RATE_CONFIG_FAILED;
+    }
+
+    if (s_rate_state == GPS_MB_RATE_WAIT_READY) {
+        const bool post_role_gga_seen = s_gga_count > s_rate_ready_gga_count;
+        const bool gga_is_recent =
+            s_last_gga_ms != 0 &&
+            elapsed_since(now_ms, s_last_gga_ms) <=
+                GPS_MB_RATE_RETRY_INTERVAL_MS;
+        const bool role_is_ready =
+            !s_rate_waits_for_role_ack || s_role_command_ack_seen ||
+            elapsed_since(now_ms, s_rate_ready_started_ms) >=
+                GPS_MB_ROLE_ACK_GRACE_MS;
+
+        if (post_role_gga_seen && gga_is_recent && role_is_ready) {
+            (void)send_position_rate_attempt(now_ms);
+            s_rate_state = GPS_MB_RATE_WAIT_RESULT;
+            return GPS_MB_RATE_CONFIG_WAITING;
+        }
+
+        if (elapsed_since(now_ms, s_rate_ready_started_ms) >=
+            GPS_MB_RATE_READY_TIMEOUT_MS) {
+            ESP_LOGW(TAG,
+                     "Position-rate configuration timed out waiting for receiver readiness: role_ack=%s post_role_gga=%s",
+                     s_role_command_ack_seen ? "yes" : "no",
+                     post_role_gga_seen ? "yes" : "no");
+            s_rate_state = GPS_MB_RATE_FAILED;
+            return GPS_MB_RATE_CONFIG_FAILED;
+        }
+        return GPS_MB_RATE_CONFIG_WAITING;
+    }
+
+    const uint32_t elapsed_ms = elapsed_since(now_ms, s_rate_attempt_ms);
+    const uint32_t gga_count = s_gga_count - s_rate_attempt_gga_count;
+    if (elapsed_ms >= GPS_MB_RATE_VALIDATION_WINDOW_MS &&
+        s_rate_command_ack_seen &&
+        gga_count >= GPS_MB_RATE_VALIDATION_MIN_GGA) {
+        ESP_LOGI(TAG,
+                 "Position update rate validated at %u Hz: attempt=%u ack=0x0e gga=%lu/%u ms",
+                 (unsigned)GPS_POSITION_UPDATE_RATE_HZ,
+                 (unsigned)s_rate_attempts, (unsigned long)gga_count,
+                 (unsigned)elapsed_ms);
+        s_rate_state = GPS_MB_RATE_VALIDATED;
+        return GPS_MB_RATE_CONFIG_SUCCEEDED;
+    }
+
+    if (elapsed_ms < GPS_MB_RATE_RETRY_INTERVAL_MS) {
+        return GPS_MB_RATE_CONFIG_WAITING;
+    }
+
+    if (s_rate_attempts < GPS_MB_RATE_MAX_ATTEMPTS) {
+        ESP_LOGW(TAG,
+                 "Position-rate validation retry: attempt=%u ack=%s gga=%lu/%u ms",
+                 (unsigned)s_rate_attempts,
+                 s_rate_command_ack_seen ? "yes" : "no",
+                 (unsigned long)gga_count, (unsigned)elapsed_ms);
+        (void)send_position_rate_attempt(now_ms);
+        return GPS_MB_RATE_CONFIG_WAITING;
+    }
+
+    ESP_LOGW(TAG,
+             "Position-rate validation failed after %u attempts: ack=%s gga=%lu/%u ms",
+             (unsigned)s_rate_attempts,
+             s_rate_command_ack_seen ? "yes" : "no",
+             (unsigned long)gga_count, (unsigned)elapsed_ms);
+    s_rate_state = GPS_MB_RATE_FAILED;
+    return GPS_MB_RATE_CONFIG_FAILED;
 }
 
 static esp_err_t configure_primary_binary_output(void)
@@ -558,6 +697,14 @@ static void process_skytraq_frame(const uint8_t *frame, size_t length)
         s_snapshot.receiver_ack_count++;
         if (payload_length >= 2) {
             s_snapshot.receiver_last_ack_id = payload[1];
+            if (payload[1] == 0x6A &&
+                s_rate_state == GPS_MB_RATE_WAIT_READY &&
+                s_rate_waits_for_role_ack) {
+                s_role_command_ack_seen = true;
+            } else if (payload[1] == 0x0E &&
+                       s_rate_state == GPS_MB_RATE_WAIT_RESULT) {
+                s_rate_command_ack_seen = true;
+            }
         }
     } else if (payload[0] == 0x84) {
         s_snapshot.receiver_nack_count++;
@@ -635,6 +782,10 @@ esp_err_t gps_moving_base_start(uart_port_t primary_uart, uint8_t module_id)
     s_snapshot.role = role_for_module(module_id);
     s_started_ms = ticks_to_ms();
     s_receiver_config_pending = true;
+    s_gga_count = 0;
+    s_last_gga_ms = 0;
+    s_receiver_config_failed = false;
+    prepare_position_rate_configuration(s_started_ms, false);
     if (s_snapshot.role == GPS_MB_ROLE_NONE) {
         /* Software identity is useful on every physical module, including
          * anchors that do not participate in the moving-base transport.  The
@@ -695,10 +846,24 @@ void gps_moving_base_stop(void)
     s_last_downlink_sequence = 0;
     s_config_step = 0;
     s_receiver_config_pending = false;
+    s_rate_state = GPS_MB_RATE_WAIT_READY;
+    s_gga_count = 0;
+    s_last_gga_ms = 0;
+    s_rate_ready_started_ms = 0;
+    s_rate_ready_gga_count = 0;
+    s_rate_attempt_ms = 0;
+    s_rate_attempt_gga_count = 0;
+    s_rate_attempts = 0;
+    s_rate_waits_for_role_ack = false;
+    s_role_command_ack_seen = false;
+    s_rate_command_ack_seen = false;
+    s_receiver_config_failed = false;
 }
 
 void gps_moving_base_set_gga(const char *sentence)
 {
+    s_gga_count++;
+    s_last_gga_ms = ticks_to_ms();
     gps_ntrip_client_set_gga(sentence);
 }
 
@@ -745,14 +910,17 @@ static void configure_receiver_if_due(uint32_t now_ms)
 
     esp_err_t err = ESP_ERR_INVALID_STATE;
     bool final_step = false;
+    bool role_step = false;
+    bool rate_step = false;
     switch (s_snapshot.role) {
     case GPS_MB_ROLE_LOCAL_BASE:
         if (s_config_step == 0) {
             err = query_software_version();
         } else if (s_config_step == 1) {
             err = configure_rtk_role();
+            role_step = true;
         } else if (s_config_step == 2) {
-            err = configure_position_update_rate();
+            rate_step = true;
         } else if (s_config_step == 3) {
             err = configure_local_base_rtcm();
         } else {
@@ -764,11 +932,13 @@ static void configure_receiver_if_due(uint32_t now_ms)
         if (s_config_step == 0) {
             err = query_software_version();
         } else if (s_config_step == 1) {
-            err = configure_position_update_rate();
-        } else if (s_config_step == 2) {
             /* The extended raw stream is an RTK-base output.  Enter the
-             * final Advanced Moving Base role before configuring it. */
+             * final Advanced Moving Base role before configuring it or the
+             * position rate. */
             err = configure_rtk_role();
+            role_step = true;
+        } else if (s_config_step == 2) {
+            rate_step = true;
         } else if (s_config_step == 3) {
             err = configure_precise_base_raw_output();
         } else if (s_config_step == 4) {
@@ -786,8 +956,9 @@ static void configure_receiver_if_due(uint32_t now_ms)
             err = query_software_version();
         } else if (s_config_step == 1) {
             err = configure_rtk_role();
+            role_step = true;
         } else if (s_config_step == 2) {
-            err = configure_position_update_rate();
+            rate_step = true;
         } else {
             err = query_rtk_role();
             final_step = true;
@@ -798,23 +969,49 @@ static void configure_receiver_if_due(uint32_t now_ms)
             err = query_software_version();
         } else if (s_config_step == 1) {
             err = configure_rtk_role();
+            role_step = true;
         } else if (s_config_step == 2) {
-            err = configure_position_update_rate();
+            rate_step = true;
         } else {
             err = query_rtk_role();
             final_step = true;
         }
         break;
     case GPS_MB_ROLE_NONE:
-        err = configure_position_update_rate();
+        rate_step = true;
         final_step = true;
         break;
     default:
         return;
     }
+
+    if (role_step && err == ESP_OK) {
+        /* A role change may restart the Phoenix navigation engine for tens
+         * of seconds.  Do not send the rate command until a new GGA proves
+         * that the engine and its primary UART are alive again. */
+        prepare_position_rate_configuration(now_ms, true);
+    }
+
+    if (rate_step) {
+        const gps_mb_rate_config_result_t rate_result =
+            poll_position_rate_configuration(now_ms);
+        if (rate_result == GPS_MB_RATE_CONFIG_WAITING) {
+            return;
+        }
+        if (rate_result == GPS_MB_RATE_CONFIG_FAILED) {
+            s_receiver_config_failed = true;
+            err = ESP_FAIL;
+        } else {
+            err = ESP_OK;
+        }
+    }
+
     if (final_step) {
-        s_snapshot.receiver_config_sent = err == ESP_OK;
-        s_receiver_config_pending = err != ESP_OK;
+        s_snapshot.receiver_config_sent =
+            err == ESP_OK && !s_receiver_config_failed;
+        /* Rate retries are deliberately bounded.  Preserve the old retry
+         * behavior only for a transient failure of the final query/write. */
+        s_receiver_config_pending = !rate_step && err != ESP_OK;
     }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Receiver configuration step %u failed: %s",

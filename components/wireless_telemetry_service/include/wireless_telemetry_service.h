@@ -55,7 +55,28 @@ bool wireless_telemetry_service_submit_bno085_imu(
     uint32_t gyro_rv_sequence, int16_t quat_i_q14, int16_t quat_j_q14,
     int16_t quat_k_q14, int16_t quat_real_q14, int16_t gyro_x_q10,
     int16_t gyro_y_q10, int16_t gyro_z_q10, uint8_t gyro_time_flags,
-    bool gyro_rv_valid);
+    bool gyro_rv_valid, uint32_t fusion_time_ticks_low,
+    uint32_t fusion_time_ticks_high);
+bool wireless_telemetry_service_submit_bno085_accel_compact(
+    uint64_t fusion_time_ticks, uint32_t accel_sequence,
+    int16_t accel_x_q8, int16_t accel_y_q8, int16_t accel_z_q8,
+    uint16_t sensor_delay_100us, uint8_t accuracy,
+    uint8_t time_flags);
+bool wireless_telemetry_service_submit_bno085_orientation(
+    uint64_t fusion_time_ticks, uint32_t gyro_rv_sequence,
+    int16_t quat_i_q14, int16_t quat_j_q14, int16_t quat_k_q14,
+    int16_t quat_real_q14, int16_t gyro_x_q10, int16_t gyro_y_q10,
+    int16_t gyro_z_q10, uint8_t time_flags);
+bool wireless_telemetry_service_submit_bno085_clock_anchor(
+    uint64_t fusion_time_ticks, uint64_t esp_timer_us);
+bool wireless_telemetry_service_submit_gps_gga(
+    uint64_t sample_monotonic_us, uint32_t gga_sequence,
+    uint32_t utc_ms_of_day, uint32_t utc_date_ddmmyy,
+    int64_t latitude_nanodeg, int64_t longitude_nanodeg,
+    int32_t altitude_mm, int32_t speed_mmps,
+    int32_t course_millideg, uint16_t hdop_centi,
+    uint8_t satellites, uint8_t fix_quality, uint8_t rmc_status,
+    uint8_t rmc_mode, uint16_t flags);
 bool wireless_telemetry_service_submit_flex_tdoa_observation(
     uint8_t tag_id, uint8_t initiator_id, uint8_t responder_id,
     uint8_t responder_index, uint16_t sequence, uint32_t slot_id,

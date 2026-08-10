@@ -56,3 +56,50 @@ bool bno085_timing_due(uint64_t previous_ticks, uint64_t current_ticks,
     const uint64_t period_ticks = BNO085_FUSION_TIMER_HZ / rate_hz;
     return current_ticks - previous_ticks >= period_ticks;
 }
+
+uint64_t bno085_timing_advance(uint64_t previous_ticks,
+                               uint64_t current_ticks, uint32_t rate_hz)
+{
+    if (rate_hz == 0 || rate_hz > BNO085_FUSION_TIMER_HZ) {
+        return previous_ticks;
+    }
+    if (previous_ticks == 0 || current_ticks < previous_ticks) {
+        return current_ticks;
+    }
+
+    const uint64_t period_ticks = BNO085_FUSION_TIMER_HZ / rate_hz;
+    const uint64_t periods = (current_ticks - previous_ticks) / period_ticks;
+    return periods == 0 ? previous_ticks
+                        : previous_ticks + periods * period_ticks;
+}
+
+uint32_t bno085_timing_track_period(uint32_t previous_period_ticks,
+                                    uint64_t hint_delta_ticks,
+                                    uint32_t report_delta,
+                                    uint32_t nominal_period_ticks)
+{
+    if (report_delta == 0 || nominal_period_ticks == 0) {
+        return previous_period_ticks != 0 ? previous_period_ticks
+                                          : nominal_period_ticks;
+    }
+
+    const uint64_t observed_ticks = hint_delta_ticks / report_delta;
+    const uint64_t minimum_ticks = (uint64_t)nominal_period_ticks * 3U / 4U;
+    const uint64_t maximum_ticks = (uint64_t)nominal_period_ticks * 5U / 4U;
+    if (observed_ticks < minimum_ticks || observed_ticks > maximum_ticks ||
+        observed_ticks > UINT32_MAX) {
+        return previous_period_ticks != 0 ? previous_period_ticks
+                                          : nominal_period_ticks;
+    }
+
+    if (previous_period_ticks == 0) {
+        return (uint32_t)observed_ticks;
+    }
+
+    /* H_INTN-to-H_INTN intervals contain packetization jitter.  A modest
+     * one-pole average follows oscillator tolerance without imprinting that
+     * jitter on individual reconstructed samples. */
+    return (uint32_t)(((uint64_t)previous_period_ticks * 7U +
+                       observed_ticks + 4U) /
+                      8U);
+}
