@@ -33,6 +33,7 @@ def imu_mapping(
     sample_time_us: int | None = None,
     fusion_time_ticks: int | None = None,
     fusion_timer_hz: int | None = None,
+    fusion_uptime_offset_us: float | None = None,
 ) -> dict[str, object]:
     result: dict[str, object] = {
         "uptime_ms": uptime_ms,
@@ -56,6 +57,8 @@ def imu_mapping(
         result["fusion_time_ticks"] = fusion_time_ticks
     if fusion_timer_hz is not None:
         result["fusion_timer_hz"] = fusion_timer_hz
+    if fusion_uptime_offset_us is not None:
+        result["fusion_uptime_offset_us"] = fusion_uptime_offset_us
     return result
 
 
@@ -174,6 +177,36 @@ class FusionTest(unittest.TestCase):
             output["diagnostics"]["last_fusion_time_ticks"], ticks
         )
 
+    def test_gptimer_sub_microsecond_ticks_remain_distinct(self) -> None:
+        fusion = UwbImuFusion()
+        fusion.update_position(raw_position(100, 0.0, 0.0))
+
+        first = fusion.update_imu(
+            imu_mapping(
+                110,
+                sample_time_us=110_000,
+                fusion_time_ticks=1_100_000,
+                fusion_timer_hz=10_000_000,
+                fusion_uptime_offset_us=0.0,
+            )
+        )
+        second = fusion.update_imu(
+            imu_mapping(
+                110,
+                sample_time_us=110_000,
+                fusion_time_ticks=1_100_001,
+                fusion_timer_hz=10_000_000,
+                fusion_uptime_offset_us=0.0,
+            )
+        )
+
+        self.assertNotIn("imu_duplicate_time", first["flags"])
+        self.assertNotIn("imu_duplicate_time", second["flags"])
+        self.assertEqual(second["diagnostics"]["ordering_rejects"], 0)
+        self.assertAlmostEqual(
+            second["diagnostics"]["last_imu_dt_s"], 0.0000001
+        )
+
     def test_stationary_window_estimates_bias_and_applies_zupt(self) -> None:
         fusion = UwbImuFusion(
             FusionConfig(stationary_min_duration_ms=30)
@@ -181,9 +214,15 @@ class FusionTest(unittest.TestCase):
         fusion.update_position(raw_position(0, 0.0, 0.0))
         biased_rest = (0.10, -0.05, GRAVITY + 0.02)
 
-        fusion.update_imu(imu_mapping(10, accel=biased_rest))
-        fusion.update_imu(imu_mapping(20, accel=biased_rest))
-        output = fusion.update_imu(imu_mapping(40, accel=biased_rest))
+        output = {}
+        for uptime_ms in (10, 20, 40, 60, 80):
+            if uptime_ms >= 20:
+                fusion.update_position(
+                    raw_position(uptime_ms, 0.0, 0.0)
+                )
+            output = fusion.update_imu(
+                imu_mapping(uptime_ms, accel=biased_rest)
+            )
 
         diagnostics = output["diagnostics"]
         self.assertTrue(diagnostics["stationary"])
@@ -231,7 +270,9 @@ class FusionTest(unittest.TestCase):
         self.assertEqual(sample.gyro_body_rps, (0.1, -0.2, 0.3))
         self.assertTrue(sample.valid)
 
-    def test_ekf_position_correction_is_separate_from_raw(self) -> None:
+    def test_moving_raw_correction_is_authoritative_and_fusion_bridges(
+        self,
+    ) -> None:
         config = FusionConfig(alpha=0.5, beta=0.25)
         fusion = UwbImuFusion(config)
         first_raw = raw_position(0, 0.0, 0.0)
@@ -239,15 +280,20 @@ class FusionTest(unittest.TestCase):
 
         initialized = fusion.update_position(first_raw)
         corrected = fusion.update_position(second_raw)
+        bridged = fusion.update_imu(imu_mapping(1100))
 
         self.assertEqual(initialized["stream"], "fused")
-        self.assertGreater(corrected["x"], 0.0)
-        self.assertLess(corrected["x"], 2.0)
+        self.assertEqual(corrected["x"], 2.0)
         self.assertAlmostEqual(corrected["y"], 0.0)
         self.assertGreater(corrected["vx"], 0.0)
         self.assertAlmostEqual(corrected["vy"], 0.0)
+        self.assertIn(
+            "moving_uwb_position_authoritative", corrected["flags"]
+        )
         self.assertIn("position_corrected", corrected["flags"])
         self.assertIn("ekf_corrected", corrected["flags"])
+        self.assertGreater(bridged["x"], corrected["x"])
+        self.assertIn("constant_velocity_propagated", bridged["flags"])
         self.assertEqual(
             corrected["diagnostics"]["filter"], "ekf_cv_accel_zupt"
         )
@@ -262,19 +308,32 @@ class FusionTest(unittest.TestCase):
                 alpha=1.0,
                 beta=0.0,
                 yaw_alignment_gain=1.0,
-                imu_gap_reset_ms=2000,
+                imu_gap_reset_ms=3000,
+                stationary_min_duration_ms=30,
             )
         )
 
+        # Calibrate zero acceleration from an independently stationary UWB
+        # cloud before testing acceleration in the learned yaw frame.
         fusion.update_position(raw_position(0, 0.0, 0.0))
-        fusion.update_position(raw_position(500, 0.3, 0.0))
-        fusion.update_position(raw_position(1000, 0.6, 0.0))
-        fusion.update_position(raw_position(1500, 0.9, 0.0))
-        fusion.update_imu(imu_mapping(1990, quaternion=yaw_90))
-        aligned = fusion.update_position(raw_position(2000, 1.2, 0.0))
+        for uptime_ms in (10, 20, 40, 60, 80):
+            if uptime_ms >= 20:
+                fusion.update_position(
+                    raw_position(uptime_ms, 0.0, 0.0)
+                )
+            fusion.update_imu(imu_mapping(uptime_ms))
+        for uptime_ms, x_m in (
+            (100, 0.0),
+            (600, 0.3),
+            (1100, 0.6),
+            (1600, 0.9),
+        ):
+            fusion.update_position(raw_position(uptime_ms, x_m, 0.0))
+        fusion.update_imu(imu_mapping(2090, quaternion=yaw_90))
+        aligned = fusion.update_position(raw_position(2100, 1.2, 0.0))
         propagated = fusion.update_imu(
             imu_mapping(
-                2040,
+                2140,
                 accel=(1.0, 0.0, GRAVITY),
                 quaternion=yaw_90,
             )
@@ -450,7 +509,9 @@ class FusionTest(unittest.TestCase):
         self.assertIn("imu_invalid", hard["flags"])
 
     def test_uwb_quality_gate_rejects_position_outlier(self) -> None:
-        fusion = UwbImuFusion()
+        fusion = UwbImuFusion(
+            FusionConfig(position_reacquire_gap_ms=2000)
+        )
         fusion.update_position(
             raw_position(0, 0.0, 0.0, sigma_m=0.05, rms_m=0.02)
         )
@@ -460,7 +521,10 @@ class FusionTest(unittest.TestCase):
         )
 
         self.assertIn("uwb_outlier_rejected", output["flags"])
-        self.assertAlmostEqual(output["x"], 0.0)
+        self.assertIn(
+            "moving_uwb_position_authoritative", output["flags"]
+        )
+        self.assertAlmostEqual(output["x"], 1.0)
         self.assertAlmostEqual(
             output["diagnostics"]["last_uwb_innovation_gate_m"], 0.2
         )
@@ -504,7 +568,9 @@ class FusionTest(unittest.TestCase):
         self.assertNotIn("position_reacquired", first["flags"])
         self.assertNotIn("position_reacquired", second["flags"])
         self.assertIn("position_reacquired", third["flags"])
-        self.assertIn("reset:position_outlier_streak", third["flags"])
+        self.assertIn("position_soft_reacquired", third["flags"])
+        self.assertIn("reacquire:coherent_outlier_cluster", third["flags"])
+        self.assertEqual(third["diagnostics"]["reset_count"], 0)
         self.assertAlmostEqual(third["x"], 1.0)
         self.assertAlmostEqual(third["y"], 0.0)
         self.assertAlmostEqual(third["vx"], 0.0)
@@ -532,7 +598,9 @@ class FusionTest(unittest.TestCase):
 
         self.assertNotIn("position_reacquired", first["flags"])
         self.assertIn("position_reacquired", reacquired["flags"])
-        self.assertIn("reset:position_acceptance_gap", reacquired["flags"])
+        self.assertIn("position_soft_reacquired", reacquired["flags"])
+        self.assertIn("reacquire:position_acceptance_gap", reacquired["flags"])
+        self.assertEqual(reacquired["diagnostics"]["reset_count"], 0)
         self.assertAlmostEqual(reacquired["x"], 1.1)
         self.assertAlmostEqual(reacquired["vx"], 0.0)
 

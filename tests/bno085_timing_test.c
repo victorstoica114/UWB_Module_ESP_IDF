@@ -17,6 +17,15 @@ int main(void)
            1015000);
     assert(bno085_timing_reconstruct_ticks(1000, 10, 0, 0) == 0);
 
+    assert(bno085_timing_causal_monotonic(120000, 100000, 90000, 20000) ==
+           100000);
+    assert(bno085_timing_causal_monotonic(80000, 120000, 90000, 20000) ==
+           110000);
+    assert(bno085_timing_causal_monotonic(80000, 95000, 90000, 20000) ==
+           95000);
+    assert(bno085_timing_causal_monotonic(80000, 90000, 90000, 20000) ==
+           90001);
+
     assert(bno085_timing_due(0, 1, 100));
     assert(!bno085_timing_due(100000, 150000, 100));
     assert(bno085_timing_due(100000, 200000, 100));

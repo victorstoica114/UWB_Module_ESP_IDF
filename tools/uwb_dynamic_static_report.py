@@ -1595,8 +1595,12 @@ def load_replay_summaries(
                 continue
             track = tracks[0]
             diagnostics = track.get("fusion_final", {}).get("diagnostics", {})
-            raw = payload.get("overall_metrics", {}).get("raw_vs_rtk", {})
-            fused = payload.get("overall_metrics", {}).get("fused_vs_rtk", {})
+            raw = (
+                payload.get("overall_metrics", {}).get("raw_vs_rtk") or {}
+            )
+            fused = (
+                payload.get("overall_metrics", {}).get("fused_vs_rtk") or {}
+            )
             timing = track.get("timing", {})
             alignment = track.get("rtk_alignment", {})
             position_samples = int(diagnostics.get("position_samples", 0))
@@ -1768,6 +1772,37 @@ def write_report(
         f"- {PROTOCOL_LABELS.get(item['protocol'], item['protocol'])} / {item['motion']}: missing capture"
         for item in missing
     ) or "- None."
+    if args.skip_raw_archive:
+        raw_archive_artifacts = (
+            "- RAW capture archiving was intentionally skipped for this "
+            "development run; the immutable source JSONL paths remain in "
+            "`analysis_summary.json`."
+        )
+        raw_restore_instructions = ""
+    else:
+        raw_archive_artifacts = (
+            "- `data/*.jsonl.xz`: the six complete RAW captures, compressed "
+            "losslessly;\n- `raw_data_manifest.csv` and `SHA256SUMS`: "
+            "source/archive integrity;"
+        )
+        raw_restore_instructions = r'''
+
+Restore an archived capture without an `xz` executable:
+
+```powershell
+python -c "import lzma,shutil; shutil.copyfileobj(lzma.open(r'data/CAPTURE.jsonl.xz','rb'), open(r'CAPTURE.jsonl','wb'))"
+```
+'''
+    reproduce_flags = []
+    if args.require_rpi_static:
+        reproduce_flags.append("  --require-rpi-static `")
+    if args.skip_raw_archive:
+        reproduce_flags.append("  --skip-raw-archive `")
+    reproduce_options = (
+        "\n".join(reproduce_flags).rstrip(" `")
+        if reproduce_flags
+        else ""
+    )
     report = f"""# Dynamic/static UWB comparison
 
 Generated from immutable JSONL captures. This report compares published
@@ -1891,8 +1926,7 @@ anchor registration and is a shape/repeatability diagnostic, not accuracy.
 - `rtk_pairs.csv`: every accepted time association and residual;
 - `alignment_snapshots.csv`: every geometry-to-RTK rigid fit;
 - `replay_metrics.csv`: continuity, fusion and replay RTK diagnostics;
-- `data/*.jsonl.xz`: the six complete RAW captures, compressed losslessly;
-- `raw_data_manifest.csv` and `SHA256SUMS`: source/archive integrity;
+{raw_archive_artifacts}
 - `figures/`: dependency-free SVG plots.
 
 ## Reproduce
@@ -1902,15 +1936,10 @@ python tools/uwb_dynamic_static_report.py `
   --input-dir {args.input_dir.as_posix()} `
   --output-dir {args.output_dir.as_posix()} `
   --replay-dynamic-dir {args.replay_dynamic_dir.as_posix()} `
-  --replay-static-dir {args.replay_static_dir.as_posix()} `
-  --require-rpi-static
+  --replay-static-dir {args.replay_static_dir.as_posix()}{(' `' if reproduce_options else '')}
+{reproduce_options}
 ```
-
-Restore an archived capture without an `xz` executable:
-
-```powershell
-python -c "import lzma,shutil; shutil.copyfileobj(lzma.open(r'data/CAPTURE.jsonl.xz','rb'), open(r'CAPTURE.jsonl','wb'))"
-```
+{raw_restore_instructions}
 """
     path.write_text(report, encoding="utf-8")
 
@@ -2575,11 +2604,12 @@ Recommendation & primary scalable mode & coherent baseline & continue recovery t
 
 \section{Reproduction and audit files}
 The directory contains \texttt{analysis\_summary.json}, capture/replay/alignment
-CSV files, SVG/PDF plots, six lossless \texttt{data/*.jsonl.xz} captures,
-\texttt{raw\_data\_manifest.csv}, \texttt{SHA256SUMS} and this TeX source.
+CSV files, SVG/PDF plots and this TeX source. The machine-readable summary
+records whether optional lossless RAW archive generation was enabled; when it
+is skipped, immutable source JSONL paths remain recorded for reproduction.
 
 \begin{verbatim}
-python tools/uwb_dynamic_static_report.py --require-rpi-static
+python tools/uwb_dynamic_static_report.py --input-dir INPUT --output-dir OUTPUT
 \end{verbatim}
 
 No raw capture is modified during report generation.

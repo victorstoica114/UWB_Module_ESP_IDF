@@ -258,6 +258,7 @@ typedef struct {
 typedef struct {
     wireless_telemetry_item_type_t type;
     uint32_t uptime_ms;
+    uint64_t queue_sequence;
     union {
         char line[WIRELESS_TELEMETRY_LINE_MAX];
         wireless_telemetry_accel_t accel;
@@ -283,6 +284,7 @@ static wireless_telemetry_item_t *s_ring_items;
 static size_t s_ring_capacity;
 static size_t s_ring_head;
 static size_t s_ring_count;
+static uint64_t s_ring_next_sequence;
 static portMUX_TYPE s_ring_lock = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t s_ring_items_ready;
 static uint8_t *s_batch_buffer;
@@ -344,6 +346,7 @@ static bool wireless_telemetry_create_ring(size_t capacity, uint32_t caps)
     s_ring_capacity = capacity;
     s_ring_head = 0;
     s_ring_count = 0;
+    s_ring_next_sequence = 0;
     return true;
 }
 
@@ -360,6 +363,7 @@ static void wireless_telemetry_delete_ring(void)
     s_ring_capacity = 0;
     s_ring_head = 0;
     s_ring_count = 0;
+    s_ring_next_sequence = 0;
 }
 
 static void wireless_telemetry_delete_batch_buffer(void)
@@ -381,11 +385,17 @@ static uint8_t wireless_telemetry_item_priority(
     case WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL:
     case WIRELESS_TELEMETRY_ITEM_BNO085_IMU:
     case WIRELESS_TELEMETRY_ITEM_BNO085_ACCEL_COMPACT:
+        return 0;
+    case WIRELESS_TELEMETRY_ITEM_FLEX_POSITION:
+    case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_POSITION:
+    case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_POSITION:
+    case WIRELESS_TELEMETRY_ITEM_PASSIVE_DS_GEOMETRY:
+    case WIRELESS_TELEMETRY_ITEM_NATIVE_DS_GEOMETRY:
+    case WIRELESS_TELEMETRY_ITEM_FLEX_GEOMETRY:
     case WIRELESS_TELEMETRY_ITEM_BNO085_ORIENTATION:
     case WIRELESS_TELEMETRY_ITEM_BNO085_CLOCK:
-        return 0;
     case WIRELESS_TELEMETRY_ITEM_GPS_GGA:
-        return 1;
+        return 3;
     default:
         return 2;
     }
@@ -408,8 +418,8 @@ static bool wireless_telemetry_enqueue(const wireless_telemetry_item_t *item)
 
         /* A 500 Hz IMU stream must not evict a UWB solution when the TCP
          * consumer briefly stalls.  Find the newest queued item in the
-         * lowest priority class.  Choosing the newest candidate minimizes
-         * the number of ring entries shifted while retaining FIFO order. */
+         * lowest priority class; sequence numbers preserve FIFO order
+         * within each priority class after the O(1) replacement below. */
         for (size_t offset = 0; offset < s_ring_count; offset++) {
             const size_t index = (s_ring_head + offset) % s_ring_capacity;
             const uint8_t priority =
@@ -428,11 +438,12 @@ static bool wireless_telemetry_enqueue(const wireless_telemetry_item_t *item)
             return false;
         }
 
-        for (size_t offset = victim_offset; offset + 1U < s_ring_count;
-             offset++) {
-            const size_t dst = (s_ring_head + offset) % s_ring_capacity;
-            const size_t src = (s_ring_head + offset + 1U) % s_ring_capacity;
-            s_ring_items[dst] = s_ring_items[src];
+        const size_t victim_index =
+            (s_ring_head + victim_offset) % s_ring_capacity;
+        const size_t last_index =
+            (s_ring_head + s_ring_count - 1U) % s_ring_capacity;
+        if (victim_index != last_index) {
+            s_ring_items[victim_index] = s_ring_items[last_index];
         }
         s_ring_count--;
         s_dropped_count++;
@@ -441,6 +452,7 @@ static bool wireless_telemetry_enqueue(const wireless_telemetry_item_t *item)
 
     const size_t tail = (s_ring_head + s_ring_count) % s_ring_capacity;
     s_ring_items[tail] = *item;
+    s_ring_items[tail].queue_sequence = ++s_ring_next_sequence;
     s_ring_count++;
     if (s_ring_count > s_ring_high_water) {
         s_ring_high_water = (uint32_t)s_ring_count;
@@ -470,9 +482,33 @@ static bool wireless_telemetry_dequeue(wireless_telemetry_item_t *item,
         return false;
     }
 
-    *item = s_ring_items[s_ring_head];
-    s_ring_head = (s_ring_head + 1U) % s_ring_capacity;
+    size_t selected_offset = 0;
+    uint8_t selected_priority = 0;
+    uint64_t selected_sequence = UINT64_MAX;
+    for (size_t offset = 0; offset < s_ring_count; ++offset) {
+        const size_t index = (s_ring_head + offset) % s_ring_capacity;
+        const uint8_t priority =
+            wireless_telemetry_item_priority(&s_ring_items[index]);
+        const uint64_t sequence = s_ring_items[index].queue_sequence;
+        if (priority > selected_priority ||
+            (priority == selected_priority && sequence < selected_sequence)) {
+            selected_offset = offset;
+            selected_priority = priority;
+            selected_sequence = sequence;
+        }
+    }
+    const size_t selected_index =
+        (s_ring_head + selected_offset) % s_ring_capacity;
+    const size_t last_index =
+        (s_ring_head + s_ring_count - 1U) % s_ring_capacity;
+    *item = s_ring_items[selected_index];
+    if (selected_index != last_index) {
+        s_ring_items[selected_index] = s_ring_items[last_index];
+    }
     s_ring_count--;
+    if (s_ring_count == 0) {
+        s_ring_head = 0;
+    }
     taskEXIT_CRITICAL(&s_ring_lock);
     return true;
 }

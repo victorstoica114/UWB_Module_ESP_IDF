@@ -59,7 +59,7 @@ enum {
     BNO085_REPORT_GYRO_RV = 0x2A,
     BNO085_GYRO_RV_REPORT_LEN = 14,
     /* Leave enough SH2 processing budget for the 500 Hz accelerometer.  A
-     * 50 Hz orientation update is still inside the dashboard's 30 ms merge
+     * 50 Hz orientation update is still inside the dashboard's 40 ms merge
      * window, while 100 Hz reduced measured acceleration output to ~460 Hz. */
     BNO085_GYRO_RV_RATE_HZ = 50,
     BNO085_GYRO_RV_INTERVAL_US = 1000000U / BNO085_GYRO_RV_RATE_HZ,
@@ -938,6 +938,20 @@ static uint64_t bno085_packet_hint_ticks(uint8_t *time_flags,
     if (time_flags != NULL) {
         *time_flags = BNO085_ACCEL_TIME_HINT_ESTIMATED;
     }
+    /* A consumed IRQ timestamp describes an older packet, not the packet we
+     * are about to read while draining an asserted H_INTN level. Reusing the
+     * last accelerometer timestamp here creates a self-referential clock:
+     * monotonic repair advances it once per report and can move acceleration
+     * hundreds of milliseconds away from the independent GyroRV channel.
+     * The current GPTimer count is the correct causal upper bound for a
+     * packet without a fresh IRQ edge and keeps both sensor channels on the
+     * same hardware clock. */
+    uint64_t current_ticks = 0;
+    if (s_fusion_timer != NULL &&
+        gptimer_get_raw_count(s_fusion_timer, &current_ticks) == ESP_OK &&
+        current_ticks != 0) {
+        return current_ticks;
+    }
     return bno085_service_fusion_time_ticks();
 }
 
@@ -1055,9 +1069,11 @@ static void bno085_parse_input_reports(const uint8_t *payload, size_t len,
             portENTER_CRITICAL(&s_sample_lock);
             previous_sample_ticks = s_last_fusion_time_ticks;
             portEXIT_CRITICAL(&s_sample_lock);
-            if (sample_ticks <= previous_sample_ticks) {
-                sample_ticks = previous_sample_ticks +
-                               bno085_timestamp_period_ticks();
+            const uint64_t causal_ticks = bno085_timing_causal_monotonic(
+                sample_ticks, packet_hint_ticks, previous_sample_ticks,
+                bno085_timestamp_period_ticks());
+            if (causal_ticks != sample_ticks) {
+                sample_ticks = causal_ticks;
                 time_flags |= BNO085_ACCEL_TIME_MONOTONIC_REPAIRED;
                 s_monotonic_repair_count++;
             }

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import math
 import pathlib
@@ -40,6 +41,51 @@ IMU_FUSION_NON_ADVANCING_FLAGS = frozenset(
         "position_duplicate_time",
     }
 )
+
+
+def normalize_quaternion_xyzw(
+    values: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    norm = math.sqrt(sum(value * value for value in values))
+    if not math.isfinite(norm) or norm < 1e-9:
+        raise ValueError("invalid quaternion")
+    return tuple(value / norm for value in values)  # type: ignore[return-value]
+
+
+def slerp_quaternion_xyzw(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+    fraction: float,
+) -> tuple[float, float, float, float]:
+    """Shortest-arc quaternion interpolation in BNO xyzw order."""
+
+    q0 = normalize_quaternion_xyzw(first)
+    q1 = normalize_quaternion_xyzw(second)
+    amount = max(0.0, min(1.0, float(fraction)))
+    dot = sum(left * right for left, right in zip(q0, q1))
+    if dot < 0.0:
+        q1 = tuple(-value for value in q1)  # type: ignore[assignment]
+        dot = -dot
+    dot = max(-1.0, min(1.0, dot))
+    if dot > 0.9995:
+        return normalize_quaternion_xyzw(
+            tuple(
+                left + amount * (right - left)
+                for left, right in zip(q0, q1)
+            )  # type: ignore[arg-type]
+        )
+    theta = math.acos(dot)
+    sine = math.sin(theta)
+    if abs(sine) < 1e-9:
+        return q0
+    first_weight = math.sin((1.0 - amount) * theta) / sine
+    second_weight = math.sin(amount * theta) / sine
+    return normalize_quaternion_xyzw(
+        tuple(
+            first_weight * left + second_weight * right
+            for left, right in zip(q0, q1)
+        )  # type: ignore[arg-type]
+    )
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -1494,6 +1540,24 @@ class DashboardState:
         self.passive_ds_tag_diagnostics: dict[int, dict[str, Any]] = {}
         self.latest_imu_by_module: dict[int, dict[str, Any]] = {}
         self.latest_orientation_by_module: dict[int, dict[str, Any]] = {}
+        self.imu_orientation_history: dict[int, list[dict[str, Any]]] = {}
+        self.imu_pending_accel: dict[int, list[dict[str, Any]]] = {}
+        self.imu_latest_display_orientation: dict[int, dict[str, Any]] = {}
+        self.imu_association_events: dict[
+            int, deque[tuple[float, bool, str]]
+        ] = {}
+        self.imu_association_latest: dict[int, dict[str, Any]] = {}
+        self.imu_association_timeout_us = 40_000
+        self.imu_association_window_sec = 10.0
+        self.imu_orientation_history_limit = 32
+        self.imu_fusion_event_buffers: dict[int, list[dict[str, Any]]] = {}
+        self.imu_fusion_event_latest_time_us: dict[int, int] = {}
+        # Live telemetry batches occasionally delayed valid 500 Hz IMU
+        # samples by 50.7--62.6 ms behind a newer UWB solution. Keep 80 ms of
+        # measurement-time look-ahead for the derived EKF only; raw UWB is
+        # published immediately and the filter's order tolerance stays strict.
+        self.imu_fusion_reorder_window_us = 80_000
+        self.imu_fusion_event_sequence = 1
         self.telemetry_sequence_stats: dict[str, dict[str, int]] = {}
         self.imu_clock_alignment: dict[int, dict[str, int]] = {}
         self.imu_fusions: dict[tuple[int, str, int], UwbImuFusion] = {}
@@ -1716,8 +1780,32 @@ class DashboardState:
         # BNO085 must never be fused into a remote tag track: tag IDs are the
         # physical module IDs in this deployment, so route IMU by tag_id.
         imu_module_id = tag_id
-        fusion_key = (imu_module_id, protocol, tag_id)
         stored["imu_fusion_module_id"] = imu_module_id
+        self.next_position_event_id += 1
+        self.next_position_stream_event_id += 1
+        self.tdoa_local_positions[tag_id] = stored
+        self.tdoa_position_events.append(stored)
+        # Raw UWB remains visible immediately. Only the derived EKF update is
+        # held behind unresolved, earlier IMU/orientation associations.
+        position_time_us = int(
+            stored.get("sample_time_us")
+            or int(stored.get("uptime_ms") or 0) * 1000
+        )
+        self._enqueue_fusion_event_locked(
+            imu_module_id,
+            position_time_us,
+            "position",
+            {"stored": stored},
+        )
+        self.position_condition.notify_all()
+
+    def _process_position_fusion_locked(
+        self, stored: dict[str, Any]
+    ) -> None:
+        imu_module_id = int(stored["imu_fusion_module_id"])
+        protocol = str(stored.get("tdoa_protocol") or "flextdoa")
+        tag_id = int(stored["tag_id"])
+        fusion_key = (imu_module_id, protocol, tag_id)
         fusion = self.imu_fusions.get(fusion_key)
         reused_fusion = False
         for stale_key in list(self.imu_fusions):
@@ -1747,8 +1835,8 @@ class DashboardState:
                     or int(latest_imu.get("uptime_ms") or 0) * 1000
                 )
                 <= int(
-                    item.get("sample_time_us")
-                    or int(item.get("uptime_ms") or 0) * 1000
+                    stored.get("sample_time_us")
+                    or int(stored.get("uptime_ms") or 0) * 1000
                 )
             ):
                 try:
@@ -1767,15 +1855,10 @@ class DashboardState:
             fused = None
         if fused is not None:
             self._attach_imu_fusion_locked(stored, fusion_key, fused)
-        self.next_position_event_id += 1
-        self.next_position_stream_event_id += 1
-        self.tdoa_local_positions[tag_id] = stored
-        self.tdoa_position_events.append(stored)
         if fused is not None:
             self._emit_imu_fusion_event_locked(
                 fusion_key, fused, stored["received_at"], force=True
             )
-        self.position_condition.notify_all()
 
     @staticmethod
     def _fusion_key_text(key: tuple[int, str, int]) -> str:
@@ -1829,8 +1912,14 @@ class DashboardState:
         heading_rad, fit_rms_m = alignment
         if fit_rms_m > 0.35:
             return
+        enu_heading_rad = math.radians(90.0 - course_deg)
+        uwb_to_enu_yaw_rad = (
+            enu_heading_rad - heading_rad + math.pi
+        ) % (2.0 * math.pi) - math.pi
         fused = fusion.align_yaw_from_heading(
-            heading_rad, source="rtk_course"
+            heading_rad,
+            source="rtk_course",
+            uwb_to_enu_yaw_rad=uwb_to_enu_yaw_rad,
         )
         if "yaw_aligned" in fused.get("flags", ()):
             self.imu_fusion_last_rtk_yaw_status_at[key] = gps_updated_at
@@ -2111,6 +2200,17 @@ class DashboardState:
         module_id = int(sample["module_id"])
         self._align_imu_sample_time_locked(sample, module_id)
         self.latest_orientation_by_module[module_id] = dict(sample)
+        history = self.imu_orientation_history.setdefault(module_id, [])
+        sample_time_us = int(sample.get("sample_time_us") or 0)
+        insertion = bisect.bisect_right(
+            [int(item.get("sample_time_us") or 0) for item in history],
+            sample_time_us,
+        )
+        history.insert(insertion, dict(sample))
+        if len(history) > self.imu_orientation_history_limit:
+            del history[:-self.imu_orientation_history_limit]
+        self._finalize_pending_accel_locked(module_id)
+        self._drain_fusion_events_locked(module_id)
 
     def record_imu_clock_anchor_locked(self, sample: dict[str, Any]) -> None:
         try:
@@ -2123,6 +2223,7 @@ class DashboardState:
         if module_id <= 0 or fusion_ticks < 0 or fusion_timer_hz <= 0:
             return
         fusion_time_us = fusion_ticks * 1_000_000 // fusion_timer_hz
+        candidate_offset_us = esp_timer_us - fusion_time_us
         previous = self.imu_clock_alignment.get(module_id)
         rebooted = (
             previous is not None
@@ -2134,13 +2235,60 @@ class DashboardState:
             if previous is None
             else int(previous["generation"]) + (1 if rebooted else 0)
         )
+        if rebooted:
+            self._retire_imu_generation_locked(module_id)
+        # esp_timer is quantized to integer microseconds while the GPTimer
+        # resolves 0.1 us. Replacing the offset on every periodic clock anchor
+        # can therefore move the aligned timeline backwards by a fraction of
+        # a microsecond even though the native ticks are strictly monotonic.
+        # Freeze one offset for the whole boot generation; later anchors are
+        # diagnostics only. A reboot establishes a new generation and offset.
+        offset_us = (
+            candidate_offset_us
+            if previous is None or rebooted
+            else int(previous["offset_us"])
+        )
+        previous_last_ticks = (
+            0
+            if previous is None or rebooted
+            else int(previous["last_fusion_ticks"])
+        )
+        previous_last_uptime_ms = (
+            0
+            if previous is None or rebooted
+            else int(previous["last_uptime_ms"])
+        )
         self.imu_clock_alignment[module_id] = {
-            "offset_us": esp_timer_us - fusion_time_us,
-            "last_fusion_ticks": fusion_ticks,
-            "last_uptime_ms": int(sample.get("uptime_ms") or 0),
+            "offset_us": offset_us,
+            "last_fusion_ticks": max(fusion_ticks, previous_last_ticks),
+            "last_uptime_ms": max(
+                int(sample.get("uptime_ms") or 0),
+                previous_last_uptime_ms,
+            ),
             "generation": generation,
             "anchor_esp_timer_us": esp_timer_us,
+            "anchor_offset_us": candidate_offset_us,
+            "anchor_offset_delta_us": candidate_offset_us - offset_us,
         }
+
+    def _retire_imu_generation_locked(self, module_id: int) -> None:
+        """Close pending samples before accepting a post-reboot clock."""
+
+        pending = self.imu_pending_accel.pop(module_id, [])
+        for sample in pending:
+            self._mark_orientation_unavailable_locked(
+                module_id, sample, "clock_mismatch"
+            )
+            sample.pop("_association_arrival_monotonic", None)
+            self._record_orientation_association_locked(module_id, sample)
+            self._commit_accel_sample_locked(sample, chronological=True)
+        # A reboot starts a new GPTimer generation.  Finish every event from
+        # the retired generation now so old and new module-local timelines can
+        # never share one reorder buffer.
+        self._drain_fusion_events_locked(module_id, force=True)
+        self.imu_orientation_history.pop(module_id, None)
+        self.latest_orientation_by_module.pop(module_id, None)
+        self.imu_latest_display_orientation.pop(module_id, None)
 
     def record_gps_sample_locked(self, sample: dict[str, Any]) -> None:
         module_id = int(sample["module_id"])
@@ -2200,29 +2348,261 @@ class DashboardState:
         module_id = int(sample["module_id"])
         self._align_imu_sample_time_locked(sample, module_id)
         if bool(sample.get("imu_compact")):
-            orientation = self.latest_orientation_by_module.get(module_id)
+            sample["_association_arrival_monotonic"] = time.monotonic()
+            pending = self.imu_pending_accel.setdefault(module_id, [])
             sample_time_us = int(sample.get("sample_time_us") or 0)
-            orientation_time_us = int(
-                (orientation or {}).get("sample_time_us") or 0
+            insertion = bisect.bisect_right(
+                [int(item.get("sample_time_us") or 0) for item in pending],
+                sample_time_us,
             )
-            orientation_age_us = sample_time_us - orientation_time_us
-            orientation_valid = (
-                orientation is not None
-                and -2_000 <= orientation_age_us <= 30_000
-                and orientation.get("fusion_clock_generation")
-                == sample.get("fusion_clock_generation")
+            pending.insert(insertion, sample)
+            self._finalize_pending_accel_locked(module_id)
+            self._drain_fusion_events_locked(module_id)
+            return
+        self._commit_accel_sample_locked(sample, chronological=False)
+
+    def _orientation_pair_locked(
+        self, module_id: int, sample: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        generation = sample.get("fusion_clock_generation")
+        candidates = [
+            item
+            for item in self.imu_orientation_history.get(module_id, [])
+            if item.get("fusion_clock_generation") == generation
+        ]
+        if not candidates:
+            return None, None
+        sample_time_us = int(sample.get("sample_time_us") or 0)
+        times = [int(item.get("sample_time_us") or 0) for item in candidates]
+        insertion = bisect.bisect_left(times, sample_time_us)
+        if insertion < len(candidates) and times[insertion] == sample_time_us:
+            return candidates[insertion], candidates[insertion]
+        previous = candidates[insertion - 1] if insertion > 0 else None
+        following = candidates[insertion] if insertion < len(candidates) else None
+        return previous, following
+
+    @staticmethod
+    def _orientation_quaternion(
+        orientation: Mapping[str, Any],
+    ) -> tuple[float, float, float, float]:
+        return (
+            float(orientation["quat_i"]),
+            float(orientation["quat_j"]),
+            float(orientation["quat_k"]),
+            float(orientation["quat_real"]),
+        )
+
+    def _associate_orientation_locked(
+        self,
+        module_id: int,
+        sample: dict[str, Any],
+        previous: dict[str, Any],
+        following: dict[str, Any],
+    ) -> bool:
+        sample_time_us = int(sample.get("sample_time_us") or 0)
+        previous_time_us = int(previous.get("sample_time_us") or 0)
+        following_time_us = int(following.get("sample_time_us") or 0)
+        span_us = following_time_us - previous_time_us
+        fraction = (
+            0.0
+            if span_us <= 0
+            else (sample_time_us - previous_time_us) / span_us
+        )
+        try:
+            quaternion = slerp_quaternion_xyzw(
+                self._orientation_quaternion(previous),
+                self._orientation_quaternion(following),
+                fraction,
             )
-            if orientation_valid:
+            gyro = tuple(
+                float(previous.get(key) or 0.0)
+                + fraction
+                * (
+                    float(following.get(key) or 0.0)
+                    - float(previous.get(key) or 0.0)
+                )
+                for key in ("gyro_x", "gyro_y", "gyro_z")
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        for key, value in zip(
+            ("quat_i", "quat_j", "quat_k", "quat_real"), quaternion
+        ):
+            sample[key] = value
+            sample[f"display_{key}"] = value
+        for key, value in zip(("gyro_x", "gyro_y", "gyro_z"), gyro):
+            sample[key] = value
+            sample[f"display_{key}"] = value
+        sample["gyro_reports"] = int(
+            following.get("gyro_reports")
+            or previous.get("gyro_reports")
+            or 0
+        )
+        sample["gyro_time_flags"] = int(
+            previous.get("gyro_time_flags") or 0
+        ) | int(following.get("gyro_time_flags") or 0)
+        mode = "exact" if previous is following else "interpolated"
+        sample.update(
+            {
+                "imu_valid": True,
+                "orientation_association_valid": True,
+                "orientation_association_reason": "ok",
+                "orientation_association_mode": mode,
+                "orientation_previous_time_us": previous_time_us,
+                "orientation_next_time_us": following_time_us,
+                "orientation_span_us": max(0, span_us),
+                "orientation_age_us": sample_time_us - previous_time_us,
+                "orientation_interpolation_fraction": max(
+                    0.0, min(1.0, fraction)
+                ),
+                "orientation_display_held": False,
+            }
+        )
+        self.imu_latest_display_orientation[module_id] = {
+            "sample_time_us": sample_time_us,
+            "fusion_clock_generation": sample.get(
+                "fusion_clock_generation"
+            ),
+            **{
+                key: sample[key]
                 for key in (
-                    "gyro_reports", "quat_i", "quat_j", "quat_k",
-                    "quat_real", "gyro_x", "gyro_y", "gyro_z",
-                    "gyro_time_flags",
-                ):
-                    sample[key] = orientation.get(key)
-            sample["imu_valid"] = orientation_valid
-            sample["orientation_age_us"] = (
-                orientation_age_us if orientation_valid else None
+                    "quat_i", "quat_j", "quat_k", "quat_real",
+                    "gyro_x", "gyro_y", "gyro_z",
+                )
+            },
+        }
+        return True
+
+    def _mark_orientation_unavailable_locked(
+        self, module_id: int, sample: dict[str, Any], reason: str
+    ) -> None:
+        sample.update(
+            {
+                "imu_valid": False,
+                "orientation_association_valid": False,
+                "orientation_association_reason": reason,
+                "orientation_association_mode": "unavailable",
+                "orientation_age_us": None,
+                "orientation_display_held": False,
+            }
+        )
+        held = self.imu_latest_display_orientation.get(module_id)
+        if (
+            held is None
+            or held.get("fusion_clock_generation")
+            != sample.get("fusion_clock_generation")
+        ):
+            return
+        sample_time_us = int(sample.get("sample_time_us") or 0)
+        held_time_us = int(held.get("sample_time_us") or 0)
+        for key in (
+            "quat_i", "quat_j", "quat_k", "quat_real",
+            "gyro_x", "gyro_y", "gyro_z",
+        ):
+            sample[f"display_{key}"] = held.get(key)
+        sample["orientation_display_held"] = True
+        sample["orientation_held_age_us"] = max(
+            0, sample_time_us - held_time_us
+        )
+
+    def _record_orientation_association_locked(
+        self, module_id: int, sample: dict[str, Any]
+    ) -> None:
+        valid = bool(sample.get("orientation_association_valid"))
+        label = str(
+            sample.get("orientation_association_mode")
+            if valid
+            else sample.get("orientation_association_reason")
+            or "orientation_missing"
+        )
+        now = time.monotonic()
+        events = self.imu_association_events.setdefault(
+            module_id, deque(maxlen=10_000)
+        )
+        events.append((now, valid, label))
+        cutoff = now - self.imu_association_window_sec
+        while events and events[0][0] < cutoff:
+            events.popleft()
+        self.imu_association_latest[module_id] = {
+            "valid": valid,
+            "reason": str(
+                sample.get("orientation_association_reason") or "ok"
+            ),
+            "mode": str(
+                sample.get("orientation_association_mode") or "unavailable"
+            ),
+            "display_held": bool(sample.get("orientation_display_held")),
+            "held_age_us": sample.get("orientation_held_age_us"),
+            "sample_time_us": sample.get("sample_time_us"),
+            "received_at": sample.get("received_at"),
+        }
+
+    def _finalize_pending_accel_locked(self, module_id: int) -> None:
+        pending = self.imu_pending_accel.get(module_id)
+        if not pending:
+            return
+        history = self.imu_orientation_history.get(module_id, [])
+        newest_time_us = max(
+            [int(item.get("sample_time_us") or 0) for item in pending]
+            + [int(item.get("sample_time_us") or 0) for item in history]
+        )
+        now_monotonic = time.monotonic()
+        remaining: list[dict[str, Any]] = []
+        for sample in pending:
+            previous, following = self._orientation_pair_locked(
+                module_id, sample
             )
+            associated = False
+            if previous is not None and following is not None:
+                associated = self._associate_orientation_locked(
+                    module_id, sample, previous, following
+                )
+            sample_time_us = int(sample.get("sample_time_us") or 0)
+            arrival = float(
+                sample.get("_association_arrival_monotonic")
+                or now_monotonic
+            )
+            expired = (
+                newest_time_us - sample_time_us
+                >= self.imu_association_timeout_us
+                or now_monotonic - arrival
+                >= self.imu_association_timeout_us / 1_000_000.0
+            )
+            if not associated and not expired:
+                remaining.append(sample)
+                continue
+            if not associated:
+                generation = sample.get("fusion_clock_generation")
+                same_generation = [
+                    item
+                    for item in history
+                    if item.get("fusion_clock_generation") == generation
+                ]
+                any_previous = any(
+                    int(item.get("sample_time_us") or 0) <= sample_time_us
+                    for item in same_generation
+                )
+                if history and not same_generation:
+                    reason = "clock_mismatch"
+                elif any_previous:
+                    reason = "orientation_late"
+                else:
+                    reason = "orientation_missing"
+                self._mark_orientation_unavailable_locked(
+                    module_id, sample, reason
+                )
+            sample.pop("_association_arrival_monotonic", None)
+            self._record_orientation_association_locked(module_id, sample)
+            self._commit_accel_sample_locked(sample, chronological=True)
+        if remaining:
+            self.imu_pending_accel[module_id] = remaining
+        else:
+            self.imu_pending_accel.pop(module_id, None)
+
+    def _commit_accel_sample_locked(
+        self, sample: dict[str, Any], *, chronological: bool
+    ) -> None:
+        module_id = int(sample["module_id"])
         sample["sample_id"] = self.next_accel_id
         self.next_accel_id += 1
         self.raw_accel_samples.append(sample)
@@ -2256,6 +2636,18 @@ class DashboardState:
         # fusion so it can stop integrating stale acceleration safely.
         if "imu_valid" not in sample:
             return
+        if chronological:
+            self._enqueue_fusion_event_locked(
+                module_id,
+                int(sample.get("sample_time_us") or 0),
+                "imu",
+                {"sample": sample},
+            )
+            return
+        self._process_imu_fusion_locked(sample)
+
+    def _process_imu_fusion_locked(self, sample: dict[str, Any]) -> None:
+        module_id = int(sample["module_id"])
         if bool(sample.get("imu_valid")):
             self.latest_imu_by_module[module_id] = dict(sample)
         received_at = float(sample.get("received_at") or time.time())
@@ -2272,6 +2664,92 @@ class DashboardState:
             self._emit_imu_fusion_event_locked(
                 key, fused, received_at, force=False
             )
+
+    def _enqueue_fusion_event_locked(
+        self,
+        module_id: int,
+        sample_time_us: int,
+        kind: str,
+        payload: dict[str, Any],
+    ) -> None:
+        event = {
+            "sample_time_us": int(sample_time_us),
+            "kind": str(kind),
+            "sequence": self.imu_fusion_event_sequence,
+            "enqueued_monotonic": time.monotonic(),
+            **payload,
+        }
+        self.imu_fusion_event_sequence += 1
+        events = self.imu_fusion_event_buffers.setdefault(module_id, [])
+        priority = 0 if kind == "imu" else 1
+        key = (int(sample_time_us), priority, int(event["sequence"]))
+        keys = [
+            (
+                int(item["sample_time_us"]),
+                0 if item["kind"] == "imu" else 1,
+                int(item["sequence"]),
+            )
+            for item in events
+        ]
+        events.insert(bisect.bisect_right(keys, key), event)
+        self.imu_fusion_event_latest_time_us[module_id] = max(
+            int(sample_time_us),
+            self.imu_fusion_event_latest_time_us.get(module_id, int(sample_time_us)),
+        )
+        self._drain_fusion_events_locked(module_id)
+
+    def _drain_fusion_events_locked(
+        self, module_id: int, *, force: bool = False
+    ) -> None:
+        events = self.imu_fusion_event_buffers.get(module_id)
+        if not events:
+            return
+        # TCP preserves byte order, but independent telemetry producers can
+        # enqueue a newer 500 Hz IMU sample before an older UWB solution.  A
+        # short measurement-time watermark gives both streams a chance to
+        # arrive before advancing the derived EKF.  Raw UWB was already
+        # published by record_tdoa_position_sample_locked and is never held.
+        split_orientation_stream = (
+            module_id in self.imu_orientation_history
+            or module_id in self.imu_pending_accel
+        )
+        latest_time_us = self.imu_fusion_event_latest_time_us.get(
+            module_id, int(events[-1]["sample_time_us"])
+        )
+        watermark_us = latest_time_us - self.imu_fusion_reorder_window_us
+        now = time.monotonic()
+        pending = self.imu_pending_accel.get(module_id) or []
+        barrier_time_us = (
+            min(int(item.get("sample_time_us") or 0) for item in pending)
+            if pending
+            else None
+        )
+        while events:
+            event_time_us = int(events[0]["sample_time_us"])
+            if barrier_time_us is not None and event_time_us >= barrier_time_us:
+                break
+            held_us = int(
+                max(
+                    0.0,
+                    now - float(events[0].get("enqueued_monotonic") or now),
+                )
+                * 1_000_000
+            )
+            matured = (
+                not split_orientation_stream
+                or event_time_us <= watermark_us
+                or held_us >= self.imu_fusion_reorder_window_us
+            )
+            if not force and not matured:
+                break
+            event = events.pop(0)
+            if event["kind"] == "imu":
+                self._process_imu_fusion_locked(event["sample"])
+            elif event["kind"] == "position":
+                self._process_position_fusion_locked(event["stored"])
+        if not events:
+            self.imu_fusion_event_buffers.pop(module_id, None)
+            self.imu_fusion_event_latest_time_us.pop(module_id, None)
 
     def _align_imu_sample_time_locked(
         self, sample: dict[str, Any], module_id: int
@@ -2317,6 +2795,8 @@ class DashboardState:
             < alignment["last_fusion_ticks"]
         )
         if alignment is None or rebooted:
+            if rebooted:
+                self._retire_imu_generation_locked(module_id)
             alignment = {
                 "offset_us": uptime_ms * 1000 - fusion_time_us,
                 "last_fusion_ticks": fusion_ticks,
@@ -3094,8 +3574,100 @@ class DashboardState:
             next_id = self.next_log_id
         return {"logs": items, "next_id": next_id, "client_count": self.client_count}
 
+    def _flush_imu_timeouts_locked(self) -> None:
+        module_ids = set(self.imu_pending_accel) | set(
+            self.imu_fusion_event_buffers
+        )
+        for module_id in list(module_ids):
+            self._finalize_pending_accel_locked(module_id)
+            self._drain_fusion_events_locked(module_id)
+
+    def _imu_association_snapshot_locked(self) -> dict[str, Any]:
+        now = time.monotonic()
+        cutoff = now - self.imu_association_window_sec
+        module_ids = set(self.imu_association_events) | set(
+            self.imu_pending_accel
+        )
+        snapshot: dict[str, Any] = {}
+        for module_id in sorted(module_ids):
+            events = self.imu_association_events.setdefault(
+                module_id, deque(maxlen=10_000)
+            )
+            while events and events[0][0] < cutoff:
+                events.popleft()
+            counts: dict[str, int] = {}
+            valid = 0
+            for _, event_valid, label in events:
+                counts[label] = counts.get(label, 0) + 1
+                if event_valid:
+                    valid += 1
+            total = len(events)
+            latest = dict(self.imu_association_latest.get(module_id) or {})
+            orientation_history = self.imu_orientation_history.get(
+                module_id, []
+            )
+            latest_orientation = (
+                orientation_history[-1] if orientation_history else None
+            )
+            latest_accel_time_us = int(latest.get("sample_time_us") or 0)
+            pending = self.imu_pending_accel.get(module_id) or []
+            if pending:
+                latest_accel_time_us = max(
+                    latest_accel_time_us,
+                    max(
+                        int(item.get("sample_time_us") or 0)
+                        for item in pending
+                    ),
+                )
+            orientation_time_us = int(
+                (latest_orientation or {}).get("sample_time_us") or 0
+            )
+            orientation_intervals_ms = [
+                (
+                    int(right.get("sample_time_us") or 0)
+                    - int(left.get("sample_time_us") or 0)
+                )
+                / 1000.0
+                for left, right in zip(
+                    orientation_history, orientation_history[1:]
+                )
+                if left.get("fusion_clock_generation")
+                == right.get("fusion_clock_generation")
+                and int(right.get("sample_time_us") or 0)
+                > int(left.get("sample_time_us") or 0)
+            ]
+            snapshot[str(module_id)] = {
+                "window_sec": self.imu_association_window_sec,
+                "total": total,
+                "valid": valid,
+                "valid_percent": (
+                    100.0 * valid / total if total > 0 else None
+                ),
+                "pending": len(pending),
+                "counts": counts,
+                "latest": latest,
+                "latest_accel_time_us": (
+                    latest_accel_time_us or None
+                ),
+                "latest_orientation_time_us": (
+                    orientation_time_us or None
+                ),
+                "orientation_tail_delta_ms": (
+                    (latest_accel_time_us - orientation_time_us) / 1000.0
+                    if latest_accel_time_us and orientation_time_us
+                    else None
+                ),
+                "orientation_period_median_ms": (
+                    median(orientation_intervals_ms)
+                    if orientation_intervals_ms
+                    else None
+                ),
+            }
+        return snapshot
+
     def accel_after(self, after_id: int, limit: int) -> dict[str, Any]:
         with self.lock:
+            self._flush_imu_timeouts_locked()
             samples = [
                 sample
                 for sample in self.accel_samples
@@ -3113,6 +3685,7 @@ class DashboardState:
 
     def raw_accel_after(self, after_id: int, limit: int) -> dict[str, Any]:
         with self.lock:
+            self._flush_imu_timeouts_locked()
             samples = [
                 sample
                 for sample in self.raw_accel_samples
@@ -3149,6 +3722,7 @@ class DashboardState:
         """Return current collector inputs without large recent histories."""
 
         with self.lock:
+            self._flush_imu_timeouts_locked()
             now = time.time()
             statuses = []
             seen_targets: set[str] = set()
@@ -3215,6 +3789,7 @@ class DashboardState:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
+            self._flush_imu_timeouts_locked()
             now = time.time()
             statuses = []
             seen_targets: set[str] = set()
@@ -3277,6 +3852,7 @@ class DashboardState:
                 for module_id, item in self.passive_ds_tag_diagnostics.items()
             }
             imu_fusion = dict(self.imu_fusion_latest)
+            imu_association = self._imu_association_snapshot_locked()
         statuses.sort(
             key=lambda item: (
                 int(item.get("module_id") or 9999),
@@ -3300,6 +3876,7 @@ class DashboardState:
             "tdoa": tdoa,
             "passive_ds_tag_diagnostics": passive_ds_tag_diagnostics,
             "imu_fusion": imu_fusion,
+            "imu_association": imu_association,
         }
 
 
@@ -6230,12 +6807,14 @@ const state = {
   ranging: {distances: {}, max_age_sec: 3},
   tdoa: {observations: {}, anchor_distances: {}, local_positions: {}, local_geometries: {}, max_age_sec: 3},
   imuFusion: {},
+  imuAssociation: {},
   positionTrail: {},
   positionRawTrail: {},
   positionImuTrail: {},
   positionTrailTokens: {},
   positionImuTrailTokens: {},
   positionImuSnapshotTokens: {},
+  positionTrailEpochs: {},
   positionAnchorTrail: {},
   positionResults: {},
   positionModel: null,
@@ -6273,6 +6852,7 @@ const state = {
   gpsMapTileErrors: 0,
   gpsRtkSamples: new Map(),
   gpsRtkLastTokens: new Map(),
+  gpsRtkPendingJumps: new Map(),
   gpsRtkAnchorIdsKey: "",
   gpsRtkGeometryGenerationKey: "",
 };
@@ -6283,6 +6863,7 @@ const maxTerminalRenderLines = 1000;
 const positionTrailMaxAgeSec = 120;
 const positionTrailMaxPoints = 12000;
 const positionTrailMaxDrawPoints = 2500;
+const positionTrailBreakGapSec = 0.75;
 const plot = {left: 52, right: 704, top: 14, bottom: 166, width: 652, height: 152};
 const toastTimers = new Map();
 let calibrationPollTimer = null;
@@ -6872,11 +7453,12 @@ function accelMagnitude(sample) {
 }
 
 function imuDisplayEstimate(sample) {
-  if (!sample || !sample.imu_valid) return null;
-  let qx = Number(sample.quat_i);
-  let qy = Number(sample.quat_j);
-  let qz = Number(sample.quat_k);
-  let qw = Number(sample.quat_real);
+  if (!sample || (!sample.imu_valid && !sample.orientation_display_held)) return null;
+  const prefix = sample.imu_valid ? "" : "display_";
+  let qx = Number(sample[`${prefix}quat_i`]);
+  let qy = Number(sample[`${prefix}quat_j`]);
+  let qz = Number(sample[`${prefix}quat_k`]);
+  let qw = Number(sample[`${prefix}quat_real`]);
   const norm = Math.hypot(qx, qy, qz, qw);
   if (![qx, qy, qz, qw, norm].every(Number.isFinite) || norm < 1e-6) return null;
   qx /= norm;
@@ -7036,7 +7618,10 @@ function ensureAccelCharts() {
         <div><span>Z</span><b id="latestZ${moduleId}">-</b></div>
       </div>
       <div class="latest-extra" id="latestExtra${moduleId}">no samples yet</div>
-      <div class="latest-extra" id="latestOrientation${moduleId}">RPY waiting - BNO reference, not ENU-calibrated</div>
+      <div class="latest-extra" id="latestOrientation${moduleId}">raw BNO RPY waiting</div>
+      <div class="latest-extra" id="latestOrientationUwb${moduleId}">UWB yaw calibration waiting</div>
+      <div class="latest-extra" id="latestOrientationEnu${moduleId}">ENU yaw waiting for RTK course</div>
+      <div class="latest-extra" id="latestAssociation${moduleId}">orientation association waiting</div>
       <div class="latest-extra" id="latestGyro${moduleId}">gyro waiting - body frame</div>
       <div class="latest-extra" id="latestLinear${moduleId}">linear acceleration waiting - body frame</div>
     </div>`).join("");
@@ -8967,12 +9552,24 @@ function appendPositionTrailPoint(store, key, position, timestamp, metrics = nul
       !Number.isFinite(Number(position.x)) ||
       !Number.isFinite(Number(position.y))) return;
   const trail = store[key] || [];
+  const previous = trail[trail.length - 1] || null;
+  const fusionFlags = Array.isArray(metrics?.imu_fusion_flags)
+    ? metrics.imu_fusion_flags.map(String)
+    : [];
+  const explicitBreak = metrics?.imu_fusion_reset === true ||
+    fusionFlags.some(flag => flag === "reset" || flag.includes("reacquir"));
+  const timeGapSec = previous
+    ? Number(timestamp) - Number(previous.t)
+    : 0;
   trail.push({
     x: Number(position.x),
     y: Number(position.y),
     t: timestamp,
     sigma_m: Number(metrics?.sigma_m),
     rms_m: Number(metrics?.rms_m),
+    break_before: Boolean(previous) && (
+      explicitBreak || timeGapSec > positionTrailBreakGapSec ||
+      timeGapSec < -0.25),
   });
   let staleCount = 0;
   while (staleCount < trail.length &&
@@ -8984,6 +9581,39 @@ function appendPositionTrailPoint(store, key, position, timestamp, metrics = nul
     trail.splice(0, trail.length - positionTrailMaxPoints);
   }
   store[key] = trail;
+}
+
+function resetPositionTagTrail(tagId) {
+  const key = String(tagId);
+  delete state.positionTrail[key];
+  delete state.positionRawTrail[key];
+  delete state.positionImuTrail[key];
+  delete state.positionTrailTokens[key];
+  delete state.positionImuTrailTokens[key];
+  delete state.positionImuSnapshotTokens[key];
+  delete state.positionTrailEpochs[key];
+}
+
+function ensurePositionTrailEpoch(tagId, sample) {
+  const key = String(tagId);
+  const protocol = String(
+    sample?.tdoa_protocol || sample?.protocol || "flextdoa");
+  const uptimeMs = Number(sample?.uptime_ms);
+  const previous = state.positionTrailEpochs[key] || null;
+  const rebooted = previous && Number.isFinite(uptimeMs) &&
+    Number.isFinite(Number(previous.uptimeMs)) &&
+    uptimeMs + 1000 < Number(previous.uptimeMs);
+  if (previous && (previous.protocol !== protocol || rebooted)) {
+    resetPositionTagTrail(key);
+  }
+  const active = state.positionTrailEpochs[key] || {protocol, uptimeMs: NaN};
+  active.protocol = protocol;
+  if (Number.isFinite(uptimeMs)) {
+    active.uptimeMs = Number.isFinite(Number(active.uptimeMs))
+      ? Math.max(Number(active.uptimeMs), uptimeMs)
+      : uptimeMs;
+  }
+  state.positionTrailEpochs[key] = active;
 }
 
 function recordPositionTrailPoint(
@@ -9008,6 +9638,7 @@ function resetPositionTagTrails() {
   state.positionTrailTokens = {};
   state.positionImuTrailTokens = {};
   state.positionImuSnapshotTokens = {};
+  state.positionTrailEpochs = {};
   state.positionStreamRenderLatencies = [];
   state.positionStreamLatestEvent = null;
   state.positionStreamLastRenderedEventToken = "";
@@ -9022,6 +9653,7 @@ function applyImuFusionSnapshot(fusions, expectedProtocol) {
       continue;
     }
     const key = String(tagId);
+    ensurePositionTrailEpoch(key, fused);
     const flags = Array.isArray(fused?.flags) ? fused.flags.map(String) : [];
     const snapshotToken = [
       protocol,
@@ -9352,7 +9984,7 @@ function drawTagTrail(ctx, tx, trail, color, dashed = false) {
   samples.forEach((point, index) => {
     const x = tx.x(point.x);
     const y = tx.y(point.y);
-    if (index === 0) ctx.moveTo(x, y);
+    if (index === 0 || point.break_before) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   });
   ctx.stroke();
@@ -10379,6 +11011,7 @@ function ingestPositionStreamSample(item) {
   // briefly, because local_positions is keyed only by tag ID.
   if (!positionTdoaProtocolMatches(item, settings.solver)) return;
   const key = String(tagId);
+  ensurePositionTrailEpoch(key, item);
   if (item.imu_fused === true) {
     if (item.imu_fusion_reset === true) {
       delete state.positionImuTrail[key];
@@ -10619,20 +11252,60 @@ function renderAccelGraphs() {
     document.getElementById(`latestExtra${moduleId}`).textContent =
       `|a| ${fmtAccel(magnitude)} m/s^2 · accuracy ${latest.accuracy} · ${fmtAge(latest.received_at)}${rateText}`;
     const orientationEl = document.getElementById(`latestOrientation${moduleId}`);
+    const orientationUwbEl = document.getElementById(`latestOrientationUwb${moduleId}`);
+    const orientationEnuEl = document.getElementById(`latestOrientationEnu${moduleId}`);
+    const associationEl = document.getElementById(`latestAssociation${moduleId}`);
     const gyroEl = document.getElementById(`latestGyro${moduleId}`);
     const linearEl = document.getElementById(`latestLinear${moduleId}`);
+    const fusion = latestImuFusionForModule(moduleId);
+    const diagnostics = fusion?.diagnostics || {};
+    const association = state.imuAssociation?.[String(moduleId)] || {};
+    const held = Boolean(latest.orientation_display_held && !latest.imu_valid);
+    const heldSuffix = held
+      ? ` · held ${Math.max(0, Number(latest.orientation_held_age_us || 0) / 1000).toFixed(0)} ms (display only)`
+      : "";
     if (imu) {
       orientationEl.textContent =
-        `RPY ${fmtAccel(imu.rollDeg)} / ${fmtAccel(imu.pitchDeg)} / ${fmtAccel(imu.yawDeg)} deg · body→BNO reference, not ENU-calibrated`;
+        `raw BNO RPY ${fmtAccel(imu.rollDeg)} / ${fmtAccel(imu.pitchDeg)} / ${fmtAccel(imu.yawDeg)} deg${heldSuffix}`;
+      const uwbYaw = diagnostics.yaw_alignment_valid
+        ? wrapDegrees(imu.yawDeg + Number(diagnostics.yaw_alignment_deg))
+        : null;
+      orientationUwbEl.textContent = Number.isFinite(uwbYaw)
+        ? `IMU → UWB yaw ${fmtAccel(uwbYaw)} deg · yaw-only calibration (${diagnostics.yaw_alignment_source || "unknown"})${heldSuffix}`
+        : "IMU → UWB yaw unavailable · calibration not initialized";
+      const enuYaw = diagnostics.enu_yaw_valid && Number.isFinite(uwbYaw)
+        ? wrapDegrees(uwbYaw + Number(diagnostics.uwb_to_enu_yaw_deg))
+        : null;
+      orientationEnuEl.textContent = Number.isFinite(enuYaw)
+        ? `ENU yaw ${fmtAccel(enuYaw)} deg (0=East, CCW) · ${diagnostics.uwb_to_enu_yaw_source || "RTK"}${heldSuffix}`
+        : "ENU yaw unavailable · waiting for valid RTK course alignment";
+      const gyroPrefix = latest.imu_valid ? "" : "display_";
       gyroEl.textContent =
-        `gyro ${fmtAccel(Number(latest.gyro_x))} / ${fmtAccel(Number(latest.gyro_y))} / ${fmtAccel(Number(latest.gyro_z))} rad/s · body frame`;
+        `gyro ${fmtAccel(Number(latest[`${gyroPrefix}gyro_x`]))} / ${fmtAccel(Number(latest[`${gyroPrefix}gyro_y`]))} / ${fmtAccel(Number(latest[`${gyroPrefix}gyro_z`]))} rad/s · body frame${heldSuffix}`;
       linearEl.textContent =
-        `linear est. ${fmtAccel(imu.linearBody.x)} / ${fmtAccel(imu.linearBody.y)} / ${fmtAccel(imu.linearBody.z)} m/s^2 · body frame`;
+        `linear est. ${fmtAccel(imu.linearBody.x)} / ${fmtAccel(imu.linearBody.y)} / ${fmtAccel(imu.linearBody.z)} m/s^2 · body frame${held ? " · display only" : ""}`;
     } else {
-      orientationEl.textContent = "RPY unavailable · legacy accel or invalid IMU sample · not ENU-calibrated";
-      gyroEl.textContent = "gyro unavailable · body frame";
-      linearEl.textContent = "linear acceleration unavailable · body frame";
+      const reason = latest.orientation_association_reason
+        ? orientationAssociationReason(latest.orientation_association_reason)
+        : "legacy acceleration sample";
+      orientationEl.textContent = `raw BNO RPY unavailable · ${reason}`;
+      orientationUwbEl.textContent = "IMU → UWB yaw unavailable";
+      orientationEnuEl.textContent = "ENU yaw unavailable";
+      gyroEl.textContent = `gyro unavailable · ${reason}`;
+      linearEl.textContent = `linear acceleration unavailable · ${reason}`;
     }
+    const total = Number(association.total || 0);
+    const valid = Number(association.valid || 0);
+    const percent = Number(association.valid_percent);
+    const counts = association.counts || {};
+    const latestAssociation = association.latest || {};
+    const tailDeltaMs = Number(association.orientation_tail_delta_ms);
+    const tailText = Number.isFinite(tailDeltaMs)
+      ? ` · tail ${tailDeltaMs.toFixed(1)} ms`
+      : "";
+    associationEl.textContent = total > 0
+      ? `orientation association ${Number.isFinite(percent) ? percent.toFixed(1) : "-"}% (${valid}/${total}, ${Number(association.window_sec || 0).toFixed(0)} s) · interpolated ${Number(counts.interpolated || 0)} · exact ${Number(counts.exact || 0)} · pending ${Number(association.pending || 0)}${tailText}${latestAssociation.valid ? "" : ` · latest ${orientationAssociationReason(latestAssociation.reason)}`}`
+      : `orientation association waiting · pending ${Number(association.pending || 0)}`;
   }
 }
 
@@ -10980,6 +11653,8 @@ const gpsRtkSampleHorizonMs = 120000;
 const gpsRtkAnchorFitRmsLimitM = 0.10;
 const gpsRtkBaseJumpM = 0.25;
 const gpsRtkMaximumMotionHorizonSec = 2.0;
+const gpsRtkJumpConfirmationSamples = 3;
+const gpsRtkJumpCandidateRadiusM = 0.75;
 
 function pruneGpsRtkSamples(nowMs = Date.now()) {
   const oldestAllowedMs = nowMs - gpsRtkSampleHorizonMs;
@@ -10995,6 +11670,7 @@ function pruneGpsRtkSamples(nowMs = Date.now()) {
     } else {
       state.gpsRtkSamples.delete(moduleId);
       state.gpsRtkLastTokens.delete(moduleId);
+      state.gpsRtkPendingJumps.delete(moduleId);
     }
   }
 }
@@ -11003,6 +11679,7 @@ function clearGpsRtkAnchorSamples() {
   for (const anchorId of gpsRtkAnchorIds) {
     state.gpsRtkSamples.delete(anchorId);
     state.gpsRtkLastTokens.delete(anchorId);
+    state.gpsRtkPendingJumps.delete(anchorId);
   }
 }
 
@@ -11086,8 +11763,13 @@ function recordGpsRtkSamples(statuses) {
       latitude.toFixed(9), longitude.toFixed(9), altitude.toFixed(4),
     ].join(":");
     if (state.gpsRtkLastTokens.get(moduleId) === token) continue;
+    // Mark every new receiver fix as seen, not only accepted fixes. Otherwise
+    // the 250 ms dashboard refresh could count one rejected 8 Hz fix several
+    // times while confirming a relocation.
+    state.gpsRtkLastTokens.set(moduleId, token);
     const samples = state.gpsRtkSamples.get(moduleId) || [];
     const speedMps = Math.max(0, Number(item?.gps_speed_mps) || 0);
+    const candidate = {latitude, longitude, altitude, capturedAt, speedMps};
     const previous = samples[samples.length - 1];
     if (previous) {
       const elapsedSec = Math.max(
@@ -11097,15 +11779,36 @@ function recordGpsRtkSamples(statuses) {
       const allowedDisplacementM = gpsRtkBaseJumpM +
         Math.max(speedMps, Number(previous.speedMps) || 0) *
           motionHorizonSec;
-      if (gpsRtkHorizontalSampleDistanceM(
-            previous, {latitude, longitude}) > allowedDisplacementM) {
-        /* Match the ESP32 guard: a zero-speed false Fixed jump must not
-         * become either moving anchor geometry or tag ground truth. */
-        continue;
+      if (gpsRtkHorizontalSampleDistanceM(previous, candidate) >
+          allowedDisplacementM) {
+        /*
+         * A single false Fixed jump must not move either the anchor geometry
+         * or ground truth. The old one-shot guard, however, latched forever:
+         * after a real movement exceeded the gate every later fix was still
+         * compared with the same obsolete point. Reacquire only after three
+         * distinct, mutually coherent RTK-Fixed fixes.
+         */
+        const pending = state.gpsRtkPendingJumps.get(moduleId) || null;
+        const pendingDistanceM = pending
+          ? gpsRtkHorizontalSampleDistanceM(pending.last, candidate)
+          : Infinity;
+        const pendingElapsedSec = pending
+          ? Math.max(0.05,
+              (capturedAt - Number(pending.last.capturedAt || capturedAt)) /
+                1000)
+          : 0;
+        const candidateRadiusM = gpsRtkJumpCandidateRadiusM +
+          Math.max(speedMps, Number(pending?.last?.speedMps) || 0) *
+            Math.min(1.0, pendingElapsedSec * 2.0);
+        const count = pending && pendingDistanceM <= candidateRadiusM
+          ? Number(pending.count || 0) + 1
+          : 1;
+        state.gpsRtkPendingJumps.set(moduleId, {count, last: candidate});
+        if (count < gpsRtkJumpConfirmationSamples) continue;
       }
     }
-    state.gpsRtkLastTokens.set(moduleId, token);
-    samples.push({latitude, longitude, altitude, capturedAt, speedMps});
+    state.gpsRtkPendingJumps.delete(moduleId);
+    samples.push(candidate);
     if (samples.length > gpsRtkMaximumSamples) {
       samples.splice(0, samples.length - gpsRtkMaximumSamples);
     }
@@ -11412,6 +12115,7 @@ async function applyGpsRtkFlexGeometry() {
 function clearGpsRtkGeometrySamples() {
   state.gpsRtkSamples.clear();
   state.gpsRtkLastTokens.clear();
+  state.gpsRtkPendingJumps.clear();
   renderGpsRtkGeometryStatus();
   setToast("gpsRtkGeometryToast", "RTK sample buffer cleared", "");
 }
@@ -11606,6 +12310,27 @@ function gpsMapLabelRect(center, size) {
     top: center.y - size.height / 2,
     bottom: center.y + size.height / 2,
   };
+}
+
+function latestImuFusionForModule(moduleId) {
+  return Object.values(state.imuFusion || {})
+    .filter(item => Number(item?.module_id) === Number(moduleId))
+    .sort((left, right) =>
+      Number(right?.received_at || 0) - Number(left?.received_at || 0))[0] || null;
+}
+
+function wrapDegrees(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return ((number + 180) % 360 + 360) % 360 - 180;
+}
+
+function orientationAssociationReason(reason) {
+  return ({
+    orientation_late: "orientation late",
+    clock_mismatch: "clock mismatch",
+    orientation_missing: "orientation missing",
+  })[String(reason || "")] || String(reason || "unknown").replaceAll("_", " ");
 }
 
 function gpsMapRectOverlapArea(first, second) {
@@ -12724,6 +13449,7 @@ function renderInfo(snapshot) {
   const selectedSolver = positionSettings().solver;
   const expectedPositionProtocol = positionGeometryProtocol(selectedSolver);
   applyImuFusionSnapshot(snapshot.imu_fusion || {}, expectedPositionProtocol);
+  state.imuAssociation = snapshot.imu_association || {};
   const displayMaxAge = positionDisplayMaxAge(positionSettings());
   const now = Date.now() / 1000;
   const previousLocalPositions = state.tdoa?.local_positions || {};

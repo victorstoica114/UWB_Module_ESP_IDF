@@ -171,6 +171,32 @@ int main(void)
     assert(output.frame_id == 301U);
     assert(output.observation_count == 4U);
 
+    /* A complete mask must not bypass the range/residual quality gate. This
+     * models a syntactically complete radio frame with one corrupt range. */
+    struct uwb_native_ds_position_solver corrupt_complete_solver;
+    assert(uwb_native_ds_position_solver_init(
+        &corrupt_complete_solver, 1U, anchors, anchor_x, anchor_y,
+        anchor_count, 29U));
+    for (size_t index = 0U; index < anchor_count; ++index) {
+        const float distance = index == 3U
+            ? 0.100f
+            : range_to(tag_x, tag_y, anchor_x[index], anchor_y[index]);
+        assert(uwb_native_ds_position_solver_submit_tag_range(
+            &corrupt_complete_solver, 1U, anchors[index], 302U,
+            distance, &output));
+    }
+    assert(!output.position_valid);
+
+    /* Rejection is frame-local; the following coherent frame still solves. */
+    submit_complete_frame(
+        &corrupt_complete_solver, anchors, anchor_x, anchor_y,
+        anchor_count, 303U, tag_x, tag_y, &output);
+    assert(output.position_valid);
+    assert(output.frame_id == 303U);
+    assert(output.observation_count == 4U);
+    assert_near(output.x_m, tag_x, 0.001f);
+    assert_near(output.y_m, tag_y, 0.001f);
+
     /* Anchor-to-anchor data only diagnoses the immutable RTK geometry. */
     for (size_t first = 0U; first < anchor_count; ++first) {
         for (size_t second = first + 1U; second < anchor_count; ++second) {

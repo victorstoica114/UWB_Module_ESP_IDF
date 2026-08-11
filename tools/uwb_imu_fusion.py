@@ -115,6 +115,7 @@ class ImuSample:
     sample_time_us: int | None = None
     fusion_time_ticks: int | None = None
     fusion_timer_hz: int | None = None
+    fusion_uptime_offset_us: float | None = None
 
     def __post_init__(self) -> None:
         if self.uptime_ms < 0:
@@ -127,16 +128,30 @@ class ImuSample:
             raise ValueError("fusion_time_ticks must be non-negative")
         if self.fusion_timer_hz is not None and self.fusion_timer_hz <= 0:
             raise ValueError("fusion_timer_hz must be positive")
+        if self.fusion_uptime_offset_us is not None:
+            _finite(self.fusion_uptime_offset_us, "fusion_uptime_offset_us")
 
     @property
-    def time_us(self) -> int:
+    def time_us(self) -> float:
         """Hardware-derived sample time, with legacy millisecond fallback."""
 
+        if (
+            self.fusion_time_ticks is not None
+            and self.fusion_timer_hz is not None
+            and self.fusion_uptime_offset_us is not None
+        ):
+            # Do not quantize the 10 MHz GPTimer to integer microseconds.
+            # Reports repaired one timer tick apart are 0.1 us apart and must
+            # remain distinct all the way into chronological fusion.
+            return (
+                self.fusion_time_ticks * 1_000_000.0 / self.fusion_timer_hz
+                + self.fusion_uptime_offset_us
+            )
         if self.sample_time_us is not None:
-            return self.sample_time_us
+            return float(self.sample_time_us)
         if self.fusion_time_ticks is not None and self.fusion_timer_hz is not None:
-            return self.fusion_time_ticks * 1_000_000 // self.fusion_timer_hz
-        return self.uptime_ms * 1000
+            return self.fusion_time_ticks * 1_000_000.0 / self.fusion_timer_hz
+        return float(self.uptime_ms * 1000)
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "ImuSample":
@@ -182,6 +197,9 @@ class ImuSample:
         fusion_timer_hz_value = _mapping_value(
             values, ("fusion_timer_hz",), required=False
         )
+        fusion_uptime_offset_value = _mapping_value(
+            values, ("fusion_uptime_offset_us",), required=False
+        )
         return cls(
             uptime_ms=uptime_ms,
             accel_body_mps2=accel,
@@ -198,6 +216,11 @@ class ImuSample:
             fusion_timer_hz=(
                 int(fusion_timer_hz_value)
                 if fusion_timer_hz_value is not None
+                else None
+            ),
+            fusion_uptime_offset_us=(
+                float(fusion_uptime_offset_value)
+                if fusion_uptime_offset_value is not None
                 else None
             ),
         )
@@ -476,6 +499,9 @@ class UwbImuFusion:
         self._yaw_alignment_updates = 0
         self._yaw_alignment_source: str | None = None
         self._last_yaw_alignment_time_us: int | None = None
+        self._uwb_to_enu_yaw_valid = False
+        self._uwb_to_enu_yaw_rad = 0.0
+        self._uwb_to_enu_yaw_source: str | None = None
         self._yaw_window: list[tuple[int, float, float]] = []
         self._last_yaw_window_duration_s: float | None = None
         self._last_yaw_displacement_m: float | None = None
@@ -516,8 +542,13 @@ class UwbImuFusion:
         self._consecutive_position_outliers = 0
         self._position_reacquisition_count = 0
         self._position_soft_reacquisition_count = 0
+        self._position_same_time_count = 0
         self._velocity_clamp_count = 0
         self._ordering_reject_count = 0
+        self._ordering_reject_reasons: dict[str, int] = {}
+        self._last_ordering_reject_reason: str | None = None
+        self._last_ordering_lag_us: int | None = None
+        self._max_ordering_lag_us = 0
         self._module_mismatch_count = 0
 
     def reset(self, reason: str = "manual") -> dict[str, Any]:
@@ -555,6 +586,9 @@ class UwbImuFusion:
         self._yaw_alignment_updates = 0
         self._yaw_alignment_source = None
         self._last_yaw_alignment_time_us = None
+        self._uwb_to_enu_yaw_valid = False
+        self._uwb_to_enu_yaw_rad = 0.0
+        self._uwb_to_enu_yaw_source = None
         self._yaw_window = []
         self._last_yaw_window_duration_s = None
         self._last_yaw_displacement_m = None
@@ -606,15 +640,29 @@ class UwbImuFusion:
             return False
         return True
 
+    def _record_ordering_reject(self, reason: str, lag_us: int) -> None:
+        self._ordering_reject_count += 1
+        self._ordering_reject_reasons[reason] = (
+            self._ordering_reject_reasons.get(reason, 0) + 1
+        )
+        self._last_ordering_reject_reason = reason
+        self._last_ordering_lag_us = max(0, int(lag_us))
+        self._max_ordering_lag_us = max(
+            self._max_ordering_lag_us, self._last_ordering_lag_us
+        )
+
     def _verify_cross_stream_order(
-        self, time_us: int, flags: list[str]
+        self, time_us: int, flags: list[str], source: str
     ) -> bool:
         tolerance_us = self.config.cross_stream_reorder_tolerance_ms * 1000
         if (
             self._last_event_time_us is not None
             and time_us < self._last_event_time_us - tolerance_us
         ):
-            self._ordering_reject_count += 1
+            self._record_ordering_reject(
+                f"{source}_cross_stream",
+                self._last_event_time_us - time_us,
+            )
             flags.append("event_out_of_order")
             return False
         if self._last_event_time_us is None or time_us > self._last_event_time_us:
@@ -1048,11 +1096,11 @@ class UwbImuFusion:
                 flags.extend(self._reset_state("imu_time_reboot"))
                 self._last_output_uptime_ms = imu.uptime_ms
             elif backstep_us > 0:
-                self._ordering_reject_count += 1
+                self._record_ordering_reject("imu_out_of_order", backstep_us)
                 flags.append("imu_out_of_order")
                 return self._output(imu.uptime_ms, flags)
             elif backstep_us == 0:
-                self._ordering_reject_count += 1
+                self._record_ordering_reject("imu_duplicate_time", 0)
                 flags.append("imu_duplicate_time")
                 return self._output(imu.uptime_ms, flags)
 
@@ -1062,7 +1110,7 @@ class UwbImuFusion:
                 flags.extend(self._reset_state("imu_gap"))
                 self._last_output_uptime_ms = imu.uptime_ms
 
-        if not self._verify_cross_stream_order(imu_time_us, flags):
+        if not self._verify_cross_stream_order(imu_time_us, flags, "imu"):
             return self._output(imu.uptime_ms, flags)
 
         previous_imu_us = self._last_imu_time_us
@@ -1329,7 +1377,11 @@ class UwbImuFusion:
         flags.extend(("yaw_aligned", "yaw_motion_assumes_body_forward_x"))
 
     def align_yaw_from_heading(
-        self, uwb_heading_rad: float, *, source: str = "external_heading"
+        self,
+        uwb_heading_rad: float,
+        *,
+        source: str = "external_heading",
+        uwb_to_enu_yaw_rad: float | None = None,
     ) -> dict[str, Any]:
         """Align BNO reference yaw to an absolute heading in the UWB frame."""
 
@@ -1369,6 +1421,13 @@ class UwbImuFusion:
         self._yaw_alignment_source = str(source)
         self._last_yaw_alignment_time_us = self._last_imu_time_us
         self._last_yaw_reject_reason = None
+        if uwb_to_enu_yaw_rad is not None:
+            self._uwb_to_enu_yaw_rad = wrap_angle_radians(
+                _finite(uwb_to_enu_yaw_rad, "uwb_to_enu_yaw_rad")
+            )
+            self._uwb_to_enu_yaw_valid = True
+            self._uwb_to_enu_yaw_source = str(source)
+            flags.append("enu_frame_aligned")
         flags.extend(("yaw_aligned", f"yaw_source:{source}"))
         return self._output(self._last_output_uptime_ms, flags)
 
@@ -1394,13 +1453,26 @@ class UwbImuFusion:
                 flags.extend(self._reset_state("position_time_reboot"))
                 self._last_output_uptime_ms = position.uptime_ms
             elif backstep_us > 0:
-                self._ordering_reject_count += 1
+                self._record_ordering_reject(
+                    "position_out_of_order", backstep_us
+                )
                 flags.append("position_out_of_order")
                 return self._output(position.uptime_ms, flags)
             elif backstep_us == 0:
-                self._ordering_reject_count += 1
-                flags.append("position_duplicate_time")
-                return self._output(position.uptime_ms, flags)
+                same_track = (
+                    self._protocol == position.protocol
+                    and self._tag_id == position.tag_id
+                )
+                if not same_track:
+                    self._record_ordering_reject("position_duplicate_time", 0)
+                    flags.append("position_duplicate_time")
+                    return self._output(position.uptime_ms, flags)
+                # The ESP32 solver can publish more than one distinct raw
+                # correction inside one millisecond. Preserve TCP/queue
+                # sequence as a stable tie-break and apply them at zero dt;
+                # no synthetic physical time is introduced.
+                self._position_same_time_count += 1
+                flags.append("position_same_time_update")
 
         if self._protocol is not None and position.protocol != self._protocol:
             flags.extend(self._reset_state("protocol_changed"))
@@ -1413,7 +1485,9 @@ class UwbImuFusion:
                 flags.extend(self._reset_state("position_gap"))
                 self._last_output_uptime_ms = position.uptime_ms
 
-        if not self._verify_cross_stream_order(position_time_us, flags):
+        if not self._verify_cross_stream_order(
+            position_time_us, flags, "position"
+        ):
             return self._output(position.uptime_ms, flags)
 
         self._protocol = position.protocol
@@ -1543,11 +1617,23 @@ class UwbImuFusion:
         return self._output(self._last_output_uptime_ms, ["snapshot"])
 
     def _diagnostics(self) -> dict[str, Any]:
+        yaw_bno_rad = self._last_imu_yaw_ref_rad
+        yaw_uwb_rad = (
+            wrap_angle_radians(yaw_bno_rad + self._yaw_alignment_rad)
+            if yaw_bno_rad is not None and self._yaw_alignment_valid
+            else None
+        )
+        yaw_enu_rad = (
+            wrap_angle_radians(yaw_uwb_rad + self._uwb_to_enu_yaw_rad)
+            if yaw_uwb_rad is not None and self._uwb_to_enu_yaw_valid
+            else None
+        )
         return {
             "ready": self._ready,
             "filter": "ekf_cv_accel_zupt",
-            "frame": "UWB horizontal; BNO reference yaw-aligned, not ENU-calibrated",
+            "frame": "body to BNO; yaw-calibrated to UWB; not ENU-calibrated until RTK course",
             "yaw_alignment_assumption": "body +X follows UWB displacement",
+            "imu_to_uwb_calibration": "yaw_only",
             "module_id": self._module_id,
             "protocol": self._protocol,
             "tag_id": self._tag_id,
@@ -1562,11 +1648,20 @@ class UwbImuFusion:
             "position_soft_reacquisitions": (
                 self._position_soft_reacquisition_count
             ),
+            "position_same_time_updates": self._position_same_time_count,
             "reacquire_probation_remaining": (
                 self._reacquire_probation_remaining
             ),
             "velocity_clamps": self._velocity_clamp_count,
             "ordering_rejects": self._ordering_reject_count,
+            "ordering_reject_reasons": dict(self._ordering_reject_reasons),
+            "last_ordering_reject_reason": self._last_ordering_reject_reason,
+            "last_ordering_lag_ms": (
+                self._last_ordering_lag_us / 1000.0
+                if self._last_ordering_lag_us is not None
+                else None
+            ),
+            "max_ordering_lag_ms": self._max_ordering_lag_us / 1000.0,
             "module_mismatches": self._module_mismatch_count,
             "reset_count": self._reset_count,
             "last_reset_reason": self._last_reset_reason,
@@ -1581,6 +1676,22 @@ class UwbImuFusion:
             ),
             "yaw_alignment_updates": self._yaw_alignment_updates,
             "yaw_alignment_source": self._yaw_alignment_source,
+            "last_imu_yaw_bno_deg": (
+                math.degrees(yaw_bno_rad) if yaw_bno_rad is not None else None
+            ),
+            "last_imu_yaw_uwb_deg": (
+                math.degrees(yaw_uwb_rad) if yaw_uwb_rad is not None else None
+            ),
+            "enu_yaw_valid": yaw_enu_rad is not None,
+            "last_imu_yaw_enu_deg": (
+                math.degrees(yaw_enu_rad) if yaw_enu_rad is not None else None
+            ),
+            "uwb_to_enu_yaw_deg": (
+                math.degrees(self._uwb_to_enu_yaw_rad)
+                if self._uwb_to_enu_yaw_valid
+                else None
+            ),
+            "uwb_to_enu_yaw_source": self._uwb_to_enu_yaw_source,
             "last_yaw_alignment_time_us": self._last_yaw_alignment_time_us,
             "last_yaw_window_duration_s": self._last_yaw_window_duration_s,
             "last_yaw_displacement_m": self._last_yaw_displacement_m,

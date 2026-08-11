@@ -44,6 +44,35 @@ uint64_t bno085_timing_reconstruct_ticks(uint64_t hint_ticks,
                             : hint_ticks + (uint64_t)offset_ticks;
 }
 
+uint64_t bno085_timing_causal_monotonic(uint64_t candidate_ticks,
+                                        uint64_t packet_upper_ticks,
+                                        uint64_t previous_ticks,
+                                        uint32_t period_ticks)
+{
+    uint64_t sample_ticks = candidate_ticks;
+    if (packet_upper_ticks != 0 && sample_ticks > packet_upper_ticks) {
+        sample_ticks = packet_upper_ticks;
+    }
+    if (previous_ticks == 0 || sample_ticks > previous_ticks) {
+        return sample_ticks;
+    }
+
+    const uint64_t next_ticks =
+        previous_ticks <= UINT64_MAX - period_ticks
+            ? previous_ticks + period_ticks
+            : UINT64_MAX;
+    if (packet_upper_ticks == 0 || next_ticks <= packet_upper_ticks) {
+        return next_ticks;
+    }
+    if (packet_upper_ticks > previous_ticks) {
+        return packet_upper_ticks;
+    }
+    /* Preserve strict order when several reports share one transport upper
+     * bound. The overshoot is at most one 10 MHz tick per report, instead of
+     * one full nominal period that can accumulate hundreds of milliseconds. */
+    return previous_ticks < UINT64_MAX ? previous_ticks + 1U : UINT64_MAX;
+}
+
 bool bno085_timing_due(uint64_t previous_ticks, uint64_t current_ticks,
                        uint32_t rate_hz)
 {

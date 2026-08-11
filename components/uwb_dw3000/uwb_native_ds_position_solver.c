@@ -502,6 +502,14 @@ bool uwb_native_ds_position_solver_submit_tag_range(
         return true;
     }
     solver->tag_frame_finalized = true;
-    (void)solve_position(solver, solver->tag_range_mask, false, output);
+    /*
+     * A complete frame is not automatically a coherent frame. A damaged but
+     * syntactically valid range can still make all four bits arrive and used
+     * to bypass both the triangle-inequality check and the residual gate.
+     * In field captures that produced isolated 1.8--2.9 m position jumps
+     * whose own equation RMS was 1.3--2.2 m. Apply the same physical and
+     * residual validation used by the 3/4 boundary fallback.
+     */
+    (void)solve_position(solver, solver->tag_range_mask, true, output);
     return true;
 }

@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="470" viewBox="0 0 900 470">
+<rect width="100%" height="100%" fill="white"/>
+<text x="450.0" y="28" text-anchor="middle" font-family="sans-serif" font-size="20">Alignment residual must accompany RTK comparison</text>
+<line x1="85" y1="55" x2="85" y2="355" stroke="#111827"/>
+<line x1="85" y1="355" x2="875" y2="355" stroke="#111827"/>
+<line x1="85" y1="355.0" x2="875" y2="355.0" stroke="#e5e7eb"/>
+<text x="76" y="359.0" text-anchor="end" font-family="sans-serif" font-size="12">0</text>
+<line x1="85" y1="295.0" x2="875" y2="295.0" stroke="#e5e7eb"/>
+<text x="76" y="299.0" text-anchor="end" font-family="sans-serif" font-size="12">0.67</text>
+<line x1="85" y1="235.0" x2="875" y2="235.0" stroke="#e5e7eb"/>
+<text x="76" y="239.0" text-anchor="end" font-family="sans-serif" font-size="12">1.3</text>
+<line x1="85" y1="175.0" x2="875" y2="175.0" stroke="#e5e7eb"/>
+<text x="76" y="179.0" text-anchor="end" font-family="sans-serif" font-size="12">2</text>
+<line x1="85" y1="115.0" x2="875" y2="115.0" stroke="#e5e7eb"/>
+<text x="76" y="119.0" text-anchor="end" font-family="sans-serif" font-size="12">2.7</text>
+<line x1="85" y1="55.0" x2="875" y2="55.0" stroke="#e5e7eb"/>
+<text x="76" y="59.0" text-anchor="end" font-family="sans-serif" font-size="12">3.3</text>
+<rect x="118.0" y="353.8" width="44.0" height="1.2" fill="#64748b" opacity="0.86"><title>anchor fit P95 RMSE: 0.01283</title></rect>
+<rect x="164.0" y="315.7" width="44.0" height="39.3" fill="#dc2626" opacity="0.86"><title>paired tag RMSE: 0.4366</title></rect>
+<text x="164.0" y="375" text-anchor="middle" font-family="sans-serif" font-size="11" transform="rotate(24 164.0 375)">FlexTDOA dynamic</text>
+<rect x="276.0" y="353.6" width="44.0" height="1.4" fill="#64748b" opacity="0.86"><title>anchor fit P95 RMSE: 0.01506</title></rect>
+<rect x="322.0" y="312.7" width="44.0" height="42.3" fill="#dc2626" opacity="0.86"><title>paired tag RMSE: 0.4707</title></rect>
+<text x="322.0" y="375" text-anchor="middle" font-family="sans-serif" font-size="11" transform="rotate(24 322.0 375)">Native DS-TWR dynamic</text>
+<rect x="434.0" y="353.8" width="44.0" height="1.2" fill="#64748b" opacity="0.86"><title>anchor fit P95 RMSE: 0.01337</title></rect>
+<rect x="480.0" y="313.3" width="44.0" height="41.7" fill="#dc2626" opacity="0.86"><title>paired tag RMSE: 0.4637</title></rect>
+<text x="480.0" y="375" text-anchor="middle" font-family="sans-serif" font-size="11" transform="rotate(24 480.0 375)">Passive DS-TWR dynamic</text>
+<rect x="592.0" y="258.5" width="44.0" height="96.5" fill="#64748b" opacity="0.86"><title>anchor fit P95 RMSE: 1.073</title></rect>
+<rect x="638.0" y="87.1" width="44.0" height="267.9" fill="#dc2626" opacity="0.86"><title>paired tag RMSE: 2.979</title></rect>
+<text x="638.0" y="375" text-anchor="middle" font-family="sans-serif" font-size="11" transform="rotate(24 638.0 375)">Native DS-TWR static</text>
+<rect x="750.0" y="288.4" width="44.0" height="66.6" fill="#64748b" opacity="0.86"><title>anchor fit P95 RMSE: 0.7406</title></rect>
+<rect x="796.0" y="183.3" width="44.0" height="171.7" fill="#dc2626" opacity="0.86"><title>paired tag RMSE: 1.909</title></rect>
+<text x="796.0" y="375" text-anchor="middle" font-family="sans-serif" font-size="11" transform="rotate(24 796.0 375)">Passive DS-TWR static</text>
+<rect x="95" y="442" width="14" height="14" fill="#64748b"/>
+<text x="115" y="454" font-family="sans-serif" font-size="12">anchor fit P95 RMSE</text>
+<rect x="305" y="442" width="14" height="14" fill="#dc2626"/>
+<text x="325" y="454" font-family="sans-serif" font-size="12">paired tag RMSE</text>
+<text x="18" y="205.0" text-anchor="middle" font-family="sans-serif" font-size="13" transform="rotate(-90 18 205.0)">metres</text>
+</svg>

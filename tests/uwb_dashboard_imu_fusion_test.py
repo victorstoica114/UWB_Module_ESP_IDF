@@ -36,6 +36,45 @@ def imu_sample(module_id: int, uptime_ms: int) -> dict[str, object]:
     }
 
 
+def orientation_sample(
+    module_id: int,
+    uptime_ms: int,
+    *,
+    yaw_deg: float = 0.0,
+) -> dict[str, object]:
+    half_yaw = math.radians(yaw_deg) / 2.0
+    return {
+        "topic": "bno085.orientation",
+        "module_id": module_id,
+        "uptime_ms": uptime_ms,
+        "fusion_time_ticks": uptime_ms * 10_000,
+        "quat_i": 0.0,
+        "quat_j": 0.0,
+        "quat_k": math.sin(half_yaw),
+        "quat_real": math.cos(half_yaw),
+        "gyro_x": 0.0,
+        "gyro_y": 0.0,
+        "gyro_z": 0.0,
+        "gyro_reports": uptime_ms,
+        "gyro_time_flags": 0,
+    }
+
+
+def compact_accel(module_id: int, uptime_ms: int) -> dict[str, object]:
+    return {
+        "topic": "bno085.accel",
+        "module_id": module_id,
+        "uptime_ms": uptime_ms,
+        "fusion_time_ticks": uptime_ms * 10_000,
+        "x": 0.0,
+        "y": 0.0,
+        "z": GRAVITY,
+        "reports": uptime_ms,
+        "accuracy": 3,
+        "imu_compact": True,
+    }
+
+
 def position_sample(
     publisher_id: int,
     tag_id: int,
@@ -100,37 +139,155 @@ class DashboardImuFusionTest(unittest.TestCase):
         self.assertIs(self.state.accel_history[1][0], after)
 
     def test_compact_accel_uses_separate_recent_orientation(self) -> None:
-        orientation = {
-            "topic": "bno085.orientation",
-            "module_id": 1,
-            "uptime_ms": 1000,
-            "fusion_time_ticks": 10_000_000,
-            "quat_i": 0.0,
-            "quat_j": 0.0,
-            "quat_k": 0.0,
-            "quat_real": 1.0,
-            "gyro_x": 0.0,
-            "gyro_y": 0.0,
-            "gyro_z": 0.0,
-            "gyro_reports": 1,
-            "gyro_time_flags": 0,
-        }
-        accel = {
-            "topic": "bno085.accel",
-            "module_id": 1,
-            "uptime_ms": 1002,
-            "fusion_time_ticks": 10_020_000,
-            "x": 0.0,
-            "y": 0.0,
-            "z": GRAVITY,
-            "reports": 1,
-            "accuracy": 3,
-            "imu_compact": True,
-        }
-        self.add(orientation, accel)
+        orientation = orientation_sample(1, 1000)
+        following = orientation_sample(1, 1020, yaw_deg=90.0)
+        accel = compact_accel(1, 1002)
+        self.add(orientation, accel, following)
         self.assertTrue(accel["imu_valid"])
-        self.assertEqual(accel["quat_real"], 1.0)
+        self.assertEqual(accel["orientation_association_mode"], "interpolated")
         self.assertEqual(accel["orientation_age_us"], 2000)
+        self.assertAlmostEqual(
+            float(accel["orientation_interpolation_fraction"]), 0.1
+        )
+        self.assertAlmostEqual(float(accel["quat_k"]), math.sin(math.radians(4.5)))
+
+    def test_unresolved_orientation_holds_display_only_not_fusion(self) -> None:
+        first = compact_accel(1, 1010)
+        self.add(
+            orientation_sample(1, 1000),
+            first,
+            orientation_sample(1, 1020),
+        )
+        unresolved = compact_accel(1, 1060)
+        later = compact_accel(1, 1102)
+        self.add(unresolved, later)
+
+        self.assertFalse(unresolved["imu_valid"])
+        self.assertEqual(
+            unresolved["orientation_association_reason"], "orientation_late"
+        )
+        self.assertTrue(unresolved["orientation_display_held"])
+        self.assertIn("display_quat_real", unresolved)
+        self.assertNotIn("quat_real", unresolved)
+
+    def test_raw_position_is_immediate_but_fusion_waits_for_imu_bracket(
+        self,
+    ) -> None:
+        accel = compact_accel(1, 1002)
+        self.add(orientation_sample(1, 1000), accel)
+        self.add(position_sample(1, 1, 1003))
+
+        self.assertIn(1, self.state.tdoa_local_positions)
+        self.assertEqual(len(self.state.tdoa_position_events), 1)
+        self.assertNotIn((1, "flextdoa", 1), self.state.imu_fusions)
+
+        self.add(orientation_sample(1, 1020))
+        # Advance the 80 ms fusion watermark. Raw UWB was visible throughout;
+        # only the derived EKF waits for cross-stream measurement-time order.
+        self.add(
+            compact_accel(1, 1084),
+            orientation_sample(1, 1100),
+        )
+
+        self.assertTrue(accel["imu_valid"])
+        self.assertIn((1, "flextdoa", 1), self.state.imu_fusions)
+        self.assertTrue(
+            self.state.tdoa_local_positions[1]["imu_fused_valid"]
+        )
+        self.assertGreaterEqual(len(self.state.tdoa_position_events), 2)
+        self.assertFalse(self.state.tdoa_position_events[0].get("imu_fused", False))
+        self.assertTrue(
+            any(
+                event.get("imu_fused")
+                for event in list(self.state.tdoa_position_events)[1:]
+            )
+        )
+
+    def test_fusion_reorders_late_position_behind_newer_imu_arrivals(
+        self,
+    ) -> None:
+        self.add(
+            orientation_sample(1, 1000),
+            compact_accel(1, 1002),
+            orientation_sample(1, 1020),
+            compact_accel(1, 1022),
+            orientation_sample(1, 1040),
+            compact_accel(1, 1042),
+            orientation_sample(1, 1060),
+        )
+        # Position 1010 arrives after IMU 1042, as can happen across producer
+        # queues even though every individual TCP connection remains ordered.
+        self.add(position_sample(1, 1, 1010))
+        self.assertEqual(
+            [
+                (event["kind"], event["sample_time_us"])
+                for event in self.state.imu_fusion_event_buffers[1]
+            ],
+            [
+                ("imu", 1_002_000),
+                ("position", 1_010_000),
+                ("imu", 1_022_000),
+                ("imu", 1_042_000),
+            ],
+        )
+        self.add(
+            compact_accel(1, 1102),
+            orientation_sample(1, 1120),
+        )
+
+        diagnostics = self.state.snapshot()["imu_fusion"][
+            "1:flextdoa:1"
+        ]["diagnostics"]
+        self.assertEqual(diagnostics["ordering_rejects"], 0)
+        self.assertGreaterEqual(diagnostics["imu_samples"], 1)
+
+    def test_association_snapshot_reports_rolling_valid_percentage(self) -> None:
+        self.add(
+            orientation_sample(1, 1000),
+            compact_accel(1, 1010),
+            orientation_sample(1, 1020),
+        )
+        association = self.state.snapshot()["imu_association"]["1"]
+        self.assertEqual(association["total"], 1)
+        self.assertEqual(association["valid"], 1)
+        self.assertEqual(association["valid_percent"], 100.0)
+        self.assertEqual(association["counts"]["interpolated"], 1)
+
+    def test_500hz_accel_and_50hz_orientation_are_fully_bracketed(self) -> None:
+        self.add(orientation_sample(1, 1000))
+        for window_start in range(1000, 2000, 20):
+            accelerations = [
+                compact_accel(1, uptime_ms)
+                for uptime_ms in range(window_start, window_start + 20, 2)
+            ]
+            self.add(*accelerations)
+            self.add(orientation_sample(1, window_start + 20))
+
+        association = self.state.snapshot()["imu_association"]["1"]
+        self.assertEqual(association["total"], 500)
+        self.assertEqual(association["valid"], 500)
+        self.assertEqual(association["valid_percent"], 100.0)
+        self.assertEqual(association["pending"], 0)
+        self.assertEqual(len(self.state.raw_accel_samples), 500)
+        self.assertGreaterEqual(len(self.state.accel_history[1]), 95)
+        self.assertLessEqual(len(self.state.accel_history[1]), 101)
+
+    def test_reboot_retires_old_pending_association_generation(self) -> None:
+        old_pending = compact_accel(1, 50_010)
+        self.add(orientation_sample(1, 50_000), old_pending)
+        new_accel = compact_accel(1, 1000)
+        self.add(new_accel, orientation_sample(1, 1000))
+
+        self.assertFalse(old_pending["imu_valid"])
+        self.assertEqual(
+            old_pending["orientation_association_reason"], "clock_mismatch"
+        )
+        self.assertTrue(new_accel["imu_valid"])
+        self.assertEqual(new_accel["fusion_clock_generation"], 2)
+        self.assertEqual(
+            {item["fusion_clock_generation"] for item in self.state.imu_orientation_history[1]},
+            {2},
+        )
 
     def test_clock_anchor_removes_batch_arrival_bias(self) -> None:
         clock = {
@@ -146,6 +303,34 @@ class DashboardImuFusionTest(unittest.TestCase):
         self.add(clock, accel)
         self.assertEqual(accel["sample_time_us"], 1_002_007)
         self.assertEqual(accel["sample_time_source"], "gptimer64_aligned")
+
+    def test_clock_anchor_quantization_does_not_move_boot_timeline(self) -> None:
+        first_clock = {
+            "topic": "bno085.clock",
+            "module_id": 1,
+            "uptime_ms": 1000,
+            "fusion_time_ticks": 10_000_000,
+            "fusion_timer_hz": 10_000_000,
+            "esp_timer_us": 1_000_007,
+        }
+        first = imu_sample(1, 1002)
+        first["fusion_time_ticks"] = 10_020_000
+        jittered_clock = {
+            **first_clock,
+            "uptime_ms": 1002,
+            "fusion_time_ticks": 10_020_000,
+            "esp_timer_us": 1_002_008,
+        }
+        second = imu_sample(1, 1002)
+        second["fusion_time_ticks"] = 10_020_001
+
+        self.add(first_clock, first, jittered_clock, second)
+
+        self.assertEqual(first["fusion_uptime_offset_us"], 7)
+        self.assertEqual(second["fusion_uptime_offset_us"], 7)
+        alignment = self.state.imu_clock_alignment[1]
+        self.assertEqual(alignment["anchor_offset_us"], 8)
+        self.assertEqual(alignment["anchor_offset_delta_us"], 1)
 
     def test_gps_telemetry_updates_status_and_cursor(self) -> None:
         gps = {
@@ -269,6 +454,11 @@ class DashboardImuFusionTest(unittest.TestCase):
         ]["diagnostics"]
         self.assertTrue(diagnostics["yaw_alignment_valid"])
         self.assertEqual(diagnostics["yaw_alignment_source"], "rtk_course")
+        self.assertTrue(diagnostics["enu_yaw_valid"])
+        self.assertAlmostEqual(diagnostics["last_imu_yaw_enu_deg"], 0.0)
+        self.assertAlmostEqual(
+            diagnostics["uwb_to_enu_yaw_deg"], -90.0, places=4
+        )
 
     def test_routes_imu_by_tag_and_keeps_raw_and_fused_events_separate(
         self,
@@ -345,18 +535,18 @@ class DashboardImuFusionTest(unittest.TestCase):
         self.assertEqual(fused["tag_id"], 1)
         self.assertEqual(fused["tdoa_protocol"], "flextdoa")
 
-    def test_duplicate_position_does_not_emit_a_stale_fused_event(self) -> None:
+    def test_same_millisecond_position_uses_stable_zero_dt_update(self) -> None:
         self.add(imu_sample(1, 10))
         self.add(position_sample(5, 1, 20))
         event_count = len(self.state.tdoa_position_events)
 
         self.add(position_sample(5, 1, 20, x_m=9.0, y_m=9.0))
 
-        self.assertEqual(len(self.state.tdoa_position_events), event_count + 1)
-        duplicate = self.state.tdoa_position_events[-1]
-        self.assertNotIn("imu_fused", duplicate)
+        self.assertEqual(len(self.state.tdoa_position_events), event_count + 2)
+        same_time = self.state.tdoa_position_events[-1]
+        self.assertTrue(same_time["imu_fused"])
         self.assertIn(
-            "position_duplicate_time", duplicate["imu_fusion_flags"]
+            "position_same_time_update", same_time["imu_fusion_flags"]
         )
 
     def test_fused_event_keeps_64_bit_gptimer_timestamp(self) -> None:

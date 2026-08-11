@@ -19,6 +19,10 @@ uint64_t bno085_timing_reconstruct_ticks(uint64_t hint_ticks,
                                          int32_t base_delta_100us,
                                          int32_t rebase_delta_100us,
                                          uint16_t report_delay_100us);
+uint64_t bno085_timing_causal_monotonic(uint64_t candidate_ticks,
+                                        uint64_t packet_upper_ticks,
+                                        uint64_t previous_ticks,
+                                        uint32_t period_ticks);
 bool bno085_timing_due(uint64_t previous_ticks, uint64_t current_ticks,
                        uint32_t rate_hz);
 uint64_t bno085_timing_advance(uint64_t previous_ticks,
