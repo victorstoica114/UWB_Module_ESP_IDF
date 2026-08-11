@@ -355,6 +355,12 @@ class FusionConfig:
     uwb_min_std_m: float = 0.02
     uwb_measurement_std_scale: float = 0.6
     uwb_nis_gate: float = 13.8155
+    uwb_high_confidence_sigma_m: float = 0.05
+    position_smoothing_window_ms: int = 400
+    position_smoothing_max_samples: int = 10
+    position_smoothing_tau_ms: float = 150.0
+    position_smoothing_blend: float = 0.5
+    position_smoothing_max_offset_m: float = 0.30
     stationary_accel_threshold_mps2: float = 0.35
     stationary_gyro_threshold_rps: float = 0.12
     stationary_max_speed_mps: float = 0.20
@@ -441,6 +447,16 @@ class FusionConfig:
             raise ValueError("uwb_measurement_std_scale must be positive")
         if self.uwb_nis_gate <= 0.0:
             raise ValueError("uwb_nis_gate must be positive")
+        if self.uwb_high_confidence_sigma_m <= 0.0:
+            raise ValueError("uwb_high_confidence_sigma_m must be positive")
+        if (
+            self.position_smoothing_window_ms <= 0
+            or self.position_smoothing_max_samples < 3
+            or self.position_smoothing_tau_ms <= 0.0
+            or not 0.0 <= self.position_smoothing_blend <= 1.0
+            or self.position_smoothing_max_offset_m <= 0.0
+        ):
+            raise ValueError("position smoothing parameters are invalid")
         if (
             self.stationary_accel_threshold_mps2 <= 0.0
             or self.stationary_gyro_threshold_rps <= 0.0
@@ -457,7 +473,7 @@ class FusionConfig:
 
 
 class UwbImuFusion:
-    """Small alpha-beta position tracker with IMU prediction.
+    """Constant-velocity EKF position tracker with IMU prediction.
 
     ``update_imu`` accepts a combined telemetry mapping or ``ImuSample``.
     ``update_position`` accepts only a raw UWB position mapping or
@@ -526,6 +542,7 @@ class UwbImuFusion:
         self._stationary_sample_count = 0
         self._raw_position_window: list[tuple[int, float, float]] = []
         self._last_raw_position: RawPosition | None = None
+        self._last_raw_was_accepted = False
         self._rejected_position_cluster: list[RawPosition] = []
         self._reacquire_probation_remaining = 0
         self._high_dynamic_until_us: int | None = None
@@ -543,6 +560,7 @@ class UwbImuFusion:
         self._position_reacquisition_count = 0
         self._position_soft_reacquisition_count = 0
         self._position_same_time_count = 0
+        self._position_smoothing_count = 0
         self._velocity_clamp_count = 0
         self._ordering_reject_count = 0
         self._ordering_reject_reasons: dict[str, int] = {}
@@ -612,6 +630,7 @@ class UwbImuFusion:
         self._stationary_sample_count = 0
         self._raw_position_window = []
         self._last_raw_position = None
+        self._last_raw_was_accepted = False
         self._rejected_position_cluster = []
         self._reacquire_probation_remaining = 0
         self._high_dynamic_until_us = None
@@ -812,6 +831,93 @@ class UwbImuFusion:
         ):
             self._raw_position_window.pop(0)
 
+    def _endpoint_smoothed_position(
+        self, position: RawPosition
+    ) -> tuple[float, float] | None:
+        """Fit recent raw positions and evaluate the line at the newest time.
+
+        This causal endpoint regression removes alternating frame-to-frame
+        UWB noise without the spatial lag of a trailing moving average.  The
+        result is blended with the newest raw correction and bounded so it
+        cannot invent a large displacement at a turn.
+        """
+
+        if self.config.position_smoothing_blend <= 0.0:
+            return None
+        cutoff_us = (
+            position.time_us
+            - self.config.position_smoothing_window_ms * 1000
+        )
+        points = [
+            point
+            for point in self._raw_position_window
+            if cutoff_us <= point[0] <= position.time_us
+        ][-self.config.position_smoothing_max_samples :]
+        if len(points) < 3 or points[-1][0] - points[0][0] < 15_000:
+            return None
+
+        tau_us = self.config.position_smoothing_tau_ms * 1000.0
+        weights = [
+            math.exp((point[0] - position.time_us) / tau_us)
+            for point in points
+        ]
+        times_s = [
+            (point[0] - position.time_us) / 1_000_000.0
+            for point in points
+        ]
+        sum_weight = sum(weights)
+        mean_time = sum(
+            weight * time_s for weight, time_s in zip(weights, times_s)
+        ) / sum_weight
+        denominator = sum(
+            weight * (time_s - mean_time) ** 2
+            for weight, time_s in zip(weights, times_s)
+        )
+
+        def endpoint(coordinate: int) -> float:
+            values = [point[coordinate] for point in points]
+            mean_value = sum(
+                weight * value for weight, value in zip(weights, values)
+            ) / sum_weight
+            slope = (
+                sum(
+                    weight
+                    * (time_s - mean_time)
+                    * (value - mean_value)
+                    for weight, time_s, value in zip(
+                        weights, times_s, values
+                    )
+                )
+                / denominator
+                if denominator > 1e-12
+                else 0.0
+            )
+            return mean_value - slope * mean_time
+
+        fitted_x = endpoint(1)
+        fitted_y = endpoint(2)
+        blend = self.config.position_smoothing_blend
+        candidate_x = position.x_m + blend * (fitted_x - position.x_m)
+        candidate_y = position.y_m + blend * (fitted_y - position.y_m)
+        offset_x = candidate_x - position.x_m
+        offset_y = candidate_y - position.y_m
+        offset_m = math.hypot(offset_x, offset_y)
+        if offset_m > self.config.position_smoothing_max_offset_m:
+            scale = self.config.position_smoothing_max_offset_m / offset_m
+            candidate_x = position.x_m + scale * offset_x
+            candidate_y = position.y_m + scale * offset_y
+        return candidate_x, candidate_y
+
+    def _apply_endpoint_smoothing(
+        self, position: RawPosition, flags: list[str]
+    ) -> None:
+        smoothed = self._endpoint_smoothed_position(position)
+        if smoothed is None:
+            return
+        self._x_m, self._y_m = smoothed
+        self._position_smoothing_count += 1
+        flags.append("position_endpoint_smoothed")
+
     def _uwb_confirms_stationary(self, time_us: int) -> bool:
         if len(self._raw_position_window) < 2:
             return False
@@ -898,6 +1004,7 @@ class UwbImuFusion:
         self._reacquire_probation_remaining = (
             self.config.position_reacquire_probation_positions
         )
+        self._apply_endpoint_smoothing(position, flags)
         # Preserve the learned yaw offset and accelerometer bias, but restart
         # the motion-derived yaw window at the new coherent location.
         self._yaw_window = [(position.time_us, position.x_m, position.y_m)]
@@ -1493,7 +1600,9 @@ class UwbImuFusion:
         self._protocol = position.protocol
         self._tag_id = position.tag_id
         previous_raw_position = self._last_raw_position
+        previous_raw_was_accepted = self._last_raw_was_accepted
         self._last_raw_position = position
+        self._last_raw_was_accepted = False
         self._append_raw_position(position)
         self._last_position_time_us = position_time_us
         self._last_position_sigma_m = position.sigma_m
@@ -1503,11 +1612,49 @@ class UwbImuFusion:
 
         if not self._ready:
             self._initialize_position(position, flags)
+            self._last_raw_was_accepted = True
             return self._output(position.uptime_ms, flags)
 
+        accepted_gap_us = (
+            position_time_us - self._last_accepted_position_time_us
+            if self._last_accepted_position_time_us is not None
+            else None
+        )
+        if (
+            not self._stationary
+            and accepted_gap_us is not None
+            and accepted_gap_us > 0
+        ):
+            # The state covariance can temporarily underestimate uncertainty
+            # after a radio gap, especially when the previous velocity points
+            # along a different leg of the walk. Expand the geometric gate by
+            # the maximum plausible travel since the last accepted correction,
+            # while retaining a hard upper bound for metric spikes.
+            motion_gate_m = min(
+                self.config.uwb_default_innovation_gate_m,
+                self.config.max_velocity_mps
+                * accepted_gap_us
+                / 1_000_000.0,
+            )
+            self._last_uwb_innovation_gate_m = max(
+                self._last_uwb_innovation_gate_m,
+                motion_gate_m,
+            )
+
+        smoothed_measurement = self._endpoint_smoothed_position(position)
+        measurement_x = (
+            smoothed_measurement[0]
+            if smoothed_measurement is not None
+            else position.x_m
+        )
+        measurement_y = (
+            smoothed_measurement[1]
+            if smoothed_measurement is not None
+            else position.y_m
+        )
         self._predict_to(position_time_us, None)
-        residual_x = position.x_m - self._x_m
-        residual_y = position.y_m - self._y_m
+        residual_x = measurement_x - self._x_m
+        residual_y = measurement_y - self._y_m
         self._last_position_residual_m = math.hypot(residual_x, residual_y)
         measurement_variance = self._last_position_measurement_std_m**2
         self._last_position_nis = self._kalman_update_pair(
@@ -1516,9 +1663,44 @@ class UwbImuFusion:
             measurement_variance,
             apply=False,
         )
+        distance_outlier = (
+            self._last_position_residual_m
+            > self._last_uwb_innovation_gate_m
+        )
+        raw_motion_continuous = False
+        if previous_raw_position is not None and previous_raw_was_accepted:
+            raw_delta_us = position_time_us - previous_raw_position.time_us
+            if raw_delta_us > 0:
+                raw_step_m = math.hypot(
+                    position.x_m - previous_raw_position.x_m,
+                    position.y_m - previous_raw_position.y_m,
+                )
+                raw_quality_gate_m = (
+                    self.config.position_reacquire_quality_multiplier
+                    * max(
+                        self._position_quality_m(previous_raw_position),
+                        self._position_quality_m(position),
+                    )
+                )
+                raw_step_gate_m = max(
+                    self.config.position_reacquire_min_step_gate_m,
+                    raw_quality_gate_m,
+                    self.config.max_velocity_mps
+                    * raw_delta_us
+                    / 1_000_000.0,
+                )
+                raw_motion_continuous = raw_step_m <= raw_step_gate_m
+        nis_outlier = self._last_position_nis > self.config.uwb_nis_gate
+        high_confidence_smoothed = (
+            smoothed_measurement is not None
+            and position.sigma_m is not None
+            and 0.0 < position.sigma_m
+            < self.config.uwb_high_confidence_sigma_m
+        )
         if (
-            self._last_position_residual_m > self._last_uwb_innovation_gate_m
-            or self._last_position_nis > self.config.uwb_nis_gate
+            distance_outlier
+            and not raw_motion_continuous
+            and not high_confidence_smoothed
         ):
             self._position_outlier_count += 1
             self._consecutive_position_outliers += 1
@@ -1532,11 +1714,6 @@ class UwbImuFusion:
             if len(self._rejected_position_cluster) > keep:
                 self._rejected_position_cluster = self._rejected_position_cluster[-keep:]
             flags.extend(("uwb_outlier_rejected", "position_prediction_only"))
-            accepted_gap_us = (
-                position_time_us - self._last_accepted_position_time_us
-                if self._last_accepted_position_time_us is not None
-                else None
-            )
             cluster_ready = (
                 self._consecutive_position_outliers
                 >= self.config.position_reacquire_after_rejects
@@ -1553,20 +1730,25 @@ class UwbImuFusion:
                     else "coherent_outlier_cluster"
                 )
                 self._soft_reacquire_position(position, flags)
+                self._last_raw_was_accepted = True
                 flags.append(f"reacquire:{reason}")
                 return self._output(position.uptime_ms, flags)
             self._clamp_velocity(flags)
-            if not self._stationary:
-                # Keep the public correction sample equal to the raw dynamic
-                # measurement while retaining the rejected prediction only as
-                # internal state.  This guarantees that fusion cannot amplify
-                # a disputed sample; prediction still fills the radio gap.
-                flags.append("moving_uwb_position_authoritative")
-                output = self._output(position.uptime_ms, flags)
-                output["x"] = position.x_m
-                output["y"] = position.y_m
-                return output
+            # A rejected UWB sample must not leak into the public fused path.
+            # The independent raw stream remains available for diagnostics;
+            # fusion publishes the predicted EKF state until a measurement is
+            # accepted or a coherent new cluster triggers reacquisition.
             return self._output(position.uptime_ms, flags)
+
+        if distance_outlier and raw_motion_continuous:
+            flags.append("uwb_motion_continuity_override")
+        elif distance_outlier and high_confidence_smoothed:
+            flags.append("uwb_high_confidence_smoothed_override")
+        if nis_outlier:
+            # The residual is still physically reachable over the elapsed
+            # radio gap. Keep the NIS warning for tuning, but do not let an
+            # over-confident covariance reject plausible tag motion.
+            flags.append("uwb_nis_high_within_motion_gate")
 
         self._consecutive_position_outliers = 0
         self._rejected_position_cluster = []
@@ -1580,6 +1762,7 @@ class UwbImuFusion:
             else None
         )
         self._position_accepted_count += 1
+        self._last_raw_was_accepted = True
         self._update_yaw_alignment(position, flags)
         previous_velocity = (self._vx_mps, self._vy_mps)
         self._kalman_update_pair(
@@ -1596,15 +1779,9 @@ class UwbImuFusion:
         else:
             flags.append("velocity_correction_negligible")
         self._clamp_velocity(flags)
+        self._apply_endpoint_smoothing(position, flags)
         if not self._stationary:
-            # A causal low-pass position state necessarily lags a moving tag.
-            # Keep every accepted raw UWB correction authoritative while the
-            # IMU/CV state bridges only the intervals between corrections.
-            # Once UWB independently confirms rest, retain the EKF correction
-            # so the static cloud still benefits from noise reduction.
-            self._x_m = position.x_m
-            self._y_m = position.y_m
-            flags.append("moving_uwb_position_authoritative")
+            flags.append("moving_ekf_position_smoothed")
         self._position_correction_count += 1
         flags.extend(("position_corrected", "ekf_corrected"))
         if self._yaw_alignment_valid:
@@ -1630,7 +1807,7 @@ class UwbImuFusion:
         )
         return {
             "ready": self._ready,
-            "filter": "ekf_cv_accel_zupt",
+            "filter": "ekf_cv_accel_zupt_endpoint_regression",
             "frame": "body to BNO; yaw-calibrated to UWB; not ENU-calibrated until RTK course",
             "yaw_alignment_assumption": "body +X follows UWB displacement",
             "imu_to_uwb_calibration": "yaw_only",
@@ -1649,6 +1826,9 @@ class UwbImuFusion:
                 self._position_soft_reacquisition_count
             ),
             "position_same_time_updates": self._position_same_time_count,
+            "position_endpoint_smoothing_updates": (
+                self._position_smoothing_count
+            ),
             "reacquire_probation_remaining": (
                 self._reacquire_probation_remaining
             ),

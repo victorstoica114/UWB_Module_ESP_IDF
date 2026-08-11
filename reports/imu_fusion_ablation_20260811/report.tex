@@ -1,0 +1,572 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage{lmodern}
+\usepackage[margin=18mm]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[table]{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{parskip}
+\usepackage{array}
+\usepackage{enumitem}
+\graphicspath{{figures/}}
+\definecolor{warning}{HTML}{FFF3CD}
+\definecolor{info}{HTML}{E0F2FE}
+\definecolor{good}{HTML}{DCFCE7}
+\definecolor{bad}{HTML}{FEE2E2}
+\hypersetup{
+  pdftitle={Dynamic and static UWB/IMU validation -- 11 August 2026},
+  pdfauthor={UWB ESP-IDF technical report}
+}
+\setlist{nosep}
+\begin{document}
+
+\begin{titlepage}
+\centering
+\vspace*{16mm}
+{\Huge\bfseries Dynamic and static UWB/IMU validation\par}
+\vspace{4mm}
+{\Large FlexTDOA, Native DS-TWR and Passive DS-TWR\par}
+\vspace{11mm}
+{\large Field campaign and controlled replay ablation -- 11 August 2026\par}
+\vspace{12mm}
+\begin{tabular}{rl}
+Platform: & 5 ESP32-S3 + DW3000 modules; Raspberry Pi collector\\
+Topology: & M1 tag; M2, M3, M4 and M5 anchors\\
+Radio: & UWB channel 9; configured 40 MHz SPI\\
+Firmware: & deployed \texttt{bb23b07-dirty}; analysis branch \texttt{imu-fusion-smoothing}\\
+Sensor path: & BNO085 acquisition near 500 Hz; GPTimer timestamps\\
+Evidence: & 3 dynamic + 3 static protocol captures; replay and ablation artifacts\\
+\end{tabular}
+\vfill
+\colorbox{warning}{\parbox{0.89\textwidth}{\vspace{2mm}
+\textbf{Main result.} Raw UWB remains the authoritative positioning stream.
+The current fusion output can suppress isolated extremes, but controlled
+replays show that the measurable improvement comes from the common position
+smoother, not from accelerometer integration. The accelerometer contribution
+is therefore \textbf{not accepted} for production accuracy claims.
+\vspace{2mm}}}
+\vfill
+{\large Reproducible technical report\par}
+\end{titlepage}
+
+\pagenumbering{roman}
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\section{Executive summary}
+
+This report is the complete counterpart of the 6 August protocol report. It
+uses the same six-cell matrix (three protocols in dynamic and static modes),
+the same independent-frame policy, the same local static precision metrics,
+and the same RTK registration audit. It additionally contains the controlled
+IMU ablation that is necessary to distinguish inertial information from
+ordinary trajectory smoothing.
+
+\colorbox{info}{\parbox{0.96\textwidth}{\textbf{Evidence boundary.}
+Counts, rates, positive gaps and local static clouds are direct diagnostics.
+Dynamic UWB--RTK errors are useful in-system comparisons, but the UWB packet
+does not yet carry the radio measurement timestamp. Static absolute ranking is
+invalid for the original three 30 s captures because their RTK centers differ
+by 2.03 m and two anchor registrations are poor. No outlier was removed.}}
+
+The principal results are:
+\begin{itemize}
+\item Static raw local RMS is \textbf{2.13 cm} for FlexTDOA,
+      \textbf{2.02 cm} for Native DS-TWR and \textbf{1.78 cm} for Passive
+      DS-TWR. These values measure repeatability around each capture median.
+\item Dynamic independent rates are \textbf{12.90}, \textbf{20.86} and
+      \textbf{13.33 positions/s}, respectively. Flex and Passive contain
+      multi-second maximum gaps; Native contains a 1.02 s maximum gap.
+\item On the controlled Native replay, raw RMSE is 17.911 cm. Disabling
+      acceleration gives 16.323 cm; the current acceleration path gives
+      16.326 cm. The difference is \textbf{+0.0031 cm}: acceleration provides
+      no measurable improvement.
+\item Passive gives an even stronger null result: disabled, current and
+      relaxed acceleration configurations all produce 14.867 cm RMSE and
+      29.389 cm P95 to the displayed precision.
+\item A new Passive stationary control with the full 500 Hz telemetry path
+      yields \textbf{2.710 cm raw RMSE versus RTK} and \textbf{1.711 cm local
+      raw RMS}. The radio/solver path has therefore not suffered a general
+      stationary regression from enabling high-rate IMU acquisition.
+\end{itemize}
+
+\section{Questions and acceptance criteria}
+
+The campaign evaluates four separate questions:
+\begin{enumerate}
+\item Does each protocol continue to deliver raw positions at a useful rate?
+\item What is the unfiltered stationary repeatability of each protocol?
+\item Does the current fused output improve dynamic RMSE and P95 without
+      increasing overshoot or hiding raw data?
+\item Is any observed improvement caused by acceleration, rather than by the
+      position smoother shared by all replay variants?
+\end{enumerate}
+
+The causal acceptance criterion is intentionally strict: acceleration must
+beat an otherwise identical replay with acceleration disabled on both RMSE and
+P95, without a worse maximum or new dead zones. A raw-versus-fused comparison
+alone cannot prove an IMU gain because the fused branch also includes endpoint
+smoothing, constant-velocity propagation, reacquisition logic and ZUPT.
+
+\section{System and protocol background}
+
+\subsection{FlexTDOA}
+The tag is UWB receive-only. Anchors exchange scheduled transmissions and the
+tag solves from a coherent set of time-difference observations. Airtime scales
+well with passive tag count. The current capture includes both independent
+frames and repeated/publication events; only independent frames enter fair
+rate and trajectory metrics.
+
+\subsection{Native DS-TWR}
+The active tag ranges to every anchor and solves one coherent four-range frame.
+It offers the clearest measurement semantics but consumes tag airtime. A frame
+can be incomplete when one or more anchor exchanges miss their deadline.
+
+\subsection{Passive DS-TWR}
+The tag listens to anchor-to-anchor DS-TWR exchanges. Rolling windows can
+publish multiple positions from shared measurements. Therefore all-event rate
+and independent-frame rate are reported separately.
+
+\subsection{IMU path under test}
+BNO085 samples carry 64-bit GPTimer time into replay. Orientation association,
+reordering and interpolation are available, and raw UWB remains permanently
+separate. The filter can use constant-velocity propagation, position endpoint
+smoothing, stationary bias estimation, ZUPT and yaw-conditioned horizontal
+acceleration. That mixture is the reason for the controlled ablation.
+
+\section{Captured evidence}
+
+The selected dynamic walks lasted 177--243 s; the static blocks lasted about
+30 s. The Passive dynamic JSONL lacks its final \texttt{capture\_end} record,
+but its 177 s data span and replay are readable. It is included and explicitly
+marked incomplete rather than silently discarded.
+
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{lllrrrrrl}\toprule
+\textbf{Protocol} & \textbf{Mode} & \textbf{capture ID} & \textbf{duration s} &
+\textbf{events} & \textbf{independent} & \textbf{indep Hz} & \textbf{coverage \%} & \textbf{container}\\
+\midrule
+FlexTDOA & dynamic & flextdoa\_dynamic\_final\_01 & 240.5 & 4023 & 3101 & 12.90 & 99.4 & complete\\
+Native DS-TWR & dynamic & native\_ds\_dynamic\_quality\_gate\_02 & 243.0 & 5069 & 5069 & 20.86 & 99.7 & complete\\
+Passive DS-TWR & dynamic & passive\_ds\_dynamic\_final\_01 & 176.9 & 7033 & 2358 & 13.33 & 100.0 & missing capture\_end\\
+FlexTDOA & static & flextdoa\_static\_final & 30.3 & 929 & 929 & 30.67 & 99.4 & complete\\
+Native DS-TWR & static & native\_ds\_static\_final & 30.5 & 686 & 686 & 22.47 & 99.4 & complete\\
+Passive DS-TWR & static & passive\_ds\_static\_final & 31.1 & 2295 & 772 & 24.80 & 99.1 & complete\\
+\bottomrule\end{tabular}}
+\end{center}
+
+\section{Methodology}
+
+\subsection{Population and continuity}
+Interleaved records marked as fused are excluded from raw UWB metrics. Passive
+and Flex publications are reduced to independent frames where the protocol
+marks them. Rates use the full capture wall duration. Positive gaps are
+differences between unique ESP32 uptime values; P50, P95, P99, maximum and
+counts above 100 ms are retained.
+
+\subsection{Static precision}
+Raw radial displacement is calculated about the component-wise median of each
+capture. CEP50, RMS, P95, P99, maximum, 2DRMS and first-to-last-decile drift
+retain every independent sample. These metrics describe local repeatability,
+not absolute accuracy.
+
+\subsection{RTK association and frame registration}
+Only quality-4 RTK Fixed fixes enter comparisons. WGS84 is converted to ENU. A
+proper 2-D rigid rotation and translation (no scale) is fitted from anchor
+geometry, never from the tag trajectory. UWB and RTK samples are associated in
+software within 100 ms.
+
+The measurement-time estimate currently subtracts reported GNSS fix age from
+collector receive time. A separate audit found this estimate about 108--112 ms
+late relative to GNSS UTC; correcting it explains roughly 5--6 cm of dynamic
+RMSE for Flex and Native, but not the complete 15--18 cm error. The radio
+measurement timestamp must be transmitted end-to-end before sub-decimetre
+dynamic claims are treated as final.
+
+\subsection{Controlled IMU ablation}
+Raw, acceleration-disabled, current-gate and relaxed-gate configurations are
+replayed on the same captured population. The disabled replay preserves the
+same position smoother and constant-velocity machinery. Consequently,
+\emph{current minus disabled} isolates the acceleration contribution much more
+cleanly than \emph{fused minus raw}.
+
+\section{Dynamic raw results}
+
+\subsection{Trajectories}
+The walks are separate physical trials rather than synchronized repetitions.
+The panels are therefore used for continuity, jumps and gross geometry, not
+point-by-point route ranking.
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\textwidth]{06_dynamic_trajectories.pdf}
+\caption{Raw independent dynamic trajectories in each local UWB frame. Green
+markers are anchors. Outliers are retained.}
+\end{figure}
+
+\subsection{Update rate and gaps}
+
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrr}\toprule
+\textbf{Protocol} & \textbf{event Hz} & \textbf{indep Hz} & \textbf{P50 ms} &
+\textbf{P95 ms} & \textbf{P99 ms} & \textbf{max ms} & \textbf{$>$100 ms} & \textbf{step P95 m/s}\\
+\midrule
+FlexTDOA & 16.73 & 12.90 & 30 & 160 & 280 & 2550 & 380 & 14.75\\
+Native DS-TWR & 20.86 & 20.86 & 40 & 70 & 130 & 1020 & 71 & 5.22\\
+Passive DS-TWR & 39.75 & 13.33 & 10 & 120 & 240 & 2680 & 385 & 4.29\\
+\bottomrule\end{tabular}}
+\end{center}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{01_position_rate.pdf}
+\caption{Independent position rate. Passive all-event publication rate is not
+substituted for independent frames.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{02_position_gap.pdf}
+\caption{Positive-gap P95 for dynamic and static raw streams. Maximum gaps are
+listed in the tables.}
+\end{figure}
+
+Native has the strongest dynamic cadence in this campaign. Flex and Passive
+both contain multi-second interruptions. The very large Flex step-speed P95 is
+a direct symptom of abrupt raw position variation, not measured walking speed.
+
+\subsection{Native radio-loss diagnostic}
+Across the Native capture, start/end counter deltas give 4254 complete and
+1208 incomplete candidate frames: \textbf{22.12\% incomplete}. There were 658
+slot overruns. All 485 PHY errors were reported as recovered, but the same
+interval also contained 964 response timeouts, 517 result timeouts, 377 frame
+sync losses, 90 PHR errors and 18 FCS errors.
+
+\begin{center}\scriptsize
+\begin{tabular}{lrrrrr}\toprule
+\textbf{Anchor} & \textbf{attempts} & \textbf{completed ranges} &
+\textbf{completion \%} & \textbf{response timeout} & \textbf{result timeout}\\
+\midrule
+A2 & 5462 & 5028 & 92.06 & 302 & 131\\
+A3 & 5461 & 5042 & 92.33 & 289 & 130\\
+A4 & 5461 & 5219 & 95.57 & 120 & 122\\
+A5 & 5461 & 5074 & 92.91 & 253 & 134\\
+\bottomrule\end{tabular}
+\end{center}
+
+Loss is not confined to one anchor, although A4 is visibly better. The data do
+not support blaming geometry alone. Scheduling and RX recovery remain credible
+contributors.
+
+\section{Static raw results}
+
+\subsection{Local precision}
+
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrr}\toprule
+\textbf{Protocol} & \textbf{N} & \textbf{CEP50 cm} & \textbf{RMS cm} &
+\textbf{P95 cm} & \textbf{P99 cm} & \textbf{max cm} & \textbf{2DRMS cm} & \textbf{drift cm}\\
+\midrule
+FlexTDOA & 929 & 1.68 & 2.13 & 3.85 & 4.89 & 5.95 & 4.27 & 0.21\\
+Native DS-TWR & 686 & 1.40 & 2.02 & 3.76 & 5.99 & 10.06 & 4.02 & 0.16\\
+Passive DS-TWR & 772 & 1.50 & 1.78 & 3.11 & 3.72 & 6.44 & 3.57 & 0.45\\
+\bottomrule\end{tabular}}
+\end{center}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{03_static_precision.pdf}
+\caption{Static raw precision around each capture median. All independent
+samples are included.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\textwidth]{07_static_position_clouds.pdf}
+\caption{Static raw position clouds centered on each capture median and drawn
+at one common scale. The cross is the median.}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\textwidth]{08_static_gps_rtk_clouds.pdf}
+\caption{Static GPS RTK Fixed tag solutions. Top: each cloud centered on its
+own median at a shared centimetre scale. Bottom: the same fixes in a common ENU
+frame, exposing the cross-capture reference displacement.}
+\end{figure}
+
+All three protocols remain close to the requested 2 cm local RMS target at the
+tested central point. This does not establish 2 cm absolute accuracy across the
+polygon or under NLOS.
+
+\subsection{Static RTK consistency gate}
+The maximum separation between the three stationary RTK centers is 2.032 m,
+versus a 0.250 m consistency gate. Flex has no usable anchor transform in its
+static block. Native and Passive anchor-fit RMS values are 1.073 m and 0.741 m,
+respectively. Therefore the approximately 3.0 m Native and 1.9 m Passive
+absolute offsets produced by these blocks are registration artifacts and
+\textbf{must not be used to rank protocols}.
+
+\subsection{Current stationary regression control}
+A new 30 s Passive capture made after the high-rate IMU changes has valid RTK
+registration and provides the relevant regression check.
+
+\begin{center}\small
+\begin{tabular}{lr}\toprule
+\textbf{Metric} & \textbf{result}\\
+\midrule
+Independent raw positions & 832\\
+Raw UWB RMSE versus RTK & 2.710 cm\\
+Raw UWB P95 versus RTK & 4.080 cm\\
+Raw UWB maximum versus RTK & 4.993 cm\\
+Raw local-cloud RMS & 1.711 cm\\
+Raw local-cloud P95 & 2.915 cm\\
+Fused RMSE versus RTK & 2.568 cm\\
+Anchor rigid-fit RMS & 0.422 cm\\
+RTK rate & 8.08 Hz\\
+Tag IMU rate used by replay & 458.9 Hz\\
+\bottomrule\end{tabular}
+\end{center}
+
+This is close to the prior calibrated stationary baseline of 2.55 cm absolute
+RMSE. High-rate sensor acquisition and telemetry have not generally degraded
+stationary raw UWB accuracy.
+
+\section{Dynamic UWB--RTK audit}
+
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrr}\toprule
+\textbf{Protocol} & \textbf{pairs} & \textbf{pair coverage \%} &
+\textbf{time P95 ms} & \textbf{raw RMSE cm} & \textbf{raw P95 cm} &
+\textbf{raw max cm} & \textbf{anchor fit P95 cm} & \textbf{debiased RMSE cm}\\
+\midrule
+FlexTDOA & 1100 & 62.6 & 65.6 & 18.28 & 30.57 & 80.19 & 1.41 & 17.16\\
+Native DS-TWR & 1892 & 98.2 & 28.0 & 18.68 & 28.36 & 278.00 & 2.25 & 14.77\\
+Passive DS-TWR & 1154 & 83.3 & 83.4 & 16.75 & 34.66 & 67.91 & 1.50 & 16.82\\
+\bottomrule\end{tabular}}
+\end{center}
+
+These values use direct capture-time association and anchor-based rigid
+registration. Replay tables later use their own identical-timestamp population;
+small differences in sample selection are expected and are retained rather
+than forced to agree.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{04_dynamic_rtk_error_cdf.pdf}
+\caption{Dynamic raw UWB--RTK disagreement CDF after anchor registration. RTK
+is an in-system reference, not surveyed truth.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{05_alignment_quality.pdf}
+\caption{Anchor-registration residual beside paired tag disagreement. Dynamic
+anchor fits are centimetric; timing remains the larger limitation.}
+\end{figure}
+
+\section{Fusion replay and causal ablation}
+
+\subsection{Raw versus selected fused replay}
+The table below uses the per-tag comparison population and the selected replay
+for each protocol. It describes the complete fused algorithm, not acceleration
+alone.
+
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrrl}\toprule
+\textbf{Protocol} & \textbf{pairs} & \textbf{raw RMSE cm} & \textbf{fused RMSE cm} &
+\textbf{raw P95 cm} & \textbf{fused P95 cm} & \textbf{raw max cm} &
+\textbf{fused max cm} & \textbf{gap count delta} & \textbf{gate}\\
+\midrule
+FlexTDOA & 1044 & 17.262 & 16.883 & 28.062 & 28.263 & 78.42 & 65.12 & -190 & reject\\
+Native DS-TWR & 1860 & 17.911 & 16.326 & 26.822 & 25.395 & 260.87 & 103.49 & -57 & nominal pass\\
+Passive DS-TWR & 1067 & 14.953 & 15.029 & 29.440 & 29.818 & 67.78 & 67.41 & -355 & reject\\
+\bottomrule\end{tabular}}
+\end{center}
+
+Flex reduces RMSE and maximum but increases P95 by 2.0 mm. Passive slightly
+worsens both RMSE and P95. Native appears to pass a raw-versus-fused gate, but
+that result is not causal evidence for the accelerometer.
+
+\subsection{Controlled acceleration ablation}
+
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrr}\toprule
+\textbf{Protocol} & \textbf{configuration} & \textbf{accel used / valid} &
+\textbf{RMSE cm} & \textbf{P95 cm} & \textbf{max cm} & \textbf{generic replay pass}\\
+\midrule
+Native DS-TWR & raw UWB & -- & 17.910850 & 26.821895 & 260.873390 & --\\
+Native DS-TWR & acceleration disabled & 4 / 108563 & 16.323327 & 25.395069 & 105.326516 & yes\\
+Native DS-TWR & current gates & 20449 / 108563 & 16.326430 & 25.395069 & 103.493998 & yes\\
+Native DS-TWR & relaxed gates & 97763 / 108563 & 16.310498 & 25.649909 & 94.720490 & yes\\
+\midrule
+Passive DS-TWR & raw UWB & -- & 14.952546 & 29.439575 & 67.783143 & --\\
+Passive DS-TWR & acceleration disabled & 0 / 78893 & 14.867235 & 29.388807 & 66.904426 & yes\\
+Passive DS-TWR & current gates & 0 / 78893 & 14.867235 & 29.388807 & 66.904426 & yes\\
+Passive DS-TWR & relaxed gates & 26903 / 78893 & 14.867235 & 29.388807 & 66.904426 & yes\\
+\bottomrule\end{tabular}}
+\end{center}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{09_imu_ablation_rmse.pdf}
+\caption{Dynamic RMSE under controlled replay ablation. The large raw-to-
+disabled change belongs to the common smoother; current acceleration is
+indistinguishable from disabled.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{10_imu_ablation_p95.pdf}
+\caption{Dynamic P95 under the same ablation. Relaxing Native acceleration
+gates slightly worsens P95.}
+\end{figure}
+
+For Native, current minus disabled is +0.003103 cm RMSE and exactly 0.000 cm
+P95 to the shown precision. Relaxed acceleration changes RMSE by only
+-0.012829 cm while worsening P95 by 0.254840 cm. Passive is numerically
+identical even after 26903 samples are allowed to propagate. The current
+vector-acceleration path therefore fails the causal acceptance criterion.
+
+\subsection{Why acceleration was often unavailable}
+
+\begin{center}\small
+\begin{tabular}{lrl}\toprule
+\textbf{Protocol} & \textbf{propagated / valid} & \textbf{dominant exclusive gates}\\
+\midrule
+Native DS-TWR & 20449 / 108563 = 18.84\% & yaw stale 69.30\%; yaw absent 9.28\%\\
+FlexTDOA & 0 / 98805 & yaw absent 39.20\%; yaw stale 34.87\%; bias missing 25.93\%\\
+Passive DS-TWR & 0 / 78893 & yaw stale 56.92\%; yaw absent 25.53\%; bias missing 17.55\%\\
+\bottomrule\end{tabular}
+\end{center}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.90\textwidth]{11_accel_propagation_coverage.pdf}
+\caption{Current-gate acceleration propagation coverage. Zero does not mean
+that IMU transport failed; it means vector acceleration was blocked.}
+\end{figure}
+
+Flex has an additional replay epoch defect: an IMU timer backstep is translated
+into an artificial $2^{32}$ ms span and triggers a reset. Its zero-propagation
+figure cannot be attributed only to the normal gates. The current orientation
+mapping also assumes body +X follows travel, which is false for arbitrary
+handheld rotation and for the simulated throw.
+
+\section{Root-cause findings beyond the filter}
+
+\subsection{Missing radio measurement timestamp}
+The current position wire format contains a 32-bit \texttt{uptime\_ms} assigned
+when telemetry is submitted, not the radio measurement time. Dashboard and
+replay therefore fall back to receive time. The required correction is a
+versioned position stream carrying a 64-bit
+\texttt{measurement\_monotonic\_us}, derived from the midpoint of the radio RX
+host timestamps and preserved through the dashboard archive.
+
+\subsection{Scheduling risks on the UWB core}
+The UWB task runs on core 1 at priority 20 and installs the global GPIO ISR
+service. BNO085 starts later on core 0, but its 500 Hz handler can consequently
+execute on core 1 and perform a GPTimer read plus a critical section. Telemetry
+also runs on core 1; its dequeue path scans up to 1024 PSRAM ring entries under
+a critical section. Task priority cannot preempt code while interrupts are
+masked. Both paths can increase missed radio deadlines and should be A/B tested
+after restoring an O(1) FIFO or separate priority queues.
+
+\subsection{What the IMU can safely do now}
+Until a physical body-to-UWB mount calibration and a stable yaw source exist,
+the safe uses are stationary detection, bias observation, ZUPT, motion-state
+classification and adaptive process noise. Vector acceleration should remain
+in a shadow predictor and must not replace raw UWB positions.
+
+\section{Protocol assessment}
+
+\begin{center}\small\resizebox{\textwidth}{!}{%
+\begin{tabular}{p{0.18\textwidth}p{0.25\textwidth}p{0.25\textwidth}p{0.25\textwidth}}\toprule
+\textbf{Criterion} & \textbf{FlexTDOA} & \textbf{Native DS-TWR} & \textbf{Passive DS-TWR}\\
+\midrule
+Tag radio role & receive-only; scalable & active exchange with each anchor & receive-only\\
+Dynamic independent rate & 12.90 Hz & best: 20.86 Hz & 13.33 Hz after overlap removal\\
+Dynamic worst gap & 2.55 s & best: 1.02 s & 2.68 s\\
+Static local RMS & 2.13 cm & 2.02 cm & best: 1.78 cm\\
+Current fused replay & rejected: P95 worsens 2 mm & generic pass, but not an IMU gain & rejected on per-tag RMSE/P95\\
+Operational role & primary scalable mode after timestamp fix & coherent diagnostic baseline & useful passive mode; continuity still matters\\
+\bottomrule\end{tabular}}
+\end{center}
+
+No protocol rewrite is justified by these data. The largest immediate gains are
+expected from correct measurement timing, reduced UWB-core interference and
+radio-loss diagnostics, not from more aggressive inertial integration.
+
+\section{Limitations}
+\begin{itemize}
+\item The three dynamic routes are separate walks, not one synchronized path.
+\item RTK is an in-system comparison reference and uses software association.
+\item GNSS and UWB antenna lever arms are not surveyed.
+\item The original static blocks fail the common-reference consistency gate;
+      only local precision is comparable across them.
+\item One stationary point does not cover GDOP, polygon edges, NLOS or tag
+      orientation.
+\item The Passive dynamic container lacks \texttt{capture\_end}; its data are
+      included but its completeness status is not promoted.
+\item The causal ablation is available for Native and Passive. Flex requires a
+      replay after the timer-epoch defect is corrected.
+\end{itemize}
+
+\section{Recommended next validation sequence}
+\begin{enumerate}
+\item Add and validate the 64-bit radio measurement timestamp end-to-end.
+\item Replace telemetry's O(1024) critical-section scan with O(1) queues and
+      A/B test IMU off, acquisition-only and full streaming.
+\item Keep yaw-free IMU assistance limited to stationary detection, ZUPT and
+      adaptive process noise.
+\item Calibrate the physical IMU-to-UWB rotation before using vector
+      acceleration; do not infer body +X from arbitrary walking direction.
+\item Repeat one marked dynamic route for all protocols and collect at most
+      30 s static at the same point without restarting the RTK reference.
+\item Accept fusion only when current beats acceleration-disabled on held-out
+      RMSE and P95, with no larger maximum or dead-zone count.
+\item After timing is trustworthy, investigate channel-9 antenna delay and
+      per-link tag--anchor biases to approach the absolute $\pm$2 cm target.
+\end{enumerate}
+
+\section{Final conclusion}
+
+The campaign is a useful negative result. High-rate IMU transport works and
+stationary raw UWB remains centimetric, but the accelerometer has not improved
+dynamic positioning. The visually calmer fused trace is primarily a smoother.
+Calling the 17.91 to 16.33 cm Native change an accelerometer improvement would
+be incorrect: the acceleration-disabled replay already reaches 16.323 cm.
+
+Raw UWB remains the production and audit reference. Fusion stays optional and
+experimental until measurement timing, orientation calibration and causal
+held-out tests demonstrate a real improvement.
+
+\section{Reproduction and audit artifacts}
+
+The report directory contains:
+\begin{itemize}
+\item \texttt{analysis\_summary.json}, \texttt{capture\_metrics.csv},
+      \texttt{replay\_metrics.csv}, \texttt{rtk\_pairs.csv} and alignment CSVs;
+\item \texttt{ablation\_metrics.csv} and the script that generates the
+      additional ablation figures;
+\item eleven SVG/PDF figures, this TeX source and the compiled PDF;
+\item source paths to the immutable JSONL captures. Raw archives were not
+      duplicated into this directory.
+\end{itemize}
+
+The six matrix captures are in
+\texttt{reports/imu\_fusion\_final\_validation\_20260811} and
+\texttt{reports/imu\_fusion\_static\_20260811}. The current Passive regression
+control is
+\texttt{passive\_ds\_static\_raw\_regression\_01.passive\_ds.jsonl}.
+
+\begin{verbatim}
+python tools/uwb_dynamic_static_report.py ... --include-incomplete
+python reports/imu_fusion_ablation_20260811/generate_additional_figures.py
+pdflatex -interaction=nonstopmode report.tex
+\end{verbatim}
+
+No raw capture is modified during report generation.
+
+\end{document}

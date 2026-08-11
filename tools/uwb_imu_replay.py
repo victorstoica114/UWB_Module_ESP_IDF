@@ -82,7 +82,52 @@ def finite_float(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def load_jsonl(paths: Sequence[pathlib.Path]) -> list[dict[str, Any]]:
+def _record_relevant_for_track(
+    record: Mapping[str, Any], protocol: str, module_id: int
+) -> bool:
+    """Keep only records needed to replay one high-rate tag track.
+
+    Field captures contain 500 Hz IMU telemetry from every module. Loading all
+    of it can turn a one-minute replay into several gigabytes of Python objects,
+    although a track needs IMU data only from its tag. Anchor GPS and geometry
+    snapshots remain global because they define the RTK alignment.
+    """
+
+    kind = str(record.get("kind") or "")
+    if kind in {"capture_start", "capture_end", "dashboard_snapshot", "gps_fix"}:
+        return True
+    if kind == "accel":
+        return (
+            int(record.get("module_id") or 0) == module_id
+            and normalize_protocol(record.get("protocol")) == protocol
+        )
+    if kind == "position":
+        record_module_id = int(
+            record.get("module_id")
+            or record.get("tag_id")
+            or record.get("tag")
+            or 0
+        )
+        return (
+            record_module_id == module_id
+            and normalize_protocol(
+                record.get("tdoa_protocol") or record.get("protocol")
+            )
+            == protocol
+            and record.get("imu_fused") is not True
+        )
+    return False
+
+
+def load_jsonl(
+    paths: Sequence[pathlib.Path],
+    *,
+    protocol: str | None = None,
+    module_id: int | None = None,
+) -> list[dict[str, Any]]:
+    selected_protocol = normalize_protocol(protocol) if protocol else None
+    if (selected_protocol is None) != (module_id is None):
+        raise ValueError("protocol and module_id must be provided together")
     records: list[dict[str, Any]] = []
     index = 0
     for path in paths:
@@ -97,6 +142,14 @@ def load_jsonl(paths: Sequence[pathlib.Path]) -> list[dict[str, Any]]:
                     raise ValueError(f"{path}:{line_number}: {exc}") from exc
                 if not isinstance(record, dict):
                     raise ValueError(f"{path}:{line_number}: expected JSON object")
+                if (
+                    selected_protocol is not None
+                    and module_id is not None
+                    and not _record_relevant_for_track(
+                        record, selected_protocol, module_id
+                    )
+                ):
+                    continue
                 record = dict(record)
                 record["_input_index"] = index
                 record["_input_file"] = str(path)
@@ -1067,6 +1120,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("inputs", nargs="+", type=pathlib.Path)
     parser.add_argument("--protocol", choices=sorted(set(PROTOCOL_ALIASES.values())))
+    parser.add_argument(
+        "--module-id",
+        type=int,
+        help="Replay one tag module and stream-filter other 500 Hz IMU records.",
+    )
     parser.add_argument("--output", type=pathlib.Path)
     parser.add_argument("--samples-output", type=pathlib.Path)
     parser.add_argument("--rtk-max-age-ms", type=float, default=250.0)
@@ -1089,6 +1147,16 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=FusionConfig.yaw_min_displacement_m,
     )
+    parser.add_argument(
+        "--position-smoothing-blend",
+        type=float,
+        default=FusionConfig.position_smoothing_blend,
+    )
+    parser.add_argument(
+        "--high-confidence-sigma-m",
+        type=float,
+        default=FusionConfig.uwb_high_confidence_sigma_m,
+    )
     return parser.parse_args()
 
 
@@ -1103,17 +1171,27 @@ def main() -> int:
         args.rtk_max_age_ms <= 0
         or (args.gap_ms is not None and args.gap_ms <= 0)
         or args.overshoot_tolerance_m < 0
+        or (args.module_id is not None and args.module_id <= 0)
+        or ((args.protocol is None) != (args.module_id is None))
     ):
-        print("RTK age and gap thresholds must be positive", file=sys.stderr)
+        print(
+            "RTK age/gap/module thresholds are invalid; --protocol and "
+            "--module-id must be used together",
+            file=sys.stderr,
+        )
         return 2
     try:
-        records = load_jsonl(paths)
+        records = load_jsonl(
+            paths, protocol=args.protocol, module_id=args.module_id
+        )
         config = FusionConfig(
             alpha=args.alpha,
             beta=args.beta,
             process_accel_noise_mps2=args.process_accel_noise,
             uwb_measurement_std_scale=args.uwb_std_scale,
             yaw_min_displacement_m=args.yaw_min_displacement_m,
+            position_smoothing_blend=args.position_smoothing_blend,
+            uwb_high_confidence_sigma_m=args.high_confidence_sigma_m,
         )
         report, samples = replay_capture(
             records,

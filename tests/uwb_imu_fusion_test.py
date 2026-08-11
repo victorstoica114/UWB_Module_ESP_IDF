@@ -270,7 +270,7 @@ class FusionTest(unittest.TestCase):
         self.assertEqual(sample.gyro_body_rps, (0.1, -0.2, 0.3))
         self.assertTrue(sample.valid)
 
-    def test_moving_raw_correction_is_authoritative_and_fusion_bridges(
+    def test_moving_correction_is_smoothed_and_fusion_bridges(
         self,
     ) -> None:
         config = FusionConfig(alpha=0.5, beta=0.25)
@@ -283,22 +283,42 @@ class FusionTest(unittest.TestCase):
         bridged = fusion.update_imu(imu_mapping(1100))
 
         self.assertEqual(initialized["stream"], "fused")
-        self.assertEqual(corrected["x"], 2.0)
+        self.assertGreater(corrected["x"], 0.0)
+        self.assertLess(corrected["x"], 2.0)
         self.assertAlmostEqual(corrected["y"], 0.0)
         self.assertGreater(corrected["vx"], 0.0)
         self.assertAlmostEqual(corrected["vy"], 0.0)
         self.assertIn(
-            "moving_uwb_position_authoritative", corrected["flags"]
+            "moving_ekf_position_smoothed", corrected["flags"]
         )
         self.assertIn("position_corrected", corrected["flags"])
         self.assertIn("ekf_corrected", corrected["flags"])
         self.assertGreater(bridged["x"], corrected["x"])
         self.assertIn("constant_velocity_propagated", bridged["flags"])
         self.assertEqual(
-            corrected["diagnostics"]["filter"], "ekf_cv_accel_zupt"
+            corrected["diagnostics"]["filter"],
+            "ekf_cv_accel_zupt_endpoint_regression",
         )
         self.assertEqual(second_raw["raw_x"], 2.0)
         self.assertNotIn("raw_x", corrected)
+
+    def test_endpoint_regression_reduces_alternating_position_noise(self) -> None:
+        fusion = UwbImuFusion(
+            FusionConfig(uwb_default_innovation_gate_m=20.0)
+        )
+        fusion.update_position(raw_position(0, 0.0, 0.0, rms_m=1.0))
+        fusion.update_position(raw_position(100, 1.0, 0.2, rms_m=1.0))
+
+        output = fusion.update_position(
+            raw_position(200, 2.0, -0.2, rms_m=1.0)
+        )
+
+        self.assertIn("position_endpoint_smoothed", output["flags"])
+        self.assertLess(abs(output["y"]), 0.2)
+        self.assertEqual(
+            output["diagnostics"]["position_endpoint_smoothing_updates"],
+            1,
+        )
 
     def test_yaw_alignment_maps_body_forward_accel_to_uwb_motion(self) -> None:
         half_sqrt = math.sqrt(0.5)
@@ -517,22 +537,41 @@ class FusionTest(unittest.TestCase):
         )
 
         output = fusion.update_position(
-            raw_position(1000, 1.0, 0.0, sigma_m=0.05, rms_m=0.02)
+            raw_position(100, 1.0, 0.0, sigma_m=0.05, rms_m=0.02)
         )
 
         self.assertIn("uwb_outlier_rejected", output["flags"])
-        self.assertIn(
-            "moving_uwb_position_authoritative", output["flags"]
+        self.assertIn("position_prediction_only", output["flags"])
+        self.assertNotIn(
+            "moving_ekf_position_smoothed", output["flags"]
         )
-        self.assertAlmostEqual(output["x"], 1.0)
+        self.assertAlmostEqual(output["x"], 0.0)
         self.assertAlmostEqual(
-            output["diagnostics"]["last_uwb_innovation_gate_m"], 0.2
+            output["diagnostics"]["last_uwb_innovation_gate_m"], 0.5
         )
         self.assertEqual(output["diagnostics"]["position_accepted"], 1)
         self.assertEqual(output["diagnostics"]["position_outliers"], 1)
 
-    def test_uwb_rms_expands_quality_innovation_gate(self) -> None:
+    def test_motion_gap_expands_gate_for_plausible_displacement(self) -> None:
         fusion = UwbImuFusion()
+        fusion.update_position(
+            raw_position(0, 0.0, 0.0, sigma_m=0.05, rms_m=0.02)
+        )
+
+        output = fusion.update_position(
+            raw_position(250, 1.0, 0.0, sigma_m=0.05, rms_m=0.02)
+        )
+
+        self.assertNotIn("uwb_outlier_rejected", output["flags"])
+        self.assertIn("moving_ekf_position_smoothed", output["flags"])
+        self.assertAlmostEqual(
+            output["diagnostics"]["last_uwb_innovation_gate_m"], 1.25
+        )
+        self.assertGreater(output["x"], 0.0)
+        self.assertLess(output["x"], 1.0)
+
+    def test_uwb_rms_expands_quality_innovation_gate(self) -> None:
+        fusion = UwbImuFusion(FusionConfig(max_velocity_mps=1.0))
         fusion.update_position(raw_position(0, 0.0, 0.0, rms_m=0.5))
 
         output = fusion.update_position(
@@ -548,6 +587,8 @@ class FusionTest(unittest.TestCase):
         fusion = UwbImuFusion(
             FusionConfig(
                 beta=0.0,
+                max_velocity_mps=0.5,
+                position_smoothing_blend=0.0,
                 position_reacquire_after_rejects=3,
                 position_reacquire_gap_ms=10_000,
             )
@@ -583,6 +624,7 @@ class FusionTest(unittest.TestCase):
         fusion = UwbImuFusion(
             FusionConfig(
                 beta=0.0,
+                position_smoothing_blend=0.0,
                 position_gap_reset_ms=1000,
                 position_reacquire_after_rejects=100,
                 position_reacquire_gap_ms=150,
@@ -610,6 +652,7 @@ class FusionTest(unittest.TestCase):
                 alpha=1.0,
                 beta=1.0,
                 max_velocity_mps=5.0,
+                position_smoothing_blend=0.0,
                 position_reacquire_after_rejects=3,
                 position_reacquire_gap_ms=500,
             )

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
+import json
 import math
 import pathlib
 import sys
+import tempfile
 import unittest
 
 
@@ -14,6 +16,7 @@ from uwb_imu_replay import (
     EARTH_RADIUS_M,
     TrackKey,
     fusion_acceptance,
+    load_jsonl,
     ordered_track_events,
     raw_position_xy,
     replay_capture,
@@ -119,6 +122,40 @@ def position_record(
 
 
 class ReplayTest(unittest.TestCase):
+    def test_load_jsonl_filters_high_rate_records_for_one_track(self) -> None:
+        records = [
+            {"kind": "capture_start", "protocol": "passive_ds"},
+            {"kind": "gps_fix", "module_id": 4},
+            {"kind": "accel", "protocol": "passive_ds", "module_id": 1},
+            {"kind": "accel", "protocol": "passive_ds", "module_id": 2},
+            {
+                "kind": "position",
+                "protocol": "passive_ds",
+                "module_id": 1,
+                "tag_id": 1,
+            },
+            {
+                "kind": "position_fused",
+                "protocol": "passive_ds",
+                "module_id": 1,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "capture.jsonl"
+            path.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            loaded = load_jsonl(
+                [path], protocol="passive_ds", module_id=1
+            )
+
+        self.assertEqual(
+            [record["kind"] for record in loaded],
+            ["capture_start", "gps_fix", "accel", "position"],
+        )
+        self.assertEqual(loaded[-1]["_input_index"], 3)
+
     def test_uses_raw_passive_coordinates(self) -> None:
         self.assertEqual(
             raw_position_xy(

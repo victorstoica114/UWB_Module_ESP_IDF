@@ -1,0 +1,9 @@
+protocol,configuration,imu_valid,imu_propagated,rmse_cm,p95_cm,max_cm,accepted
+native_ds,raw,,,17.910850,26.821895,260.873390,
+native_ds,accel_disabled,108563,4,16.323327,25.395069,105.326516,true
+native_ds,current,108563,20449,16.326430,25.395069,103.493998,true
+native_ds,accel_relaxed,108563,97763,16.310498,25.649909,94.720490,true
+passive_ds,raw,,,14.952546,29.439575,67.783143,
+passive_ds,accel_disabled,78893,0,14.867235,29.388807,66.904426,true
+passive_ds,current,78893,0,14.867235,29.388807,66.904426,true
+passive_ds,accel_relaxed,78893,26903,14.867235,29.388807,66.904426,true

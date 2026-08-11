@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="470" viewBox="0 0 900 470">
+<rect width="100%" height="100%" fill="white"/>
+<text x="450.0" y="28" text-anchor="middle" font-family="sans-serif" font-size="20">Valid IMU samples used for acceleration propagation</text>
+<line x1="85" y1="55" x2="85" y2="355" stroke="#111827"/>
+<line x1="85" y1="355" x2="875" y2="355" stroke="#111827"/>
+<line x1="85" y1="355.0" x2="875" y2="355.0" stroke="#e5e7eb"/>
+<text x="76" y="359.0" text-anchor="end" font-family="sans-serif" font-size="12">0</text>
+<line x1="85" y1="295.0" x2="875" y2="295.0" stroke="#e5e7eb"/>
+<text x="76" y="299.0" text-anchor="end" font-family="sans-serif" font-size="12">4.2</text>
+<line x1="85" y1="235.0" x2="875" y2="235.0" stroke="#e5e7eb"/>
+<text x="76" y="239.0" text-anchor="end" font-family="sans-serif" font-size="12">8.4</text>
+<line x1="85" y1="175.0" x2="875" y2="175.0" stroke="#e5e7eb"/>
+<text x="76" y="179.0" text-anchor="end" font-family="sans-serif" font-size="12">13</text>
+<line x1="85" y1="115.0" x2="875" y2="115.0" stroke="#e5e7eb"/>
+<text x="76" y="119.0" text-anchor="end" font-family="sans-serif" font-size="12">17</text>
+<line x1="85" y1="55.0" x2="875" y2="55.0" stroke="#e5e7eb"/>
+<text x="76" y="59.0" text-anchor="end" font-family="sans-serif" font-size="12">21</text>
+<rect x="193.7" y="87.1" width="44.0" height="267.9" fill="#dc2626" opacity="0.86"><title>current gates: 18.84</title></rect>
+<text x="216.7" y="375" text-anchor="middle" font-family="sans-serif" font-size="11" transform="rotate(24 216.7 375)">Native DS-TWR</text>
+<rect x="457.0" y="355.0" width="44.0" height="0.0" fill="#dc2626" opacity="0.86"><title>current gates: 0</title></rect>
+<text x="480.0" y="375" text-anchor="middle" font-family="sans-serif" font-size="11" transform="rotate(24 480.0 375)">FlexTDOA</text>
+<rect x="720.3" y="355.0" width="44.0" height="0.0" fill="#dc2626" opacity="0.86"><title>current gates: 0</title></rect>
+<text x="743.3" y="375" text-anchor="middle" font-family="sans-serif" font-size="11" transform="rotate(24 743.3 375)">Passive DS-TWR</text>
+<rect x="95" y="442" width="14" height="14" fill="#dc2626"/>
+<text x="115" y="454" font-family="sans-serif" font-size="12">current gates</text>
+<text x="18" y="205.0" text-anchor="middle" font-family="sans-serif" font-size="13" transform="rotate(-90 18 205.0)">percent</text>
+</svg>
