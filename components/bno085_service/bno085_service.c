@@ -39,6 +39,11 @@ enum {
     BNO085_RESET_SETTLE_MS = 5,
     BNO085_RESET_PULSE_MS = 20,
     BNO085_BOOT_AFTER_RESET_MS = 800,
+    BNO085_BOOT_AFTER_SOFT_RESET_MS = 250,
+    BNO085_FEATURE_RETRY_DELAY_MS = 50,
+    BNO085_FEATURE_MAX_ATTEMPTS = 3,
+    BNO085_STARTUP_RETRY_MIN_MS = 500,
+    BNO085_STARTUP_RETRY_MAX_MS = 5000,
     BNO085_MAX_PACKETS_PER_WAKE = 16,
     BNO085_HIGH_RATE_INTERVAL_MS = 10,
     BNO085_HIGH_RATE_DRAIN_BUDGET_MS = 8,
@@ -165,6 +170,7 @@ static uint32_t s_gyro_rv_overwrite_count;
 static esp_err_t bno085_hold_in_reset(void);
 static bool bno085_drain_startup_packets(void);
 static esp_err_t bno085_rebind_i2c_device(void);
+static bool bno085_initialize_until_ready(const char *reason);
 
 static void bno085_notify_task(uint32_t bits)
 {
@@ -743,7 +749,7 @@ static esp_err_t bno085_send_packet(uint8_t channel, const uint8_t *payload,
     packet[0] = (uint8_t)(total_len & 0xFFU);
     packet[1] = (uint8_t)((total_len >> 8) & 0x7FU);
     packet[2] = channel;
-    packet[3] = s_shtp_sequence[channel]++;
+    packet[3] = s_shtp_sequence[channel];
     memcpy(&packet[BNO085_SHTP_HEADER_LEN], payload, payload_len);
 
     if (!i2c_bus_service_lock_realtime(pdMS_TO_TICKS(BNO085_WRITE_TIMEOUT_MS))) {
@@ -753,6 +759,9 @@ static esp_err_t bno085_send_packet(uint8_t channel, const uint8_t *payload,
         i2c_master_transmit(s_i2c_dev, packet, total_len,
                             BNO085_WRITE_TIMEOUT_MS);
     i2c_bus_service_unlock();
+    if (err == ESP_OK) {
+        s_shtp_sequence[channel]++;
+    }
     return err;
 }
 
@@ -1269,39 +1278,10 @@ static bool bno085_recover_if_stalled(void)
              (unsigned)(now_ms - s_last_progress_ms),
              (unsigned)s_report_count);
 
-    esp_err_t err = bno085_soft_reset();
-    if (err == ESP_OK) {
-        vTaskDelay(pdMS_TO_TICKS(50));
-        err = bno085_rebind_i2c_device();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "BNO085 stall reset address detection failed: %s",
-                     esp_err_to_name(err));
-            return false;
-        }
-        if (!bno085_drain_startup_packets()) {
-            return false;
-        }
-        vTaskDelay(pdMS_TO_TICKS(50));
-        if (!bno085_drain_startup_packets()) {
-            return false;
-        }
-    } else {
-        ESP_LOGW(TAG, "BNO085 stall soft reset failed: %s",
-                 esp_err_to_name(err));
+    if (!bno085_initialize_until_ready("stall recovery")) {
+        return false;
     }
-
-    err = bno085_enable_gyro_rv();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "BNO085 GyroRV stall recovery enable failed: %s",
-                 esp_err_to_name(err));
-    }
-    err = bno085_enable_accelerometer();
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "BNO085 accelerometer re-enabled after stall");
-    } else {
-        ESP_LOGW(TAG, "BNO085 stall recovery enable failed: %s",
-                 esp_err_to_name(err));
-    }
+    ESP_LOGI(TAG, "BNO085 reports re-enabled after stall");
 
     s_last_progress_report_count = s_report_count;
     s_last_progress_ms = ticks_to_ms();
@@ -1421,6 +1401,128 @@ static bool bno085_drain_startup_packets(void)
         }
     }
     return true;
+}
+
+typedef esp_err_t (*bno085_feature_enable_fn_t)(void);
+
+static esp_err_t bno085_enable_feature_with_retry(
+    const char *name, bno085_feature_enable_fn_t enable_fn)
+{
+    esp_err_t err = ESP_FAIL;
+    for (uint32_t attempt = 1; attempt <= BNO085_FEATURE_MAX_ATTEMPTS;
+         ++attempt) {
+        err = enable_fn();
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "BNO085 %s enable attempt %u/%u failed: %s", name,
+                 (unsigned)attempt,
+                 (unsigned)BNO085_FEATURE_MAX_ATTEMPTS,
+                 esp_err_to_name(err));
+        if (attempt < BNO085_FEATURE_MAX_ATTEMPTS) {
+            vTaskDelay(pdMS_TO_TICKS(BNO085_FEATURE_RETRY_DELAY_MS));
+        }
+    }
+    return err;
+}
+
+static esp_err_t bno085_initialize_once(bool *stop_requested)
+{
+    if (stop_requested == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *stop_requested = false;
+
+    esp_err_t err = bno085_hard_reset();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "BNO085 hard reset failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = bno085_i2c_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "BNO085 I2C init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = bno085_soft_reset();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "BNO085 soft reset failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    ESP_LOGI(TAG, "BNO085 soft reset command sent");
+    vTaskDelay(pdMS_TO_TICKS(BNO085_BOOT_AFTER_SOFT_RESET_MS));
+
+    err = bno085_rebind_i2c_device();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "BNO085 post-reset address detection failed: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+    if (!bno085_drain_startup_packets()) {
+        *stop_requested = true;
+        return ESP_ERR_INVALID_STATE;
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+    if (!bno085_drain_startup_packets()) {
+        *stop_requested = true;
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    err = bno085_enable_feature_with_retry("GyroRV",
+                                            bno085_enable_gyro_rv);
+    if (err != ESP_OK) {
+        return err;
+    }
+    ESP_LOGI(TAG, "BNO085 GyroRV enable command sent at %u Hz",
+             (unsigned)BNO085_GYRO_RV_RATE_HZ);
+
+    err = bno085_enable_feature_with_retry("accelerometer",
+                                            bno085_enable_accelerometer);
+    if (err != ESP_OK) {
+        return err;
+    }
+    ESP_LOGI(TAG, "BNO085 accelerometer enable command sent last");
+    return ESP_OK;
+}
+
+static bool bno085_initialize_until_ready(const char *reason)
+{
+    uint32_t attempt = 0;
+    while (app_runtime_config_get()->bno085_accel_enabled) {
+        attempt++;
+        bool stop_requested = false;
+        const esp_err_t err = bno085_initialize_once(&stop_requested);
+        if (err == ESP_OK) {
+            if (attempt > 1) {
+                ESP_LOGI(TAG, "BNO085 %s succeeded on attempt %u", reason,
+                         (unsigned)attempt);
+            }
+            return true;
+        }
+        if (stop_requested ||
+            !app_runtime_config_get()->bno085_accel_enabled) {
+            return false;
+        }
+
+        bno085_release_i2c_device();
+        i2c_bus_service_set_realtime_period_us(0);
+        (void)bno085_hold_in_reset();
+        uint32_t retry_delay_ms =
+            BNO085_STARTUP_RETRY_MIN_MS << (attempt > 4 ? 4 : attempt - 1);
+        if (retry_delay_ms > BNO085_STARTUP_RETRY_MAX_MS) {
+            retry_delay_ms = BNO085_STARTUP_RETRY_MAX_MS;
+        }
+        ESP_LOGW(TAG,
+                 "BNO085 %s attempt %u failed: %s; retrying in %u ms",
+                 reason, (unsigned)attempt, esp_err_to_name(err),
+                 (unsigned)retry_delay_ms);
+        const uint32_t notify_bits = bno085_wait_notify_bits(retry_delay_ms);
+        if ((notify_bits & BNO085_NOTIFY_STOP) != 0) {
+            return false;
+        }
+    }
+    return false;
 }
 
 static bool bno085_wait_for_interrupt_or_timeout(uint32_t *notify_bits)
@@ -1567,63 +1669,11 @@ static void bno085_task(void *arg)
         s_int_irq_enabled = false;
     }
 
-    err = bno085_hard_reset();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "BNO085 hard reset failed: %s", esp_err_to_name(err));
+    if (!bno085_initialize_until_ready("startup")) {
+        ESP_LOGI(TAG, "BNO085 stop requested during startup");
         bno085_task_finish(true);
         return;
     }
-
-    err = bno085_i2c_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "BNO085 I2C init failed: %s", esp_err_to_name(err));
-        bno085_task_finish(true);
-        return;
-    }
-
-    err = bno085_soft_reset();
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "BNO085 soft reset command sent");
-        vTaskDelay(pdMS_TO_TICKS(50));
-        err = bno085_rebind_i2c_device();
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "BNO085 post-reset address detection failed: %s",
-                     esp_err_to_name(err));
-            bno085_task_finish(true);
-            return;
-        }
-        if (!bno085_drain_startup_packets()) {
-            ESP_LOGI(TAG, "BNO085 stop requested during startup");
-            bno085_task_finish(true);
-            return;
-        }
-        vTaskDelay(pdMS_TO_TICKS(50));
-        if (!bno085_drain_startup_packets()) {
-            ESP_LOGI(TAG, "BNO085 stop requested during startup");
-            bno085_task_finish(true);
-            return;
-        }
-    } else {
-        ESP_LOGW(TAG, "BNO085 soft reset failed: %s", esp_err_to_name(err));
-    }
-
-    err = bno085_enable_gyro_rv();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "BNO085 GyroRV enable failed: %s",
-                 esp_err_to_name(err));
-        bno085_task_finish(true);
-        return;
-    }
-    ESP_LOGI(TAG, "BNO085 GyroRV enable command sent at %u Hz",
-             (unsigned)BNO085_GYRO_RV_RATE_HZ);
-    err = bno085_enable_accelerometer();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "BNO085 accelerometer enable failed: %s",
-                 esp_err_to_name(err));
-        bno085_task_finish(true);
-        return;
-    }
-    ESP_LOGI(TAG, "BNO085 accelerometer enable command sent last");
     s_last_progress_ms = ticks_to_ms();
     s_last_progress_report_count = s_report_count;
 

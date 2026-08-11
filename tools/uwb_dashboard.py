@@ -6835,6 +6835,9 @@ const state = {
   positionSettingsSolver: null,
   positionSetupDirty: false,
   positionApplyInFlight: false,
+  accelSettingsDirty: false,
+  accelApplyInFlight: false,
+  accelPendingApply: null,
   flexTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.flexTimingSlotSelect") || 0),
   dsTimingSlotIndex: Number(localStorage.getItem("uwbDash.setting.dsTimingSlotSelect") || 0),
   gpsMap: null,
@@ -8044,10 +8047,79 @@ function selectedAccelModuleIds() {
   return target === "all" ? [1, 2, 3, 4, 5] : [Number(target)];
 }
 
+function setAccelControlsDisabled(disabled) {
+  ["accelEnabled", "accelSampleHz", "accelTargets", "applyAccelSample"].forEach(id => {
+    const element = document.getElementById(id);
+    if (element) element.disabled = Boolean(disabled);
+  });
+}
+
+function accelRuntimeMatchesPending(pending) {
+  const statuses = pending.moduleIds.map(statusForModule);
+  if (statuses.some(item => !item || !statusIsFresh(item))) return false;
+  if (!statuses.every(item =>
+    Boolean(item.runtime_bno085_accel_enabled) === pending.enabled
+  )) return false;
+  if (!pending.enabled) return true;
+  return statuses.every(item =>
+    Number(intervalMsToHz(item.runtime_bno085_accel_interval_ms)) === pending.sampleHz
+  );
+}
+
+function renderPendingAccelSelection(label, checkbox, phase) {
+  const selected = checkbox.indeterminate
+    ? "BNO085 mixed selection"
+    : `BNO085 ${checkbox.checked ? "enabled" : "disabled"}`;
+  label.textContent = `${selected} - ${phase}`;
+}
+
 function updateAccelEnabledControl() {
   const checkbox = document.getElementById("accelEnabled");
   const label = document.getElementById("accelEnabledLabel");
   if (!checkbox || !label) return;
+
+  const pending = state.accelPendingApply;
+  if (pending) {
+    checkbox.indeterminate = false;
+    checkbox.checked = pending.enabled;
+    if (accelRuntimeMatchesPending(pending)) {
+      state.accelPendingApply = null;
+      state.accelApplyInFlight = false;
+      state.accelSettingsDirty = false;
+      setAccelControlsDisabled(false);
+    } else if (Date.now() - pending.startedAtMs >= 12000) {
+      state.accelPendingApply = null;
+      state.accelApplyInFlight = false;
+      state.accelSettingsDirty = true;
+      setAccelControlsDisabled(false);
+      renderPendingAccelSelection(label, checkbox, "not confirmed; retry Apply");
+      setToast(
+        "accelToast",
+        "BNO085 setting was sent but not confirmed by live status",
+        "bad"
+      );
+      return;
+    } else {
+      renderPendingAccelSelection(
+        label,
+        checkbox,
+        state.accelApplyInFlight ? "applying..." : "awaiting live confirmation..."
+      );
+      return;
+    }
+  }
+
+  // Live telemetry is authoritative only while the form is clean. Otherwise
+  // the 250 ms snapshot refresh would erase the operator's edit before Apply.
+  if (state.accelSettingsDirty || state.accelApplyInFlight) {
+    renderPendingAccelSelection(
+      label,
+      checkbox,
+      state.accelApplyInFlight ? "applying..." : "not applied"
+    );
+    return;
+  }
+
   const statuses = selectedAccelModuleIds()
     .map(statusForModule)
     .filter(Boolean);
@@ -17083,26 +17155,60 @@ function wireSettings() {
       }
     }, "calTimingToast");
   });
-  document.getElementById("applyAccelSample").addEventListener("click", () => {
-    const sampleHz = document.getElementById("accelSampleHz").value;
+  document.getElementById("applyAccelSample").addEventListener("click", async () => {
+    if (state.accelApplyInFlight || state.accelPendingApply) return;
+    const sampleHz = Number(document.getElementById("accelSampleHz").value);
     const enabled = document.getElementById("accelEnabled");
     if (enabled.indeterminate) {
       setToast("accelToast", "Choose enabled or disabled for the mixed target set", "bad");
       return;
     }
-    postConfig({
-      target_modules: document.getElementById("accelTargets").value,
+    if (!Number.isFinite(sampleHz) || sampleHz < 1 || sampleHz > 500) {
+      setToast("accelToast", "Samples/s must be between 1 and 500", "bad");
+      return;
+    }
+    const target = document.getElementById("accelTargets").value;
+    state.accelSettingsDirty = true;
+    state.accelApplyInFlight = true;
+    state.accelPendingApply = {
+      enabled: enabled.checked,
+      sampleHz: Math.round(sampleHz),
+      moduleIds: selectedAccelModuleIds(),
+      startedAtMs: Date.now(),
+    };
+    setAccelControlsDisabled(true);
+    updateAccelEnabledControl();
+    const data = await postConfig({
+      target_modules: target,
       params: {
         bno085: enabled.checked ? "1" : "0",
-        bno085_sample_hz: sampleHz,
+        bno085_sample_hz: String(Math.round(sampleHz)),
       }
     }, "accelToast");
+    state.accelApplyInFlight = false;
+    if (!apiResponseOk(data)) {
+      state.accelPendingApply = null;
+      setAccelControlsDisabled(false);
+      updateAccelEnabledControl();
+      return;
+    }
+    updateAccelEnabledControl();
+    await fetchSnapshot();
+    setTimeout(fetchSnapshot, 300);
+    setTimeout(fetchSnapshot, 900);
   });
-  document.getElementById("accelTargets").addEventListener("change", updateAccelEnabledControl);
+  document.getElementById("accelTargets").addEventListener("change", () => {
+    state.accelSettingsDirty = false;
+    updateAccelEnabledControl();
+  });
+  document.getElementById("accelSampleHz").addEventListener("input", () => {
+    state.accelSettingsDirty = true;
+    updateAccelEnabledControl();
+  });
   document.getElementById("accelEnabled").addEventListener("change", event => {
+    state.accelSettingsDirty = true;
     event.currentTarget.indeterminate = false;
-    document.getElementById("accelEnabledLabel").textContent =
-      `BNO085 ${event.currentTarget.checked ? "enabled" : "disabled"}`;
+    updateAccelEnabledControl();
   });
   document.getElementById("applyUwbSettings").addEventListener("click", () => {
     postConfig({
