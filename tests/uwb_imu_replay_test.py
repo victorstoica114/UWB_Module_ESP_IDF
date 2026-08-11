@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import lzma
 import math
 import pathlib
 import sys
@@ -155,6 +156,31 @@ class ReplayTest(unittest.TestCase):
             ["capture_start", "gps_fix", "accel", "position"],
         )
         self.assertEqual(loaded[-1]["_input_index"], 3)
+
+    def test_load_jsonl_reads_lossless_xz_capture_directly(self) -> None:
+        records = [
+            {"kind": "capture_start", "protocol": "native_ds"},
+            {
+                "kind": "position",
+                "protocol": "native_ds",
+                "module_id": 1,
+                "tag_id": 1,
+                "x_m": 1.0,
+                "y_m": 2.0,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "capture.native_ds.jsonl.xz"
+            with lzma.open(path, "wt", encoding="utf-8") as handle:
+                for record in records:
+                    handle.write(json.dumps(record) + "\n")
+            loaded = load_jsonl([path])
+
+        self.assertEqual(
+            [record["kind"] for record in loaded],
+            ["capture_start", "position"],
+        )
+        self.assertEqual(loaded[-1]["_input_file"], str(path))
 
     def test_uses_raw_passive_coordinates(self) -> None:
         self.assertEqual(

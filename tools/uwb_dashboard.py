@@ -1525,6 +1525,13 @@ class DashboardState:
         self.tdoa_position_events: deque[dict[str, Any]] = deque(maxlen=4096)
         self.next_position_event_id = 1
         self.next_position_stream_event_id = 1
+        # Lossless-enough short ring for offline solver replay.  Unlike the
+        # snapshot dictionaries, this preserves every radio observation in
+        # arrival order and gives the field collector a monotonic cursor.
+        self.uwb_measurement_events: deque[dict[str, Any]] = deque(
+            maxlen=65536
+        )
+        self.next_uwb_measurement_event_id = 1
         self.max_tdoa_samples = 200
         self.next_log_id = 1
         self.next_accel_id = 1
@@ -1746,6 +1753,25 @@ class DashboardState:
         )
         geometry["received_at"] = received_at
         geometry["complete"] = len(geometry["anchors"]) == anchor_count
+        self.append_uwb_measurement_event_locked(
+            "geometry",
+            {
+                "tag_id": tag_id,
+                "anchor_id": anchor_id,
+                "anchor_count": anchor_count,
+                "geometry_version": version,
+                "x_m": x_m,
+                "y_m": y_m,
+                "fit_rms_m": fit_rms_m,
+                "dynamic": bool(item.get("dynamic", True)),
+                "all_rtk_fixed": bool(
+                    item.get("all_rtk_fixed", False)
+                ),
+                "received_at": received_at,
+                "source_module_id": item.get("module_id"),
+                "tdoa_protocol": protocol,
+            },
+        )
 
     def record_tdoa_position_sample_locked(self, item: dict[str, Any]) -> None:
         try:
@@ -2923,6 +2949,9 @@ class DashboardState:
         self.ranging_history.setdefault(
             key, deque(maxlen=self.max_ranging_samples)
         ).append(sample)
+        self.append_uwb_measurement_event_locked(
+            "native_ds_range", sample
+        )
         # Native DS-TWR ranges remain available to the diagnostic tables and
         # history endpoint. Position-stream events contain only positions
         # solved by the ESP32 tag, so the browser never assembles or solves
@@ -3010,6 +3039,9 @@ class DashboardState:
         self.tdoa_history.setdefault(
             key, deque(maxlen=self.max_tdoa_samples)
         ).append(sample)
+        self.append_uwb_measurement_event_locked(
+            "range_difference", sample
+        )
         self.store_tdoa_anchor_distance_locked(
             initiator_id=initiator_id,
             responder_id=responder_id,
@@ -3088,6 +3120,9 @@ class DashboardState:
         self.tdoa_history.setdefault(
             key, deque(maxlen=self.max_tdoa_samples)
         ).append(sample)
+        self.append_uwb_measurement_event_locked(
+            "range_difference", sample
+        )
         self.store_tdoa_anchor_distance_locked(
             initiator_id=initiator_id,
             responder_id=responder_id,
@@ -3196,6 +3231,25 @@ class DashboardState:
         self.tdoa_anchor_history.setdefault(
             key, deque(maxlen=self.max_tdoa_samples)
         ).append(sample)
+        if source == "anchor_result":
+            self.append_uwb_measurement_event_locked(
+                "anchor_range", sample
+            )
+
+    def append_uwb_measurement_event_locked(
+        self, measurement_kind: str, sample: dict[str, Any]
+    ) -> None:
+        event = {
+            "uwb_measurement_event_id":
+                self.next_uwb_measurement_event_id,
+            "measurement_kind": str(measurement_kind),
+            **sample,
+        }
+        # Logs can be very large and are already archived separately.  The
+        # structured values above are sufficient for deterministic replay.
+        event.pop("raw", None)
+        self.next_uwb_measurement_event_id += 1
+        self.uwb_measurement_events.append(event)
 
     @staticmethod
     def median_float(values: list[float]) -> float | None:
@@ -3707,6 +3761,49 @@ class DashboardState:
                 samples = samples[-limit:]
             next_id = self.next_gps_id
         return {"samples": samples, "next_id": next_id}
+
+    def uwb_measurements_after(
+        self, after_id: int, limit: int
+    ) -> dict[str, Any]:
+        with self.lock:
+            oldest_id = (
+                int(
+                    self.uwb_measurement_events[0].get(
+                        "uwb_measurement_event_id"
+                    ) or 0
+                )
+                if self.uwb_measurement_events
+                else 0
+            )
+            newest_id = (
+                int(
+                    self.uwb_measurement_events[-1].get(
+                        "uwb_measurement_event_id"
+                    ) or 0
+                )
+                if self.uwb_measurement_events
+                else 0
+            )
+            events = [
+                event
+                for event in self.uwb_measurement_events
+                if int(event.get("uwb_measurement_event_id") or 0) > after_id
+            ]
+            if len(events) > limit:
+                events = events[-limit:]
+            next_id = self.next_uwb_measurement_event_id
+            cursor_gap = (
+                after_id > 0
+                and after_id <= newest_id
+                and oldest_id > after_id + 1
+            )
+        return {
+            "events": events,
+            "next_id": next_id,
+            "oldest_id": oldest_id,
+            "newest_id": newest_id,
+            "cursor_gap": cursor_gap,
+        }
 
     def telemetry_stats(self) -> dict[str, Any]:
         with self.lock:
@@ -17482,6 +17579,16 @@ class HttpHandler(BaseHTTPRequestHandler):
             limit = int(query.get("limit", ["2000"])[0] or "2000")
             self.send_json(
                 self.server.state.gps_after(after, max(1, min(limit, 10000)))
+            )
+            return
+        if parsed.path == "/api/uwb-measurement-events":
+            query = urllib.parse.parse_qs(parsed.query)
+            after = int(query.get("after", ["0"])[0] or "0")
+            limit = int(query.get("limit", ["8192"])[0] or "8192")
+            self.send_json(
+                self.server.state.uwb_measurements_after(
+                    after, max(1, min(limit, 65536))
+                )
             )
             return
         if parsed.path == "/api/telemetry-stats":

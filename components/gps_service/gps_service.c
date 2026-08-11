@@ -156,13 +156,8 @@ static esp_err_t gps_set_enable_level(bool enabled)
     return ESP_OK;
 }
 
-static esp_err_t gps_configure_disabled_gpios(void)
+static esp_err_t gps_configure_primary_uart_gpios_high_z(void)
 {
-    esp_err_t err = gps_set_enable_level(false);
-    if (err != ESP_OK) {
-        return err;
-    }
-
     const uint64_t uart_pins = (1ULL << BOARD_CONFIG_GPS_RX_GPIO) |
                                (1ULL << BOARD_CONFIG_GPS_TX_GPIO);
     const gpio_config_t config = {
@@ -172,12 +167,19 @@ static esp_err_t gps_configure_disabled_gpios(void)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    err = gpio_config(&config);
+    const esp_err_t err = gpio_config(&config);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "GPS UART GPIO idle config failed: %s",
+        ESP_LOGW(TAG, "GPS primary UART high-Z config failed: %s",
                  esp_err_to_name(err));
     }
     return err;
+}
+
+static esp_err_t gps_configure_disabled_gpios(void)
+{
+    ESP_RETURN_ON_ERROR(gps_set_enable_level(false), TAG,
+                        "GPS disable failed");
+    return gps_configure_primary_uart_gpios_high_z();
 }
 
 const char *gps_service_fix_quality_to_string(int quality)
@@ -1307,7 +1309,9 @@ esp_err_t gps_service_suspend_primary_uart(void)
                  (unsigned)GPS_STOP_TIMEOUT_MS);
         return ESP_ERR_TIMEOUT;
     }
-    return ESP_OK;
+    /* Explicitly release both primary UART pins before GNSS VCC is removed,
+     * otherwise a HIGH host TX can parasitically power receiver RXD1. */
+    return gps_configure_primary_uart_gpios_high_z();
 }
 
 esp_err_t gps_service_reset_receiver_for_update(void)

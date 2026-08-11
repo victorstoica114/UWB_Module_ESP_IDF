@@ -101,6 +101,15 @@ def gps_cursor(payload: dict[str, Any], previous: int = 0) -> int:
     return candidate if candidate and candidate < previous else max(previous, candidate)
 
 
+def measurement_cursor(payload: dict[str, Any], previous: int = 0) -> int:
+    event_ids = [
+        int(item.get("uwb_measurement_event_id") or 0)
+        for item in payload.get("events") or []
+    ]
+    candidate = max(event_ids + [max(0, int(payload.get("next_id") or 0) - 1)])
+    return candidate if candidate and candidate < previous else max(previous, candidate)
+
+
 def gps_telemetry_record(sample: dict[str, Any]) -> dict[str, Any]:
     return {
         "module_id": int(sample.get("module_id") or 0),
@@ -132,6 +141,9 @@ def status_summary(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
         "runtime_flex_tdoa_geometry_fixed",
         "runtime_flex_tdoa_geometry_generation",
         "runtime_flex_tdoa_anchor_x_mm", "runtime_flex_tdoa_anchor_y_mm",
+        "runtime_flex_tdoa_slot_count",
+        "runtime_flex_tdoa_responder_count",
+        "runtime_passive_ds_solve_mode",
         "gps_fix_quality_text", "gps_gga_count", "gps_latitude_deg",
         "gps_longitude_deg", "gps_altitude_m", "gps_speed_mps",
         "gps_course_deg", "gps_last_fix_age_ms", "gps_hdop",
@@ -325,6 +337,12 @@ def main() -> int:
             endpoint(base, "/api/gps-events", after=0, limit=1),
             args.timeout_sec,
         )
+        measurement_initial = fetch_json(
+            endpoint(
+                base, "/api/uwb-measurement-events", after=0, limit=1
+            ),
+            args.timeout_sec,
+        )
     except (OSError, ValueError, urllib.error.URLError) as exc:
         print(f"dashboard preflight failed: {exc}", file=sys.stderr)
         return 1
@@ -337,6 +355,7 @@ def main() -> int:
     accel_after = accel_cursor(accel_initial)
     position_after = position_cursor(position_initial)
     gps_after = gps_cursor(gps_initial)
+    measurement_after = measurement_cursor(measurement_initial)
     counts: collections.Counter[str] = collections.Counter()
     errors: collections.Counter[str] = collections.Counter()
     gps_quality: dict[int, collections.Counter[str]] = collections.defaultdict(
@@ -446,6 +465,37 @@ def main() -> int:
                     errors["gps"] += 1
                     if errors["gps"] <= 3:
                         print(f"gps poll failed: {exc}", file=sys.stderr)
+                try:
+                    payload = fetch_json(
+                        endpoint(
+                            base,
+                            "/api/uwb-measurement-events",
+                            after=measurement_after,
+                            limit=65536,
+                        ),
+                        args.timeout_sec,
+                    )
+                    if payload.get("cursor_gap"):
+                        errors["uwb_measurement_cursor_gap"] += 1
+                    for event in payload.get("events") or []:
+                        write_record(
+                            handle,
+                            args.protocol,
+                            capture_id,
+                            "uwb_measurement",
+                            dict(event),
+                            counts,
+                        )
+                    measurement_after = measurement_cursor(
+                        payload, measurement_after
+                    )
+                except (OSError, ValueError, urllib.error.URLError) as exc:
+                    errors["uwb_measurement"] += 1
+                    if errors["uwb_measurement"] <= 3:
+                        print(
+                            f"UWB measurement poll failed: {exc}",
+                            file=sys.stderr,
+                        )
                 now = time.monotonic()
                 if now >= next_snapshot:
                     try:

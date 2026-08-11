@@ -33,6 +33,15 @@ PROTOCOL_LABELS = {
     "native_ds": "Native DS-TWR",
     "passive_ds": "Passive DS-TWR",
 }
+PROTOCOL_ALIASES = {
+    "ds_twr": "native_ds",
+    "native": "native_ds",
+    "native_ds": "native_ds",
+    "passive": "passive_ds",
+    "passive_ds": "passive_ds",
+    "flex_tdoa": "flextdoa",
+    "flextdoa": "flextdoa",
+}
 PROTOCOL_COLORS = {
     "flextdoa": "#ea580c",
     "native_ds": "#2563eb",
@@ -49,6 +58,11 @@ def finite(value: Any) -> bool:
         return math.isfinite(float(value))
     except (TypeError, ValueError):
         return False
+
+
+def normalize_protocol(value: Any) -> str:
+    clean = str(value or "unknown").strip().lower()
+    return PROTOCOL_ALIASES.get(clean, clean)
 
 
 def percentile(values: Iterable[float], q: float) -> float:
@@ -159,6 +173,7 @@ class Capture:
     positions: list[dict[str, Any]] = field(default_factory=list)
     imu: list[dict[str, Any]] = field(default_factory=list)
     gps: list[dict[str, Any]] = field(default_factory=list)
+    ranges: list[dict[str, Any]] = field(default_factory=list)
     geometries: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -241,9 +256,58 @@ def snapshot_geometry(record: dict[str, Any], protocol: str, tag_id: int) -> dic
     }
 
 
+def status_geometry(
+    record: dict[str, Any], protocol: str, tag_id: int
+) -> dict[str, Any] | None:
+    modules = record.get("modules")
+    if not isinstance(modules, list):
+        return None
+    for status in modules:
+        if not isinstance(status, dict) or int(status.get("module_id", -1)) != tag_id:
+            continue
+        ids = status.get("runtime_anchor_ids")
+        xs = status.get("runtime_flex_tdoa_anchor_x_mm")
+        ys = status.get("runtime_flex_tdoa_anchor_y_mm")
+        if not (
+            isinstance(ids, list)
+            and isinstance(xs, list)
+            and isinstance(ys, list)
+            and len(ids) == len(xs) == len(ys)
+            and len(ids) >= 3
+        ):
+            continue
+        anchors = {
+            int(anchor_id): (float(x_mm) / 1000.0, float(y_mm) / 1000.0)
+            for anchor_id, x_mm, y_mm in zip(ids, xs, ys)
+            if int(anchor_id) > 0 and finite(x_mm) and finite(y_mm)
+        }
+        if len(anchors) < 3:
+            continue
+        return {
+            "time": wall_seconds(record),
+            "snapshot_time": wall_seconds(record),
+            "geometry_version": int(
+                status.get("runtime_flex_tdoa_geometry_generation", 0)
+            ),
+            "dynamic": not bool(
+                status.get("runtime_flex_tdoa_geometry_fixed", True)
+            ),
+            "fit_rms_m": math.nan,
+            "all_rtk_fixed": False,
+            "anchors": anchors,
+            "source": "status_runtime_geometry",
+            "protocol": protocol,
+        }
+    return None
+
+
 def load_capture(path: pathlib.Path, tag_id: int) -> Capture:
     capture = Capture(path=path)
-    with path.open(encoding="utf-8") as handle:
+    if path.suffix.lower() == ".xz":
+        handle_context = lzma.open(path, "rt", encoding="utf-8")
+    else:
+        handle_context = path.open(encoding="utf-8")
+    with handle_context as handle:
         for line_number, line in enumerate(handle, start=1):
             try:
                 record = json.loads(line)
@@ -252,11 +316,16 @@ def load_capture(path: pathlib.Path, tag_id: int) -> Capture:
                 continue
             kind = str(record.get("kind", "unknown"))
             capture.counts[kind] += 1
-            if capture.protocol == "unknown" and record.get("protocol"):
-                capture.protocol = str(record["protocol"])
+            record_protocol = normalize_protocol(
+                record.get("tdoa_protocol") or record.get("protocol")
+            )
+            if capture.protocol == "unknown" and record_protocol != "unknown":
+                capture.protocol = record_protocol
             if kind == "capture_start":
                 capture.capture_id = str(record.get("capture_id", path.stem.split(".")[0]))
-                capture.protocol = str(record.get("protocol", capture.protocol))
+                capture.protocol = normalize_protocol(
+                    record.get("protocol", capture.protocol)
+                )
                 capture.start_wall = wall_seconds(record)
                 capture.warnings.extend(str(item) for item in record.get("warnings", []))
                 geometry = initial_status_geometry(record, capture.protocol, tag_id)
@@ -266,7 +335,9 @@ def load_capture(path: pathlib.Path, tag_id: int) -> Capture:
                 capture.complete = True
                 capture.interrupted = bool(record.get("interrupted"))
                 capture.end_wall = wall_seconds(record)
-            elif kind == "position" and int(record.get("tag_id", record.get("module_id", -1))) == tag_id:
+            elif kind in {"position", "local_position"} and int(
+                record.get("tag_id", record.get("module_id", -1))
+            ) == tag_id:
                 if bool(record.get("imu_fused")) or "imu_fused_position" in str(
                     record.get("position_stream_type", "")
                 ):
@@ -332,8 +403,37 @@ def load_capture(path: pathlib.Path, tag_id: int) -> Capture:
                         "gga_count": int(record.get("gps_gga_count", -1)),
                     }
                 )
+            elif kind in {"ds_range", "anchor_range"}:
+                if kind == "ds_range":
+                    first_id = int(record.get("tag_id", -1))
+                    second_id = int(record.get("anchor_id", -1))
+                else:
+                    first_id = int(
+                        record.get("anchor_a_id", record.get("initiator_id", -1))
+                    )
+                    second_id = int(
+                        record.get("anchor_b_id", record.get("responder_id", -1))
+                    )
+                distance_m = record.get("distance_m", record.get("raw_distance_m"))
+                if first_id > 0 and second_id > 0 and finite(distance_m):
+                    capture.ranges.append(
+                        {
+                            "time": wall_seconds(record),
+                            "kind": kind,
+                            "first_id": first_id,
+                            "second_id": second_id,
+                            "distance_m": float(distance_m),
+                            "frame_id": int(
+                                record.get("frame_id", record.get("slot_id", -1))
+                            ),
+                        }
+                    )
             elif kind == "dashboard_snapshot":
                 geometry = snapshot_geometry(record, capture.protocol, tag_id)
+                if geometry is not None:
+                    capture.geometries.append(geometry)
+            elif kind == "status":
+                geometry = status_geometry(record, capture.protocol, tag_id)
                 if geometry is not None:
                     capture.geometries.append(geometry)
 
@@ -343,7 +443,7 @@ def load_capture(path: pathlib.Path, tag_id: int) -> Capture:
     if not finite(capture.end_wall):
         observed = [
             item["time"]
-            for series in (capture.positions, capture.imu, capture.gps)
+            for series in (capture.positions, capture.imu, capture.gps, capture.ranges)
             for item in series
             if finite(item.get("time"))
         ]

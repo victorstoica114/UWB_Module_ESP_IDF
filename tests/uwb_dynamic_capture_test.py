@@ -17,6 +17,7 @@ from uwb_dynamic_capture import (
     gps_records,
     gps_cursor,
     gps_telemetry_record,
+    measurement_cursor,
     position_cursor,
     position_event_kind,
     write_position_event,
@@ -96,6 +97,16 @@ class CursorTest(unittest.TestCase):
             "next_event_id": 42,
         }
         self.assertEqual(position_cursor(payload, 41), 42)
+
+    def test_measurement_cursor_tracks_last_assigned_id(self) -> None:
+        payload = {
+            "events": [{"uwb_measurement_event_id": 77}],
+            "next_id": 78,
+        }
+        self.assertEqual(measurement_cursor(payload, 76), 77)
+        self.assertEqual(
+            measurement_cursor({"events": [], "next_id": 3}, 900), 2
+        )
 
 
 class PositionEventTest(unittest.TestCase):

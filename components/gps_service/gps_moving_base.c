@@ -9,6 +9,7 @@
 #include "secrets.h"
 #include "app_config.h"
 #include "board_config.h"
+#include "driver/gpio.h"
 #include "esp_log.h"
 #include "gps_ntrip_client.h"
 #include "freertos/FreeRTOS.h"
@@ -830,6 +831,18 @@ void gps_moving_base_stop(void)
     gps_ntrip_client_stop();
     if (s_snapshot.correction_uart_ready) {
         (void)uart_driver_delete(GPS_MB_CORRECTION_UART);
+    }
+    const gpio_config_t correction_tx_high_z = {
+        .pin_bit_mask = 1ULL << BOARD_CONFIG_RTCM_TX_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    const esp_err_t gpio_err = gpio_config(&correction_tx_high_z);
+    if (gpio_err != ESP_OK) {
+        ESP_LOGW(TAG, "GNSS correction TX high-Z config failed: %s",
+                 esp_err_to_name(gpio_err));
     }
     if (s_socket >= 0) {
         close(s_socket);

@@ -7,6 +7,7 @@ import argparse
 import bisect
 import collections
 import json
+import lzma
 import math
 import pathlib
 import statistics
@@ -131,7 +132,11 @@ def load_jsonl(
     records: list[dict[str, Any]] = []
     index = 0
     for path in paths:
-        with path.open("r", encoding="utf-8") as handle:
+        if path.suffix.lower() == ".xz":
+            handle_context = lzma.open(path, "rt", encoding="utf-8")
+        else:
+            handle_context = path.open("r", encoding="utf-8")
+        with handle_context as handle:
             for line_number, line in enumerate(handle, 1):
                 clean = line.strip()
                 if not clean:

@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 import urllib.request
+from collections import deque
 from unittest import mock
 
 
@@ -33,6 +34,9 @@ def populated_state() -> DashboardState:
             "runtime_mode_name": "uwb_flex_tdoa",
             "runtime_tag_id": 4,
             "runtime_anchor_ids": [1, 2, 3],
+            "runtime_flex_tdoa_slot_count": 3,
+            "runtime_flex_tdoa_responder_count": 2,
+            "runtime_passive_ds_solve_mode": 1,
             "gps_fix_valid": True,
             "gps_fix_quality": 4,
             "gps_gga_count": 10,
@@ -131,6 +135,10 @@ class CaptureSnapshotPayloadTest(unittest.TestCase):
         )
         self.assertEqual(status_summary(capture), status_summary(full))
         self.assertEqual(
+            status_summary(capture)[0]["runtime_flex_tdoa_slot_count"],
+            3,
+        )
+        self.assertEqual(
             capture["ranging"],
             {"distances": full["ranging"]["distances"]},
         )
@@ -155,6 +163,44 @@ class CaptureSnapshotPayloadTest(unittest.TestCase):
         ).encode()
 
         self.assertLess(len(capture_raw), len(full_raw) // 2)
+
+    def test_measurement_ring_preserves_replay_inputs(self) -> None:
+        state = populated_state()
+        payload = state.uwb_measurements_after(0, 1000)
+        events = payload["events"]
+        self.assertGreaterEqual(len(events), 121)
+        self.assertEqual(
+            [event["uwb_measurement_event_id"] for event in events],
+            list(range(1, len(events) + 1)),
+        )
+        self.assertTrue(
+            any(
+                event["measurement_kind"] == "range_difference"
+                and event["tdoa_protocol"] == "flextdoa"
+                for event in events
+            )
+        )
+        self.assertTrue(
+            any(
+                event["measurement_kind"] == "native_ds_range"
+                and event["frame_id"] == 12
+                for event in events
+            )
+        )
+        self.assertNotIn("raw", events[0])
+
+    def test_measurement_ring_reports_collector_overrun(self) -> None:
+        state = DashboardState(max_logs=10)
+        state.uwb_measurement_events = deque(maxlen=3)
+        with state.lock:
+            for frame_id in range(5):
+                state.append_uwb_measurement_event_locked(
+                    "native_ds_range", {"frame_id": frame_id}
+                )
+        payload = state.uwb_measurements_after(1, 10)
+        self.assertTrue(payload["cursor_gap"])
+        self.assertEqual(payload["oldest_id"], 3)
+        self.assertEqual(payload["newest_id"], 5)
 
 
 class CaptureSnapshotEndpointTest(unittest.TestCase):
@@ -187,6 +233,13 @@ class CaptureSnapshotEndpointTest(unittest.TestCase):
             self.assertIn("distances", capture["ranging"])
             self.assertNotIn("recent_observations", capture["tdoa"])
             self.assertLess(len(capture_raw), len(full_raw) // 2)
+            with urllib.request.urlopen(
+                base + "/api/uwb-measurement-events?after=0&limit=1000",
+                timeout=2.0,
+            ) as response:
+                measurements = json.load(response)
+            self.assertFalse(measurements["cursor_gap"])
+            self.assertTrue(measurements["events"])
         finally:
             server.shutdown()
             server.server_close()
