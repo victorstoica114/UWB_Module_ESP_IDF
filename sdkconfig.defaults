@@ -12,6 +12,15 @@ CONFIG_SPIRAM_USE_MALLOC=y
 # at the lower 160 MHz default used by a generic ESP-IDF project.
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
+# Keep the ESP32-S3 in reset while the 3.3 V rail is outside its supported
+# operating range. Level 4 selects approximately 2.84 V, leaving enough margin
+# below the nominal 3.3 V rail to tolerate the measured startup transient. Keep the
+# ESP-IDF flash brownout path enabled so an in-flight flash operation is stopped
+# safely before the software reset completes.
+CONFIG_ESP_BROWNOUT_DET=y
+CONFIG_ESP_BROWNOUT_DET_LVL_SEL_4=y
+CONFIG_SPI_FLASH_BROWNOUT_RESET=y
+
 # Keep OTA updates recoverable: a freshly flashed OTA image must prove that it
 # can boot and bring up Wi-Fi/OTA before it is marked valid.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
