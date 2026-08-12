@@ -366,6 +366,29 @@ RUNTIME_MODE_STATUS_NAMES = {
     "uwb_passive_ds_twr": "uwb_passive_ds_twr",
 }
 
+# GPS fixes also arrive over the high-rate binary telemetry stream. Preserve
+# only fields owned by that stream when a slower HTTP poll replaces status.
+# Copying every ``gps_*`` field freezes HTTP-only counters at their value from
+# the first post-reboot poll and can falsely display "no recent NMEA".
+GPS_TELEMETRY_STATUS_FIELDS = frozenset({
+    "gps_gga_count",
+    "gps_fix_valid",
+    "gps_fix_quality",
+    "gps_fix_quality_text",
+    "gps_latitude_deg",
+    "gps_longitude_deg",
+    "gps_altitude_m",
+    "gps_speed_mps",
+    "gps_course_deg",
+    "gps_hdop",
+    "gps_satellites",
+    "gps_last_fix_age_ms",
+    "gps_telemetry_received_at",
+    "gps_sample_monotonic_us",
+    "gps_utc_ms_of_day",
+    "gps_utc_date_ddmmyy",
+})
+
 RUNTIME_PARAM_STATUS_FIELDS = {
     "tag": "runtime_tag_id",
     "anchor_count": "runtime_anchor_count",
@@ -3608,9 +3631,9 @@ class DashboardState:
             if previous is not None and previous.get(
                 "gps_telemetry_received_at"
             ) is not None:
-                for key, value in previous.items():
-                    if key.startswith("gps_"):
-                        status[key] = value
+                for key in GPS_TELEMETRY_STATUS_FIELDS:
+                    if key in previous:
+                        status[key] = previous[key]
             self.status_by_module[module_id] = status
             target = status.get("target")
             if isinstance(target, str):

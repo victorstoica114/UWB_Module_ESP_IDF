@@ -111,6 +111,52 @@ def populated_state() -> DashboardState:
 
 
 class CaptureSnapshotPayloadTest(unittest.TestCase):
+    def test_http_gps_counters_are_not_frozen_by_telemetry_merge(self) -> None:
+        state = DashboardState(max_logs=10)
+        with state.lock:
+            state.record_gps_sample_locked(
+                {
+                    "module_id": 4,
+                    "received_at": 1000.0,
+                    "uptime_ms": 100_000,
+                    "sample_monotonic_us": 99_950_000,
+                    "gga_sequence": 10,
+                    "fix_valid": True,
+                    "fix_quality": 4,
+                    "latitude_deg": 44.3,
+                    "longitude_deg": 25.9,
+                    "altitude_m": 76.0,
+                    "speed_mps": 0.0,
+                    "course_deg": 0.0,
+                    "hdop": 0.5,
+                    "satellites": 27,
+                    "utc_ms_of_day": 12_345,
+                    "utc_date_ddmmyy": 120826,
+                }
+            )
+
+        state.set_status(
+            4,
+            {
+                "module_id": 4,
+                "gps_byte_count": 2_399_803,
+                "gps_sentence_count": 32_747,
+                "gps_last_rx_age_ms": 90,
+                "gps_gga_count": 9,
+                "gps_fix_quality": 5,
+                "gps_utc_time": "104733.375",
+            },
+        )
+        status = state.status_by_module[4]
+
+        self.assertEqual(status["gps_byte_count"], 2_399_803)
+        self.assertEqual(status["gps_sentence_count"], 32_747)
+        self.assertEqual(status["gps_last_rx_age_ms"], 90)
+        self.assertEqual(status["gps_utc_time"], "104733.375")
+        self.assertEqual(status["gps_gga_count"], 10)
+        self.assertEqual(status["gps_fix_quality"], 4)
+        self.assertEqual(status["gps_fix_quality_text"], "rtk_fixed")
+
     def test_matches_collector_inputs_without_recent_histories(self) -> None:
         state = populated_state()
         frozen_now = time.time()
