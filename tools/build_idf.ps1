@@ -106,11 +106,23 @@ $env:CCACHE_DISABLE = "1"
 
 # Codex and the interactive user can run under different Windows identities.
 # Keep Git ownership exceptions local to this process.
-$env:GIT_CONFIG_COUNT = "2"
+$env:GIT_CONFIG_COUNT = "3"
 $env:GIT_CONFIG_KEY_0 = "safe.directory"
-$env:GIT_CONFIG_VALUE_0 = ($idfPath -replace '\\', '/')
+$env:GIT_CONFIG_VALUE_0 = ($projectPath -replace '\\', '/')
 $env:GIT_CONFIG_KEY_1 = "safe.directory"
-$env:GIT_CONFIG_VALUE_1 = ((Join-Path $idfPath "components\openthread\openthread") -replace '\\', '/')
+$env:GIT_CONFIG_VALUE_1 = ($idfPath -replace '\\', '/')
+$env:GIT_CONFIG_KEY_2 = "safe.directory"
+$env:GIT_CONFIG_VALUE_2 = ((Join-Path $idfPath "components\openthread\openthread") -replace '\\', '/')
+
+# Pass the project revision explicitly. This keeps the image descriptor correct
+# even when CMake is reusing a cache originally created by another Windows
+# identity, and makes a dirty source tree visible in the reported version.
+$projectVersion = (& git -C $projectPath describe --always --dirty 2>&1 |
+    Select-Object -First 1)
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($projectVersion)) {
+    throw "Unable to determine the project Git revision: $projectVersion"
+}
+$projectVersion = $projectVersion.Trim()
 
 if (-not (Test-Path -LiteralPath $buildPath)) {
     New-Item -ItemType Directory -Path $buildPath | Out-Null
@@ -142,7 +154,9 @@ try {
     Write-Host "ESP-IDF $($selected.version)"
     Write-Host "Project:   $projectPath"
     Write-Host "Build dir: $buildPath"
-    & $pythonPath $idfPy -C $projectPath -B $buildPath build
+    Write-Host "Version:   $projectVersion"
+    & $pythonPath $idfPy -C $projectPath -B $buildPath `
+        -D "PROJECT_VER=$projectVersion" build
     if ($LASTEXITCODE -ne 0) {
         throw "ESP-IDF build failed with exit code $LASTEXITCODE"
     }
