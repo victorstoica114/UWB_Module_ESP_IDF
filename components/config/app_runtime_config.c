@@ -36,7 +36,6 @@ static const char *TAG = "app_runtime_config";
 #define KEY_FLEX_GGEN "flex_ggen"
 #define KEY_FLEX_GX "flex_gx"
 #define KEY_FLEX_GY "flex_gy"
-#define KEY_FLEX_CORR "flex_corr"
 #define KEY_COORD "coord"
 #define KEY_AS_RX "as_rx"
 #define KEY_AS_CMD "as_cmd"
@@ -50,9 +49,6 @@ static const char *TAG = "app_runtime_config";
 #define KEY_RNG_RESP "rng_resp"
 #define KEY_RNG_FINAL "rng_final"
 #define KEY_RNG_ARX "rng_arx"
-#define KEY_NDS_CAL "nds_cal"
-#define KEY_NDS_CGEN "nds_cgen"
-#define KEY_NDS_RBIAS "nds_rbias"
 #define KEY_PDS_SCHED "pds_sched"
 #define KEY_PDS_SLOT "pds_slot"
 #define KEY_PDS_GAP "pds_gap"
@@ -64,10 +60,6 @@ static const char *TAG = "app_runtime_config";
 #define KEY_PDS_PIPE "pds_pipe"
 #define KEY_PDS_SOLVE "pds_solve"
 #define KEY_PDS_ROLL_HZ "pds_roll_hz"
-#define KEY_PDS_CAL "pds_cal"
-#define KEY_PDS_CGEN "pds_cgen"
-#define KEY_PDS_ABIAS "pds_abias"
-#define KEY_PDS_RBIAS "pds_rbias"
 #define KEY_DT_PEER "dt_peer"
 #define KEY_DT_INIT "dt_init"
 #define KEY_DT_RESP "dt_resp"
@@ -250,85 +242,6 @@ static bool flex_tdoa_geometry_valid(const app_runtime_config_t *config)
     return true;
 }
 
-static bool flex_tdoa_correction_valid(const app_runtime_config_t *config)
-{
-    if (config->flex_tdoa_anchor_correction_mm[0] != 0) {
-        return false;
-    }
-    for (size_t i = 0; i < config->anchor_count; ++i) {
-        if (config->flex_tdoa_anchor_correction_mm[i] < -5000 ||
-            config->flex_tdoa_anchor_correction_mm[i] > 5000) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static bool native_ds_calibration_valid(
-    const app_runtime_config_t *config)
-{
-    if (!config->native_ds_calibration_enabled) {
-        return true;
-    }
-    if (config->native_ds_calibration_generation == 0U) {
-        return false;
-    }
-    for (size_t index = 0U; index < config->anchor_count; ++index) {
-        if (config->native_ds_range_bias_mm[index] < -5000 ||
-            config->native_ds_range_bias_mm[index] > 5000) {
-            return false;
-        }
-    }
-    return true;
-}
-
-size_t app_runtime_config_anchor_pair_index(size_t first_index,
-                                            size_t second_index)
-{
-    if (first_index == second_index ||
-        first_index >= APP_RUNTIME_CONFIG_MAX_ANCHORS ||
-        second_index >= APP_RUNTIME_CONFIG_MAX_ANCHORS) {
-        return SIZE_MAX;
-    }
-    if (first_index > second_index) {
-        const size_t temporary = first_index;
-        first_index = second_index;
-        second_index = temporary;
-    }
-    return first_index * (2U * APP_RUNTIME_CONFIG_MAX_ANCHORS -
-                          first_index - 1U) /
-               2U +
-           second_index - first_index - 1U;
-}
-
-static bool passive_ds_calibration_valid(
-    const app_runtime_config_t *config)
-{
-    if (!config->passive_ds_calibration_enabled) {
-        return true;
-    }
-    if (config->passive_ds_calibration_generation == 0U ||
-        config->passive_ds_anchor_bias_mm[0] != 0) {
-        return false;
-    }
-    for (size_t i = 0; i < config->anchor_count; ++i) {
-        if (config->passive_ds_anchor_bias_mm[i] < -5000 ||
-            config->passive_ds_anchor_bias_mm[i] > 5000) {
-            return false;
-        }
-        for (size_t j = i + 1U; j < config->anchor_count; ++j) {
-            const size_t pair =
-                app_runtime_config_anchor_pair_index(i, j);
-            if (pair == SIZE_MAX ||
-                config->passive_ds_range_bias_mm[pair] < -5000 ||
-                config->passive_ds_range_bias_mm[pair] > 5000) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
 bool app_runtime_config_runtime_mode_valid(uint8_t mode)
 {
     return mode == APP_RUNTIME_MODE_UWB_BEACON_SMOKE ||
@@ -476,7 +389,6 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->ranging_final_delay_ms = APP_UWB_RANGING_FINAL_DELAY_MS;
     config->ranging_auto_rx_delay_uus =
         APP_UWB_RANGING_AUTO_RX_DELAY_UUS;
-    app_runtime_config_reset_native_ds_calibration(config);
     config->passive_ds_schedule = APP_UWB_PASSIVE_DS_SCHEDULE;
     config->passive_ds_slot_ms = APP_UWB_PASSIVE_DS_SLOT_MS;
     config->passive_ds_round_gap_ms = APP_UWB_PASSIVE_DS_ROUND_GAP_MS;
@@ -491,7 +403,6 @@ void app_runtime_config_defaults(app_runtime_config_t *config)
     config->passive_ds_solve_mode = APP_UWB_PASSIVE_DS_SOLVE_MODE;
     config->passive_ds_rolling_max_hz =
         APP_UWB_PASSIVE_DS_ROLLING_MAX_HZ;
-    app_runtime_config_reset_passive_ds_calibration(config);
     config->distance_test_peer_id = (uint8_t)APP_UWB_DISTANCE_TEST_PEER_ID;
     config->distance_test_initiator_id =
         (uint8_t)APP_UWB_DISTANCE_TEST_INITIATOR_ID;
@@ -568,44 +479,10 @@ void app_runtime_config_reset_flex_tdoa(app_runtime_config_t *config)
            sizeof(config->flex_tdoa_anchor_x_mm));
     memset(config->flex_tdoa_anchor_y_mm, 0,
            sizeof(config->flex_tdoa_anchor_y_mm));
-    memset(config->flex_tdoa_anchor_correction_mm, 0,
-           sizeof(config->flex_tdoa_anchor_correction_mm));
     config->flex_tdoa_geometry_generation =
         config->flex_tdoa_geometry_generation == UINT32_MAX
             ? 1U
             : config->flex_tdoa_geometry_generation + 1U;
-}
-
-void app_runtime_config_reset_native_ds_calibration(
-    app_runtime_config_t *config)
-{
-    if (config == NULL) {
-        return;
-    }
-    config->native_ds_calibration_enabled = false;
-    memset(config->native_ds_range_bias_mm, 0,
-           sizeof(config->native_ds_range_bias_mm));
-    config->native_ds_calibration_generation =
-        config->native_ds_calibration_generation == UINT32_MAX
-            ? 1U
-            : config->native_ds_calibration_generation + 1U;
-}
-
-void app_runtime_config_reset_passive_ds_calibration(
-    app_runtime_config_t *config)
-{
-    if (config == NULL) {
-        return;
-    }
-    config->passive_ds_calibration_enabled = false;
-    memset(config->passive_ds_anchor_bias_mm, 0,
-           sizeof(config->passive_ds_anchor_bias_mm));
-    memset(config->passive_ds_range_bias_mm, 0,
-           sizeof(config->passive_ds_range_bias_mm));
-    config->passive_ds_calibration_generation =
-        config->passive_ds_calibration_generation == UINT32_MAX
-            ? 1U
-            : config->passive_ds_calibration_generation + 1U;
 }
 
 bool app_runtime_config_validate(const app_runtime_config_t *config)
@@ -615,7 +492,6 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         !id_valid(config->tag_id) || !anchor_ids_valid(config) ||
         !flex_tdoa_config_valid(config) ||
         !flex_tdoa_geometry_valid(config) ||
-        !flex_tdoa_correction_valid(config) ||
         !id_valid(config->anchor_survey_coordinator_id) ||
         !ms_valid(config->anchor_survey_rx_slice_ms) ||
         !ms_valid(config->anchor_survey_command_delay_ms) ||
@@ -628,7 +504,6 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
         !ms_valid(config->ranging_resp_delay_ms) ||
         !ms_valid(config->ranging_final_delay_ms) ||
         config->ranging_auto_rx_delay_uus == 0 ||
-        !native_ds_calibration_valid(config) ||
         (config->passive_ds_schedule != APP_RUNTIME_PASSIVE_DS_FAST_STAR &&
          config->passive_ds_schedule !=
              APP_RUNTIME_PASSIVE_DS_ROBUST_ROTATING &&
@@ -661,7 +536,6 @@ bool app_runtime_config_validate(const app_runtime_config_t *config)
              APP_RUNTIME_PASSIVE_DS_SOLVE_PRECISION_THREE_STAR) ||
         config->passive_ds_rolling_max_hz == 0U ||
         config->passive_ds_rolling_max_hz > 500U ||
-        !passive_ds_calibration_valid(config) ||
         !id_valid(config->distance_test_initiator_id) ||
         !id_valid(config->distance_test_responder_id) ||
         config->distance_test_initiator_id ==
@@ -753,124 +627,6 @@ static bool read_blob_exact(nvs_handle_t handle, const char *key, void *value,
            size == expected_size;
 }
 
-static bool read_passive_ds_anchor_bias(
-    nvs_handle_t handle, app_runtime_config_t *config)
-{
-    size_t size = 0;
-    if (config->anchor_count > APP_RUNTIME_CONFIG_MAX_ANCHORS ||
-        nvs_get_blob(handle, KEY_PDS_ABIAS, NULL, &size) != ESP_OK) {
-        return false;
-    }
-    if (size == sizeof(config->passive_ds_anchor_bias_mm)) {
-        return read_blob_exact(
-            handle, KEY_PDS_ABIAS,
-            config->passive_ds_anchor_bias_mm, size);
-    }
-    const size_t compact_size =
-        (size_t)config->anchor_count * sizeof(int32_t);
-    if (size != compact_size) {
-        return false;
-    }
-    size_t read_size = compact_size;
-    return nvs_get_blob(
-               handle, KEY_PDS_ABIAS,
-               config->passive_ds_anchor_bias_mm,
-               &read_size) == ESP_OK &&
-           read_size == compact_size;
-}
-
-static bool read_native_ds_range_bias(
-    nvs_handle_t handle, app_runtime_config_t *config)
-{
-    size_t size = 0;
-    if (config->anchor_count > APP_RUNTIME_CONFIG_MAX_ANCHORS ||
-        nvs_get_blob(handle, KEY_NDS_RBIAS, NULL, &size) != ESP_OK) {
-        return false;
-    }
-    if (size == sizeof(config->native_ds_range_bias_mm)) {
-        return read_blob_exact(handle, KEY_NDS_RBIAS,
-                               config->native_ds_range_bias_mm, size);
-    }
-    const size_t compact_size =
-        (size_t)config->anchor_count * sizeof(int32_t);
-    if (size != compact_size) {
-        return false;
-    }
-    size_t read_size = compact_size;
-    return nvs_get_blob(handle, KEY_NDS_RBIAS,
-                        config->native_ds_range_bias_mm,
-                        &read_size) == ESP_OK &&
-           read_size == compact_size;
-}
-
-static bool read_flex_tdoa_anchor_correction(
-    nvs_handle_t handle, app_runtime_config_t *config)
-{
-    size_t size = 0;
-    if (config->anchor_count > APP_RUNTIME_CONFIG_MAX_ANCHORS ||
-        nvs_get_blob(handle, KEY_FLEX_CORR, NULL, &size) != ESP_OK) {
-        return false;
-    }
-    if (size == sizeof(config->flex_tdoa_anchor_correction_mm)) {
-        return read_blob_exact(
-            handle, KEY_FLEX_CORR,
-            config->flex_tdoa_anchor_correction_mm, size);
-    }
-    const size_t compact_size =
-        (size_t)config->anchor_count * sizeof(int32_t);
-    if (size != compact_size) {
-        return false;
-    }
-    size_t read_size = compact_size;
-    return nvs_get_blob(
-               handle, KEY_FLEX_CORR,
-               config->flex_tdoa_anchor_correction_mm,
-               &read_size) == ESP_OK &&
-           read_size == compact_size;
-}
-
-static bool read_passive_ds_range_bias(
-    nvs_handle_t handle, app_runtime_config_t *config)
-{
-    size_t size = 0;
-    if (config->anchor_count > APP_RUNTIME_CONFIG_MAX_ANCHORS ||
-        nvs_get_blob(handle, KEY_PDS_RBIAS, NULL, &size) != ESP_OK) {
-        return false;
-    }
-    if (size == sizeof(config->passive_ds_range_bias_mm)) {
-        return read_blob_exact(
-            handle, KEY_PDS_RBIAS,
-            config->passive_ds_range_bias_mm, size);
-    }
-    const size_t pair_count =
-        (size_t)config->anchor_count *
-        ((size_t)config->anchor_count - 1U) / 2U;
-    const size_t compact_size = pair_count * sizeof(int32_t);
-    if (size != compact_size) {
-        return false;
-    }
-    int32_t compact[APP_RUNTIME_CONFIG_MAX_ANCHOR_PAIRS] = {0};
-    size_t read_size = compact_size;
-    if (nvs_get_blob(handle, KEY_PDS_RBIAS, compact, &read_size) !=
-            ESP_OK ||
-        read_size != compact_size) {
-        return false;
-    }
-    size_t compact_pair = 0;
-    for (size_t a = 0; a < config->anchor_count; ++a) {
-        for (size_t b = a + 1U; b < config->anchor_count; ++b) {
-            const size_t stored_pair =
-                app_runtime_config_anchor_pair_index(a, b);
-            if (stored_pair == SIZE_MAX) {
-                return false;
-            }
-            config->passive_ds_range_bias_mm[stored_pair] =
-                compact[compact_pair++];
-        }
-    }
-    return true;
-}
-
 static void read_config_from_nvs(app_runtime_config_t *config)
 {
     nvs_handle_t handle = 0;
@@ -924,7 +680,6 @@ static void read_config_from_nvs(app_runtime_config_t *config)
     found |= read_blob_exact(handle, KEY_FLEX_GY,
                              config->flex_tdoa_anchor_y_mm,
                              sizeof(config->flex_tdoa_anchor_y_mm));
-    found |= read_flex_tdoa_anchor_correction(handle, config);
     found |= read_u8(handle, KEY_COORD, &config->anchor_survey_coordinator_id);
     found |= read_u32(handle, KEY_AS_RX, &config->anchor_survey_rx_slice_ms);
     found |= read_u32(handle, KEY_AS_CMD,
@@ -944,11 +699,6 @@ static void read_config_from_nvs(app_runtime_config_t *config)
                       &config->ranging_final_delay_ms);
     found |= read_u32(handle, KEY_RNG_ARX,
                       &config->ranging_auto_rx_delay_uus);
-    found |= read_bool(handle, KEY_NDS_CAL,
-                       &config->native_ds_calibration_enabled);
-    found |= read_u32(handle, KEY_NDS_CGEN,
-                      &config->native_ds_calibration_generation);
-    found |= read_native_ds_range_bias(handle, config);
     found |= read_u8(handle, KEY_PDS_SCHED, &config->passive_ds_schedule);
     found |= read_u32(handle, KEY_PDS_SLOT, &config->passive_ds_slot_ms);
     found |= read_u32(handle, KEY_PDS_GAP,
@@ -968,12 +718,6 @@ static void read_config_from_nvs(app_runtime_config_t *config)
                      &config->passive_ds_solve_mode);
     found |= read_u32(handle, KEY_PDS_ROLL_HZ,
                       &config->passive_ds_rolling_max_hz);
-    found |= read_bool(handle, KEY_PDS_CAL,
-                       &config->passive_ds_calibration_enabled);
-    found |= read_u32(handle, KEY_PDS_CGEN,
-                      &config->passive_ds_calibration_generation);
-    found |= read_passive_ds_anchor_bias(handle, config);
-    found |= read_passive_ds_range_bias(handle, config);
     found |= read_u8(handle, KEY_DT_PEER, &config->distance_test_peer_id);
     found |= read_u8(handle, KEY_DT_INIT, &config->distance_test_initiator_id);
     found |= read_u8(handle, KEY_DT_RESP, &config->distance_test_responder_id);
@@ -1140,22 +884,6 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
 
-    int32_t compact_passive_ds_range_bias[
-        APP_RUNTIME_CONFIG_MAX_ANCHOR_PAIRS] = {0};
-    size_t compact_passive_ds_pair_count = 0;
-    for (size_t a = 0; a < config->anchor_count; ++a) {
-        for (size_t b = a + 1U; b < config->anchor_count; ++b) {
-            const size_t stored_pair =
-                app_runtime_config_anchor_pair_index(a, b);
-            if (stored_pair == SIZE_MAX) {
-                return ESP_ERR_INVALID_ARG;
-            }
-            compact_passive_ds_range_bias[
-                compact_passive_ds_pair_count++] =
-                config->passive_ds_range_bias_mm[stored_pair];
-        }
-    }
-
     nvs_handle_t handle = 0;
     ESP_RETURN_ON_ERROR(
         nvs_open(APP_RUNTIME_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &handle),
@@ -1211,10 +939,6 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
     WRITE_OR_GOTO(nvs_set_blob(handle, KEY_FLEX_GY,
                                config->flex_tdoa_anchor_y_mm,
                                sizeof(config->flex_tdoa_anchor_y_mm)));
-    WRITE_OR_GOTO(nvs_set_blob(
-        handle, KEY_FLEX_CORR,
-        config->flex_tdoa_anchor_correction_mm,
-        (size_t)config->anchor_count * sizeof(int32_t)));
     WRITE_OR_GOTO(write_u8(handle, KEY_COORD,
                            config->anchor_survey_coordinator_id));
     WRITE_OR_GOTO(write_u32(handle, KEY_AS_RX,
@@ -1239,13 +963,6 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
                             config->ranging_final_delay_ms));
     WRITE_OR_GOTO(write_u32(handle, KEY_RNG_ARX,
                             config->ranging_auto_rx_delay_uus));
-    WRITE_OR_GOTO(write_bool(handle, KEY_NDS_CAL,
-                             config->native_ds_calibration_enabled));
-    WRITE_OR_GOTO(write_u32(handle, KEY_NDS_CGEN,
-                            config->native_ds_calibration_generation));
-    WRITE_OR_GOTO(nvs_set_blob(
-        handle, KEY_NDS_RBIAS, config->native_ds_range_bias_mm,
-        (size_t)config->anchor_count * sizeof(int32_t)));
     WRITE_OR_GOTO(write_u8(handle, KEY_PDS_SCHED,
                            config->passive_ds_schedule));
     WRITE_OR_GOTO(write_u32(handle, KEY_PDS_SLOT,
@@ -1268,18 +985,6 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config)
                            config->passive_ds_solve_mode));
     WRITE_OR_GOTO(write_u32(handle, KEY_PDS_ROLL_HZ,
                             config->passive_ds_rolling_max_hz));
-    WRITE_OR_GOTO(write_bool(handle, KEY_PDS_CAL,
-                             config->passive_ds_calibration_enabled));
-    WRITE_OR_GOTO(write_u32(handle, KEY_PDS_CGEN,
-                            config->passive_ds_calibration_generation));
-    WRITE_OR_GOTO(nvs_set_blob(handle, KEY_PDS_ABIAS,
-                               config->passive_ds_anchor_bias_mm,
-                               (size_t)config->anchor_count *
-                                   sizeof(int32_t)));
-    WRITE_OR_GOTO(nvs_set_blob(handle, KEY_PDS_RBIAS,
-                               compact_passive_ds_range_bias,
-                               compact_passive_ds_pair_count *
-                                   sizeof(int32_t)));
     WRITE_OR_GOTO(write_u8(handle, KEY_DT_PEER,
                            config->distance_test_peer_id));
     WRITE_OR_GOTO(write_u8(handle, KEY_DT_INIT,

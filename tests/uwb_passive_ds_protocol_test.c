@@ -57,6 +57,71 @@ static void test_rotating_plan_and_timing(void)
                UWB_PASSIVE_DS_MESSAGE_RESPONSE, 0U) == 65U);
     assert(uwb_passive_ds_protocol_packet_size(
                UWB_PASSIVE_DS_MESSAGE_FINAL, 3U) == 47U);
+
+    uint32_t next_frame_id = 0U;
+    uint8_t frame_offset = 0U;
+    assert(uwb_passive_ds_next_owned_frame(
+        anchors, 4U, 5U, 2U, &next_frame_id, &frame_offset));
+    assert(next_frame_id == 8U);
+    assert(frame_offset == 3U);
+    assert(uwb_passive_ds_next_owned_frame(
+        anchors, 4U, 5U, 4U, &next_frame_id, &frame_offset));
+    assert(next_frame_id == 6U);
+    assert(frame_offset == 1U);
+
+    /* uint32_t frame wrap keeps the modulo rotation deterministic. */
+    assert(uwb_passive_ds_next_owned_frame(
+        anchors, 4U, UINT32_MAX - 1U, 2U,
+        &next_frame_id, &frame_offset));
+    assert(next_frame_id == 0U);
+    assert(frame_offset == 2U);
+    assert(!uwb_passive_ds_next_owned_frame(
+        anchors, 4U, 5U, 9U, &next_frame_id, &frame_offset));
+
+    const uint32_t boundary_frames[] = {
+        0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U,
+        UINT32_MAX - 3U, UINT32_MAX - 2U,
+        UINT32_MAX - 1U, UINT32_MAX,
+    };
+    for (size_t frame_index = 0U;
+         frame_index < sizeof(boundary_frames) /
+                           sizeof(boundary_frames[0]);
+         ++frame_index) {
+        const uint32_t after = boundary_frames[frame_index];
+        for (size_t local_index = 0U; local_index < 4U;
+             ++local_index) {
+            assert(uwb_passive_ds_next_owned_frame(
+                anchors, 4U, after, anchors[local_index],
+                &next_frame_id, &frame_offset));
+            assert(frame_offset >= 1U && frame_offset <= 4U);
+            assert(next_frame_id == after + frame_offset);
+            struct uwb_passive_ds_plan owned = {0};
+            assert(uwb_passive_ds_build_plan(
+                anchors, 4U, next_frame_id, &owned));
+            assert(owned.initiator_id == anchors[local_index]);
+            for (uint8_t earlier = 1U; earlier < frame_offset;
+                 ++earlier) {
+                struct uwb_passive_ds_plan skipped = {0};
+                assert(uwb_passive_ds_build_plan(
+                    anchors, 4U, after + earlier, &skipped));
+                assert(skipped.initiator_id != anchors[local_index]);
+            }
+        }
+    }
+
+    /* If frame 101 is lost, A4 still keeps frame 102 scheduled from
+     * frame 100; the rotation no longer depends on a one-hop daisy chain. */
+    assert(uwb_passive_ds_next_owned_frame(
+        anchors, 4U, 100U, 4U, &next_frame_id, &frame_offset));
+    assert(next_frame_id == 102U);
+    assert(frame_offset == 2U);
+
+    assert(!uwb_passive_ds_next_owned_frame(
+        anchors, 2U, 5U, 2U, &next_frame_id, &frame_offset));
+    assert(!uwb_passive_ds_next_owned_frame(
+        anchors, 4U, 5U, 2U, NULL, &frame_offset));
+    assert(!uwb_passive_ds_next_owned_frame(
+        anchors, 4U, 5U, 2U, &next_frame_id, NULL));
 }
 
 static void round_trip(const struct uwb_passive_ds_packet *packet)

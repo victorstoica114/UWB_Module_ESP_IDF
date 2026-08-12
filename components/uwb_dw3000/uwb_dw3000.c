@@ -5971,30 +5971,14 @@ static void uwb_passive_ds_write_piggyback(uint8_t *payload, size_t offset)
 }
 #endif
 
-static bool uwb_passive_ds_calibrated_anchor_range_mm(
-    const uint8_t *anchor_ids, size_t anchor_count, uint8_t first_id,
-    uint8_t second_id, int32_t measured_mm, int32_t *calibrated_mm)
+static bool uwb_passive_ds_anchor_range_mm(
+    int32_t measured_mm, int32_t *distance_mm)
 {
-    if (anchor_ids == NULL || calibrated_mm == NULL || measured_mm <= 0) {
+    if (distance_mm == NULL || measured_mm <= 0) {
         return false;
     }
-    int32_t correction_mm = 0;
-    const app_runtime_config_t *config = app_runtime_config_get();
-    if (config->passive_ds_calibration_enabled) {
-        const size_t first_index = uwb_anchor_survey_id_index(
-            anchor_ids, anchor_count, first_id);
-        const size_t second_index = uwb_anchor_survey_id_index(
-            anchor_ids, anchor_count, second_id);
-        const size_t pair_index = app_runtime_config_anchor_pair_index(
-            first_index, second_index);
-        if (first_index == SIZE_MAX || second_index == SIZE_MAX ||
-            pair_index == SIZE_MAX) {
-            return false;
-        }
-        correction_mm = config->passive_ds_range_bias_mm[pair_index];
-    }
-    *calibrated_mm = measured_mm - correction_mm;
-    return *calibrated_mm > 0;
+    *distance_mm = measured_mm;
+    return true;
 }
 
 #if 0 /* Passive DS-TWR v1 tag reconstruction. */
@@ -6033,8 +6017,7 @@ static enum uwb_passive_ds_tdoa_status uwb_passive_ds_accept_piggyback(
         return UWB_PASSIVE_DS_TDOA_INCOMPLETE;
     }
     int32_t calibrated_distance_mm = 0;
-    if (!uwb_passive_ds_calibrated_anchor_range_mm(
-            anchor_ids, anchor_count, frame->source_id, peer_id,
+    if (!uwb_passive_ds_anchor_range_mm(
             distance_mm, &calibrated_distance_mm)) {
         return UWB_PASSIVE_DS_TDOA_INCOMPLETE;
     }
@@ -8537,19 +8520,6 @@ static void uwb_passive_ds_tag_submit_double_sided(
     const app_runtime_config_t *config = app_runtime_config_get();
     int32_t difference_mm = uwb_distance_meters_to_mm(
         result->difference_m);
-    if (config->passive_ds_calibration_enabled) {
-        const size_t initiator_index = uwb_anchor_survey_id_index(
-            anchor_ids, anchor_count, initiator_id);
-        const size_t responder_index = uwb_anchor_survey_id_index(
-            anchor_ids, anchor_count, responder_id);
-        if (initiator_index == SIZE_MAX || responder_index == SIZE_MAX) {
-            return;
-        }
-        difference_mm -=
-            config->passive_ds_anchor_bias_mm[responder_index] -
-            config->passive_ds_anchor_bias_mm[initiator_index];
-    }
-
     uint8_t expected_initiator = 0U;
     uint8_t expected_responder = 0U;
     uint8_t responder_index = 0U;
@@ -10133,6 +10103,7 @@ struct uwb_passive_ds_clean_schedule {
     int64_t next_poll_host_us;
     int64_t last_poll_host_us;
     uint32_t late_count;
+    uint32_t bootstrap_count;
 };
 
 struct uwb_passive_ds_clean_completed_history {
@@ -10296,6 +10267,7 @@ struct uwb_passive_ds_clean_tag_stats {
     uint32_t queue_drops;
     uint32_t telemetry_drops;
     uint32_t solver_drops;
+    uint32_t session_changes;
     uint32_t last_frame_id;
     bool have_last_frame;
     int64_t summary_started_us;
@@ -10449,20 +10421,29 @@ static void uwb_passive_ds_clean_schedule_from_poll(
     const uint32_t period_us =
         config->passive_ds_slot_ms * 1000U +
         config->passive_ds_round_gap_ms * 1000U;
-    struct uwb_passive_ds_plan next = {0};
+    uint32_t next_frame_id = 0U;
+    uint8_t frame_offset = 0U;
     schedule->last_poll_host_us = poll_host_us;
-    schedule->synced = uwb_passive_ds_build_plan(
-                           anchor_ids, anchor_count,
-                           poll->frame_id + 1U, &next) &&
-                       next.initiator_id == s_source_id;
+    schedule->synced = uwb_passive_ds_next_owned_frame(
+        anchor_ids, anchor_count, poll->frame_id, s_source_id,
+        &next_frame_id, &frame_offset);
     if (!schedule->synced) {
         return;
     }
     schedule->session_id = poll->session_id;
-    schedule->next_frame_id = poll->frame_id + 1U;
+    schedule->next_frame_id = next_frame_id;
+    const uint64_t schedule_delta_us =
+        (uint64_t)period_us * (uint64_t)frame_offset;
+    if (schedule_delta_us > UINT32_MAX ||
+        poll_host_us > INT64_MAX - (int64_t)schedule_delta_us) {
+        schedule->synced = false;
+        return;
+    }
     schedule->next_poll_radio_ts = uwb_dw3000_add_timestamp_delta(
-        poll_radio_ts, uwb_dw3000_us_to_dtu(period_us));
-    schedule->next_poll_host_us = poll_host_us + period_us;
+        poll_radio_ts,
+        uwb_dw3000_us_to_dtu((uint32_t)schedule_delta_us));
+    schedule->next_poll_host_us =
+        poll_host_us + (int64_t)schedule_delta_us;
 }
 
 static esp_err_t uwb_passive_ds_clean_initiate(
@@ -10806,9 +10787,7 @@ static esp_err_t uwb_passive_ds_clean_respond(
     const int32_t measured_mm =
         uwb_distance_meters_to_mm(measurement.distance_m);
     int32_t calibrated_mm = 0;
-    if (!uwb_passive_ds_calibrated_anchor_range_mm(
-            anchor_ids, anchor_count, poll->initiator_id, s_source_id,
-            measured_mm, &calibrated_mm)) {
+    if (!uwb_passive_ds_anchor_range_mm(measured_mm, &calibrated_mm)) {
         return ESP_ERR_INVALID_RESPONSE;
     }
     const int32_t raw_mm =
@@ -11001,23 +10980,6 @@ static bool uwb_passive_ds_clean_tag_try_emit(
     int32_t comparison_mm = response->cfo_comparison_valid
                                 ? response->cfo_comparison_mm
                                 : difference_mm;
-    const app_runtime_config_t *config = app_runtime_config_get();
-    if (config->passive_ds_calibration_enabled) {
-        const size_t initiator_index = uwb_anchor_survey_id_index(
-            anchor_ids, anchor_count, frame->initiator_id);
-        const size_t responder_anchor_index = uwb_anchor_survey_id_index(
-            anchor_ids, anchor_count, response->responder_id);
-        if (initiator_index == SIZE_MAX ||
-            responder_anchor_index == SIZE_MAX) {
-            stats->invalid++;
-            return false;
-        }
-        const int32_t correction =
-            config->passive_ds_anchor_bias_mm[responder_anchor_index] -
-            config->passive_ds_anchor_bias_mm[initiator_index];
-        difference_mm -= correction;
-        comparison_mm -= correction;
-    }
     if ((frame->computed_mask & bit) == 0U) {
         frame->computed_mask |= bit;
         stats->computed_observations++;
@@ -11342,6 +11304,7 @@ static void uwb_passive_ds_clean_tag_loop(
                     } else {
                         if (have_current_session &&
                             poll.session_id != current_session_id) {
+                            stats.session_changes++;
                             for (size_t index = 0U;
                                  index <
                                      UWB_PASSIVE_DS_CLEAN_TAG_FRAME_BUCKETS;
@@ -11452,7 +11415,8 @@ static void uwb_passive_ds_clean_tag_loop(
                 "computed_star=%lu/%lu/%lu/%lu "
                 "radio_obs=%lu computed_obs=%lu "
                 "computed_incomplete=%lu solver_full=%lu "
-                "miss_poll=%lu queue_attempt_drop=%lu/%lu",
+                "miss_poll=%lu session_change=%lu "
+                "queue_attempt_drop=%lu/%lu",
                 (unsigned long)stats.radio_ready_stars[0],
                 (unsigned long)stats.radio_ready_stars[1],
                 (unsigned long)stats.radio_ready_stars[2],
@@ -11466,6 +11430,7 @@ static void uwb_passive_ds_clean_tag_loop(
                 (unsigned long)stats.computed_incomplete,
                 (unsigned long)stats.solver_full,
                 (unsigned long)stats.missing_poll,
+                (unsigned long)stats.session_changes,
                 (unsigned long)stats.telemetry_drops,
                 (unsigned long)stats.solver_drops);
             const uint32_t last_frame = stats.last_frame_id;
@@ -11524,6 +11489,7 @@ static void uwb_passive_ds_clean_anchor_loop(
             now_us - schedule.last_poll_host_us >= recovery_us) {
             initiate = true;
             bootstrap = true;
+            schedule.bootstrap_count++;
             frame_id = 0U;
             do {
                 session_id = esp_random();
@@ -11652,12 +11618,14 @@ static void uwb_passive_ds_clean_anchor_loop(
         if (summary_now_us - summary_started_us >= 1000000LL) {
             ESP_LOGI(TAG,
                      "PASSIVE_DS anchors raw full=%lu partial=%lu "
-                     "fail=%lu late=%lu period=%lldus packets=5 "
+                     "fail=%lu late=%lu bootstrap=%lu "
+                     "period=%lldus packets=5 "
                      "rx_err=%lu rx_status=0x%08lx",
                      (unsigned long)full_frames,
                      (unsigned long)partial_frames,
                      (unsigned long)failed_frames,
                      (unsigned long)schedule.late_count,
+                     (unsigned long)schedule.bootstrap_count,
                      (long long)period_us,
                      (unsigned long)s_passive_ds_rx_errors_since_summary,
                      (unsigned long)s_passive_ds_rx_error_status_since_summary);
@@ -11665,6 +11633,7 @@ static void uwb_passive_ds_clean_anchor_loop(
             partial_frames = 0U;
             failed_frames = 0U;
             schedule.late_count = 0U;
+            schedule.bootstrap_count = 0U;
             s_passive_ds_rx_errors_since_summary = 0U;
             s_passive_ds_rx_error_status_since_summary = 0U;
             summary_started_us = summary_now_us;
@@ -11986,19 +11955,12 @@ static void uwb_dw3000_ranging_loop(void)
         .maximum_distance_m = APP_UWB_RANGING_MAX_DISTANCE_M,
         .fixed_geometry = runtime->flex_tdoa_geometry_fixed,
         .geometry_version = runtime->flex_tdoa_geometry_generation,
-        .range_calibration_enabled =
-            runtime->native_ds_calibration_enabled,
-        .range_calibration_generation =
-            runtime->native_ds_calibration_generation,
     };
     memcpy(config.anchor_ids, anchor_ids, anchor_count);
     memcpy(config.anchor_x_mm, runtime->flex_tdoa_anchor_x_mm,
            anchor_count * sizeof(config.anchor_x_mm[0]));
     memcpy(config.anchor_y_mm, runtime->flex_tdoa_anchor_y_mm,
            anchor_count * sizeof(config.anchor_y_mm[0]));
-    memcpy(config.anchor_range_bias_mm,
-           runtime->native_ds_range_bias_mm,
-           anchor_count * sizeof(config.anchor_range_bias_mm[0]));
 
     const struct uwb_native_ds_radio_ops radio = {
         .send_immediate_expect_rx = native_ds_send_immediate_expect_rx,
@@ -12019,16 +11981,13 @@ static void uwb_dw3000_ranging_loop(void)
     ESP_LOGI(TAG,
              "Native DS-TWR clean runtime: source=%u tag=%u anchors=%u "
              "slot=%lu ms gap=%lu ms timeout=%lu ms resp=%lu ms "
-             "final=%lu ms range_cal=%s generation=%lu; "
-             "no clock correction",
+             "final=%lu ms; no clock or per-anchor range correction",
              (unsigned)config.source_id, (unsigned)config.tag_id,
              (unsigned)config.anchor_count, (unsigned long)config.slot_ms,
              (unsigned long)config.round_gap_ms,
              (unsigned long)config.rx_timeout_ms,
              (unsigned long)config.response_delay_ms,
-             (unsigned long)config.final_delay_ms,
-             config.range_calibration_enabled ? "on" : "off",
-             (unsigned long)config.range_calibration_generation);
+             (unsigned long)config.final_delay_ms);
     const esp_err_t err = uwb_native_ds_runtime_run(&config, &radio);
     if (err != ESP_OK && !uwb_dw3000_runtime_switch_pending()) {
         s_status = UWB_DW3000_STATUS_FAILED;

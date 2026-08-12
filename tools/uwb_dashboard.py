@@ -26,9 +26,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Mapping
 
 try:
-    from uwb_imu_fusion import UwbImuFusion
+    from uwb_imu_fusion import FusionConfig, UwbImuFusion
 except ImportError:  # Supports importing this script as tools.uwb_dashboard.
-    from tools.uwb_imu_fusion import UwbImuFusion
+    from tools.uwb_imu_fusion import FusionConfig, UwbImuFusion
 
 
 IMU_FUSION_NON_ADVANCING_FLAGS = frozenset(
@@ -456,43 +456,6 @@ def runtime_config_matches_status(
             int(value) for value in status.get("runtime_anchor_ids") or []
         ]
         if actual_anchors != expected_anchors:
-            return False
-        checked += 1
-
-    for key, field in (
-        ("flex_tdoa_anchor_correction_mm",
-         "runtime_flex_tdoa_anchor_correction_mm"),
-        ("native_ds_range_bias_mm",
-         "runtime_native_ds_range_bias_mm"),
-        ("passive_ds_anchor_bias_mm",
-         "runtime_passive_ds_anchor_bias_mm"),
-        ("passive_ds_range_bias_mm",
-         "runtime_passive_ds_range_bias_mm"),
-    ):
-        if key not in params:
-            continue
-        try:
-            expected_values = [
-                int(value, 0)
-                for value in re.split(r"[\s,;]+", str(params[key]))
-                if value.strip()
-            ]
-            actual_values = [
-                int(value) for value in status.get(field) or []
-            ]
-        except (TypeError, ValueError):
-            return False
-        if actual_values != expected_values:
-            return False
-        checked += 1
-
-    if "passive_ds_calibration_clear" in params:
-        if bool(status.get("runtime_passive_ds_calibration_enabled")):
-            return False
-        checked += 1
-
-    if "native_ds_calibration_clear" in params:
-        if bool(status.get("runtime_native_ds_calibration_enabled")):
             return False
         checked += 1
 
@@ -1599,6 +1562,59 @@ class DashboardState:
             tuple[int, str, int], float
         ] = {}
         self.imu_fusion_emit_interval_us = 20_000
+        # Position-only CV Kalman tracks are deliberately independent from
+        # the optional IMU fusion.  They run continuously so every browser
+        # can switch raw/Kalman display without resetting or rebooting a UWB
+        # runtime, while the authoritative raw event remains unchanged.
+        self.position_kalmans: dict[tuple[str, int], UwbImuFusion] = {}
+        # The model is identical for all protocols; only process/measurement
+        # noise follows their very different update rates.  Passive DS emits
+        # more highly correlated windows and therefore needs a more agile,
+        # transparent profile than Flex/Native.
+        self.position_kalman_configs = {
+            "flextdoa": FusionConfig(
+                process_accel_noise_mps2=36.0,
+                adaptive_process_noise=True,
+                adaptive_process_accel_noise_min_mps2=2.0,
+                uwb_default_std_m=0.12,
+                uwb_min_std_m=0.06,
+                uwb_measurement_std_scale=0.5,
+                position_smoothing_blend=0.0,
+                reboot_backstep_ms=1000,
+                position_gap_reset_ms=250,
+            ),
+            "native_ds": FusionConfig(
+                process_accel_noise_mps2=24.0,
+                adaptive_process_noise=True,
+                adaptive_process_accel_noise_min_mps2=1.0,
+                adaptive_process_residual_full_sigma=5.0,
+                adaptive_process_noise_decay_gain=0.05,
+                uwb_default_std_m=0.12,
+                uwb_min_std_m=0.06,
+                uwb_measurement_std_scale=0.7,
+                position_smoothing_blend=0.0,
+                reboot_backstep_ms=1000,
+                position_gap_reset_ms=250,
+            ),
+            "passive_ds": FusionConfig(
+                process_accel_noise_mps2=480.0,
+                adaptive_process_noise=True,
+                adaptive_process_accel_noise_min_mps2=20.0,
+                uwb_default_std_m=0.08,
+                uwb_min_std_m=0.02,
+                uwb_measurement_std_scale=0.5,
+                position_smoothing_blend=0.0,
+                reboot_backstep_ms=1000,
+                position_gap_reset_ms=200,
+                position_only_stationary_enabled=True,
+                position_only_stationary_window_ms=2000,
+                position_only_stationary_min_samples=20,
+                position_only_stationary_max_center_shift_m=0.16,
+                position_only_stationary_max_radius_m=0.22,
+                position_only_stationary_exit_center_m=0.18,
+                position_only_stationary_exit_sample_m=0.35,
+            ),
+        }
 
     def add_log(self, line: str, addr: tuple[str, int]) -> None:
         parsed = self.parse_line(line)
@@ -1825,6 +1841,7 @@ class DashboardState:
             ),
             "position_stream_event_id": self.next_position_stream_event_id,
         }
+        self._attach_position_kalman_locked(stored)
         # The position publisher can be a receive-only listener.  Its local
         # BNO085 must never be fused into a remote tag track: tag IDs are the
         # physical module IDs in this deployment, so route IMU by tag_id.
@@ -1840,13 +1857,156 @@ class DashboardState:
             stored.get("sample_time_us")
             or int(stored.get("uptime_ms") or 0) * 1000
         )
-        self._enqueue_fusion_event_locked(
-            imu_module_id,
-            position_time_us,
-            "position",
-            {"stored": stored},
-        )
+        if self._imu_fusion_enabled_for_module_locked(imu_module_id):
+            self._enqueue_fusion_event_locked(
+                imu_module_id,
+                position_time_us,
+                "position",
+                {"stored": stored},
+            )
         self.position_condition.notify_all()
+
+    def _attach_position_kalman_locked(self, stored: dict[str, Any]) -> None:
+        """Attach one position-only Kalman estimate to one raw UWB event."""
+
+        protocol = str(stored.get("tdoa_protocol") or "flextdoa")
+        tag_id = int(stored.get("tag_id") or 0)
+        stored["dashboard_position_filter"] = "adaptive_ekf_position_only"
+        stored["kalman_valid"] = False
+        if tag_id <= 0:
+            stored["kalman_reason"] = "invalid_tag"
+            return
+
+        # Legacy Passive DS firmware sometimes exposes only its own filtered
+        # x/y.  It is not a raw baseline, so only accept that legacy stream
+        # when the explicit pre-filter coordinates are present.
+        source_x = stored.get("x_m")
+        source_y = stored.get("y_m")
+        if protocol == "passive_ds" and stored.get("position_filter") != "none":
+            if stored.get("raw_x_m") is None or stored.get("raw_y_m") is None:
+                stored["kalman_reason"] = "source_not_raw"
+                return
+            source_x = stored.get("raw_x_m")
+            source_y = stored.get("raw_y_m")
+
+        try:
+            source_x = float(source_x)
+            source_y = float(source_y)
+            if not math.isfinite(source_x) or not math.isfinite(source_y):
+                raise ValueError("non-finite raw position")
+            key = (protocol, tag_id)
+            tracker = self.position_kalmans.get(key)
+            correlated_passive = (
+                protocol == "passive_ds"
+                and stored.get("independent_frame") is not True
+            )
+            if correlated_passive:
+                # This solver output reuses most of the previous radio frame.
+                # Keep it in the authoritative high-rate raw trail, but do
+                # not expose a stale held estimate as a fresh EKF sample.
+                stored["kalman_reason"] = "correlated_window_raw_bypass"
+                return
+            if tracker is None:
+                config = self.position_kalman_configs.get(
+                    protocol, self.position_kalman_configs["flextdoa"]
+                )
+                tracker = UwbImuFusion(config)
+                self.position_kalmans[key] = tracker
+            measurement = {
+                **stored,
+                "module_id": tag_id,
+                # Force the authoritative direct solve selected above;
+                # RawPosition otherwise intentionally prefers raw_x_m.
+                "raw_x_m": source_x,
+                "raw_y_m": source_y,
+                "x_m": source_x,
+                "y_m": source_y,
+                "protocol": protocol,
+            }
+            # Passive DS-TWR publishes three overlapping solver windows per
+            # independent radio frame. The early return above prevents the
+            # EKF from counting the same range information repeatedly.
+            filtered = tracker.update_position(measurement)
+            filtered_x = filtered.get("x")
+            filtered_y = filtered.get("y")
+            measurement_std = filtered.get("diagnostics", {}).get(
+                "last_position_measurement_std_m"
+            )
+            leash_m = (
+                max(0.06, 2.5 * float(measurement_std or 0.0))
+                if protocol == "passive_ds"
+                else max(0.12, 3.0 * float(measurement_std or 0.0))
+            )
+            if (
+                filtered.get("ready")
+                and filtered_x is not None
+                and filtered_y is not None
+                and math.hypot(
+                    float(filtered_x) - source_x,
+                    float(filtered_y) - source_y,
+                )
+                > leash_m
+            ):
+                tracker.reset("position_only_leash")
+                filtered = tracker.update_position(measurement)
+                filtered["flags"] = [
+                    *filtered.get("flags", []),
+                    "kalman_raw_leash_reset",
+                ]
+        except (TypeError, ValueError):
+            stored["kalman_reason"] = "invalid_measurement"
+            return
+
+        flags = [str(value) for value in filtered.get("flags", [])]
+        diagnostics = filtered.get("diagnostics", {})
+        stored["kalman_flags"] = flags
+        # Do not attach the full fusion diagnostic dictionary to every
+        # high-rate SSE position.  It is several kilobytes and the browser
+        # never consumes it; keep only the compact values needed for replay
+        # and tuning so the live dashboard remains responsive.
+        stored["kalman_measurement_std_m"] = diagnostics.get(
+            "last_position_measurement_std_m"
+        )
+        stored["kalman_nis"] = diagnostics.get("last_position_nis")
+        stored["kalman_process_accel_noise_mps2"] = diagnostics.get(
+            "active_process_accel_noise_mps2"
+        )
+        stored["kalman_process_noise_ratio"] = diagnostics.get(
+            "adaptive_process_noise_ratio"
+        )
+        stored["kalman_reset"] = "reset" in flags
+        stored["kalman_source_x_m"] = source_x
+        stored["kalman_source_y_m"] = source_y
+        non_advancing = bool(set(flags) & IMU_FUSION_NON_ADVANCING_FLAGS)
+        coordinates = (filtered.get("x"), filtered.get("y"))
+        if (
+            not bool(filtered.get("ready"))
+            or non_advancing
+            or coordinates[0] is None
+            or coordinates[1] is None
+        ):
+            stored["kalman_reason"] = (
+                "non_advancing" if non_advancing else "not_ready"
+            )
+            return
+        kalman_x = float(coordinates[0])
+        kalman_y = float(coordinates[1])
+        if not math.isfinite(kalman_x) or not math.isfinite(kalman_y):
+            stored["kalman_reason"] = "invalid_output"
+            return
+        stored.update(
+            {
+                "kalman_valid": True,
+                "kalman_x_m": kalman_x,
+                "kalman_y_m": kalman_y,
+                "kalman_vx_mps": filtered.get("vx"),
+                "kalman_vy_mps": filtered.get("vy"),
+                "kalman_innovation_m": (
+                    diagnostics.get("last_position_residual_m")
+                ),
+                "kalman_reason": "ok",
+            }
+        )
 
     def _process_position_fusion_locked(
         self, stored: dict[str, Any]
@@ -2683,7 +2843,10 @@ class DashboardState:
         # Legacy acceleration-only telemetry has no orientation and cannot be
         # fused.  A full IMU sample marked invalid must still reach an active
         # fusion so it can stop integrating stale acceleration safely.
-        if "imu_valid" not in sample:
+        if (
+            "imu_valid" not in sample
+            or not self._imu_fusion_enabled_for_module_locked(module_id)
+        ):
             return
         if chronological:
             self._enqueue_fusion_event_locked(
@@ -2746,6 +2909,24 @@ class DashboardState:
             self.imu_fusion_event_latest_time_us.get(module_id, int(sample_time_us)),
         )
         self._drain_fusion_events_locked(module_id)
+
+    def _imu_fusion_enabled_for_module_locked(self, module_id: int) -> bool:
+        status = self.status_by_module.get(module_id)
+        if status is None or "runtime_bno085_accel_enabled" not in status:
+            return True
+        return bool(status["runtime_bno085_accel_enabled"])
+
+    def _clear_imu_fusion_module_locked(self, module_id: int) -> None:
+        self.imu_fusion_event_buffers.pop(module_id, None)
+        self.imu_fusion_event_latest_time_us.pop(module_id, None)
+        self.latest_imu_by_module.pop(module_id, None)
+        for key in list(self.imu_fusions):
+            if key[0] != module_id:
+                continue
+            self.imu_fusions.pop(key, None)
+            self.imu_fusion_last_emit_time_us.pop(key, None)
+            self.imu_fusion_last_rtk_yaw_status_at.pop(key, None)
+            self.imu_fusion_latest.pop(self._fusion_key_text(key), None)
 
     def _drain_fusion_events_locked(
         self, module_id: int, *, force: bool = False
@@ -2962,6 +3143,7 @@ class DashboardState:
             "frame_id": frame_id,
             "seq": frame_id,
             "slot_id": slot_id,
+            "uptime_ms": item.get("uptime_ms"),
             "received_at": now,
             "log_id": item.get("id"),
             "source_module_id": item.get("module_id"),
@@ -3635,6 +3817,8 @@ class DashboardState:
                     if key in previous:
                         status[key] = previous[key]
             self.status_by_module[module_id] = status
+            if not self._imu_fusion_enabled_for_module_locked(module_id):
+                self._clear_imu_fusion_module_locked(module_id)
             target = status.get("target")
             if isinstance(target, str):
                 self.status_errors.pop(target, None)
@@ -5654,6 +5838,12 @@ tr.status-stale td { color: #4f3b1d; }
             <input id="positionReferenceY" value="1.50" type="number" step="0.001">
             <label for="positionErrorWindowSec">Error window s</label>
             <input id="positionErrorWindowSec" value="30" type="number" min="1" max="120" step="1">
+            <label for="positionKalmanEnabled">Display filter</label>
+            <label class="checkbox-row"><input id="positionKalmanEnabled" type="checkbox"> Adaptive EKF (position-only, no IMU)</label>
+            <label for="positionShowRawTrail">Raw overlay</label>
+            <label class="checkbox-row"><input id="positionShowRawTrail" type="checkbox" checked> Show raw trail</label>
+            <label for="positionShowEkfTrail">EKF overlay</label>
+            <label class="checkbox-row"><input id="positionShowEkfTrail" type="checkbox"> Show EKF trail</label>
           </div>
           <div class="form-actions">
             <button id="positionResetTrail">Reset Trail</button>
@@ -5667,6 +5857,7 @@ tr.status-stale td { color: #4f3b1d; }
             <div><b>Tags</b><span>Comma separated tag IDs. In both passive protocols every non-anchor module only listens on UWB, so additional tags consume no radio slots.</span></div>
             <div><b>Geometry</b><span>All three positioning protocols start from the surveyed GPS RTK ENU geometry after every anchor is RTK Fixed, then follow packet-time GNSS anchor positions. Float/SPS holds the last Fixed coordinate and is labelled as degraded continuity. Anchor-to-anchor ranges remain diagnostics only.</span></div>
             <div><b>Known reference</b><span>GPS RTK first fits the RTK anchor geometry to the active UWB anchors with one rigid 2D rotation/translation, then compares every UWB point with the nearest RTK-fixed tag sample. Centroid and manual coordinates remain available for static tests.</span></div>
+            <div><b>Display filter</b><span>The Raspberry computes a position-only constant-velocity Kalman estimate. The filter controls only the live marker. Raw and EKF trail overlays can be shown independently; both histories are always retained and never modified.</span></div>
           </div>
           <div id="positionToast" class="toast"></div>
           <div class="section" style="margin-top:12px;">
@@ -5680,7 +5871,7 @@ tr.status-stale td { color: #4f3b1d; }
           </div>
           <div class="section">
             <h2>Live Position</h2>
-            <div class="position-legend"><span style="color:#d7352a">live marker (all updates)</span><span style="color:#7b8798">pre-filter current (when available)</span><span style="color:#2b64d8">displayed independent trail</span><span style="color:#0e9f6e">IMU fused trail</span><span style="color:#7b8798">pre-filter independent trail</span><span style="color:#6d4c9f">known reference</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
+            <div class="position-legend"><span style="color:#d7352a">selected live marker</span><span style="color:#2b64d8">raw UWB trail</span><span style="color:#0e9f6e">adaptive EKF trail</span><span style="color:#7b8798">pre-filter legacy trail</span><span style="color:#6d4c9f">known reference</span><span class="ring" style="color:#2b64d8">anchor drift</span><span style="color:#16833a">anchor</span></div>
             <div id="positionReadout" class="position-readout"></div>
             <table>
               <thead><tr><th>Tag</th><th>axis σ</th><th>equation RMS</th><th>max residual</th></tr></thead>
@@ -6554,30 +6745,6 @@ tr.status-stale td { color: #4f3b1d; }
               <div class="form-actions"><button class="primary apply-passive-ds-profile" data-passive-ds-profile="multi">Apply Clean Rotating Full-DS</button><button class="reset-passive-ds-profile" data-passive-ds-profile="multi">Reset Defaults</button></div>
             </div>
           </div>
-          <div class="profile-card" style="margin-top:12px">
-            <h3>Passive DS-TWR calibration</h3>
-            <p class="muted">Optional hardware-bias calibration for receive-only tags. Apply it to each passive tag, not to the ranging anchors. Anchor bias values are ordered like the configured anchors. Range bias values use unordered pair order: A1-A2, A1-A3, …, A2-A3, … . The first anchor bias must be zero.</p>
-            <div class="form-grid">
-              <label for="passiveDsCalibrationTargets">Passive tag target</label>
-              <select id="passiveDsCalibrationTargets">
-                <option value="1" selected>module 1 (current tag)</option>
-                <option value="2">module 2</option>
-                <option value="3">module 3</option>
-                <option value="4">module 4</option>
-                <option value="5">module 5</option>
-                <option value="all">all modules (advanced)</option>
-              </select>
-              <label for="passiveDsAnchorBiasMm">Anchor observation bias mm</label>
-              <input id="passiveDsAnchorBiasMm" value="0,34,-16,-55">
-              <label for="passiveDsRangeBiasMm">Anchor-pair range bias mm</label>
-              <input id="passiveDsRangeBiasMm" value="71,56,-49,67,66,-29">
-            </div>
-            <div id="passiveDsCalibrationStatus" class="profile-summary">calibration status unavailable</div>
-            <div class="form-actions">
-              <button id="applyPassiveDsCalibration" class="primary">Apply Calibration</button>
-              <button id="clearPassiveDsCalibration">Clear Calibration</button>
-            </div>
-          </div>
           <div id="passiveDsProfileToast" class="toast"></div>
         </div>
         <div id="rangingProfilesSection" class="section">
@@ -6596,28 +6763,6 @@ tr.status-stale td { color: #4f3b1d; }
           <p id="rangingProfileNote" class="muted profile-note">Each slot contains POLL, RESP, FINAL and one one-shot RESULT. A complete frame ranges the tag to every configured anchor, then applies the frame gap.</p>
           <div id="rangingActiveProfile" class="profile-validation">Waiting for live Native DS-TWR timing...</div>
           <div id="rangingProfileGrid" class="profile-grid"></div>
-          <div class="profile-card" style="margin-top:12px">
-            <h3>Native DS-TWR range calibration</h3>
-            <p class="muted">Static per-anchor range bias, ordered like the configured anchor IDs. Each value is measured range minus RTK truth in millimetres and is subtracted before the raw independent-frame solver. The defaults below were validated on channel 9 with the 44 ms profile. This is a hardware/timing calibration, not a temporal filter.</p>
-            <div class="form-grid">
-              <label for="nativeDsCalibrationTargets">Targets</label>
-              <select id="nativeDsCalibrationTargets">
-                <option value="all" selected>all modules</option>
-                <option value="1">module 1</option>
-                <option value="2">module 2</option>
-                <option value="3">module 3</option>
-                <option value="4">module 4</option>
-                <option value="5">module 5</option>
-              </select>
-              <label for="nativeDsRangeBiasMm">Range bias mm</label>
-              <input id="nativeDsRangeBiasMm" value="-13,92,39,-17">
-            </div>
-            <div id="nativeDsCalibrationStatus" class="profile-summary">calibration status unavailable</div>
-            <div class="form-actions">
-              <button id="applyNativeDsCalibration" class="primary">Apply Calibration</button>
-              <button id="clearNativeDsCalibration">Clear Calibration</button>
-            </div>
-          </div>
           <div class="form-actions">
             <button id="resetAllRangingProfiles">Reset All Profile Defaults</button>
           </div>
@@ -6930,20 +7075,25 @@ const state = {
   imuAssociation: {},
   positionTrail: {},
   positionRawTrail: {},
+  positionKalmanTrail: {},
   positionImuTrail: {},
   positionTrailTokens: {},
+  positionKalmanTrailTokens: {},
   positionImuTrailTokens: {},
   positionImuSnapshotTokens: {},
   positionTrailEpochs: {},
+  positionTrailEpochBreaks: {},
   positionAnchorTrail: {},
   positionResults: {},
   positionModel: null,
   positionWasActive: false,
   positionGeometry: {key: "", ekf: null},
+  positionViewport: null,
   positionSeeds: {},
   positionStream: null,
   positionStreamConnected: false,
   positionStreamRenderPending: false,
+  positionStreamLastRenderMs: -Infinity,
   positionStreamRxTimes: [],
   positionStreamIndependentTimes: [],
   positionStreamSuperframeTimes: [],
@@ -6952,6 +7102,7 @@ const state = {
   positionStreamRenderLatencies: [],
   positionStreamLatestEvent: null,
   positionStreamLastRenderedEventToken: "",
+  positionMetricsLastUpdateMs: -Infinity,
   positionSettingsSolver: null,
   positionSetupDirty: false,
   positionApplyInFlight: false,
@@ -6976,6 +7127,7 @@ const state = {
   gpsRtkSamples: new Map(),
   gpsRtkLastTokens: new Map(),
   gpsRtkPendingJumps: new Map(),
+  gpsRtkStatusByModule: new Map(),
   gpsRtkAnchorIdsKey: "",
   gpsRtkGeometryGenerationKey: "",
 };
@@ -6983,10 +7135,16 @@ const accelLineRe = /\bBNO085 accel x=([-+]?\d+(?:\.\d+)?) y=([-+]?\d+(?:\.\d+)?
 const maxAccelSamples = 30000;
 const maxSeriesPoints = 1600;
 const maxTerminalRenderLines = 1000;
-const positionTrailMaxAgeSec = 120;
-const positionTrailMaxPoints = 12000;
-const positionTrailMaxDrawPoints = 2500;
+// A field trail is operator-owned state: keep it intact until Reset Trail.
+// The former 120 s expiry removed old legs while a walk was still in progress,
+// and the changing draw stride rebuilt the whole polyline from a different
+// subset whenever its length crossed a threshold.  Both effects made an
+// already-recorded route appear to change shape.  This generous safety cap is
+// only a browser-memory guard; it is well beyond a normal field capture.
+const positionTrailMaxPoints = 30000;
 const positionTrailBreakGapSec = 0.75;
+const positionMetricsUpdateIntervalMs = 500;
+const positionStreamRenderIntervalMs = 1000 / 30;
 const plot = {left: 52, right: 704, top: 14, bottom: 166, width: 652, height: 152};
 const toastTimers = new Map();
 let calibrationPollTimer = null;
@@ -7937,6 +8095,12 @@ function positionSettings() {
   const referenceY = Number(document.getElementById("positionReferenceY")?.value);
   const errorWindowSec = Math.max(
     1, Math.min(120, Number(document.getElementById("positionErrorWindowSec")?.value || 30)));
+  const kalmanEnabled = Boolean(
+    document.getElementById("positionKalmanEnabled")?.checked);
+  const showRawTrail = Boolean(
+    document.getElementById("positionShowRawTrail")?.checked);
+  const showEkfTrail = Boolean(
+    document.getElementById("positionShowEkfTrail")?.checked);
   return {
     anchorCount,
     solver,
@@ -7947,6 +8111,9 @@ function positionSettings() {
     referenceX,
     referenceY,
     errorWindowSec,
+    kalmanEnabled,
+    showRawTrail,
+    showEkfTrail,
     nativeDsUpdateMode: "rolling",
     nativeDsFit: "all_anchor",
   };
@@ -8114,14 +8281,16 @@ function percentile(values, fraction) {
   return sorted[lower] * (1 - blend) + sorted[upper] * blend;
 }
 
-function positionReferenceErrorStats(tagId, position, reference, windowSec) {
+function positionReferenceErrorStats(
+  tagId, position, reference, windowSec, trailStore = state.positionTrail
+) {
   if (!position || !reference) return null;
   if (reference.dynamicGps) {
     return positionGpsReferenceErrorStats(
-      tagId, position, reference, windowSec);
+      tagId, position, reference, windowSec, trailStore);
   }
   const now = Date.now() / 1000;
-  const samples = (state.positionTrail[String(tagId)] || []).filter(point =>
+  const samples = (trailStore[String(tagId)] || []).filter(point =>
     Number.isFinite(Number(point.x)) &&
     Number.isFinite(Number(point.y)) &&
     now - Number(point.t) <= windowSec);
@@ -9739,7 +9908,10 @@ function updatePositionAnchorTrail(anchors, now) {
   }
 }
 
-function appendPositionTrailPoint(store, key, position, timestamp, metrics = null) {
+function appendPositionTrailPoint(
+  store, key, position, timestamp, metrics = null,
+  breakOnFilterReset = true
+) {
   if (!position ||
       !Number.isFinite(Number(position.x)) ||
       !Number.isFinite(Number(position.y))) return;
@@ -9748,8 +9920,11 @@ function appendPositionTrailPoint(store, key, position, timestamp, metrics = nul
   const fusionFlags = Array.isArray(metrics?.imu_fusion_flags)
     ? metrics.imu_fusion_flags.map(String)
     : [];
-  const explicitBreak = metrics?.imu_fusion_reset === true ||
+  const filterReset = metrics?.imu_fusion_reset === true ||
+    metrics?.kalman_reset === true ||
     fusionFlags.some(flag => flag === "reset" || flag.includes("reacquir"));
+  const explicitBreak = metrics?.trail_epoch_break === true ||
+    (breakOnFilterReset && filterReset);
   const timeGapSec = previous
     ? Number(timestamp) - Number(previous.t)
     : 0;
@@ -9759,16 +9934,11 @@ function appendPositionTrailPoint(store, key, position, timestamp, metrics = nul
     t: timestamp,
     sigma_m: Number(metrics?.sigma_m),
     rms_m: Number(metrics?.rms_m),
+    sample_time_us: Number(metrics?.sample_time_us),
     break_before: Boolean(previous) && (
       explicitBreak || timeGapSec > positionTrailBreakGapSec ||
       timeGapSec < -0.25),
   });
-  let staleCount = 0;
-  while (staleCount < trail.length &&
-         timestamp - trail[staleCount].t > positionTrailMaxAgeSec) {
-    staleCount++;
-  }
-  if (staleCount > 0) trail.splice(0, staleCount);
   if (trail.length > positionTrailMaxPoints) {
     trail.splice(0, trail.length - positionTrailMaxPoints);
   }
@@ -9779,11 +9949,14 @@ function resetPositionTagTrail(tagId) {
   const key = String(tagId);
   delete state.positionTrail[key];
   delete state.positionRawTrail[key];
+  delete state.positionKalmanTrail[key];
   delete state.positionImuTrail[key];
   delete state.positionTrailTokens[key];
+  delete state.positionKalmanTrailTokens[key];
   delete state.positionImuTrailTokens[key];
   delete state.positionImuSnapshotTokens[key];
   delete state.positionTrailEpochs[key];
+  delete state.positionTrailEpochBreaks[key];
 }
 
 function ensurePositionTrailEpoch(tagId, sample) {
@@ -9795,9 +9968,19 @@ function ensurePositionTrailEpoch(tagId, sample) {
   const rebooted = previous && Number.isFinite(uptimeMs) &&
     Number.isFinite(Number(previous.uptimeMs)) &&
     uptimeMs + 1000 < Number(previous.uptimeMs);
-  if (previous && (previous.protocol !== protocol || rebooted)) {
+  if (previous && previous.protocol !== protocol) {
     resetPositionTagTrail(key);
+    state.positionTrailEpochs[key] = {protocol, uptimeMs};
+    return;
   }
+  if (rebooted) {
+    // Preserve the operator's walk through a tag brownout, but make the
+    // discontinuity explicit instead of drawing a line across the outage.
+    state.positionTrailEpochBreaks[key] = true;
+    state.positionTrailEpochs[key] = {protocol, uptimeMs};
+    return;
+  }
+  // A protocol change is a new capture; a reboot is only a segment boundary.
   const active = state.positionTrailEpochs[key] || {protocol, uptimeMs: NaN};
   active.protocol = protocol;
   if (Number.isFinite(uptimeMs)) {
@@ -9809,31 +9992,66 @@ function ensurePositionTrailEpoch(tagId, sample) {
 }
 
 function recordPositionTrailPoint(
-  tagId, position, receivedAt, token, metrics = null, rawPosition = null
+  tagId, position, timestamp, token, metrics = null, rawPosition = null
 ) {
   if (!position || !Number.isFinite(Number(position.x)) || !Number.isFinite(Number(position.y))) return;
   const key = String(tagId);
-  const pointToken = String(token ?? `${receivedAt}:${position.x}:${position.y}`);
+  const pointToken = String(token ?? `${timestamp}:${position.x}:${position.y}`);
   if (state.positionTrailTokens[key] === pointToken) return;
   state.positionTrailTokens[key] = pointToken;
-  const timestamp = Number.isFinite(Number(receivedAt)) ? Number(receivedAt) : Date.now() / 1000;
+  const trailTimestamp = Number.isFinite(Number(timestamp))
+    ? Number(timestamp)
+    : Date.now() / 1000;
+  const epochBreak = Boolean(state.positionTrailEpochBreaks[key]);
+  if (epochBreak) delete state.positionTrailEpochBreaks[key];
+  const trailMetrics = epochBreak
+    ? {...(metrics || {}), trail_epoch_break: true}
+    : metrics;
   appendPositionTrailPoint(
-    state.positionTrail, key, position, timestamp, metrics);
+    state.positionTrail, key, position, trailTimestamp, trailMetrics, false);
   appendPositionTrailPoint(
-    state.positionRawTrail, key, rawPosition, timestamp, metrics);
+    state.positionRawTrail, key, rawPosition, trailTimestamp, trailMetrics, false);
+  const kalmanPosition = metrics?.kalman_valid === true &&
+    Number.isFinite(Number(metrics?.kalman_x_m)) &&
+    Number.isFinite(Number(metrics?.kalman_y_m))
+    ? {x: Number(metrics.kalman_x_m), y: Number(metrics.kalman_y_m)}
+    : null;
+  if (kalmanPosition) {
+    const kalmanToken = `${pointToken}:${metrics?.kalman_x_m}:${metrics?.kalman_y_m}`;
+    if (state.positionKalmanTrailTokens[key] !== kalmanToken) {
+      state.positionKalmanTrailTokens[key] = kalmanToken;
+      appendPositionTrailPoint(
+        state.positionKalmanTrail, key, kalmanPosition, trailTimestamp,
+        trailMetrics);
+    }
+  }
+}
+
+function positionTrailTimestamp(sample) {
+  // Wall time is used only for RTK association and dashboard time windows.
+  // The Kalman estimator itself uses sample_time_us/GPTimer on the Raspberry.
+  // Keeping those two clocks separate avoids comparing ESP uptime seconds
+  // with the Unix timestamps carried by the GPS reference track.
+  const receivedAt = Number(sample?.received_at);
+  return Number.isFinite(receivedAt) ? receivedAt : Date.now() / 1000;
 }
 
 function resetPositionTagTrails() {
   state.positionTrail = {};
   state.positionRawTrail = {};
+  state.positionKalmanTrail = {};
   state.positionImuTrail = {};
   state.positionTrailTokens = {};
+  state.positionKalmanTrailTokens = {};
   state.positionImuTrailTokens = {};
   state.positionImuSnapshotTokens = {};
   state.positionTrailEpochs = {};
+  state.positionTrailEpochBreaks = {};
   state.positionStreamRenderLatencies = [];
   state.positionStreamLatestEvent = null;
   state.positionStreamLastRenderedEventToken = "";
+  state.positionMetricsLastUpdateMs = -Infinity;
+  state.positionViewport = null;
 }
 
 function applyImuFusionSnapshot(fusions, expectedProtocol) {
@@ -9872,19 +10090,9 @@ function applyImuFusionSnapshot(fusions, expectedProtocol) {
 }
 
 function positionTrailDrawSamples(trail) {
-  if (!Array.isArray(trail) || trail.length <= positionTrailMaxDrawPoints) {
-    return trail || [];
-  }
-  const stride = Math.max(
-    1, Math.ceil(trail.length / positionTrailMaxDrawPoints));
-  const samples = [];
-  for (let index = 0; index < trail.length; index += stride) {
-    samples.push(trail[index]);
-  }
-  if (samples[samples.length - 1] !== trail[trail.length - 1]) {
-    samples.push(trail[trail.length - 1]);
-  }
-  return samples;
+  // Draw the stored samples verbatim.  Dynamic whole-trail decimation changed
+  // both visible vertices and gap markers as new samples arrived.
+  return Array.isArray(trail) ? trail : [];
 }
 
 function localPositionAge(item, now = Date.now() / 1000) {
@@ -9906,6 +10114,34 @@ function observedFlexTagIds(settings, now = Date.now() / 1000) {
     .map(item => Number(item.tag_id))
     .filter((value, index, values) => values.indexOf(value) === index)
     .sort((left, right) => left - right);
+}
+
+function kalmanPositionFromSample(sample) {
+  const x = Number(sample?.kalman_x_m);
+  const y = Number(sample?.kalman_y_m);
+  return sample?.kalman_valid === true && Number.isFinite(x) && Number.isFinite(y)
+    ? {x, y}
+    : null;
+}
+
+function heldPassiveKalmanPosition(tagId, sample, settings, now = Date.now() / 1000) {
+  if (!settings?.kalmanEnabled ||
+      String(sample?.tdoa_protocol || "") !== "passive_ds" ||
+      sample?.kalman_reason !== "correlated_window_raw_bypass") return null;
+  const trail = state.positionKalmanTrail[String(tagId)] || [];
+  const latest = trail[trail.length - 1];
+  const ageSec = latest ? now - Number(latest.t) : Infinity;
+  if (!latest || !Number.isFinite(ageSec) || ageSec < -0.25 ||
+      ageSec > positionDisplayMaxAge(settings)) return null;
+  const x = Number(latest.x);
+  const y = Number(latest.y);
+  return Number.isFinite(x) && Number.isFinite(y) ? {x, y} : null;
+}
+
+function rawPositionFromSample(sample) {
+  const x = Number(sample?.x_m);
+  const y = Number(sample?.y_m);
+  return Number.isFinite(x) && Number.isFinite(y) ? {x, y} : null;
 }
 
 function computePositionModel() {
@@ -9977,11 +10213,17 @@ function computePositionModel() {
         Number.isFinite(Number(localPosition.y_m))
       );
       if (positionIsFresh) {
-        position = {
-          x: Number(localPosition.x_m),
-          y: Number(localPosition.y_m),
-        };
-        if (Number.isFinite(Number(localPosition.raw_x_m)) &&
+        const directRawPosition = rawPositionFromSample(localPosition);
+        const kalmanPosition = kalmanPositionFromSample(localPosition);
+        const heldKalmanPosition = heldPassiveKalmanPosition(
+          tagId, localPosition, settings, now);
+        const displayKalmanPosition = kalmanPosition || heldKalmanPosition;
+        position = settings.kalmanEnabled && displayKalmanPosition
+          ? displayKalmanPosition
+          : directRawPosition;
+        if (settings.kalmanEnabled && displayKalmanPosition) {
+          rawPosition = directRawPosition;
+        } else if (Number.isFinite(Number(localPosition.raw_x_m)) &&
             Number.isFinite(Number(localPosition.raw_y_m))) {
           rawPosition = {
             x: Number(localPosition.raw_x_m),
@@ -10020,10 +10262,20 @@ function computePositionModel() {
         coherence,
         rawPosition,
         nativeFrame: null,
-        heldPosition: false,
+        heldPosition: positionIsFresh && settings.kalmanEnabled &&
+          !kalmanPositionFromSample(localPosition) &&
+          Boolean(heldPassiveKalmanPosition(
+            tagId, localPosition, settings, now)),
         positionAgeSec: positionIsFresh ? localPositionAge(localPosition, now) : 0,
         positionHoldSec: 0,
         solverSource: positionIsFresh ? "ESP32 tag" : "waiting for ESP32 tag",
+        displayFilter: settings.kalmanEnabled &&
+          Boolean(
+            kalmanPositionFromSample(localPosition) ||
+            heldPassiveKalmanPosition(tagId, localPosition, settings, now)
+          )
+          ? "adaptive_ekf_position_only"
+          : "raw",
       };
     }
   }
@@ -10046,34 +10298,56 @@ function computePositionModel() {
   };
 }
 
+function positionViewportKey(model) {
+  const protocol = positionGeometryProtocol(model?.settings?.solver);
+  const anchorIds = (model?.settings?.anchorIds || [])
+    .map(Number)
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right);
+  return `${protocol}:${anchorIds.join(",")}`;
+}
+
 function positionBounds(model) {
-  const points = [];
-  for (const anchor of Object.values(model.anchors)) points.push(anchor);
-  for (const tag of Object.values(model.tags)) {
-    if (tag.position) points.push(tag.position);
-    if (tag.metricPosition) points.push(tag.metricPosition);
-  }
-  for (const tagId of Object.keys(model.tags)) {
-    for (const store of [
-      state.positionTrail,
-      state.positionRawTrail,
-      state.positionImuTrail,
-    ]) {
-      const trail = store[tagId] || [];
-      for (const point of trail) points.push(point);
-    }
-  }
-  if (model.reference) points.push(model.reference);
+  const key = positionViewportKey(model);
+  if (state.positionViewport?.key === key) return state.positionViewport;
+
+  const selectedAnchorIds = (model?.settings?.anchorIds || [])
+    .map(Number)
+    .filter(Number.isFinite);
+  const points = selectedAnchorIds
+    .map(anchorId => model?.anchors?.[anchorId])
+    .filter(anchor =>
+      Number.isFinite(Number(anchor?.x)) &&
+      Number.isFinite(Number(anchor?.y)));
+  const completeAnchorGeometry = selectedAnchorIds.length >= 3 &&
+    points.length === selectedAnchorIds.length;
+
+  // Before complete geometry exists this result is deliberately transient.
+  // Once every selected anchor is present, cache the survey-only viewport and
+  // keep it byte-for-byte unchanged until Reset Trail/protocol/anchor-set
+  // change.  Including live tags, trails, or anchor jitter in subsequent bounds
+  // calculations rescales every historical pixel and makes the tail "dance".
   if (!points.length) {
     points.push({x: 0, y: 0}, {x: 2, y: 2});
   }
-  let minX = Math.min(...points.map(point => point.x));
-  let maxX = Math.max(...points.map(point => point.x));
-  let minY = Math.min(...points.map(point => point.y));
-  let maxY = Math.max(...points.map(point => point.y));
-  const span = Math.max(1, maxX - minX, maxY - minY);
-  const pad = Math.max(0.35, span * 0.14);
-  return {minX: minX - pad, maxX: maxX + pad, minY: minY - pad, maxY: maxY + pad};
+  const observed = {
+    minX: Math.min(...points.map(point => point.x)),
+    maxX: Math.max(...points.map(point => point.x)),
+    minY: Math.min(...points.map(point => point.y)),
+    maxY: Math.max(...points.map(point => point.y)),
+  };
+  const observedSpan = Math.max(
+    1, observed.maxX - observed.minX, observed.maxY - observed.minY);
+  const pad = Math.max(0.35, observedSpan * 0.14);
+  const viewport = {
+    key,
+    minX: observed.minX - pad,
+    maxX: observed.maxX + pad,
+    minY: observed.minY - pad,
+    maxY: observed.maxY + pad,
+  };
+  if (completeAnchorGeometry) state.positionViewport = viewport;
+  return viewport;
 }
 
 function positionTransform(model, width, height) {
@@ -10223,24 +10497,34 @@ function drawPosition(model) {
   }
 
   for (const tagId of Object.keys(model.tags)) {
-    drawTagTrail(
-      ctx,
-      tx,
-      state.positionRawTrail[tagId] || [],
-      "rgba(123, 135, 152, 0.62)",
-      true
-    );
-    drawTagTrail(
-      ctx,
-      tx,
-      state.positionTrail[tagId] || [],
-      "rgba(43, 100, 216, 0.76)"
-    );
+    if (model.settings.showRawTrail) {
+      drawTagTrail(
+        ctx,
+        tx,
+        state.positionRawTrail[tagId] || [],
+        "rgba(123, 135, 152, 0.62)",
+        true
+      );
+      drawTagTrail(
+        ctx,
+        tx,
+        state.positionTrail[tagId] || [],
+        "rgba(43, 100, 216, 0.76)"
+      );
+    }
+    if (model.settings.showEkfTrail) {
+      drawTagTrail(
+        ctx,
+        tx,
+        state.positionKalmanTrail[tagId] || [],
+        "rgba(14, 159, 110, 0.90)"
+      );
+    }
     drawTagTrail(
       ctx,
       tx,
       state.positionImuTrail[tagId] || [],
-      "rgba(14, 159, 110, 0.88)"
+      "rgba(180, 106, 0, 0.70)"
     );
   }
 
@@ -10549,6 +10833,10 @@ function renderPositionSolverStatus(model) {
   const liveItem = firstTag
     ? state.tdoa?.local_positions?.[String(firstTag.tagId)]
     : null;
+  const kalmanAvailable = Boolean(kalmanPositionFromSample(liveItem));
+  pills.push(
+    `<span class="position-pill ${settings.kalmanEnabled && !kalmanAvailable ? "warn" : "good"}">Kalman ${settings.kalmanEnabled ? "ON" : "OFF"}${kalmanAvailable ? " · ready" : " · waiting"}</span>`
+  );
   if (positionIsDirectEspSolve(liveItem)) {
     pills.push(`<span class="position-pill good">raw position · no filter</span>`);
   }
@@ -10726,7 +11014,10 @@ function renderPositionReadout(model) {
       tag.tagId,
       tag.metricPosition || tag.position,
       model.reference,
-      model.settings.errorWindowSec);
+      model.settings.errorWindowSec,
+      tag.displayFilter === "adaptive_ekf_position_only"
+        ? state.positionKalmanTrail
+        : state.positionTrail);
     const referenceText = referenceStats
       ? ` · actual ${fmtPositionCm(referenceStats.currentErrorM, 1)}`
       : "";
@@ -10738,7 +11029,8 @@ function renderPositionReadout(model) {
       : tag.heldPosition
         ? `holding last-good · age ${fmtFixed(tag.positionAgeSec, 2)} s`
         : `${fitCount}/${total} fresh distances`;
-    return `<div class="position-tag-card"><b id="positionTagSummary${esc(tag.tagId)}">Tag ${esc(tag.tagId)}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span id="positionTagMeta${esc(tag.tagId)}">${countText}${accuracyText}${referenceText}</span></div>`;
+    const heldText = tag.heldPosition ? " / adaptive EKF held" : "";
+    return `<div class="position-tag-card"><b id="positionTagSummary${esc(tag.tagId)}">Tag ${esc(tag.tagId)}${heldText}: x=${fmtFixed(tag.position.x, 2)} m, y=${fmtFixed(tag.position.y, 2)} m</b><span id="positionTagMeta${esc(tag.tagId)}">${countText}${accuracyText}${referenceText}</span></div>`;
   });
   const emptyTagCard = !model.geometry?.positionReady
     ? `<div class="position-tag-card"><b>waiting for geometry</b><span>Apply surveyed RTK ENU anchor coordinates from the GPS map. Mobile tracking starts after every anchor reports RTK Fixed.</span></div>`
@@ -10765,20 +11057,29 @@ function renderPositionReadout(model) {
       `${Number.isFinite(Number(model.reference.anchorFitRmsM)) ? ` · anchor fit RMS ${fmtPositionCm(model.reference.anchorFitRmsM, 1)}` : ""}` +
       ` · rolling ${fmtFixed(model.settings.errorWindowSec, 0)} s`;
     errorRows.innerHTML = Object.values(model.tags).map(tag => {
-      const stats = positionReferenceErrorStats(
-        tag.tagId,
-        tag.metricPosition || tag.position,
-        model.reference,
-        model.settings.errorWindowSec);
-      if (!stats) return `<tr><td>T${esc(tag.tagId)}</td><td colspan="5">waiting</td></tr>`;
-      return `<tr id="positionErrorRow${esc(tag.tagId)}">
-        <td>T${esc(tag.tagId)}<br><span class="muted" id="positionErrorCount${esc(tag.tagId)}">${esc(stats.count)} pts · ${fmtFixed(stats.spanSec, 1)} s</span></td>
-        <td id="positionErrorNow${esc(tag.tagId)}">${fmtPositionCm(stats.currentErrorM, 1)}</td>
-        <td id="positionErrorBias${esc(tag.tagId)}">${fmtPositionCm(stats.biasM, 1)}</td>
-        <td id="positionErrorRmse${esc(tag.tagId)}">${fmtPositionCm(stats.rmseM, 1)}</td>
-        <td id="positionErrorP95${esc(tag.tagId)}">${fmtPositionCm(stats.p95M, 1)}</td>
-        <td id="positionErrorMax${esc(tag.tagId)}">${fmtPositionCm(stats.maxM, 1)}</td>
-      </tr>`;
+      const item = state.tdoa?.local_positions?.[String(tag.tagId)];
+      const candidates = [
+        {name: "raw", position: rawPositionFromSample(item), trail: state.positionTrail},
+        {name: "Kalman", position: kalmanPositionFromSample(item), trail: state.positionKalmanTrail},
+      ];
+      return candidates.map(candidate => {
+        const suffix = candidate.name === "raw" ? "Raw" : "Kalman";
+        const stats = positionReferenceErrorStats(
+          tag.tagId,
+          candidate.position,
+          model.reference,
+          model.settings.errorWindowSec,
+          candidate.trail);
+        if (!stats) return `<tr><td>T${esc(tag.tagId)} ${esc(candidate.name)}</td><td colspan="5">waiting</td></tr>`;
+        return `<tr id="positionErrorRow${suffix}${esc(tag.tagId)}">
+          <td>T${esc(tag.tagId)} ${esc(candidate.name)}<br><span class="muted" id="positionErrorCount${suffix}${esc(tag.tagId)}">${esc(stats.count)} pts · ${fmtFixed(stats.spanSec, 1)} s</span></td>
+          <td id="positionErrorNow${suffix}${esc(tag.tagId)}">${fmtPositionCm(stats.currentErrorM, 1)}</td>
+          <td id="positionErrorBias${suffix}${esc(tag.tagId)}">${fmtPositionCm(stats.biasM, 1)}</td>
+          <td id="positionErrorRmse${suffix}${esc(tag.tagId)}">${fmtPositionCm(stats.rmseM, 1)}</td>
+          <td id="positionErrorP95${suffix}${esc(tag.tagId)}">${fmtPositionCm(stats.p95M, 1)}</td>
+          <td id="positionErrorMax${suffix}${esc(tag.tagId)}">${fmtPositionCm(stats.maxM, 1)}</td>
+        </tr>`;
+      }).join("");
     }).join("");
   } else if (model.referenceError) {
     referenceStatus.className = "warn";
@@ -10886,19 +11187,23 @@ function positionTrailSummary() {
   const keys = new Set([
     ...Object.keys(state.positionTrail || {}),
     ...Object.keys(state.positionRawTrail || {}),
+    ...Object.keys(state.positionKalmanTrail || {}),
     ...Object.keys(state.positionImuTrail || {}),
   ]);
   let ekfCount = 0;
   let rawCount = 0;
+  let kalmanCount = 0;
   let fusedCount = 0;
   let oldest = Infinity;
   let newest = -Infinity;
   for (const key of keys) {
     const ekf = state.positionTrail[key] || [];
     const raw = state.positionRawTrail[key] || [];
+    const kalman = state.positionKalmanTrail[key] || [];
     const fused = state.positionImuTrail[key] || [];
     ekfCount += ekf.length;
     rawCount += raw.length;
+    kalmanCount += kalman.length;
     fusedCount += fused.length;
     const representative = ekf.length ? ekf : raw.length ? raw : fused;
     if (!representative.length) continue;
@@ -10909,6 +11214,7 @@ function positionTrailSummary() {
   return {
     ekfCount,
     rawCount,
+    kalmanCount,
     fusedCount,
     spanSec: Number.isFinite(oldest) && Number.isFinite(newest)
       ? Math.max(0, newest - oldest)
@@ -10992,7 +11298,7 @@ function updatePositionStreamMetrics() {
     const usesTdoa = positionProtocolUsesTdoa(positionSettings().solver);
     const nativeMode = positionSettings().nativeDsUpdateMode;
     trailElement.textContent = directEspSolve
-      ? `independent raw trail: ${passiveUnfiltered ? trail.rawCount || trail.ekfCount : trail.ekfCount} points · IMU fused ${trail.fusedCount} · ` +
+      ? `raw trail ${trail.ekfCount} points · Kalman ${trail.kalmanCount} · ` +
         `${fmtFixed(trail.spanSec, 1)} s${latencyText}`
       : usesTdoa
       ? `independent trail: EKF ${trail.ekfCount} · raw ${trail.rawCount} · IMU fused ${trail.fusedCount} · ` +
@@ -11000,6 +11306,12 @@ function updatePositionStreamMetrics() {
       : `${nativeMode === "rolling" ? "rolling" : "coherent"} trail: ` +
         `${trail.ekfCount} points · IMU fused ${trail.fusedCount} · ` +
         `${fmtFixed(trail.spanSec, 1)} s${latencyText}`;
+    if (directEspSolve && passiveUnfiltered) {
+      trailElement.textContent =
+        `all valid raw solves trail: ${trail.ekfCount} / Kalman ${trail.kalmanCount} / ` +
+        `independent ${independentRate}/s / ` +
+        `${fmtFixed(trail.spanSec, 1)} s${latencyText}`;
+    }
     trailElement.className = "position-pill good";
   }
 }
@@ -11022,13 +11334,27 @@ function applyStreamPositionToModel(model) {
     const x = Number(item.x_m);
     const y = Number(item.y_m);
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    tag.position = {x, y};
+    const directRawPosition = {x, y};
+    const kalmanPosition = kalmanPositionFromSample(item);
+    const heldKalmanPosition = heldPassiveKalmanPosition(
+      tag.tagId, item, model.settings, now);
+    const displayKalmanPosition = kalmanPosition || heldKalmanPosition;
+    tag.position = model.settings.kalmanEnabled && displayKalmanPosition
+      ? displayKalmanPosition
+      : directRawPosition;
     const rawX = Number(item.raw_x_m);
     const rawY = Number(item.raw_y_m);
-    tag.rawPosition =
-      Number.isFinite(rawX) && Number.isFinite(rawY)
+    tag.rawPosition = model.settings.kalmanEnabled && displayKalmanPosition
+      ? directRawPosition
+      : Number.isFinite(rawX) && Number.isFinite(rawY)
         ? {x: rawX, y: rawY}
         : null;
+    tag.metricPosition = tag.position;
+    tag.heldPosition = model.settings.kalmanEnabled && !kalmanPosition &&
+      Boolean(heldKalmanPosition);
+    tag.displayFilter = model.settings.kalmanEnabled && displayKalmanPosition
+      ? "adaptive_ekf_position_only"
+      : "raw";
     tag.solverSource = "ESP32 tag";
     tag.accuracy = {
       count: Number(item.observation_count),
@@ -11041,6 +11367,10 @@ function applyStreamPositionToModel(model) {
 }
 
 function updatePositionLiveMetrics(model) {
+  const metricsNowMs = performance.now();
+  if (metricsNowMs - Number(state.positionMetricsLastUpdateMs) <
+      positionMetricsUpdateIntervalMs) return;
+  state.positionMetricsLastUpdateMs = metricsNowMs;
   for (const tag of Object.values(model.tags || {})) {
     const item = state.tdoa?.local_positions?.[String(tag.tagId)];
     if (!item ||
@@ -11050,7 +11380,13 @@ function updatePositionLiveMetrics(model) {
     const meta = document.getElementById(`positionTagMeta${tag.tagId}`);
     const sigma = Number(item.sigma_m);
     const referenceStats = positionReferenceErrorStats(
-      tag.tagId, tag.position, model.reference, model.settings.errorWindowSec);
+      tag.tagId,
+      tag.position,
+      model.reference,
+      model.settings.errorWindowSec,
+      tag.displayFilter === "adaptive_ekf_position_only"
+        ? state.positionKalmanTrail
+        : state.positionTrail);
     if (summary) {
       const rawDelta = tag.rawPosition
         ? Math.hypot(
@@ -11059,8 +11395,9 @@ function updatePositionLiveMetrics(model) {
           )
         : NaN;
       const unfilteredEsp = positionIsDirectEspSolve(item);
+      const heldText = tag.heldPosition ? " held" : "";
       summary.textContent = unfilteredEsp
-        ? `Tag ${tag.tagId}: x=${fmtFixed(tag.position.x, 3)} m, ` +
+        ? `Tag ${tag.tagId} ${tag.displayFilter === "adaptive_ekf_position_only" ? `adaptive EKF${heldText}` : "raw"}: x=${fmtFixed(tag.position.x, 3)} m, ` +
           `y=${fmtFixed(tag.position.y, 3)} m`
         : `Tag ${tag.tagId}: EKF x=${fmtFixed(tag.position.x, 3)} m, ` +
           `y=${fmtFixed(tag.position.y, 3)} m` +
@@ -11114,7 +11451,8 @@ function updatePositionLiveMetrics(model) {
         : "";
       meta.textContent =
         `${item.observation_count || 0} raw obs${sigmaText}${referenceText}` +
-        `${filterText}${batchText} · live`;
+        `${filterText}${batchText} · display ${tag.displayFilter === "adaptive_ekf_position_only" ? "adaptive EKF" : "raw"}` +
+        `${tag.heldPosition ? " held · raw stream live" : " · live"}`;
     }
     const solverSigma = document.getElementById(`positionSolverSigma${tag.tagId}`);
     const tdoaRms = document.getElementById(`positionTdoaRms${tag.tagId}`);
@@ -11124,21 +11462,34 @@ function updatePositionLiveMetrics(model) {
       : fmtPositionSigma(item.sigma_m, 1);
     if (tdoaRms) tdoaRms.textContent = fmtPositionCm(item.rms_m, 1);
     if (tdoaMax) tdoaMax.textContent = "-";
-    if (referenceStats) {
+    const metricCandidates = [
+      {suffix: "Raw", position: rawPositionFromSample(item), trail: state.positionTrail},
+      {suffix: "Kalman", position: kalmanPositionFromSample(item), trail: state.positionKalmanTrail},
+    ];
+    for (const candidate of metricCandidates) {
+      const stats = positionReferenceErrorStats(
+        tag.tagId,
+        candidate.position,
+        model.reference,
+        model.settings.errorWindowSec,
+        candidate.trail);
+      if (!stats) continue;
       const values = {
-        positionErrorNow: referenceStats.currentErrorM,
-        positionErrorBias: referenceStats.biasM,
-        positionErrorRmse: referenceStats.rmseM,
-        positionErrorP95: referenceStats.p95M,
-        positionErrorMax: referenceStats.maxM,
+        positionErrorNow: stats.currentErrorM,
+        positionErrorBias: stats.biasM,
+        positionErrorRmse: stats.rmseM,
+        positionErrorP95: stats.p95M,
+        positionErrorMax: stats.maxM,
       };
       for (const [prefix, value] of Object.entries(values)) {
-        const element = document.getElementById(`${prefix}${tag.tagId}`);
+        const element = document.getElementById(
+          `${prefix}${candidate.suffix}${tag.tagId}`);
         if (element) element.textContent = fmtPositionCm(value, 1);
       }
-      const count = document.getElementById(`positionErrorCount${tag.tagId}`);
+      const count = document.getElementById(
+        `positionErrorCount${candidate.suffix}${tag.tagId}`);
       if (count) count.textContent =
-        `${referenceStats.count} pts · ${fmtFixed(referenceStats.spanSec, 1)} s`;
+        `${stats.count} pts · ${fmtFixed(stats.spanSec, 1)} s`;
     }
   }
 }
@@ -11146,6 +11497,7 @@ function updatePositionLiveMetrics(model) {
 function renderPositionStreamFrame() {
   state.positionStreamRenderPending = false;
   if (state.activeTab !== "position") return;
+  state.positionStreamLastRenderMs = performance.now();
   if (positionSettings().solver === "ranging") {
     renderPosition();
     recordPositionRenderLatency();
@@ -11190,7 +11542,11 @@ function renderPositionStreamFrame() {
 function schedulePositionStreamRender() {
   if (state.activeTab !== "position" || state.positionStreamRenderPending) return;
   state.positionStreamRenderPending = true;
-  requestAnimationFrame(renderPositionStreamFrame);
+  const elapsedMs = performance.now() - state.positionStreamLastRenderMs;
+  const delayMs = Math.max(0, positionStreamRenderIntervalMs - elapsedMs);
+  const requestFrame = () => requestAnimationFrame(renderPositionStreamFrame);
+  if (delayMs <= 1) requestFrame();
+  else setTimeout(requestFrame, delayMs);
 }
 
 function ingestPositionStreamSample(item) {
@@ -11203,8 +11559,8 @@ function ingestPositionStreamSample(item) {
   // briefly, because local_positions is keyed only by tag ID.
   if (!positionTdoaProtocolMatches(item, settings.solver)) return;
   const key = String(tagId);
-  ensurePositionTrailEpoch(key, item);
   if (item.imu_fused === true) {
+    ensurePositionTrailEpoch(key, item);
     if (item.imu_fusion_reset === true) {
       delete state.positionImuTrail[key];
       delete state.positionImuTrailTokens[key];
@@ -11232,6 +11588,9 @@ function ingestPositionStreamSample(item) {
   const previous = state.tdoa?.local_positions?.[key];
   if (positionTdoaProtocolMatches(previous, settings.solver) &&
       Number(previous?.position_event_id || 0) >= eventId) return;
+  // Reject a stale EventSource replay before it can look like an uptime
+  // rollback and erase an otherwise valid trail.
+  ensurePositionTrailEpoch(key, item);
   if (!state.tdoa.local_positions) state.tdoa.local_positions = {};
   item.age_sec = localPositionAge(item);
   state.tdoa.local_positions[key] = item;
@@ -11243,13 +11602,15 @@ function ingestPositionStreamSample(item) {
       token: `position:${eventId}`,
       arrivalMs: nowMs,
     };
-    if (item.independent_frame !== false) {
+    const passiveRawSolve = item.tdoa_protocol === "passive_ds" &&
+      item.position_filter === "none";
+    if (passiveRawSolve || item.independent_frame !== false) {
       const rawX = Number(item.raw_x_m);
       const rawY = Number(item.raw_y_m);
       recordPositionTrailPoint(
         tagId,
         {x: Number(item.x_m), y: Number(item.y_m)},
-        item.received_at,
+        positionTrailTimestamp(item),
         eventId,
         item,
         Number.isFinite(rawX) && Number.isFinite(rawY)
@@ -11840,8 +12201,11 @@ function gpsMapHasValidCoordinates(item) {
 
 const gpsRtkAnchorIds = [2, 3, 4, 5];
 const gpsRtkMinimumSamples = 5;
+const gpsRtkDynamicMinimumSamples = 3;
 const gpsRtkMaximumSamples = 120;
 const gpsRtkSampleHorizonMs = 120000;
+const gpsRtkCurrentFixMaxAgeMs = 1500;
+const gpsRtkCurrentStatusMaxAgeMs = 3000;
 const gpsRtkAnchorFitRmsLimitM = 0.10;
 const gpsRtkBaseJumpM = 0.25;
 const gpsRtkMaximumMotionHorizonSec = 2.0;
@@ -11869,10 +12233,14 @@ function pruneGpsRtkSamples(nowMs = Date.now()) {
 
 function clearGpsRtkAnchorSamples() {
   for (const anchorId of gpsRtkAnchorIds) {
-    state.gpsRtkSamples.delete(anchorId);
-    state.gpsRtkLastTokens.delete(anchorId);
-    state.gpsRtkPendingJumps.delete(anchorId);
+    clearGpsRtkModuleSamples(anchorId);
   }
+}
+
+function clearGpsRtkModuleSamples(moduleId) {
+  state.gpsRtkSamples.delete(moduleId);
+  state.gpsRtkLastTokens.delete(moduleId);
+  state.gpsRtkPendingJumps.delete(moduleId);
 }
 
 function gpsRtkFixedGeometryGenerationKey(settings, geometry, anchors) {
@@ -11937,17 +12305,83 @@ function gpsRtkHorizontalSampleDistanceM(first, second) {
   return Math.hypot(east, north);
 }
 
+function gpsRtkStatusIsCurrentFixed(item) {
+  const fixAgeMs = Number(item?.gps_last_fix_age_ms);
+  return Boolean(
+    statusIsFresh(item) &&
+    gpsRxIsFresh(item) &&
+    item?.gps_fix_valid &&
+    Number(item?.gps_fix_quality) === 4 &&
+    Number.isFinite(fixAgeMs) &&
+    fixAgeMs >= 0 &&
+    fixAgeMs <= gpsRtkCurrentFixMaxAgeMs
+  );
+}
+
+function gpsRtkStatusStateIsCurrentFixed(status, nowMs = Date.now()) {
+  const capturedAt = Number(status?.capturedAt);
+  return Boolean(
+    status?.currentFixed === true &&
+    Number.isFinite(capturedAt) &&
+    capturedAt <= nowMs &&
+    nowMs - capturedAt <= gpsRtkCurrentStatusMaxAgeMs
+  );
+}
+
+function gpsRtkOptionalCounter(item, ...names) {
+  for (const name of names) {
+    const value = Number(item?.[name]);
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+  return null;
+}
+
 function recordGpsRtkSamples(statuses) {
   const capturedAt = Date.now();
   pruneGpsRtkSamples(capturedAt);
+  const observedModuleIds = new Set();
   for (const item of statuses || []) {
     const moduleId = Number(item?.module_id);
+    if (!Number.isInteger(moduleId) || moduleId < 1 || moduleId > 5) continue;
+    observedModuleIds.add(moduleId);
+    const previousStatus = state.gpsRtkStatusByModule.get(moduleId) || null;
+    const currentFixed = gpsRtkStatusIsCurrentFixed(item);
+    const ggaCount = gpsRtkOptionalCounter(item, "gps_gga_count");
+    const uptimeMs = gpsRtkOptionalCounter(
+      item, "uptime_ms", "system_uptime_ms");
+    const bootCount = gpsRtkOptionalCounter(item, "boot_guard_boot_count");
+    const ggaBackstep = previousStatus !== null &&
+      previousStatus.ggaCount !== null && ggaCount !== null &&
+      ggaCount < previousStatus.ggaCount;
+    const uptimeBackstep = previousStatus !== null &&
+      previousStatus.uptimeMs !== null && uptimeMs !== null &&
+      uptimeMs < previousStatus.uptimeMs;
+    const bootChanged = previousStatus !== null &&
+      previousStatus.bootCount !== null && bootCount !== null &&
+      bootCount !== previousStatus.bootCount;
+
+    /*
+     * A cached RTK-Fixed coordinate is not a current reference. In
+     * particular, a receiver that has fallen back to Float may hold its last
+     * Q4 point for most of the 120 s history horizon. Discard that epoch and
+     * require a short run of distinct Q4 fixes before the dynamic reference
+     * can participate again. Receiver/module restarts are the same boundary.
+     */
+    if (!currentFixed || ggaBackstep || uptimeBackstep || bootChanged) {
+      clearGpsRtkModuleSamples(moduleId);
+    }
+    state.gpsRtkStatusByModule.set(moduleId, {
+      currentFixed,
+      ggaCount,
+      uptimeMs,
+      bootCount,
+      capturedAt,
+    });
+
     const latitude = Number(item?.gps_latitude_deg);
     const longitude = Number(item?.gps_longitude_deg);
     const altitude = Number(item?.gps_altitude_m);
-    if (!Number.isInteger(moduleId) || moduleId < 1 || moduleId > 5 ||
-        Number(item?.gps_fix_quality) !== 4 || !item?.gps_fix_valid ||
-        !gpsRxIsFresh(item) || !Number.isFinite(latitude) ||
+    if (!currentFixed || !Number.isFinite(latitude) ||
         !Number.isFinite(longitude) || !Number.isFinite(altitude)) continue;
     const token = [
       item.gps_utc_date || "",
@@ -12006,6 +12440,20 @@ function recordGpsRtkSamples(statuses) {
     }
     state.gpsRtkSamples.set(moduleId, samples);
   }
+
+  // Missing status is not current status. This also prevents an offline
+  // replacement carrying the same module ID from borrowing its predecessor's
+  // cached Q4 coordinate.
+  for (let moduleId = 1; moduleId <= 5; moduleId += 1) {
+    if (observedModuleIds.has(moduleId)) continue;
+    clearGpsRtkModuleSamples(moduleId);
+    const previousStatus = state.gpsRtkStatusByModule.get(moduleId) || {};
+    state.gpsRtkStatusByModule.set(moduleId, {
+      ...previousStatus,
+      currentFixed: false,
+      capturedAt,
+    });
+  }
 }
 
 function gpsRtkEcef(latitudeDeg, longitudeDeg, altitudeM) {
@@ -12051,10 +12499,16 @@ function gpsRtkGeometryModel({
       .filter(id => Number.isInteger(id) && id > 0)
   )];
   if (!requestedAnchorIds.length) return null;
-  const minimumSamples = latestOnly ? 1 : gpsRtkMinimumSamples;
-  const usableAnchorIds = requestedAnchorIds.filter(anchorId =>
-    (state.gpsRtkSamples.get(anchorId) || []).length >= minimumSamples
-  );
+  const minimumSamples = latestOnly
+    ? gpsRtkDynamicMinimumSamples
+    : gpsRtkMinimumSamples;
+  const nowMs = Date.now();
+  const usableAnchorIds = requestedAnchorIds.filter(anchorId => {
+    const currentFixed = gpsRtkStatusStateIsCurrentFixed(
+      state.gpsRtkStatusByModule.get(anchorId), nowMs);
+    return (!latestOnly || currentFixed) &&
+      (state.gpsRtkSamples.get(anchorId) || []).length >= minimumSamples;
+  });
   const requestedMinimum = minimumAnchorCount === null
     ? requestedAnchorIds.length
     : Number(minimumAnchorCount);
@@ -12199,29 +12653,34 @@ function gpsRtkTagTrack(moduleId = 1, alignment = null,
   });
 }
 
-function positionGpsReferenceErrorStats(tagId, position, reference, windowSec) {
+function positionGpsReferenceErrorStats(
+  tagId, position, reference, windowSec, trailStore = state.positionTrail
+) {
   const track = gpsRtkTagTrack(
     reference.tagId || tagId, reference.rtkAlignment || null,
     reference.rtkGeometry || null);
   if (!track.length) return null;
   const now = Date.now() / 1000;
-  const uwbSamples = (state.positionTrail[String(tagId)] || []).filter(point =>
+  const uwbSamples = (trailStore[String(tagId)] || []).filter(point =>
     Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y)) &&
     now - Number(point.t) <= windowSec
   );
   const gpsSamples = track.filter(point => now - point.t <= windowSec + 2);
   const aligned = [];
+  let gpsIndex = 0;
   for (const uwb of uwbSamples) {
-    let nearest = null;
-    let nearestAge = Infinity;
-    for (const gps of gpsSamples) {
-      const age = Math.abs(Number(uwb.t) - gps.t);
-      if (age < nearestAge) {
-        nearest = gps;
-        nearestAge = age;
-      }
+    const uwbTime = Number(uwb.t);
+    while (gpsIndex + 1 < gpsSamples.length) {
+      const currentAge = Math.abs(uwbTime - gpsSamples[gpsIndex].t);
+      const nextAge = Math.abs(uwbTime - gpsSamples[gpsIndex + 1].t);
+      if (nextAge > currentAge) break;
+      gpsIndex += 1;
     }
-    if (nearest && nearestAge <= 2.0) {
+    const nearest = gpsSamples[gpsIndex] || null;
+    const nearestAge = nearest ? Math.abs(uwbTime - nearest.t) : Infinity;
+    // At 8 Hz RTK, a 250 ms gate tolerates one missed fix without matching a
+    // UWB point to a materially different place along a dynamic walk.
+    if (nearest && nearestAge <= 0.25) {
       const dx = Number(uwb.x) - nearest.x;
       const dy = Number(uwb.y) - nearest.y;
       aligned.push({t: Number(uwb.t), dx, dy, error: Math.hypot(dx, dy)});
@@ -12308,6 +12767,7 @@ function clearGpsRtkGeometrySamples() {
   state.gpsRtkSamples.clear();
   state.gpsRtkLastTokens.clear();
   state.gpsRtkPendingJumps.clear();
+  state.gpsRtkStatusByModule.clear();
   renderGpsRtkGeometryStatus();
   setToast("gpsRtkGeometryToast", "RTK sample buffer cleared", "");
 }
@@ -13726,11 +14186,9 @@ function renderInfo(snapshot) {
   renderPosition();
   renderFlexTdoaTimingDiagram();
   renderNativeDsTwrTimingDiagram();
-  renderNativeDsCalibration();
   renderPassiveDsTimingDiagram();
   renderPassiveDsActiveProfile();
   renderPassiveDsExperimentControls();
-  renderPassiveDsCalibration();
   scheduleAccelRender();
   updateAccelEnabledControl();
   hydrateSettingsFromStatus(freshStatus);
@@ -13787,10 +14245,6 @@ function hydrateSettingsFromStatus(item) {
   setSettingIfFresh("uwbRangingRespDelayMs", item.runtime_ranging_resp_delay_ms);
   setSettingIfFresh("uwbRangingFinalDelayMs", item.runtime_ranging_final_delay_ms);
   setSettingIfFresh("uwbRangingAutoRxDelayUus", item.runtime_ranging_auto_rx_delay_uus);
-  setSettingIfFresh(
-    "nativeDsRangeBiasMm",
-    (item.runtime_native_ds_range_bias_mm || []).join(",")
-  );
   setSettingIfFresh("uwbDtInitiator", item.runtime_distance_test_initiator_id);
   setSettingIfFresh("uwbDtResponder", item.runtime_distance_test_responder_id);
   setSettingIfFresh("uwbDtIntervalMs", item.runtime_distance_test_interval_ms);
@@ -13847,7 +14301,10 @@ async function fetchSnapshot() {
 }
 
 function snapshotPollDelayMs() {
-  if (state.activeTab === "position") return 250;
+  // Positions themselves arrive through SSE. The snapshot is a comparatively
+  // large status/diagnostic refresh, so polling it at 4 Hz needlessly blocks
+  // old tabs once both raw and EKF trails have accumulated.
+  if (state.activeTab === "position") return 1000;
   if (state.activeTab === "map") return 1000;
   return 1500;
 }
@@ -16008,58 +16465,6 @@ async function applyPassiveDsQuickProfile(key) {
   await applyPassiveDsProfile(key);
 }
 
-function nativeDsCalibrationStatus() {
-  const candidates = state.statuses || [];
-  return candidates.find(item =>
-    statusIsFresh(item) && item.runtime_mode_name === "uwb_ranging"
-  ) || candidates.find(statusIsFresh) || candidates[0] || {};
-}
-
-function renderNativeDsCalibration() {
-  const root = document.getElementById("nativeDsCalibrationStatus");
-  if (!root) return;
-  const status = nativeDsCalibrationStatus();
-  if (!statusIsFresh(status)) {
-    root.textContent = "calibration status unavailable";
-    root.className = "profile-summary warn";
-    return;
-  }
-  const anchorIds = (status.runtime_anchor_ids || []).map(Number);
-  const rangeBias = status.runtime_native_ds_range_bias_mm || [];
-  if (!status.runtime_native_ds_calibration_enabled) {
-    root.textContent = "disabled · solver receives uncorrected raw DS ranges";
-    root.className = "profile-summary";
-    return;
-  }
-  root.textContent =
-    `enabled · generation ${status.runtime_native_ds_calibration_generation || 0} · ` +
-    `[${anchorIds.map((id, index) => `A${id}:${rangeBias[index] || 0}`).join(", ")}] mm · ` +
-    "subtracted before the independent-frame solver";
-  root.className = "profile-summary good";
-}
-
-async function applyNativeDsCalibration(clear = false) {
-  const params = clear
-    ? {native_ds_calibration_clear: "1", reboot: "1"}
-    : {
-        native_ds_range_bias_mm:
-          document.getElementById("nativeDsRangeBiasMm").value,
-        reboot: "1",
-      };
-  setToast(
-    "rangingProfileToast",
-    clear ? "clearing Native DS-TWR calibration..." : "applying Native DS-TWR calibration...",
-    "",
-    null,
-    false
-  );
-  const data = await postConfig({
-    target_modules: document.getElementById("nativeDsCalibrationTargets").value,
-    params,
-  }, "rangingProfileToast");
-  if (apiResponseOk(data)) setTimeout(fetchSnapshot, 500);
-}
-
 async function applyPassiveDsProfile(key) {
   const profile = passiveDsProfileDefaults[key];
   const values = readPassiveDsProfile(key);
@@ -16122,68 +16527,6 @@ async function applyPassiveDsProfile(key) {
     );
     setTimeout(fetchSnapshot, 500);
   }
-}
-
-function passiveDsCalibrationStatus() {
-  const candidates = state.statuses || [];
-  return candidates.find(item =>
-    statusIsFresh(item) &&
-    String(item.runtime_mode_name || "").includes("passive_ds")
-  ) || candidates.find(statusIsFresh) || candidates[0] || {};
-}
-
-function renderPassiveDsCalibration() {
-  const root = document.getElementById("passiveDsCalibrationStatus");
-  if (!root) return;
-  const status = passiveDsCalibrationStatus();
-  const anchorIds = (status.runtime_anchor_ids || []).map(Number);
-  const anchorBias = status.runtime_passive_ds_anchor_bias_mm || [];
-  const rangeBias = status.runtime_passive_ds_range_bias_mm || [];
-  const pairLabels = [];
-  for (let a = 0; a < anchorIds.length; a += 1) {
-    for (let b = a + 1; b < anchorIds.length; b += 1) {
-      pairLabels.push(`A${anchorIds[a]}-A${anchorIds[b]}`);
-    }
-  }
-  if (!statusIsFresh(status)) {
-    root.textContent = "calibration status unavailable";
-    root.className = "profile-summary warn";
-    return;
-  }
-  if (!status.runtime_passive_ds_calibration_enabled) {
-    root.textContent = "disabled · raw anchor DS diagnostics and passive observations";
-    root.className = "profile-summary";
-    return;
-  }
-  root.textContent =
-    `enabled · generation ${status.runtime_passive_ds_calibration_generation || 0} · ` +
-    `anchors [${anchorIds.map((id, index) => `A${id}:${anchorBias[index] || 0}`).join(", ")}] mm · ` +
-    `ranges [${pairLabels.map((label, index) => `${label}:${rangeBias[index] || 0}`).join(", ")}] mm`;
-  root.className = "profile-summary";
-}
-
-async function applyPassiveDsCalibration(clear = false) {
-  const params = clear
-    ? {passive_ds_calibration_clear: "1", reboot: "1"}
-    : {
-        passive_ds_anchor_bias_mm:
-          document.getElementById("passiveDsAnchorBiasMm").value,
-        passive_ds_range_bias_mm:
-          document.getElementById("passiveDsRangeBiasMm").value,
-        reboot: "1",
-      };
-  setToast(
-    "passiveDsProfileToast",
-    clear ? "clearing Passive DS-TWR calibration..." : "applying Passive DS-TWR calibration...",
-    "",
-    null,
-    false
-  );
-  const data = await postConfig({
-    target_modules: document.getElementById("passiveDsCalibrationTargets").value,
-    params,
-  }, "passiveDsProfileToast");
-  if (apiResponseOk(data)) setTimeout(fetchSnapshot, 500);
 }
 
 function passiveDsRuntimeConfig() {
@@ -16740,7 +17083,8 @@ function persistedSettingIds() {
     "accelTimebase", "accelSampleHz", "accelTargets",
     "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
     "positionReferenceMode", "positionReferenceX",
-    "positionReferenceY", "positionErrorWindowSec",
+    "positionReferenceY", "positionErrorWindowSec", "positionKalmanEnabled",
+    "positionShowRawTrail", "positionShowEkfTrail",
     "uwbTargets", "uwbRadioChannel", "uwbRadioPhyMode", "uwbFlexAnchors", "uwbFlexK",
     "uwbFlexSlots", "uwbFlexMasks", "uwbSurveyRxMs", "uwbSurveyDelayMs", "uwbSurveySlotMs",
     "uwbSurveyGapMs", "uwbSurveyLogEvery", "uwbRangingSlotMs",
@@ -16765,9 +17109,6 @@ function persistedSettingIds() {
     "calAutoApply", "calMinApplyDtu", "calReferenceGuardCm", "calTimeoutSec",
     ...rangingProfileIds(),
     "passiveDsProfileTargets",
-    "nativeDsCalibrationTargets", "nativeDsRangeBiasMm",
-    "passiveDsCalibrationTargets",
-    "passiveDsAnchorBiasMm", "passiveDsRangeBiasMm",
     ...passiveDsProfileIds(),
   ];
 }
@@ -16786,6 +17127,17 @@ function restoreSettings() {
     } else {
       el.value = saved;
     }
+  }
+  const rawTrail = document.getElementById("positionShowRawTrail");
+  if (rawTrail &&
+      localStorage.getItem(settingKey("positionShowRawTrail")) === null) {
+    rawTrail.checked = true;
+  }
+  const ekfTrail = document.getElementById("positionShowEkfTrail");
+  if (ekfTrail &&
+      localStorage.getItem(settingKey("positionShowEkfTrail")) === null) {
+    ekfTrail.checked = Boolean(
+      document.getElementById("positionKalmanEnabled")?.checked);
   }
   migrateRangingProfileDefaults();
   migrateFlexProfileDefaults();
@@ -17078,7 +17430,8 @@ function wireSettings() {
   [
     "positionAnchorCount", "positionSolver", "positionAnchors", "positionTags",
     "positionMaxAgeSec", "positionReferenceMode", "positionReferenceX",
-    "positionReferenceY", "positionErrorWindowSec",
+    "positionReferenceY", "positionErrorWindowSec", "positionKalmanEnabled",
+    "positionShowRawTrail", "positionShowEkfTrail",
   ].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -17091,6 +17444,10 @@ function wireSettings() {
       }
       if (id === "positionSolver") switchPositionProtocolSettings();
       if (id === "positionMaxAgeSec") savePositionProtocolSettings();
+      if (id === "positionKalmanEnabled" &&
+          localStorage.getItem(settingKey("positionShowEkfTrail")) === null) {
+        document.getElementById("positionShowEkfTrail").checked = el.checked;
+      }
       if (id === "positionAnchors" || id === "positionTags") {
         resetPositionTagTrails();
         state.positionSeeds = {};
@@ -17178,12 +17535,6 @@ function wireSettings() {
     }
     setToast("rangingProfileToast", "all profile defaults restored locally; press Apply to write ESP NVS", "");
   });
-  document.getElementById("applyNativeDsCalibration")?.addEventListener(
-    "click", () => applyNativeDsCalibration(false)
-  );
-  document.getElementById("clearNativeDsCalibration")?.addEventListener(
-    "click", () => applyNativeDsCalibration(true)
-  );
   document.querySelectorAll(".flex-profile-card input").forEach(el => {
     const update = () => {
       const profile = el.closest(".flex-profile-card")?.dataset.flexProfile;
@@ -17250,12 +17601,6 @@ function wireSettings() {
       );
     });
   });
-  document.getElementById("applyPassiveDsCalibration")?.addEventListener(
-    "click", () => applyPassiveDsCalibration(false)
-  );
-  document.getElementById("clearPassiveDsCalibration")?.addEventListener(
-    "click", () => applyPassiveDsCalibration(true)
-  );
   document.getElementById("applyPassiveDsExperimentMode")
     ?.addEventListener("click", applyPassiveDsExperimentMode);
   Object.keys(passiveDsProfileDefaults).forEach(updatePassiveDsProfileSummary);

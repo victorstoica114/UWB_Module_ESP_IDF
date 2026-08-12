@@ -91,7 +91,10 @@ struct uwb_native_ds_pipeline_stats {
     uint32_t recovered_rx_error_count;
     uint32_t complete_frame_count;
     uint32_t incomplete_frame_count;
+    uint32_t recovery_attempt_count;
+    uint32_t recovery_success_count;
     uint32_t last_frame_missing_anchor_mask;
+    uint8_t last_recovery_anchor_id;
     uint32_t rx_phy_error_count;
     uint32_t rx_frame_sync_loss_count;
     uint32_t rx_phr_error_count;

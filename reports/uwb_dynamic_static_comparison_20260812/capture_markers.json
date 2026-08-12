@@ -1,0 +1,27 @@
+{
+  "capture": "mixed_continuous_01.passive_ds.jsonl",
+  "timezone": "Europe/Bucharest",
+  "segments": [
+    {
+      "protocol": "native_ds",
+      "start_local": "2026-08-12T22:28:11.997+03:00",
+      "start_unix_ms": 1786562891997,
+      "stop_local": "2026-08-12T22:30:05.447+03:00",
+      "stop_unix_ms": 1786563005447
+    },
+    {
+      "protocol": "flextdoa",
+      "start_local": "2026-08-12T22:32:33.442+03:00",
+      "start_unix_ms": 1786563153442,
+      "stop_local": "2026-08-12T22:33:58.079+03:00",
+      "stop_unix_ms": 1786563238079
+    },
+    {
+      "protocol": "passive_ds",
+      "start_local": "2026-08-12T22:35:01.933+03:00",
+      "start_unix_ms": 1786563301933,
+      "stop_local": "2026-08-12T22:36:48.386+03:00",
+      "stop_unix_ms": 1786563408386
+    }
+  ]
+}

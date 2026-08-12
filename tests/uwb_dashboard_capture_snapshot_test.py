@@ -75,6 +75,7 @@ def populated_state() -> DashboardState:
                 "responder_id": 1,
                 "seq": 12,
                 "slot_id": 12,
+                "uptime_ms": 987,
                 "distance_m": 1.75,
                 "raw_distance_m": 1.76,
             },
@@ -230,6 +231,7 @@ class CaptureSnapshotPayloadTest(unittest.TestCase):
             any(
                 event["measurement_kind"] == "native_ds_range"
                 and event["frame_id"] == 12
+                and event["uptime_ms"] == 987
                 for event in events
             )
         )

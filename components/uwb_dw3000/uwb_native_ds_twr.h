@@ -68,10 +68,6 @@ struct uwb_native_ds_config {
     uint32_t geometry_version;
     int32_t anchor_x_mm[UWB_NATIVE_DS_MAX_ANCHORS];
     int32_t anchor_y_mm[UWB_NATIVE_DS_MAX_ANCHORS];
-    bool range_calibration_enabled;
-    uint32_t range_calibration_generation;
-    /* Measured range minus truth; subtracted only by the tag solver. */
-    int32_t anchor_range_bias_mm[UWB_NATIVE_DS_MAX_ANCHORS];
 };
 
 esp_err_t uwb_native_ds_twr_run(const struct uwb_native_ds_config *config,

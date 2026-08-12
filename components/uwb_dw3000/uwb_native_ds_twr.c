@@ -216,6 +216,45 @@ static esp_err_t tag_exchange(
     return ESP_OK;
 }
 
+static bool run_tag_slot(const struct uwb_native_ds_config *config,
+                         const struct uwb_native_ds_radio_ops *radio,
+                         size_t anchor_index, uint32_t session_id,
+                         uint32_t frame_id)
+{
+    const int64_t slot_started_us = radio->now_us(radio->context);
+    const esp_err_t err = tag_exchange(
+        config, radio, anchor_index, session_id, frame_id);
+    if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+        ESP_LOGW(TAG, "tag exchange anchor=%u frame=%lu failed: %s",
+                 (unsigned)config->anchor_ids[anchor_index],
+                 (unsigned long)frame_id, esp_err_to_name(err));
+    }
+    const int64_t elapsed_us =
+        radio->now_us(radio->context) - slot_started_us;
+    const int64_t slot_us = (int64_t)config->slot_ms * 1000LL;
+    if (elapsed_us < slot_us) {
+        radio->wait_until_us(radio->context, slot_started_us + slot_us);
+    } else {
+        s_stats.slot_overrun_count++;
+    }
+    return err == ESP_OK;
+}
+
+static size_t single_missing_anchor_index(uint32_t missing_anchor_mask,
+                                          size_t anchor_count)
+{
+    if (missing_anchor_mask == 0U ||
+        (missing_anchor_mask & (missing_anchor_mask - 1U)) != 0U) {
+        return anchor_count;
+    }
+    for (size_t index = 0U; index < anchor_count; ++index) {
+        if ((missing_anchor_mask & (1UL << index)) != 0U) {
+            return index;
+        }
+    }
+    return anchor_count;
+}
+
 static void run_tag(const struct uwb_native_ds_config *config,
                     const struct uwb_native_ds_radio_ops *radio)
 {
@@ -240,36 +279,45 @@ static void run_tag(const struct uwb_native_ds_config *config,
         if (frame_id == 0U) {
             frame_id = 1U;
         }
-        for (size_t index = 0U;
-             index < config->anchor_count &&
+        for (size_t slot = 0U;
+             slot < config->anchor_count &&
              !radio->stop_requested(radio->context);
-             ++index) {
-            const int64_t slot_started_us = radio->now_us(radio->context);
-            const esp_err_t err = tag_exchange(
-                config, radio, index, session_id, current_frame_id);
-            if (err == ESP_OK) {
+             ++slot) {
+            /* Rotate the physical anchor order every frame.  This keeps the
+             * 0..N-1 acquisition-time offsets from belonging permanently to
+             * the same anchors while preserving one coherent frame ID. */
+            const size_t index =
+                (slot + (size_t)(current_frame_id - 1U)) %
+                config->anchor_count;
+            if (run_tag_slot(config, radio, index, session_id,
+                             current_frame_id)) {
                 completed_anchor_mask |= 1UL << index;
-            }
-            if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
-                ESP_LOGW(TAG, "tag exchange anchor=%u frame=%lu failed: %s",
-                         (unsigned)config->anchor_ids[index],
-                         (unsigned long)current_frame_id,
-                         esp_err_to_name(err));
-            }
-            const int64_t elapsed_us =
-                radio->now_us(radio->context) - slot_started_us;
-            const int64_t slot_us = (int64_t)config->slot_ms * 1000LL;
-            if (elapsed_us < slot_us) {
-                radio->wait_until_us(radio->context,
-                                     slot_started_us + slot_us);
-            } else {
-                s_stats.slot_overrun_count++;
             }
         }
         const uint32_t expected_anchor_mask =
             (1UL << config->anchor_count) - 1UL;
-        s_stats.last_frame_missing_anchor_mask =
+        uint32_t missing_anchor_mask =
             expected_anchor_mask & ~completed_anchor_mask;
+        const size_t recovery_index = single_missing_anchor_index(
+            missing_anchor_mask, config->anchor_count);
+        if (recovery_index < config->anchor_count &&
+            !radio->stop_requested(radio->context)) {
+            /* One targeted retry is still frame-local.  It converts the
+             * common single-link loss into a true 4/4 solution instead of
+             * asking the solver to infer an outlier from only three ranges. */
+            s_stats.recovery_attempt_count++;
+            s_stats.last_recovery_anchor_id =
+                config->anchor_ids[recovery_index];
+            if (run_tag_slot(config, radio, recovery_index, session_id,
+                             current_frame_id)) {
+                completed_anchor_mask |= 1UL << recovery_index;
+                s_stats.recovery_success_count++;
+            }
+            missing_anchor_mask =
+                expected_anchor_mask & ~completed_anchor_mask;
+        }
+        s_stats.last_frame_missing_anchor_mask =
+            missing_anchor_mask;
         if (completed_anchor_mask == expected_anchor_mask) {
             s_stats.complete_frame_count++;
         } else {

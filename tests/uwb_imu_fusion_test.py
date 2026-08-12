@@ -302,6 +302,46 @@ class FusionTest(unittest.TestCase):
         self.assertEqual(second_raw["raw_x"], 2.0)
         self.assertNotIn("raw_x", corrected)
 
+    def test_adaptive_process_noise_is_quiet_then_tracks_large_innovation(
+        self,
+    ) -> None:
+        fusion = UwbImuFusion(
+            FusionConfig(
+                process_accel_noise_mps2=20.0,
+                adaptive_process_noise=True,
+                adaptive_process_accel_noise_min_mps2=2.0,
+                adaptive_process_residual_start_sigma=1.0,
+                adaptive_process_residual_full_sigma=3.0,
+                adaptive_process_noise_rise_gain=1.0,
+                adaptive_process_noise_decay_gain=1.0,
+                uwb_default_innovation_gate_m=20.0,
+                position_smoothing_blend=0.0,
+            )
+        )
+        fusion.update_position(raw_position(0, 0.0, 0.0, sigma_m=0.10))
+
+        quiet = fusion.update_position(
+            raw_position(100, 0.01, 0.0, sigma_m=0.10)
+        )
+        dynamic = fusion.update_position(
+            raw_position(200, 1.0, 0.0, sigma_m=0.10)
+        )
+
+        self.assertIn("adaptive_process_noise_quiet", quiet["flags"])
+        self.assertAlmostEqual(
+            quiet["diagnostics"]["active_process_accel_noise_mps2"],
+            2.0,
+        )
+        self.assertIn("adaptive_process_noise_dynamic", dynamic["flags"])
+        self.assertAlmostEqual(
+            dynamic["diagnostics"]["active_process_accel_noise_mps2"],
+            20.0,
+        )
+        self.assertEqual(
+            dynamic["diagnostics"]["filter"],
+            "adaptive_ekf_cv_position",
+        )
+
     def test_endpoint_regression_reduces_alternating_position_noise(self) -> None:
         fusion = UwbImuFusion(
             FusionConfig(uwb_default_innovation_gate_m=20.0)
@@ -802,6 +842,119 @@ class FusionTest(unittest.TestCase):
         self.assertEqual(snapshot["tag_id"], 5)
         self.assertIn("snapshot", snapshot["flags"])
         self.assertIn("not ENU-calibrated", snapshot["diagnostics"]["frame"])
+
+    def test_position_only_stationary_hold_collapses_static_jitter(self) -> None:
+        fusion = UwbImuFusion(
+            FusionConfig(
+                adaptive_process_noise=True,
+                process_accel_noise_mps2=100.0,
+                position_only_stationary_enabled=True,
+                position_only_stationary_window_ms=500,
+                position_only_stationary_min_samples=6,
+                position_only_stationary_max_center_shift_m=0.08,
+                position_only_stationary_max_radius_m=0.10,
+                position_only_stationary_exit_center_m=0.12,
+                position_only_stationary_exit_sample_m=0.30,
+            )
+        )
+        output = None
+        for index in range(8):
+            output = fusion.update_position(
+                raw_position(
+                    index * 100,
+                    2.0 + (0.03 if index % 2 else -0.03),
+                    3.0 + (0.02 if index % 3 else -0.02),
+                )
+            )
+
+        assert output is not None
+        self.assertIn("position_only_stationary", output["flags"])
+        held = (output["x"], output["y"])
+        noisy = fusion.update_position(raw_position(800, 2.08, 2.94))
+        self.assertIn("position_only_stationary_hold", noisy["flags"])
+        self.assertEqual((noisy["x"], noisy["y"]), held)
+        self.assertEqual(noisy["vx"], 0.0)
+        self.assertEqual(noisy["vy"], 0.0)
+        self.assertTrue(
+            noisy["diagnostics"]["position_only_stationary"]
+        )
+
+    def test_position_only_stationary_releases_on_confirmed_motion(self) -> None:
+        fusion = UwbImuFusion(
+            FusionConfig(
+                position_only_stationary_enabled=True,
+                position_only_stationary_window_ms=500,
+                position_only_stationary_min_samples=6,
+                position_only_stationary_max_center_shift_m=0.08,
+                position_only_stationary_max_radius_m=0.10,
+                position_only_stationary_exit_center_m=0.12,
+                position_only_stationary_exit_sample_m=0.30,
+            )
+        )
+        for index in range(8):
+            fusion.update_position(raw_position(index * 100, 1.0, 1.0))
+
+        output = None
+        for index in range(8, 13):
+            output = fusion.update_position(
+                raw_position(index * 100, 1.20, 1.0)
+            )
+            if "position_only_stationary_released" in output["flags"]:
+                break
+
+        assert output is not None
+        self.assertIn("position_only_stationary_released", output["flags"])
+        self.assertIn("position_soft_reacquired", output["flags"])
+        self.assertAlmostEqual(output["x"], 1.20)
+        self.assertFalse(
+            output["diagnostics"]["position_only_stationary"]
+        )
+
+    def test_position_only_stationary_does_not_hold_continuous_motion(self) -> None:
+        fusion = UwbImuFusion(
+            FusionConfig(
+                position_only_stationary_enabled=True,
+                position_only_stationary_window_ms=500,
+                position_only_stationary_min_samples=6,
+                position_only_stationary_max_center_shift_m=0.08,
+                position_only_stationary_max_radius_m=0.10,
+                position_only_stationary_exit_center_m=0.12,
+                position_only_stationary_exit_sample_m=0.30,
+            )
+        )
+        outputs = [
+            fusion.update_position(raw_position(index * 100, index * 0.10, 0.0))
+            for index in range(12)
+        ]
+
+        self.assertFalse(
+            any(
+                "position_only_stationary_hold" in output["flags"]
+                for output in outputs
+            )
+        )
+
+    def test_position_only_stationary_bridges_short_radio_gap(self) -> None:
+        fusion = UwbImuFusion(
+            FusionConfig(
+                position_gap_reset_ms=150,
+                position_only_stationary_enabled=True,
+                position_only_stationary_window_ms=500,
+                position_only_stationary_min_samples=6,
+                position_only_stationary_max_center_shift_m=0.08,
+                position_only_stationary_max_radius_m=0.10,
+                position_only_stationary_exit_center_m=0.12,
+                position_only_stationary_exit_sample_m=0.30,
+            )
+        )
+        for index in range(8):
+            fusion.update_position(raw_position(index * 100, 1.0, 1.0))
+
+        output = fusion.update_position(raw_position(1000, 1.02, 0.99))
+
+        self.assertIn("position_only_stationary_gap_bridged", output["flags"])
+        self.assertIn("position_only_stationary_hold", output["flags"])
+        self.assertNotIn("reset:position_gap", output["flags"])
 
 
 if __name__ == "__main__":

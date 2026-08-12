@@ -350,6 +350,12 @@ class FusionConfig:
     position_reacquire_quality_multiplier: float = 2.0
     position_reacquire_probation_positions: int = 3
     process_accel_noise_mps2: float = 2.5
+    adaptive_process_noise: bool = False
+    adaptive_process_accel_noise_min_mps2: float = 1.5
+    adaptive_process_residual_start_sigma: float = 2.0
+    adaptive_process_residual_full_sigma: float = 6.0
+    adaptive_process_noise_rise_gain: float = 0.65
+    adaptive_process_noise_decay_gain: float = 0.08
     initial_velocity_std_mps: float = 1.0
     uwb_default_std_m: float = 0.25
     uwb_min_std_m: float = 0.02
@@ -369,6 +375,16 @@ class FusionConfig:
     stationary_uwb_extent_m: float = 0.12
     stationary_bias_gain: float = 0.02
     zupt_velocity_std_mps: float = 0.03
+    # Position-only filters have no accelerometer/gyro evidence for ZUPT.
+    # Protocol-specific dashboard profiles may infer a stationary interval
+    # from a robust, comparatively long raw UWB window instead.
+    position_only_stationary_enabled: bool = False
+    position_only_stationary_window_ms: int = 2000
+    position_only_stationary_min_samples: int = 20
+    position_only_stationary_max_center_shift_m: float = 0.16
+    position_only_stationary_max_radius_m: float = 0.22
+    position_only_stationary_exit_center_m: float = 0.18
+    position_only_stationary_exit_sample_m: float = 0.35
 
     def __post_init__(self) -> None:
         if not (0.0 < self.alpha <= 1.0):
@@ -439,6 +455,21 @@ class FusionConfig:
             raise ValueError("position reacquisition thresholds are invalid")
         if self.process_accel_noise_mps2 <= 0.0:
             raise ValueError("process_accel_noise_mps2 must be positive")
+        if not (
+            0.0 < self.adaptive_process_accel_noise_min_mps2
+            <= self.process_accel_noise_mps2
+        ):
+            raise ValueError("adaptive process-noise bounds are invalid")
+        if not (
+            0.0 < self.adaptive_process_residual_start_sigma
+            < self.adaptive_process_residual_full_sigma
+        ):
+            raise ValueError("adaptive process-noise residual gates are invalid")
+        if not (
+            0.0 < self.adaptive_process_noise_rise_gain <= 1.0
+            and 0.0 < self.adaptive_process_noise_decay_gain <= 1.0
+        ):
+            raise ValueError("adaptive process-noise gains are invalid")
         if self.initial_velocity_std_mps <= 0.0:
             raise ValueError("initial_velocity_std_mps must be positive")
         if not (0.0 < self.uwb_min_std_m <= self.uwb_default_std_m):
@@ -470,6 +501,16 @@ class FusionConfig:
             raise ValueError("stationary_bias_gain must be in (0, 1]")
         if self.zupt_velocity_std_mps <= 0.0:
             raise ValueError("zupt_velocity_std_mps must be positive")
+        if (
+            self.position_only_stationary_window_ms <= 0
+            or self.position_only_stationary_min_samples < 4
+            or self.position_only_stationary_max_center_shift_m <= 0.0
+            or self.position_only_stationary_max_radius_m <= 0.0
+            or self.position_only_stationary_exit_center_m <= 0.0
+            or self.position_only_stationary_exit_sample_m
+            <= self.position_only_stationary_exit_center_m
+        ):
+            raise ValueError("position-only stationary thresholds are invalid")
 
 
 class UwbImuFusion:
@@ -533,6 +574,12 @@ class UwbImuFusion:
         self._last_position_rms_m: float | None = None
         self._last_position_measurement_std_m: float | None = None
         self._last_position_nis: float | None = None
+        self._active_process_accel_noise_mps2 = (
+            self.config.adaptive_process_accel_noise_min_mps2
+            if self.config.adaptive_process_noise
+            else self.config.process_accel_noise_mps2
+        )
+        self._adaptive_process_noise_ratio: float | None = None
         self._accel_bias_ref_mps2: Vector3 = (0.0, 0.0, 0.0)
         self._accel_bias_valid = False
         self._stationary_candidate_since_us: int | None = None
@@ -540,6 +587,10 @@ class UwbImuFusion:
         self._stationary_candidate_count = 0
         self._stationary = False
         self._stationary_sample_count = 0
+        self._position_only_stationary = False
+        self._position_only_stationary_center: tuple[float, float] | None = None
+        self._position_only_stationary_entries = 0
+        self._position_only_stationary_exits = 0
         self._raw_position_window: list[tuple[int, float, float]] = []
         self._last_raw_position: RawPosition | None = None
         self._last_raw_was_accepted = False
@@ -621,6 +672,12 @@ class UwbImuFusion:
         self._last_position_rms_m = None
         self._last_position_measurement_std_m = None
         self._last_position_nis = None
+        self._active_process_accel_noise_mps2 = (
+            self.config.adaptive_process_accel_noise_min_mps2
+            if self.config.adaptive_process_noise
+            else self.config.process_accel_noise_mps2
+        )
+        self._adaptive_process_noise_ratio = None
         self._accel_bias_ref_mps2 = (0.0, 0.0, 0.0)
         self._accel_bias_valid = False
         self._stationary_candidate_since_us = None
@@ -628,6 +685,8 @@ class UwbImuFusion:
         self._stationary_candidate_count = 0
         self._stationary = False
         self._stationary_sample_count = 0
+        self._position_only_stationary = False
+        self._position_only_stationary_center = None
         self._raw_position_window = []
         self._last_raw_position = None
         self._last_raw_was_accepted = False
@@ -824,12 +883,169 @@ class UwbImuFusion:
     def _append_raw_position(self, position: RawPosition) -> None:
         point = (position.time_us, position.x_m, position.y_m)
         self._raw_position_window.append(point)
-        cutoff_us = position.time_us - self.config.stationary_uwb_window_ms * 1000
+        window_ms = self.config.stationary_uwb_window_ms
+        if self.config.position_only_stationary_enabled:
+            window_ms = max(
+                window_ms, self.config.position_only_stationary_window_ms
+            )
+        cutoff_us = position.time_us - window_ms * 1000
         while (
             len(self._raw_position_window) > 1
             and self._raw_position_window[0][0] < cutoff_us
         ):
             self._raw_position_window.pop(0)
+
+    @staticmethod
+    def _median(values: Sequence[float]) -> float:
+        ordered = sorted(values)
+        middle = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[middle]
+        return 0.5 * (ordered[middle - 1] + ordered[middle])
+
+    def _position_only_stationary_action(
+        self, position: RawPosition, flags: list[str]
+    ) -> str | None:
+        """Return ``hold``/``released`` for robust position-only ZUPT.
+
+        Entry compares medians from the two halves of a two-second UWB window
+        and bounds its 90th-percentile radius. Individual Passive DS-TWR
+        solutions can jump by more than ten centimetres while a tag is still,
+        so maxima are deliberately not used for entry. Once held, a median of
+        the latest five independent solutions releases motion quickly while a
+        larger single-sample guard handles an abrupt displacement.
+        """
+
+        if not self.config.position_only_stationary_enabled:
+            return None
+        points = self._raw_position_window
+        if self._position_only_stationary:
+            center = self._position_only_stationary_center
+            if center is None:
+                self._position_only_stationary = False
+                return None
+            recent = points[-min(5, len(points)) :]
+            recent_center = (
+                self._median([point[1] for point in recent]),
+                self._median([point[2] for point in recent]),
+            )
+            center_shift_m = math.hypot(
+                recent_center[0] - center[0], recent_center[1] - center[1]
+            )
+            sample_shift_m = math.hypot(
+                position.x_m - center[0], position.y_m - center[1]
+            )
+            if (
+                center_shift_m
+                > self.config.position_only_stationary_exit_center_m
+                or sample_shift_m
+                > self.config.position_only_stationary_exit_sample_m
+            ):
+                self._position_only_stationary = False
+                self._position_only_stationary_center = None
+                self._position_only_stationary_exits += 1
+                # Require a complete fresh window before another entry. This
+                # prevents chatter while the previous static cloud still
+                # occupies most of the rolling history.
+                self._raw_position_window = [
+                    (position.time_us, position.x_m, position.y_m)
+                ]
+                if self.config.adaptive_process_noise:
+                    self._active_process_accel_noise_mps2 = (
+                        self.config.process_accel_noise_mps2
+                    )
+                flags.append("position_only_stationary_released")
+                return "released"
+
+            self._x_m, self._y_m = center
+            self._vx_mps = 0.0
+            self._vy_mps = 0.0
+            self._state_time_us = position.time_us
+            self._last_accepted_position_time_us = position.time_us
+            self._last_position_residual_m = sample_shift_m
+            self._last_raw_was_accepted = True
+            self._position_accepted_count += 1
+            self._position_correction_count += 1
+            self._stationary_sample_count += 1
+            if self.config.adaptive_process_noise:
+                self._active_process_accel_noise_mps2 = (
+                    self.config.adaptive_process_accel_noise_min_mps2
+                )
+                self._adaptive_process_noise_ratio = 0.0
+            self._zero_velocity_update(flags)
+            flags.extend(
+                ("position_only_stationary", "position_only_stationary_hold")
+            )
+            return "hold"
+
+        required = self.config.position_only_stationary_min_samples
+        if len(points) < required:
+            return None
+        duration_us = points[-1][0] - points[0][0]
+        if duration_us < self.config.position_only_stationary_window_ms * 900:
+            return None
+        midpoint_us = (points[0][0] + points[-1][0]) // 2
+        first_half = [point for point in points if point[0] <= midpoint_us]
+        second_half = [point for point in points if point[0] > midpoint_us]
+        if len(first_half) < 3 or len(second_half) < 3:
+            return None
+        first_center = (
+            self._median([point[1] for point in first_half]),
+            self._median([point[2] for point in first_half]),
+        )
+        second_center = (
+            self._median([point[1] for point in second_half]),
+            self._median([point[2] for point in second_half]),
+        )
+        center_shift_m = math.hypot(
+            second_center[0] - first_center[0],
+            second_center[1] - first_center[1],
+        )
+        center = (
+            self._median([point[1] for point in points]),
+            self._median([point[2] for point in points]),
+        )
+        radii = sorted(
+            math.hypot(point[1] - center[0], point[2] - center[1])
+            for point in points
+        )
+        radius_90_m = radii[round(0.90 * (len(radii) - 1))]
+        if (
+            center_shift_m
+            > self.config.position_only_stationary_max_center_shift_m
+            or radius_90_m
+            > self.config.position_only_stationary_max_radius_m
+        ):
+            return None
+
+        self._position_only_stationary = True
+        self._position_only_stationary_center = center
+        self._position_only_stationary_entries += 1
+        self._x_m, self._y_m = center
+        self._vx_mps = 0.0
+        self._vy_mps = 0.0
+        self._state_time_us = position.time_us
+        self._last_accepted_position_time_us = position.time_us
+        self._last_position_residual_m = math.hypot(
+            position.x_m - center[0], position.y_m - center[1]
+        )
+        self._last_raw_was_accepted = True
+        self._position_accepted_count += 1
+        self._position_correction_count += 1
+        if self.config.adaptive_process_noise:
+            self._active_process_accel_noise_mps2 = (
+                self.config.adaptive_process_accel_noise_min_mps2
+            )
+            self._adaptive_process_noise_ratio = 0.0
+        self._zero_velocity_update(flags)
+        flags.extend(
+            (
+                "position_only_stationary_entered",
+                "position_only_stationary",
+                "position_only_stationary_hold",
+            )
+        )
+        return "hold"
 
     def _endpoint_smoothed_position(
         self, position: RawPosition
@@ -1154,7 +1370,7 @@ class UwbImuFusion:
             ]
             for row in range(4)
         ]
-        accel_variance = self.config.process_accel_noise_mps2**2
+        accel_variance = self._active_process_accel_noise_mps2**2
         half_dt_squared = 0.5 * dt * dt
         noise_vectors = (
             (half_dt_squared, 0.0, dt, 0.0),
@@ -1177,6 +1393,52 @@ class UwbImuFusion:
         ]
         self._state_time_us = time_us
         return acceleration_uwb_mps2 is not None
+
+    def _adapt_process_noise(
+        self,
+        residual_m: float,
+        measurement_std_m: float,
+        flags: list[str],
+    ) -> None:
+        """Adapt unmodelled acceleration without treating UWB jitter as motion.
+
+        The position-only state remains ``x, y, vx, vy``.  A normalized
+        innovation below the low gate uses the quiet process model; sustained
+        turns or speed changes raise the acceleration uncertainty quickly so
+        the next correction is followed without a long constant-velocity lag.
+        The uncertainty decays slowly to avoid mode chatter at the gate.
+        """
+
+        if not self.config.adaptive_process_noise:
+            self._active_process_accel_noise_mps2 = (
+                self.config.process_accel_noise_mps2
+            )
+            self._adaptive_process_noise_ratio = None
+            return
+        normalized = residual_m / max(measurement_std_m, 1e-6)
+        start = self.config.adaptive_process_residual_start_sigma
+        full = self.config.adaptive_process_residual_full_sigma
+        ratio = min(1.0, max(0.0, (normalized - start) / (full - start)))
+        # Squaring the ramp keeps ordinary centimetre-level UWB scatter close
+        # to the quiet model while still reaching the agile model on a turn.
+        ratio *= ratio
+        minimum = self.config.adaptive_process_accel_noise_min_mps2
+        maximum = self.config.process_accel_noise_mps2
+        target = minimum + ratio * (maximum - minimum)
+        gain = (
+            self.config.adaptive_process_noise_rise_gain
+            if target > self._active_process_accel_noise_mps2
+            else self.config.adaptive_process_noise_decay_gain
+        )
+        self._active_process_accel_noise_mps2 += gain * (
+            target - self._active_process_accel_noise_mps2
+        )
+        self._adaptive_process_noise_ratio = ratio
+        flags.append(
+            "adaptive_process_noise_dynamic"
+            if ratio >= 0.25
+            else "adaptive_process_noise_quiet"
+        )
 
     def _aligned_horizontal_accel(self, linear_ref: Vector3) -> Vector3:
         cosine = math.cos(self._yaw_alignment_rad)
@@ -1589,8 +1851,17 @@ class UwbImuFusion:
         if self._last_position_time_us is not None:
             gap_us = position_time_us - self._last_position_time_us
             if gap_us > self.config.position_gap_reset_ms * 1000:
-                flags.extend(self._reset_state("position_gap"))
-                self._last_output_uptime_ms = position.uptime_ms
+                bridge_stationary_gap = (
+                    self.config.position_only_stationary_enabled
+                    and self._position_only_stationary
+                    and gap_us
+                    <= self.config.position_only_stationary_window_ms * 1000
+                )
+                if bridge_stationary_gap:
+                    flags.append("position_only_stationary_gap_bridged")
+                else:
+                    flags.extend(self._reset_state("position_gap"))
+                    self._last_output_uptime_ms = position.uptime_ms
 
         if not self._verify_cross_stream_order(
             position_time_us, flags, "position"
@@ -1615,6 +1886,16 @@ class UwbImuFusion:
             self._last_raw_was_accepted = True
             return self._output(position.uptime_ms, flags)
 
+        stationary_action = self._position_only_stationary_action(
+            position, flags
+        )
+        if stationary_action == "hold":
+            return self._output(position.uptime_ms, flags)
+        if stationary_action == "released":
+            self._soft_reacquire_position(position, flags)
+            self._last_raw_was_accepted = True
+            return self._output(position.uptime_ms, flags)
+
         accepted_gap_us = (
             position_time_us - self._last_accepted_position_time_us
             if self._last_accepted_position_time_us is not None
@@ -1622,6 +1903,7 @@ class UwbImuFusion:
         )
         if (
             not self._stationary
+            and not self._position_only_stationary
             and accepted_gap_us is not None
             and accepted_gap_us > 0
         ):
@@ -1662,6 +1944,11 @@ class UwbImuFusion:
             (residual_x, residual_y),
             measurement_variance,
             apply=False,
+        )
+        self._adapt_process_noise(
+            self._last_position_residual_m,
+            self._last_position_measurement_std_m,
+            flags,
         )
         distance_outlier = (
             self._last_position_residual_m
@@ -1780,7 +2067,7 @@ class UwbImuFusion:
             flags.append("velocity_correction_negligible")
         self._clamp_velocity(flags)
         self._apply_endpoint_smoothing(position, flags)
-        if not self._stationary:
+        if not self._stationary and not self._position_only_stationary:
             flags.append("moving_ekf_position_smoothed")
         self._position_correction_count += 1
         flags.extend(("position_corrected", "ekf_corrected"))
@@ -1807,7 +2094,11 @@ class UwbImuFusion:
         )
         return {
             "ready": self._ready,
-            "filter": "ekf_cv_accel_zupt_endpoint_regression",
+            "filter": (
+                "adaptive_ekf_cv_position"
+                if self.config.adaptive_process_noise
+                else "ekf_cv_accel_zupt_endpoint_regression"
+            ),
             "frame": "body to BNO; yaw-calibrated to UWB; not ENU-calibrated until RTK course",
             "yaw_alignment_assumption": "body +X follows UWB displacement",
             "imu_to_uwb_calibration": "yaw_only",
@@ -1896,6 +2187,13 @@ class UwbImuFusion:
                 self._last_position_measurement_std_m
             ),
             "last_position_nis": self._last_position_nis,
+            "adaptive_process_noise": self.config.adaptive_process_noise,
+            "active_process_accel_noise_mps2": (
+                self._active_process_accel_noise_mps2
+            ),
+            "adaptive_process_noise_ratio": (
+                self._adaptive_process_noise_ratio
+            ),
             "covariance_diagonal": [
                 self._covariance[index][index] for index in range(4)
             ],
@@ -1903,6 +2201,13 @@ class UwbImuFusion:
             "accel_bias_valid": self._accel_bias_valid,
             "stationary": self._stationary,
             "stationary_samples": self._stationary_sample_count,
+            "position_only_stationary": self._position_only_stationary,
+            "position_only_stationary_entries": (
+                self._position_only_stationary_entries
+            ),
+            "position_only_stationary_exits": (
+                self._position_only_stationary_exits
+            ),
             "accel_bias_updates": self._bias_update_count,
             "zero_velocity_updates": self._zupt_count,
             "high_dynamic_until_us": self._high_dynamic_until_us,

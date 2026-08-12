@@ -109,6 +109,145 @@ class DashboardImuFusionTest(unittest.TestCase):
     def add(self, *samples: dict[str, object]) -> None:
         self.state.add_telemetry_samples(list(samples), CLIENT)
 
+    def test_position_only_kalman_runs_without_imu_and_keeps_raw(self) -> None:
+        self.state.set_status(
+            1,
+            {"runtime_bno085_accel_enabled": False},
+        )
+        raw_samples = []
+        for index in range(12):
+            sample = position_sample(
+                5,
+                1,
+                1000 + index * 36,
+                x_m=1.0 + (0.10 if index % 2 else -0.10),
+                y_m=2.0,
+            )
+            sample["position_filter"] = "none"
+            raw_samples.append(sample)
+            self.add(sample)
+
+        stored = self.state.tdoa_local_positions[1]
+        self.assertTrue(stored["kalman_valid"])
+        self.assertEqual(stored["x_m"], raw_samples[-1]["x_m"])
+        self.assertEqual(stored["y_m"], raw_samples[-1]["y_m"])
+        self.assertEqual(
+            stored["dashboard_position_filter"],
+            "adaptive_ekf_position_only",
+        )
+        self.assertLess(abs(float(stored["kalman_x_m"]) - 1.0), 0.10)
+        self.assertNotIn("kalman_diagnostics", stored)
+        self.assertIn("kalman_measurement_std_m", stored)
+        self.assertIn("kalman_nis", stored)
+        self.assertIn("kalman_process_accel_noise_mps2", stored)
+        self.assertIn("kalman_process_noise_ratio", stored)
+        self.assertEqual(len(self.state.tdoa_position_events), len(raw_samples))
+        self.assertFalse(self.state.imu_fusions)
+
+    def test_position_only_kalman_uses_explicit_passive_raw_source(self) -> None:
+        sample = position_sample(
+            5, 1, 1000, protocol="passive_ds", x_m=9.0, y_m=8.0
+        )
+        sample.update(
+            {
+                "position_filter": "ekf_cv",
+                "raw_x_m": 1.25,
+                "raw_y_m": -0.50,
+                "independent_frame": True,
+            }
+        )
+        self.add(sample)
+
+        stored = self.state.tdoa_local_positions[1]
+        self.assertTrue(stored["kalman_valid"])
+        self.assertEqual(stored["x_m"], 9.0)
+        self.assertEqual(stored["y_m"], 8.0)
+        self.assertAlmostEqual(float(stored["kalman_x_m"]), 1.25)
+        self.assertAlmostEqual(float(stored["kalman_y_m"]), -0.50)
+
+    def test_passive_kalman_only_corrects_on_independent_frames(self) -> None:
+        independent = position_sample(
+            5, 1, 1000, protocol="passive_ds", x_m=1.0, y_m=2.0
+        )
+        independent.update(
+            {
+                "position_filter": "none",
+                "independent_frame": True,
+            }
+        )
+        self.add(independent)
+        tracker = self.state.position_kalmans[("passive_ds", 1)]
+        before = tracker.snapshot()["diagnostics"]["position_samples"]
+
+        correlated = position_sample(
+            5, 1, 1010, protocol="passive_ds", x_m=1.5, y_m=2.5
+        )
+        correlated.update(
+            {
+                "position_filter": "none",
+                "independent_frame": False,
+            }
+        )
+        self.add(correlated)
+
+        stored = self.state.tdoa_local_positions[1]
+        after = tracker.snapshot()["diagnostics"]["position_samples"]
+        self.assertEqual(after, before)
+        self.assertFalse(stored["kalman_valid"])
+        self.assertEqual(
+            stored["kalman_reason"], "correlated_window_raw_bypass"
+        )
+        self.assertNotIn("kalman_x_m", stored)
+        self.assertNotIn("kalman_y_m", stored)
+
+        next_independent = position_sample(
+            5, 1, 1020, protocol="passive_ds", x_m=1.1, y_m=2.1
+        )
+        next_independent.update(
+            {
+                "position_filter": "none",
+                "independent_frame": True,
+            }
+        )
+        self.add(next_independent)
+        self.assertEqual(
+            tracker.snapshot()["diagnostics"]["position_samples"],
+            before + 1,
+        )
+        self.assertTrue(self.state.tdoa_local_positions[1]["kalman_valid"])
+
+    def test_passive_correlated_frame_does_not_create_kalman_track(self) -> None:
+        correlated = position_sample(
+            5, 1, 1000, protocol="passive_ds", x_m=1.5, y_m=2.5
+        )
+        correlated.update(
+            {
+                "position_filter": "none",
+                "independent_frame": False,
+            }
+        )
+        self.add(correlated)
+
+        stored = self.state.tdoa_local_positions[1]
+        self.assertNotIn(("passive_ds", 1), self.state.position_kalmans)
+        self.assertFalse(stored["kalman_valid"])
+        self.assertEqual(
+            stored["kalman_reason"], "correlated_window_raw_bypass"
+        )
+
+    def test_position_only_kalman_tracks_are_isolated_by_protocol(self) -> None:
+        for protocol in ("flextdoa", "native_ds", "passive_ds"):
+            sample = position_sample(1, 1, 1000, protocol=protocol)
+            sample["position_filter"] = "none"
+            if protocol == "passive_ds":
+                sample["independent_frame"] = True
+            self.add(sample)
+
+        self.assertEqual(
+            set(self.state.position_kalmans),
+            {("flextdoa", 1), ("native_ds", 1), ("passive_ds", 1)},
+        )
+
     def test_gptimer_is_aligned_once_without_losing_sub_ms_time(self) -> None:
         first = imu_sample(1, 1000)
         first["fusion_time_ticks"] = 2_000_000
@@ -492,6 +631,39 @@ class DashboardImuFusionTest(unittest.TestCase):
         self.assertEqual(fused["tag_id"], 1)
         self.assertEqual(fused["tdoa_protocol"], "flextdoa")
         self.assertIsInstance(fused["received_at"], float)
+
+    def test_disabled_bno_keeps_raw_position_and_suppresses_fusion(
+        self,
+    ) -> None:
+        self.state.set_status(
+            1,
+            {
+                "module_id": 1,
+                "runtime_bno085_accel_enabled": False,
+            },
+        )
+        self.add(imu_sample(1, 90), position_sample(5, 1, 100))
+
+        self.assertEqual(len(self.state.tdoa_position_events), 1)
+        self.assertNotIn("imu_fused", self.state.tdoa_position_events[0])
+        self.assertNotIn((1, "flextdoa", 1), self.state.imu_fusions)
+        self.assertNotIn(1, self.state.imu_fusion_event_buffers)
+        self.assertNotIn(1, self.state.latest_imu_by_module)
+
+    def test_disabling_bno_retires_existing_fusion_state(self) -> None:
+        self.add(imu_sample(1, 90), position_sample(5, 1, 100))
+        self.assertIn((1, "flextdoa", 1), self.state.imu_fusions)
+
+        self.state.set_status(
+            1,
+            {
+                "module_id": 1,
+                "runtime_bno085_accel_enabled": False,
+            },
+        )
+
+        self.assertNotIn((1, "flextdoa", 1), self.state.imu_fusions)
+        self.assertNotIn("1:flextdoa:1", self.state.imu_fusion_latest)
 
     def test_protocol_switch_retires_the_previous_track(self) -> None:
         self.add(imu_sample(1, 90))

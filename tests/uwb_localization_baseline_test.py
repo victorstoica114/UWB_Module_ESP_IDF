@@ -61,6 +61,50 @@ class LocalizationBaselineTest(unittest.TestCase):
         self.assertEqual(len(capture.positions), 1)
         self.assertEqual(capture.fused_positions_excluded, 1)
 
+    def test_load_capture_reads_structured_uwb_measurement_ranges(self) -> None:
+        records = [
+            {
+                "kind": "capture_start",
+                "capture_id": "measurement_ranges",
+                "protocol": "native_ds",
+                "collector_wall_ns": 1_000_000_000,
+            },
+            {
+                "kind": "uwb_measurement",
+                "measurement_kind": "native_ds_range",
+                "protocol": "native_ds",
+                "tag_id": 1,
+                "anchor_id": 3,
+                "frame_id": 17,
+                "distance_m": 5.125,
+                "raw_distance_m": 5.094,
+                "collector_wall_ns": 1_100_000_000,
+            },
+            {
+                "kind": "uwb_measurement",
+                "measurement_kind": "range_difference",
+                "protocol": "native_ds",
+                "tag_id": 1,
+                "initiator_id": 2,
+                "responder_id": 3,
+                "diff_m": 0.25,
+                "collector_wall_ns": 1_200_000_000,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "capture.jsonl"
+            with path.open("w", encoding="utf-8") as handle:
+                for record in records:
+                    handle.write(json.dumps(record) + "\n")
+            capture = load_capture(path, 1)
+
+        self.assertEqual(len(capture.ranges), 1)
+        self.assertEqual(capture.ranges[0]["kind"], "ds_range")
+        self.assertEqual(capture.ranges[0]["first_id"], 1)
+        self.assertEqual(capture.ranges[0]["second_id"], 3)
+        self.assertAlmostEqual(capture.ranges[0]["distance_m"], 5.125)
+        self.assertAlmostEqual(capture.ranges[0]["raw_distance_m"], 5.094)
+
     def test_geometry_proxy_is_finite_for_range_and_tdoa_models(self) -> None:
         point = {"x_m": 1.0, "y_m": 1.0}
         anchors = {2: (0.0, 0.0), 3: (2.0, 0.0), 4: (2.0, 2.0), 5: (0.0, 2.0)}

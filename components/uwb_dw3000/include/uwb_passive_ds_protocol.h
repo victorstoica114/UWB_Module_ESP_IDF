@@ -110,6 +110,10 @@ enum uwb_passive_ds_decode_result uwb_passive_ds_protocol_decode(
 bool uwb_passive_ds_build_plan(
     const uint8_t *anchor_ids, size_t anchor_count, uint32_t frame_id,
     struct uwb_passive_ds_plan *plan);
+bool uwb_passive_ds_next_owned_frame(
+    const uint8_t *anchor_ids, size_t anchor_count,
+    uint32_t after_frame_id, uint8_t local_anchor_id,
+    uint32_t *next_frame_id, uint8_t *frame_offset);
 int uwb_passive_ds_responder_index(
     const struct uwb_passive_ds_plan *plan, uint8_t responder_id);
 uint32_t uwb_passive_ds_response_delay_us(

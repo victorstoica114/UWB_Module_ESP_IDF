@@ -17,8 +17,6 @@ struct uwb_native_ds_runtime_context {
     struct uwb_native_ds_position_solver solver;
     bool solver_ready;
     uint32_t position_publish_count;
-    bool range_calibration_enabled;
-    int32_t anchor_range_bias_mm[UWB_NATIVE_DS_MAX_ANCHORS];
     struct uwb_mobile_geometry mobile_geometry;
     bool mobile_geometry_active;
     bool mobile_geometry_all_rtk_fixed;
@@ -205,16 +203,6 @@ static void runtime_consume_report(
     }
 
     const double raw_distance_m = distance_m;
-    if (tag_range && runtime->range_calibration_enabled) {
-        for (size_t index = 0U; index < runtime->solver.anchor_count;
-             ++index) {
-            if (runtime->solver.anchor_ids[index] == responder_id) {
-                distance_m -=
-                    (double)runtime->anchor_range_bias_mm[index] / 1000.0;
-                break;
-            }
-        }
-    }
 
     if (tag_range) {
         runtime_update_mobile_geometry(
@@ -296,10 +284,7 @@ esp_err_t uwb_native_ds_runtime_run(
 
     struct uwb_native_ds_runtime_context runtime = {
         .backend = *radio_backend,
-        .range_calibration_enabled = config->range_calibration_enabled,
     };
-    memcpy(runtime.anchor_range_bias_mm, config->anchor_range_bias_mm,
-           sizeof(runtime.anchor_range_bias_mm));
     if (config->source_id == config->tag_id) {
         if (!config->fixed_geometry) {
             ESP_LOGE(TAG, "Native DS-TWR requires fixed RTK geometry");

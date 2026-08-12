@@ -21,6 +21,7 @@ reference/external/
 __pycache__/
 *.pyc
 logs/
+/.tmp/
 
 # Build tooling keeps ccache inside the repository so sandboxed and CI builds
 # never depend on a user-profile cache directory.
@@ -35,6 +36,17 @@ reports/**/*.jsonl
 reports/**/*.jsonl.xz
 reports/**/*.metadata.json
 reports/**/*.sse
+reports/**/*.aux
+reports/**/*.log
+reports/**/*.out
+reports/**/*.toc
+reports/**/report.pdf
+reports/uwb_adaptive_ekf_field_20260812/
+reports/uwb_final_dynamic_20260812/
+reports/uwb_final_report_input_20260812/
+reports/uwb_final_static_20260812/
+reports/uwb_kalman_validation_20260812/
+reports/uwb_protocol_comparison_20260812/
 *.bak
 *.kicad_prl
 fp-info-cache

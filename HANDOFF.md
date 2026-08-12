@@ -345,3 +345,66 @@ needed.
   install when run from Codex sandbox; previous builds still completed.
 - Current project has pushed references under `reference/external` and
   datasheets under `datasheets`; use them before browsing.
+
+## Adaptive position-only EKF field validation (2026-08-12 evening)
+
+- Branch/worktree remains `localization-raw-calibration` with a deliberately
+  dirty tree. Do not discard or reset unrelated changes.
+- The dashboard uses one position-only constant-velocity adaptive EKF per
+  protocol and tag. It never consumes IMU data. Raw UWB remains authoritative
+  and can be displayed beside the EKF trail.
+- Controlled dynamic captures are in
+  `reports/uwb_adaptive_ekf_field_20260812/`:
+  - `flex_valid_rtk_ekf_walk_02.flextdoa.jsonl` (60 s);
+  - `passive_valid_rtk_ekf_walk_02.passive_ds.jsonl` (60 s);
+  - `passive_agile_ekf_validation_03.passive_ds.jsonl` (45 s).
+- FlexTDOA result, 471 RTK-fixed pairs and 4.3 mm anchor-fit RMS: EKF changed
+  raw RMSE/P95/P99/max from 14.78/25.03/33.76/53.07 cm to
+  13.81/24.48/32.06/46.09 cm. Keep the current Flex profile.
+- The first valid Passive capture had a 2.24 m rigid tag-reference offset even
+  though anchor fit was 10.3 mm. Use its de-biased shape metrics only; do not
+  interpret its absolute tag RMSE.
+- Passive was retuned from Qmax=120, min std=0.03 m, measurement scale=0.6 to
+  Qmax=480, min std=0.02 m, measurement scale=0.5. Qmin=20 and the 200 ms gap
+  reset remain unchanged. The new profile is deployed on the Raspberry
+  dashboard; no ESP OTA is required.
+- Independent live validation of the Passive profile used 359 RTK pairs and a
+  1.6 mm anchor-fit RMS. Relative to de-biased raw it improved RMSE by 1.24 mm
+  and P99 by 2.41 mm, kept the maximum equal, shortened path length by 6.8%,
+  but worsened P95 by 2.65 mm. Therefore Passive EKF remains optional, not a
+  proven accuracy replacement for raw.
+- A 168-profile cross-capture sweep found no Passive configuration that
+  improved RMSE, P95, P99 and maximum on both RTK-valid walks. Do not continue
+  blind scalar tuning without additional repeated tracks or a better motion
+  model.
+- After deployment the Raspberry reported 5 log clients, 5 telemetry clients,
+  5/5 HTTP online and 5/5 RTK Fixed in `uwb_passive_ds_twr` mode.
+
+## Final three-protocol dynamic capture (2026-08-12 night)
+
+- Final 90 s walks are archived losslessly in
+  `reports/uwb_final_dynamic_20260812/` together with capture summaries and
+  position-only EKF replay summaries:
+  - `passive_final_dynamic_01.passive_ds.jsonl`;
+  - `flex_final_dynamic_01.flextdoa.jsonl`;
+  - `native_final_dynamic_01.native_ds.jsonl`.
+- Capture event totals were:
+  - Passive: 6,451 position records, 3,601 GPS fixes, 53,311 UWB records;
+  - Flex: 2,256 position records, 3,530 GPS fixes, 66,471 UWB records;
+  - Native: 2,302 position records, 3,466 GPS fixes, 17,392 UWB records.
+- Independent-position continuity from replay:
+  - Passive 23.34 Hz, 84 gaps over 100 ms, maximum 500 ms;
+  - Flex 25.03 Hz, 26 gaps over 120 ms, maximum 360 ms;
+  - Native 25.53 Hz, one gap over 120 ms, maximum 130 ms.
+- Native and Passive RTK anchor-registration fits are valid (0.69 cm and
+  0.52 cm RMS). Flex is not yet valid for absolute accuracy ranking: its fixed
+  runtime geometry generation 99 gives a 33.29 cm RTK anchor-fit RMS after the
+  A4/GPS changes. Preserve the capture for continuity and raw-observation
+  replay, but either re-solve it with the current RTK anchor geometry or apply
+  and verify fresh Flex geometry before another live absolute-accuracy run.
+- Default replay showed Native raw/EKF RMSE 19.76/19.18 cm and P95
+  35.17/34.55 cm. Passive raw/EKF RMSE 13.96/13.97 cm and P95 26.25/26.53 cm,
+  so the Passive EKF still does not pass the accuracy gate. Flex replay values
+  must not be presented as absolute accuracy until the geometry mismatch is
+  resolved.
+- All modules were left in `uwb_ranging` (Native DS-TWR) after the campaign.

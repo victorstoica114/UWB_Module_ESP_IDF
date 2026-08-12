@@ -12,9 +12,6 @@ extern "C" {
 #endif
 
 #define APP_RUNTIME_CONFIG_MAX_ANCHORS 10U
-#define APP_RUNTIME_CONFIG_MAX_ANCHOR_PAIRS \
-    ((APP_RUNTIME_CONFIG_MAX_ANCHORS * \
-      (APP_RUNTIME_CONFIG_MAX_ANCHORS - 1U)) / 2U)
 #define APP_RUNTIME_CONFIG_CAL_THREE_COUNT 3U
 #define APP_RUNTIME_CONFIG_FLEX_MAX_SLOTS 10U
 #define APP_RUNTIME_PASSIVE_DS_FAST_STAR 0U
@@ -58,12 +55,6 @@ typedef struct {
     uint32_t flex_tdoa_geometry_generation;
     int32_t flex_tdoa_anchor_x_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS];
     int32_t flex_tdoa_anchor_y_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS];
-    /*
-     * Additive directed-TDOA correction.  An i->j observation receives
-     * correction[j] - correction[i].  The first anchor is the zero reference.
-     */
-    int32_t flex_tdoa_anchor_correction_mm[
-        APP_RUNTIME_CONFIG_MAX_ANCHORS];
     uint8_t anchor_survey_coordinator_id;
     uint32_t anchor_survey_rx_slice_ms;
     uint32_t anchor_survey_command_delay_ms;
@@ -77,10 +68,6 @@ typedef struct {
     uint32_t ranging_resp_delay_ms;
     uint32_t ranging_final_delay_ms;
     uint32_t ranging_auto_rx_delay_uus;
-    bool native_ds_calibration_enabled;
-    uint32_t native_ds_calibration_generation;
-    /* Measured range minus RTK truth, subtracted before positioning. */
-    int32_t native_ds_range_bias_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS];
     uint8_t passive_ds_schedule;
     uint32_t passive_ds_slot_ms;
     uint32_t passive_ds_round_gap_ms;
@@ -92,11 +79,6 @@ typedef struct {
     uint8_t passive_ds_pipeline_mode;
     uint8_t passive_ds_solve_mode;
     uint32_t passive_ds_rolling_max_hz;
-    bool passive_ds_calibration_enabled;
-    uint32_t passive_ds_calibration_generation;
-    int32_t passive_ds_anchor_bias_mm[APP_RUNTIME_CONFIG_MAX_ANCHORS];
-    int32_t passive_ds_range_bias_mm[
-        APP_RUNTIME_CONFIG_MAX_ANCHOR_PAIRS];
     uint8_t distance_test_peer_id;
     uint8_t distance_test_initiator_id;
     uint8_t distance_test_responder_id;
@@ -138,18 +120,12 @@ esp_err_t app_runtime_config_save(const app_runtime_config_t *config);
 esp_err_t app_runtime_config_clear(void);
 void app_runtime_config_defaults(app_runtime_config_t *config);
 void app_runtime_config_reset_flex_tdoa(app_runtime_config_t *config);
-void app_runtime_config_reset_native_ds_calibration(
-    app_runtime_config_t *config);
-void app_runtime_config_reset_passive_ds_calibration(
-    app_runtime_config_t *config);
 bool app_runtime_config_validate(const app_runtime_config_t *config);
 bool app_runtime_config_runtime_mode_valid(uint8_t mode);
 const char *app_runtime_config_runtime_mode_to_string(uint8_t mode);
 uint8_t app_runtime_config_runtime_mode_from_string(const char *text,
                                                     bool *ok);
 size_t app_runtime_config_get_anchor_ids(uint8_t *ids, size_t capacity);
-size_t app_runtime_config_anchor_pair_index(size_t first_index,
-                                            size_t second_index);
 void app_runtime_config_format_anchors(char *buffer, size_t buffer_size,
                                        const app_runtime_config_t *config);
 

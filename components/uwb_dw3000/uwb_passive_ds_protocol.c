@@ -475,6 +475,33 @@ bool uwb_passive_ds_build_plan(
     return true;
 }
 
+bool uwb_passive_ds_next_owned_frame(
+    const uint8_t *anchor_ids, size_t anchor_count,
+    uint32_t after_frame_id, uint8_t local_anchor_id,
+    uint32_t *next_frame_id, uint8_t *frame_offset)
+{
+    if (anchor_ids == NULL || next_frame_id == NULL ||
+        frame_offset == NULL || local_anchor_id == 0U ||
+        anchor_count < 3U ||
+        anchor_count > UWB_PASSIVE_DS_MAX_ANCHORS) {
+        return false;
+    }
+    for (size_t offset = 1U; offset <= anchor_count; ++offset) {
+        const uint32_t candidate = after_frame_id + (uint32_t)offset;
+        struct uwb_passive_ds_plan plan = {0};
+        if (!uwb_passive_ds_build_plan(
+                anchor_ids, anchor_count, candidate, &plan)) {
+            return false;
+        }
+        if (plan.initiator_id == local_anchor_id) {
+            *next_frame_id = candidate;
+            *frame_offset = (uint8_t)offset;
+            return true;
+        }
+    }
+    return false;
+}
+
 int uwb_passive_ds_responder_index(
     const struct uwb_passive_ds_plan *plan, uint8_t responder_id)
 {

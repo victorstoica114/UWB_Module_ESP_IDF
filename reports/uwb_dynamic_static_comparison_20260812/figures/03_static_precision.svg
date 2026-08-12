@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="470" viewBox="0 0 900 470">
+<rect width="100%" height="100%" fill="white"/>
+<text x="450.0" y="28" text-anchor="middle" font-family="sans-serif" font-size="20">Static precision; independent-frame samples</text>
+<line x1="85" y1="55" x2="85" y2="355" stroke="#111827"/>
+<line x1="85" y1="355" x2="875" y2="355" stroke="#111827"/>
+<line x1="85" y1="355.0" x2="875" y2="355.0" stroke="#e5e7eb"/>
+<text x="76" y="359.0" text-anchor="end" font-family="sans-serif" font-size="12">0</text>
+<line x1="85" y1="295.0" x2="875" y2="295.0" stroke="#e5e7eb"/>
+<text x="76" y="299.0" text-anchor="end" font-family="sans-serif" font-size="12">0.0096</text>
+<line x1="85" y1="235.0" x2="875" y2="235.0" stroke="#e5e7eb"/>
+<text x="76" y="239.0" text-anchor="end" font-family="sans-serif" font-size="12">0.019</text>
+<line x1="85" y1="175.0" x2="875" y2="175.0" stroke="#e5e7eb"/>
+<text x="76" y="179.0" text-anchor="end" font-family="sans-serif" font-size="12">0.029</text>
+<line x1="85" y1="115.0" x2="875" y2="115.0" stroke="#e5e7eb"/>
+<text x="76" y="119.0" text-anchor="end" font-family="sans-serif" font-size="12">0.039</text>
+<line x1="85" y1="55.0" x2="875" y2="55.0" stroke="#e5e7eb"/>
+<text x="76" y="59.0" text-anchor="end" font-family="sans-serif" font-size="12">0.048</text>
+<rect x="170.7" y="235.9" width="44.0" height="119.1" fill="#0f766e" opacity="0.86"><title>CEP50: 0.0191</title></rect>
+<rect x="216.7" y="87.1" width="44.0" height="267.9" fill="#f59e0b" opacity="0.86"><title>P95: 0.04298</title></rect>
+<text x="216.7" y="375" text-anchor="middle" font-family="sans-serif" font-size="11" transform="rotate(24 216.7 375)">FlexTDOA</text>
+<rect x="434.0" y="247.8" width="44.0" height="107.2" fill="#0f766e" opacity="0.86"><title>CEP50: 0.0172</title></rect>
+<rect x="480.0" y="109.0" width="44.0" height="246.0" fill="#f59e0b" opacity="0.86"><title>P95: 0.03946</title></rect>
+<text x="480.0" y="375" text-anchor="middle" font-family="sans-serif" font-size="11" transform="rotate(24 480.0 375)">Native DS-TWR</text>
+<rect x="697.3" y="237.9" width="44.0" height="117.1" fill="#0f766e" opacity="0.86"><title>CEP50: 0.01879</title></rect>
+<rect x="743.3" y="109.7" width="44.0" height="245.3" fill="#f59e0b" opacity="0.86"><title>P95: 0.03936</title></rect>
+<text x="743.3" y="375" text-anchor="middle" font-family="sans-serif" font-size="11" transform="rotate(24 743.3 375)">Passive DS-TWR</text>
+<rect x="95" y="442" width="14" height="14" fill="#0f766e"/>
+<text x="115" y="454" font-family="sans-serif" font-size="12">CEP50</text>
+<rect x="305" y="442" width="14" height="14" fill="#f59e0b"/>
+<text x="325" y="454" font-family="sans-serif" font-size="12">P95</text>
+<text x="18" y="205.0" text-anchor="middle" font-family="sans-serif" font-size="13" transform="rotate(-90 18 205.0)">radial displacement [m]</text>
+</svg>

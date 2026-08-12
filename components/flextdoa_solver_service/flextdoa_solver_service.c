@@ -120,8 +120,7 @@ static void flex_solver_load_geometry(struct flex_solver_state *state)
         state->anchors[index].y_m =
             config->flex_tdoa_anchor_y_mm[index] / 1000.0;
         state->anchor_biases[index].anchor_id = config->anchor_ids[index];
-        state->anchor_biases[index].bias_m =
-            config->flex_tdoa_anchor_correction_mm[index] / 1000.0;
+        state->anchor_biases[index].bias_m = 0.0;
     }
     state->previous_position.valid = false;
     state->frame_tag_id = 0U;

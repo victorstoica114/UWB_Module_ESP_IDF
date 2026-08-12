@@ -152,11 +152,6 @@ def collect_params(args: argparse.Namespace) -> dict[str, str]:
     add_optional(params, "gps", args.gps)
     add_optional(params, "radio_channel", args.radio_channel)
     add_optional(params, "radio_phy_mode", args.radio_phy_mode)
-    add_optional(
-        params,
-        "flex_tdoa_anchor_correction_mm",
-        args.flex_tdoa_anchor_correction_mm,
-    )
     add_optional(params, "telemetry_port", args.telemetry_port)
     add_optional(params, "survey_rx_ms", args.survey_rx_ms)
     add_optional(params, "survey_delay_ms", args.survey_delay_ms)
@@ -251,11 +246,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gps")
     parser.add_argument("--radio-channel", "--uwb-channel", dest="radio_channel")
     parser.add_argument("--radio-phy-mode", "--uwb-phy-mode", dest="radio_phy_mode")
-    parser.add_argument(
-        "--flex-tdoa-anchor-correction-mm",
-        dest="flex_tdoa_anchor_correction_mm",
-        help="comma-separated additive corrections in anchor order; first must be zero",
-    )
     parser.add_argument("--telemetry-port", "--tel-port", dest="telemetry_port")
     parser.add_argument("--survey-rx-ms", dest="survey_rx_ms")
     parser.add_argument("--survey-delay-ms", dest="survey_delay_ms")
