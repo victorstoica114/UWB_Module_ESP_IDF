@@ -117,10 +117,13 @@ $env:GIT_CONFIG_VALUE_2 = ((Join-Path $idfPath "components\openthread\openthread
 # Pass the project revision explicitly. This keeps the image descriptor correct
 # even when CMake is reusing a cache originally created by another Windows
 # identity, and makes a dirty source tree visible in the reported version.
-$projectVersion = (& git -C $projectPath describe --always --dirty 2>&1 |
-    Select-Object -First 1)
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($projectVersion)) {
-    throw "Unable to determine the project Git revision: $projectVersion"
+$gitVersionOutput = & git -C $projectPath describe --always --dirty 2>&1
+$gitVersionExitCode = $LASTEXITCODE
+$projectVersion = $gitVersionOutput | Select-Object -First 1
+if ($gitVersionExitCode -ne 0 -or
+    [string]::IsNullOrWhiteSpace($projectVersion)) {
+    throw "Unable to determine the project Git revision " +
+        "(exit $gitVersionExitCode): $projectVersion"
 }
 $projectVersion = $projectVersion.Trim()
 
