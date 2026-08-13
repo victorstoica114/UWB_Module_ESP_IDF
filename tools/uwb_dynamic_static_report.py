@@ -21,6 +21,7 @@ import json
 import lzma
 import math
 import pathlib
+import re
 import shutil
 import statistics
 from collections import Counter, defaultdict
@@ -170,6 +171,7 @@ class Capture:
     end_wall: float = math.nan
     counts: Counter[str] = field(default_factory=Counter)
     fused_positions_excluded: int = 0
+    protocol_mismatch_positions_excluded: int = 0
     positions: list[dict[str, Any]] = field(default_factory=list)
     ekf_positions: list[dict[str, Any]] = field(default_factory=list)
     imu: list[dict[str, Any]] = field(default_factory=list)
@@ -339,6 +341,13 @@ def load_capture(path: pathlib.Path, tag_id: int) -> Capture:
             elif kind in {"position", "local_position"} and int(
                 record.get("tag_id", record.get("module_id", -1))
             ) == tag_id:
+                if (
+                    capture.protocol != "unknown"
+                    and record_protocol != "unknown"
+                    and record_protocol != capture.protocol
+                ):
+                    capture.protocol_mismatch_positions_excluded += 1
+                    continue
                 if bool(record.get("imu_fused")) or "imu_fused_position" in str(
                     record.get("position_stream_type", "")
                 ):
@@ -679,6 +688,42 @@ def select_capture_matrix(captures: list[Capture]) -> tuple[list[Capture], list[
     return selected, superseded
 
 
+UPTIME_REBOOT_BACKSTEP_MS = 5_000
+
+
+def uptime_epochs(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Return chronological uptime epochs without joining across a reboot.
+
+    Position streams can contain duplicate or mildly reordered publications,
+    especially Passive DS rolling windows.  A multi-second uptime backstep is
+    treated as a reboot/protocol restart; gaps and speeds must never bridge it.
+    """
+
+    chronological = sorted(
+        enumerate(items),
+        key=lambda pair: (
+            float(pair[1].get("time", math.inf))
+            if finite(pair[1].get("time"))
+            else math.inf,
+            pair[0],
+        ),
+    )
+    epochs: list[list[dict[str, Any]]] = []
+    previous_uptime: int | None = None
+    for _, item in chronological:
+        if not finite(item.get("uptime_ms")):
+            continue
+        uptime = int(item["uptime_ms"])
+        if (
+            previous_uptime is None
+            or uptime < previous_uptime - UPTIME_REBOOT_BACKSTEP_MS
+        ):
+            epochs.append([])
+        epochs[-1].append(item)
+        previous_uptime = uptime
+    return epochs
+
+
 def stream_metrics(
     items: list[dict[str, Any]],
     duration_s: float,
@@ -686,9 +731,20 @@ def stream_metrics(
     end_wall: float = math.nan,
 ) -> dict[str, Any]:
     uptimes = [int(item["uptime_ms"]) for item in items if finite(item.get("uptime_ms"))]
-    unique = sorted(set(uptimes))
-    gaps = [float(second - first) for first, second in zip(unique, unique[1:])]
-    uptime_span_s = (unique[-1] - unique[0]) / 1000.0 if len(unique) >= 2 else math.nan
+    epochs = uptime_epochs(items)
+    unique_by_epoch = [sorted({int(item["uptime_ms"]) for item in epoch}) for epoch in epochs]
+    gaps = [
+        float(second - first)
+        for unique in unique_by_epoch
+        for first, second in zip(unique, unique[1:])
+    ]
+    unique_count = sum(len(unique) for unique in unique_by_epoch)
+    uptime_spans = [
+        (unique[-1] - unique[0]) / 1000.0
+        for unique in unique_by_epoch
+        if len(unique) >= 2
+    ]
+    uptime_span_s = sum(uptime_spans) if uptime_spans else math.nan
     times = sorted(float(item["time"]) for item in items if finite(item.get("time")))
     wall_span_s = times[-1] - times[0] if len(times) >= 2 else math.nan
     return {
@@ -697,11 +753,12 @@ def stream_metrics(
         "active_event_rate_hz": (len(items) - 1) / uptime_span_s
         if len(items) >= 2 and finite(uptime_span_s) and uptime_span_s > 0
         else math.nan,
-        "unique_uptime_events": len(unique),
-        "unique_uptime_rate_hz": len(unique) / duration_s if finite(duration_s) and duration_s > 0 else math.nan,
-        "active_unique_uptime_rate_hz": (len(unique) - 1) / uptime_span_s
-        if len(unique) >= 2 and finite(uptime_span_s) and uptime_span_s > 0
+        "unique_uptime_events": unique_count,
+        "unique_uptime_rate_hz": unique_count / duration_s if finite(duration_s) and duration_s > 0 else math.nan,
+        "active_unique_uptime_rate_hz": (unique_count - len(uptime_spans)) / uptime_span_s
+        if unique_count >= 2 and finite(uptime_span_s) and uptime_span_s > 0
         else math.nan,
+        "uptime_epoch_count": len(epochs),
         "uptime_span_s": uptime_span_s,
         "wall_span_s": wall_span_s,
         "wall_coverage_pct": 100.0 * wall_span_s / duration_s
@@ -713,7 +770,7 @@ def stream_metrics(
         "last_event_before_capture_end_s": end_wall - times[-1]
         if times and finite(end_wall)
         else math.nan,
-        "duplicate_uptime_pct": 100.0 * (1.0 - len(unique) / len(uptimes)) if uptimes else math.nan,
+        "duplicate_uptime_pct": 100.0 * (1.0 - unique_count / len(uptimes)) if uptimes else math.nan,
         "gap_p50_ms": percentile(gaps, 50),
         "gap_p95_ms": percentile(gaps, 95),
         "gap_p99_ms": percentile(gaps, 99),
@@ -754,19 +811,20 @@ def precision_metrics(points: list[dict[str, Any]], prefix: str = "") -> dict[st
 
 
 def jump_metrics(points: list[dict[str, Any]]) -> dict[str, Any]:
-    by_uptime: dict[int, dict[str, Any]] = {}
-    for point in points:
-        by_uptime[int(point["uptime_ms"])] = point
-    ordered = [by_uptime[key] for key in sorted(by_uptime)]
     speeds: list[float] = []
-    for first, second in zip(ordered, ordered[1:]):
-        elapsed = (int(second["uptime_ms"]) - int(first["uptime_ms"])) / 1000.0
-        if elapsed <= 0:
-            continue
-        speeds.append(
-            math.hypot(float(second["x_m"]) - float(first["x_m"]), float(second["y_m"]) - float(first["y_m"]))
-            / elapsed
-        )
+    for epoch in uptime_epochs(points):
+        by_uptime: dict[int, dict[str, Any]] = {}
+        for point in epoch:
+            by_uptime[int(point["uptime_ms"])] = point
+        ordered = [by_uptime[key] for key in sorted(by_uptime)]
+        for first, second in zip(ordered, ordered[1:]):
+            elapsed = (int(second["uptime_ms"]) - int(first["uptime_ms"])) / 1000.0
+            if elapsed <= 0:
+                continue
+            speeds.append(
+                math.hypot(float(second["x_m"]) - float(first["x_m"]), float(second["y_m"]) - float(first["y_m"]))
+                / elapsed
+            )
     return {
         "step_speed_n": len(speeds),
         "step_speed_p95_mps": percentile(speeds, 95),
@@ -920,48 +978,69 @@ def fit_rigid(
     source: dict[int, tuple[float, float]],
     target: dict[int, tuple[float, float, float]],
 ) -> dict[str, Any] | None:
+    """Fit the best fixed-scale 2-D isometry, including mirror ambiguity.
+
+    Indoor UWB coordinates have no intrinsic geographic chirality.  The same
+    ID-keyed anchor geometry can therefore be expressed as either a direct or
+    mirrored local frame relative to ENU.  Evaluate both while keeping scale
+    fixed at one, then retain the candidate with the smaller anchor RMSE.
+    """
+
     ids = [anchor_id for anchor_id in ANCHOR_IDS if anchor_id in source and anchor_id in target]
     if len(ids) < 3:
         return None
-    x = [source[anchor_id] for anchor_id in ids]
     y = [(target[anchor_id][0], target[anchor_id][1]) for anchor_id in ids]
-    cx = (mean(point[0] for point in x), mean(point[1] for point in x))
     cy = (mean(point[0] for point in y), mean(point[1] for point in y))
-    cosine_term = 0.0
-    sine_term = 0.0
-    for local, common in zip(x, y):
-        lx, ly = local[0] - cx[0], local[1] - cx[1]
-        ex, ey = common[0] - cy[0], common[1] - cy[1]
-        cosine_term += lx * ex + ly * ey
-        sine_term += lx * ey - ly * ex
-    norm = math.hypot(cosine_term, sine_term)
-    if norm <= 1e-12:
-        return None
-    cosine = cosine_term / norm
-    sine = sine_term / norm
-    rotation = ((cosine, -sine), (sine, cosine))
-    translation = (
-        cy[0] - (cosine * cx[0] - sine * cx[1]),
-        cy[1] - (sine * cx[0] + cosine * cx[1]),
-    )
-    predicted = [
-        (
-            cosine * point[0] - sine * point[1] + translation[0],
-            sine * point[0] + cosine * point[1] + translation[1],
+    candidates: list[dict[str, Any]] = []
+    for reflected in (False, True):
+        x = [
+            (source[anchor_id][0], -source[anchor_id][1] if reflected else source[anchor_id][1])
+            for anchor_id in ids
+        ]
+        cx = (mean(point[0] for point in x), mean(point[1] for point in x))
+        cosine_term = 0.0
+        sine_term = 0.0
+        for local, common in zip(x, y):
+            lx, ly = local[0] - cx[0], local[1] - cx[1]
+            ex, ey = common[0] - cy[0], common[1] - cy[1]
+            cosine_term += lx * ex + ly * ey
+            sine_term += lx * ey - ly * ex
+        norm = math.hypot(cosine_term, sine_term)
+        if norm <= 1e-12:
+            continue
+        cosine = cosine_term / norm
+        sine = sine_term / norm
+        rotation = ((cosine, -sine), (sine, cosine))
+        translation = (
+            cy[0] - (cosine * cx[0] - sine * cx[1]),
+            cy[1] - (sine * cx[0] + cosine * cx[1]),
         )
-        for point in x
-    ]
-    residuals = [math.dist(first, second) for first, second in zip(predicted, y)]
-    return {
-        "anchor_ids": ids,
-        "rotation": rotation,
-        "translation": translation,
-        "yaw_deg": math.degrees(math.atan2(sine, cosine)),
-        "fit_rmse_m": math.sqrt(mean(value * value for value in residuals)),
-        "fit_p95_m": percentile(residuals, 95),
-        "fit_max_m": max(residuals),
-        "residuals_m": {str(anchor_id): float(value) for anchor_id, value in zip(ids, residuals)},
-    }
+        predicted = [
+            (
+                cosine * point[0] - sine * point[1] + translation[0],
+                sine * point[0] + cosine * point[1] + translation[1],
+            )
+            for point in x
+        ]
+        residuals = [math.dist(first, second) for first, second in zip(predicted, y)]
+        candidates.append(
+            {
+                "anchor_ids": ids,
+                "rotation": rotation,
+                "translation": translation,
+                "reflected": reflected,
+                "scale": 1.0,
+                "yaw_deg": math.degrees(math.atan2(sine, cosine)),
+                "fit_rmse_m": math.sqrt(mean(value * value for value in residuals)),
+                "fit_p95_m": percentile(residuals, 95),
+                "fit_max_m": max(residuals),
+                "residuals_m": {
+                    str(anchor_id): float(value)
+                    for anchor_id, value in zip(ids, residuals)
+                },
+            }
+        )
+    return min(candidates, key=lambda item: (item["fit_rmse_m"], item["reflected"])) if candidates else None
 
 
 def build_alignments(capture: Capture, centers: dict[int, tuple[float, float, float]]) -> list[dict[str, Any]]:
@@ -1010,9 +1089,10 @@ def transform_positions(
             continue
         rotation = alignment["rotation"]
         translation = alignment["translation"]
+        local_y = -point["y_m"] if alignment.get("reflected", False) else point["y_m"]
         common = (
-            rotation[0][0] * point["x_m"] + rotation[0][1] * point["y_m"] + translation[0],
-            rotation[1][0] * point["x_m"] + rotation[1][1] * point["y_m"] + translation[1],
+            rotation[0][0] * point["x_m"] + rotation[0][1] * local_y + translation[0],
+            rotation[1][0] * point["x_m"] + rotation[1][1] * local_y + translation[1],
         )
         transformed.append(
             {
@@ -1044,12 +1124,14 @@ def alignment_metrics(
         return {"available": False, **diagnostics}
     fit_rmse = [alignment["fit_rmse_m"] for alignment in alignments]
     yaw = [alignment["yaw_deg"] for alignment in alignments]
+    reflected = [bool(alignment.get("reflected", False)) for alignment in alignments]
     dynamic = [alignment for alignment in alignments if alignment["dynamic"]]
     max_spread = max((spreads.get(anchor_id, math.nan) for anchor_id in ANCHOR_IDS if finite(spreads.get(anchor_id))), default=math.nan)
     reliable = (
         max(fit_rmse) <= 0.5
         and (not finite(max_spread) or max_spread <= 0.5)
         and min(len(alignment["anchor_ids"]) for alignment in alignments) >= 3
+        and len(set(reflected)) == 1
     )
     return {
         "available": True,
@@ -1057,6 +1139,9 @@ def alignment_metrics(
         "dynamic_snapshot_count": len(dynamic),
         "rtk_derived_dynamic_geometry": bool(dynamic),
         "anchor_count_min": min(len(alignment["anchor_ids"]) for alignment in alignments),
+        "reflected": reflected[0] if len(set(reflected)) == 1 else None,
+        "reflected_snapshot_count": sum(reflected),
+        "reflection_consistent": len(set(reflected)) == 1,
         "fit_rmse_m_median": median(fit_rmse),
         "fit_rmse_m_p95": percentile(fit_rmse, 95),
         "fit_rmse_m_max": max(fit_rmse),
@@ -1370,6 +1455,22 @@ def pdf_bar_chart(
     canvas.save(path)
 
 
+def cdf_axis_max(values: Iterable[float]) -> float:
+    """Return an axis limit that includes every finite CDF sample."""
+
+    clean = [float(value) for value in values if finite(value)]
+    return max(max(clean) * 1.02 if clean else 1.0, 0.1)
+
+
+def cdf_sample_indices(count: int, maximum_points: int) -> list[int]:
+    """Downsample a CDF while always retaining its 0% and 100% endpoints."""
+
+    if count <= 0:
+        return []
+    stride = max(1, count // maximum_points)
+    return sorted({*range(0, count, stride), count - 1})
+
+
 def pdf_cdf_chart(
     path: pathlib.Path,
     title: str,
@@ -1379,7 +1480,7 @@ def pdf_cdf_chart(
     left, right, top, bottom = 70.0, 24.0, 55.0, 58.0
     plot_width, plot_height = width - left - right, height - top - bottom
     values = [value for _, items, _ in series for value in items if finite(value)]
-    maximum = max(percentile(values, 99) * 1.08 if values else 1.0, 0.1)
+    maximum = cdf_axis_max(values)
     canvas = PdfCanvas(width, height)
     canvas.text(width / 2, height - 28, title, 17, bold=True, centered=True)
     for tick in range(6):
@@ -1395,10 +1496,9 @@ def pdf_cdf_chart(
         ordered = sorted(value for value in items if finite(value))
         if not ordered:
             continue
-        stride = max(1, len(ordered) // 600)
         points = []
-        for item_index in range(0, len(ordered), stride):
-            value = min(ordered[item_index], maximum)
+        for item_index in cdf_sample_indices(len(ordered), 600):
+            value = ordered[item_index]
             points.append(
                 (
                     left + plot_width * value / maximum,
@@ -1849,8 +1949,7 @@ def svg_cdf_chart(
     left, right, top, bottom = 75, 25, 55, 65
     plot_width, plot_height = width - left - right, height - top - bottom
     all_values = [value for _, values, _ in series for value in values if finite(value)]
-    maximum = percentile(all_values, 99) * 1.08 if all_values else 1.0
-    maximum = max(maximum, 0.1)
+    maximum = cdf_axis_max(all_values)
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" fill="white"/>',
@@ -1877,10 +1976,9 @@ def svg_cdf_chart(
         ordered = sorted(value for value in values if finite(value))
         if not ordered:
             continue
-        stride = max(1, len(ordered) // 500)
         points = []
-        for item_index in range(0, len(ordered), stride):
-            value = min(ordered[item_index], maximum)
+        for item_index in cdf_sample_indices(len(ordered), 500):
+            value = ordered[item_index]
             x = left + plot_width * value / maximum
             y = top + plot_height * (1.0 - item_index / max(1, len(ordered) - 1))
             points.append(f"{x:.1f},{y:.1f}")
@@ -1911,6 +2009,17 @@ def make_figures(
     rtk_reference_captures: list[Capture] | None = None,
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
+    campaign_match = re.search(r"(20\d{6})", str(directory))
+    if campaign_match:
+        try:
+            campaign_day = dt.datetime.strptime(campaign_match.group(1), "%Y%m%d").date()
+            capture_date_label = (
+                f"{campaign_day.strftime('%B')} {campaign_day.day}, {campaign_day.year}"
+            )
+        except ValueError:
+            capture_date_label = "selected"
+    else:
+        capture_date_label = "selected"
     ordered = sorted(captures, key=lambda item: (item.motion, item.protocol, item.capture_id))
     labels = [f"{PROTOCOL_LABELS.get(item.protocol, item.protocol)}\n{item.motion}" for item in ordered]
     colors = [PROTOCOL_COLORS.get(item.protocol, "#64748b") for item in ordered]
@@ -1966,7 +2075,7 @@ def make_figures(
         )
         pdf_position_panels(
             directory / "07_static_position_clouds.pdf",
-            "Static raw UWB position clouds - August 12 captures",
+            f"Static raw UWB position clouds - {capture_date_label} captures",
             static,
             centered_static=True,
         )
@@ -1992,26 +2101,28 @@ def make_figures(
             for capture in dynamic:
                 pairs = pairs_by_capture[capture.capture_id]
                 errors = [pair["error_m"] for pair in pairs]
+                fit_grade = summaries[capture.capture_id]["alignment"].get("quality_flag")
+                grade_label = "usable" if fit_grade == "usable_with_limitations" else "poor fit"
                 cdf_series.append(
                     (
-                        f"{PROTOCOL_LABELS.get(capture.protocol, capture.protocol)} (n={len(errors)})",
+                        f"{PROTOCOL_LABELS.get(capture.protocol, capture.protocol)} (n={len(errors)}; {grade_label})",
                         errors,
                         PROTOCOL_COLORS.get(capture.protocol, "#64748b"),
                     )
                 )
             svg_cdf_chart(
                 directory / "04_dynamic_rtk_error_cdf.svg",
-                "Dynamic paired error CDF (RTK is not surveyed truth)",
+                "Dynamic paired residual CDF (see anchor-fit grade)",
                 cdf_series,
             )
             pdf_cdf_chart(
                 directory / "04_dynamic_rtk_error_cdf.pdf",
-                "Dynamic paired error CDF (RTK is not surveyed truth)",
+                "Dynamic paired residual CDF (see anchor-fit grade)",
                 cdf_series,
             )
         pdf_position_panels(
             directory / "06_dynamic_trajectories.pdf",
-            "Raw dynamic UWB trajectories - August 12 position captures",
+            f"Raw dynamic UWB trajectories - {capture_date_label} captures",
             dynamic,
             centered_static=False,
         )
@@ -2048,20 +2159,20 @@ def make_figures(
         error = [summaries[item.capture_id]["rtk_error"].get("error_rmse_m", math.nan) for item in aligned]
         svg_bar_chart(
             directory / "05_alignment_quality.svg",
-            "Alignment residual must accompany RTK comparison",
+            "Anchor-registration RMSE (P95 across snapshots)",
             [f"{PROTOCOL_LABELS.get(item.protocol, item.protocol)} {item.motion}" for item in aligned],
             [
-                ("anchor fit P95 RMSE", fit, "#64748b"),
+                ("anchor-fit RMSE P95", fit, "#64748b"),
                 ("paired tag RMSE", error, "#dc2626"),
             ],
             "metres",
         )
         pdf_bar_chart(
             directory / "05_alignment_quality.pdf",
-            "Alignment residual must accompany RTK comparison",
+            "Anchor-registration RMSE (P95 across snapshots)",
             [f"{PROTOCOL_LABELS.get(item.protocol, item.protocol)} {item.motion}" for item in aligned],
             [
-                ("anchor fit P95 RMSE", fit, "#64748b"),
+                ("anchor-fit RMSE P95", fit, "#64748b"),
                 ("paired tag RMSE", error, "#dc2626"),
             ],
             "metres",
@@ -2508,6 +2619,8 @@ an `*_imu_fused_position` stream) are excluded from every raw/independent
 capture metric and counted separately in `capture_metrics.csv`. `Capture Hz`
 uses the full capture wall duration; `active Hz` uses the stream's own uptime
 span. Coverage and end-lag fields expose captures whose telemetry stops early.
+Every accepted position record must also match the protocol declared by its
+capture envelope; mismatches are excluded and counted in `capture_metrics.csv`.
 
 ![Independent position rate](figures/01_position_rate.svg)
 
@@ -2558,9 +2671,10 @@ can coexist with a shifted tag reference and cannot rescue static ranking.
 Only RTK-fixed tag solutions are used. Each solution is matched to the nearest
 independent UWB position by `estimated_measurement_wall_ns` versus the UWB
 `received_at` timestamp, with an absolute limit of {args.rtk_match_ms:.0f} ms.
-The local UWB frame is mapped to RTK ENU with rotation and translation only;
-scale is never fitted. `Debiased RMSE` removes the median tag residual after
-anchor registration and is a shape/repeatability diagnostic, not accuracy.
+The local UWB frame is mapped to RTK ENU with the better ID-keyed direct or
+reflected rigid transform. Scale is fixed at one and is never fitted.
+`Debiased RMSE` removes the median tag residual after anchor registration and
+is a shape/repeatability diagnostic, not accuracy.
 
 {markdown_table(
     ["protocol", "motion", "pairs", "time P95 ms", "RMSE m", "P95 m", "debiased RMSE m", "anchor-fit P95 RMSE m", "alignment flag", "RTK interpretation"],
@@ -2577,8 +2691,9 @@ anchor registration and is a shape/repeatability diagnostic, not accuracy.
 - Interleaved dashboard fusion positions are excluded before all raw position
   metrics; raw events may still carry `imu_fused_*` diagnostic fields.
 - Anchor centers are per-capture component-wise medians of RTK-fixed samples.
-- A 2-D proper rigid transform is fitted from the local anchor geometry to the
-  RTK centers. At least three fixed anchors are required.
+- Both direct and reflected fixed-scale 2-D rigid transforms are evaluated
+  from the local anchor geometry to the RTK centers; the smaller anchor-RMSE
+  candidate is selected. At least three fixed anchors are required.
 - Time-varying Passive DS geometries use the nearest captured geometry
   snapshot, preferring an exact `geometry_version`. A non-exact dynamic
   geometry older than {args.max_geometry_age_s:.1f} s is rejected.
@@ -2848,6 +2963,415 @@ library \texttt{lzma} module, then rerun \texttt{tools/uwb\_dynamic\_static\_rep
     path.write_text(tex, encoding="utf-8")
 
 
+def campaign_date_from_output(args: argparse.Namespace) -> dt.date:
+    match = re.search(r"(20\d{6})", args.output_dir.name)
+    if match:
+        try:
+            return dt.datetime.strptime(match.group(1), "%Y%m%d").date()
+        except ValueError:
+            pass
+    return dt.datetime.now().date()
+
+
+def write_tex_report_same_session(
+    path: pathlib.Path,
+    captures: list[Capture],
+    summaries: dict[str, dict[str, Any]],
+    static_consistency: dict[str, Any],
+    args: argparse.Namespace,
+) -> None:
+    """Write the illustrated same-session report used by the August 13 campaign."""
+
+    ordered = sorted(captures, key=lambda item: (item.motion, item.protocol, item.capture_id))
+    by_cell = {(capture.motion, capture.protocol): summaries[capture.capture_id] for capture in captures}
+
+    def metric(motion: str, protocol: str, group: str, name: str) -> float:
+        return float(by_cell.get((motion, protocol), {}).get(group, {}).get(name, math.nan))
+
+    capture_rows: list[list[Any]] = []
+    dynamic_rows: list[list[Any]] = []
+    gap_rows: list[list[Any]] = []
+    static_rows: list[list[Any]] = []
+    ekf_rows: list[list[Any]] = []
+    rtk_rows: list[list[Any]] = []
+    quality_rows: list[list[Any]] = []
+    for capture in ordered:
+        item = summaries[capture.capture_id]
+        stream = item["position_stream"]
+        capture_rows.append(
+            [
+                PROTOCOL_LABELS.get(capture.protocol, capture.protocol),
+                capture.motion,
+                capture.capture_id,
+                fmt(item["duration_s"], 1),
+                stream["events"],
+                stream["independent_events"],
+                fmt(stream["independent_rate_hz"], 2),
+                fmt(stream["wall_coverage_pct"], 1),
+                stream.get("uptime_epoch_count", 1),
+            ]
+        )
+        flags = set(item.get("quality_flags", []))
+        notes: list[str] = []
+        if "position_stream_covers_less_than_80pct_of_capture" in flags:
+            notes.append(
+                "position coverage below 80%; first position at "
+                f"+{fmt(stream.get('first_event_after_capture_start_s'), 2)} s"
+            )
+        if "capture_duration_less_than_10s" in flags:
+            notes.append("short capture; interpret static precision as indicative")
+        excluded_mismatch = int(item.get("protocol_mismatch_position_records_excluded", 0))
+        if excluded_mismatch:
+            notes.append(f"excluded {excluded_mismatch} position records from another protocol")
+        if notes:
+            quality_rows.append(
+                [
+                    PROTOCOL_LABELS.get(capture.protocol, capture.protocol),
+                    capture.motion,
+                    fmt(item["duration_s"], 2),
+                    fmt(stream.get("wall_span_s"), 2),
+                    "; ".join(notes),
+                ]
+            )
+        gap_rows.append(
+            [
+                PROTOCOL_LABELS.get(capture.protocol, capture.protocol),
+                capture.motion,
+                fmt(stream["event_rate_hz"], 2),
+                fmt(stream["independent_rate_hz"], 2),
+                fmt(stream["gap_p50_ms"], 0),
+                fmt(stream["gap_p95_ms"], 0),
+                fmt(stream["gap_p99_ms"], 0),
+                fmt(stream["gap_max_ms"], 0),
+                stream["gaps_gt_100ms"],
+            ]
+        )
+        if capture.motion == "dynamic":
+            dynamic_rows.append(
+                [
+                    PROTOCOL_LABELS.get(capture.protocol, capture.protocol),
+                    fmt(item["duration_s"], 1),
+                    stream["events"],
+                    stream["independent_events"],
+                    fmt(stream["event_rate_hz"], 2),
+                    fmt(stream["independent_rate_hz"], 2),
+                    fmt(stream["gap_p95_ms"], 0),
+                    fmt(stream["gap_max_ms"], 0),
+                    fmt(item["position_jumps"].get("step_speed_p95_mps"), 2),
+                ]
+            )
+        if capture.motion == "static":
+            precision = item["static_precision"]
+            static_rows.append(
+                [
+                    PROTOCOL_LABELS.get(capture.protocol, capture.protocol),
+                    precision.get("n", 0),
+                    fmt(100 * precision.get("cep50_m", math.nan), 2),
+                    fmt(100 * precision.get("rms_m", math.nan), 2),
+                    fmt(100 * precision.get("p95_m", math.nan), 2),
+                    fmt(100 * precision.get("p99_m", math.nan), 2),
+                    fmt(100 * precision.get("max_m", math.nan), 2),
+                    fmt(100 * precision.get("first_to_last_decile_drift_m", math.nan), 2),
+                ]
+            )
+        ekf = item["ekf_stream"]
+        ekf_rows.append(
+            [
+                PROTOCOL_LABELS.get(capture.protocol, capture.protocol),
+                capture.motion,
+                fmt(ekf.get("available_pct"), 1),
+                fmt(item["position_jumps"].get("step_speed_p95_mps"), 2),
+                fmt(item["ekf_position_jumps"].get("step_speed_p95_mps"), 2),
+                fmt(100 * item["static_precision"].get("rms_m", math.nan), 2),
+                fmt(100 * item["ekf_static_precision"].get("rms_m", math.nan), 2),
+            ]
+        )
+        error = item["rtk_error"]
+        alignment = item["alignment"]
+        alignment_label = {
+            "poor_alignment_do_not_claim_accuracy": "poor; no accuracy claim",
+            "usable_with_limitations": "usable with limits",
+            "unavailable": "unavailable",
+        }.get(alignment.get("quality_flag", "unavailable"), alignment.get("quality_flag", "unavailable"))
+        rtk_rows.append(
+            [
+                PROTOCOL_LABELS.get(capture.protocol, capture.protocol),
+                capture.motion,
+                error.get("pairs", 0),
+                fmt(error.get("association_abs_p95_ms"), 1),
+                fmt(error.get("error_rmse_m")),
+                fmt(error.get("error_p95_m")),
+                fmt(error.get("debiased_error_rmse_m")),
+                fmt(alignment.get("fit_rmse_m_p95")),
+                alignment_label,
+            ]
+        )
+
+    campaign_date = campaign_date_from_output(args)
+    campaign_label = f"{campaign_date.strftime('%B')} {campaign_date.day}, {campaign_date.year}"
+    dynamic_rates = {
+        protocol: metric("dynamic", protocol, "position_stream", "independent_rate_hz")
+        for protocol in PROTOCOL_LABELS
+    }
+    dynamic_gaps = {
+        protocol: metric("dynamic", protocol, "position_stream", "gap_max_ms")
+        for protocol in PROTOCOL_LABELS
+    }
+    static_rms = {
+        protocol: 100 * metric("static", protocol, "static_precision", "rms_m")
+        for protocol in PROTOCOL_LABELS
+    }
+
+    tex = r"""\documentclass[10pt,a4paper]{article}
+\usepackage{lmodern}
+\usepackage[margin=19mm]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[table]{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{parskip}
+\usepackage{array}
+\graphicspath{{figures/}}
+\definecolor{warning}{HTML}{FFF3CD}
+\definecolor{info}{HTML}{E0F2FE}
+\hypersetup{pdftitle={Dynamic and static comparison of three UWB protocols},pdfauthor={UWB ESP-IDF technical report}}
+\begin{document}
+\pagenumbering{gobble}
+\begin{titlepage}
+\centering
+\vspace*{18mm}
+{\Huge\bfseries Dynamic and static UWB comparison\par}
+\vspace{4mm}
+{\Large FlexTDOA, Native DS-TWR and Passive DS-TWR\par}
+\vspace{14mm}
+{\large Field campaign of """ + tex_escape(campaign_label) + r"""\par}
+\vspace{12mm}
+\begin{tabular}{rl}
+Platform: & 5 ESP32-S3 + DW3000 modules, Raspberry Pi collector\\
+Topology: & M1 tag; M2, M3, M4 and M5 anchors\\
+Radio: & UWB channel 9\\
+Position streams: & raw independent UWB and position-only adaptive EKF\\
+Reference: & embedded GPS RTK telemetry, quality audited per capture\\
+\end{tabular}
+\vfill
+\colorbox{info}{\parbox{0.88\textwidth}{\vspace{2mm}
+\textbf{Main result.} All six protocol/motion cells are populated. Dynamic
+continuity is directly measurable, and static local precision is consistently
+at centimetre scale. RTK anchor registration passes for some, but not all,
+captures, so no complete three-protocol absolute-accuracy ranking is claimed;
+raw UWB remains the audit stream.\vspace{2mm}}}
+\vfill
+{\large Reproducible technical report\par}
+\end{titlepage}
+\pagenumbering{roman}
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\section{Executive summary}
+\colorbox{warning}{\parbox{0.96\textwidth}{\textbf{Evidence boundary.}
+Rates, gaps, sample counts, local static precision and raw-versus-EKF
+comparisons are direct capture diagnostics. RTK is an in-system reference, not
+independently surveyed truth. Every RTK residual must be read with its per-row
+anchor-fit grade; a failed fit invalidates that row and prevents a complete
+cross-protocol absolute-accuracy ranking.}}
+
+The dynamic independent rates were \textbf{""" + fmt(dynamic_rates["flextdoa"], 2) + r""" positions/s}
+for FlexTDOA, \textbf{""" + fmt(dynamic_rates["native_ds"], 2) + r""" positions/s} for Native
+DS-TWR and \textbf{""" + fmt(dynamic_rates["passive_ds"], 2) + r""" positions/s} for Passive
+DS-TWR. Maximum observed gaps were """ + fmt(dynamic_gaps["flextdoa"], 0) + r""",
+""" + fmt(dynamic_gaps["native_ds"], 0) + r""" and """ + fmt(dynamic_gaps["passive_ds"], 0) + r""" ms respectively.
+
+Static raw local RMS was \textbf{""" + fmt(static_rms["flextdoa"], 2) + r""" cm} for FlexTDOA,
+\textbf{""" + fmt(static_rms["native_ds"], 2) + r""" cm} for Native DS-TWR and
+\textbf{""" + fmt(static_rms["passive_ds"], 2) + r""" cm} for Passive DS-TWR. These values
+measure repeatability around each capture median, not absolute position error.
+
+\section{Scope and protocol background}
+The campaign compares the published position streams of three independent UWB
+protocols. FlexTDOA and Passive DS-TWR keep the tag radio receive-only. Native
+DS-TWR performs active tag-to-anchor exchanges and provides the coherent-frame
+baseline. Passive rolling windows may publish multiple events from shared radio
+measurements, so all-event and independent-frame rates are reported separately.
+
+\section{Captured evidence}
+"""
+    tex += tex_table(
+        ["Protocol", "Mode", "Capture ID", "duration s", "events", "independent", "indep Hz", "coverage pct", "epochs"],
+        capture_rows,
+    )
+    if quality_rows:
+        tex += r"""
+
+\subsection{Capture-quality notices}
+These notices do not invalidate the retained samples, but they limit how far
+the affected block can be generalized.
+"""
+        tex += tex_table(
+            ["Protocol", "Mode", "envelope s", "active span s", "notice"],
+            quality_rows,
+            "llrrl",
+        )
+    tex += r"""
+
+All selected blocks have terminal capture envelopes. Derived blocks are
+lossless time slices of source JSONL captures. The raw records are not
+smoothed, trimmed by error or rewritten by the report generator.
+
+\section{Dynamic results}
+\subsection{Raw trajectories}
+The routes are separate physical trials. Their panels support continuity and
+gross-shape inspection; they are not synchronized point-by-point repeats.
+"""
+    tex += tex_figure(
+        "06_dynamic_trajectories.pdf",
+        "Raw independent UWB trajectories in each protocol's local frame. Green markers are anchors.",
+        r"\textwidth",
+    )
+    tex += r"""\subsection{Update rate and gaps}
+"""
+    tex += tex_table(
+        ["Protocol", "duration s", "events", "independent", "event Hz", "indep Hz", "gap P95 ms", "gap max ms", "step P95 m/s"],
+        dynamic_rows,
+    )
+    tex += tex_figure(
+        "01_position_rate.pdf",
+        "Independent position rate for every dynamic and static block.",
+    )
+    tex += tex_figure(
+        "02_position_gap.pdf",
+        "P95 positive position gap. Maximum gaps and counts remain in the tables.",
+    )
+    tex += r"""
+\subsection{Complete continuity audit}
+Uptime epochs are separated at multi-second backsteps, so a protocol restart is
+never turned into a synthetic gap or step-speed measurement.
+"""
+    tex += tex_table(
+        ["Protocol", "Mode", "event Hz", "indep Hz", "P50 ms", "P95", "P99", "max", "gaps over 100 ms"],
+        gap_rows,
+    )
+    tex += r"""
+
+\section{Position-only adaptive EKF}
+The dashboard EKF consumes UWB positions only; acceleration is disabled. Raw
+measurements remain archived, and each valid EKF point is tied to its raw event.
+Step-speed P95 is a jitter diagnostic rather than physical walking speed.
+"""
+    tex += tex_table(
+        ["Protocol", "Mode", "coverage pct", "raw step P95", "EKF step P95", "raw static RMS cm", "EKF static RMS cm"],
+        ekf_rows,
+    )
+    tex += tex_figure(
+        "09_dynamic_raw_vs_ekf.pdf",
+        "Raw dynamic trajectories (blue) and position-only EKF trajectories (green).",
+        r"\textwidth",
+    )
+    tex += r"""
+
+\section{Static results}
+Static precision is radial displacement around each block's own component-wise
+median. All independent samples and outliers are retained.
+"""
+    tex += tex_table(
+        ["Protocol", "N", "CEP50 cm", "RMS cm", "P95 cm", "P99 cm", "max cm", "drift cm"],
+        static_rows,
+    )
+    tex += tex_figure(
+        "03_static_precision.pdf",
+        "Static raw precision around each block median.",
+    )
+    tex += tex_figure(
+        "07_static_position_clouds.pdf",
+        "Static raw position clouds, centered independently and drawn at one common scale.",
+        r"\textwidth",
+    )
+    tex += tex_figure(
+        "10_static_raw_vs_ekf.pdf",
+        "Static raw and position-only EKF clouds, each centered on its own median.",
+        r"\textwidth",
+    )
+    tex += r"""
+
+\clearpage
+\section{RTK association audit}
+Each quality-4 tag solution contributes at most one pair. The nearest
+independent UWB position must lie within """ + f"{args.rtk_match_ms:.0f}" + r""" ms. The UWB
+frame is registered to robust RTK anchor centers using the better ID-keyed
+direct or reflected rigid transform. Scale is fixed at one and is never fitted.
+The reported anchor-fit value is the P95, across captured geometry snapshots,
+of the four-anchor RMSE. A row is graded usable only when the worst snapshot
+RMSE is at most 0.5 m, anchor RTK spread is at most 0.5 m and reflection choice
+is consistent.
+
+The stationary-tag cross-capture separation is """ + fmt(static_consistency.get("max_pairwise_distance_m")) + r""" m,
+against a """ + fmt(static_consistency.get("threshold_m")) + r""" m consistency gate. The gate fails.
+Absolute static ranking is therefore invalid.
+"""
+    tex += tex_table(
+        ["Protocol", "Mode", "pairs", "time P95 ms", "RMSE m", "P95 m", "debiased RMSE m", "fit RMSE P95 m", "grade"],
+        rtk_rows,
+    )
+    tex += tex_figure(
+        "04_dynamic_rtk_error_cdf.pdf",
+        "Dynamic UWB--RTK residual CDF. Each legend entry includes its anchor-fit grade; RTK is not surveyed truth.",
+    )
+    tex += tex_figure(
+        "05_alignment_quality.pdf",
+        "Best direct/reflected fixed-scale anchor-registration residual. The per-row grade controls interpretation.",
+    )
+    tex += tex_figure(
+        "08_static_gps_rtk_clouds.pdf",
+        "RTK Fixed stationary tag clouds and cross-capture centers.",
+        r"\textwidth",
+    )
+    tex += r"""
+
+\clearpage
+\section{Interpretation}
+\begin{itemize}
+\item Passive DS-TWR has the highest independent dynamic rate in this dataset;
+its all-event rate is higher because rolling windows overlap.
+\item Native DS-TWR provides the best maximum dynamic gap among the three
+selected walks and remains the coherent active-ranging baseline.
+\item FlexTDOA preserves a receive-only tag but shows the longest gaps in this
+campaign.
+\item Static local precision is similar across all protocols. The EKF reduces
+visible stationary jitter but is not a replacement for raw UWB.
+\item FlexTDOA and Passive DS-TWR pass the configured dynamic anchor-fit gate;
+Native DS-TWR does not, so a complete absolute RTK ranking is not made.
+\end{itemize}
+
+\section{Limitations}
+\begin{itemize}
+\item RTK is an in-system comparison reference, not independently surveyed truth.
+\item GPS and UWB measurement times are associated in software, not by one hardware clock.
+\item GNSS and UWB antenna phase centers have unknown lever arms.
+\item Routes are single trials rather than randomized synchronized repeats.
+\item One static position does not characterize edge GDOP, NLOS or spatial bias.
+\item Collector rate measures the complete telemetry path, not DW3000 PHY throughput.
+\end{itemize}
+
+\section{Reproduction and audit files}
+The directory contains machine-readable JSON/CSV results, SVG/PDF figures,
+losslessly compressed raw captures, SHA-256 checksums and this TeX source.
+
+\begin{verbatim}
+$reportArgs = @(
+  "--input-dir", "reports/uwb_final_report_input_20260813"
+  "--output-dir", "reports/uwb_dynamic_static_comparison_20260813"
+  "--replay-dynamic-dir", "reports/uwb_final_report_input_20260813"
+  "--replay-static-dir", "reports/uwb_final_report_input_20260813"
+)
+python tools/uwb_dynamic_static_report.py @reportArgs
+\end{verbatim}
+
+No raw capture is modified during report generation.
+\end{document}
+"""
+    path.write_text(tex, encoding="utf-8")
+
+
 def write_tex_report(
     path: pathlib.Path,
     captures: list[Capture],
@@ -2859,6 +3383,9 @@ def write_tex_report(
     rtk_reference_summaries: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """Write the full field report; the legacy compact writer is kept above for audit."""
+    if not rtk_reference_captures:
+        write_tex_report_same_session(path, captures, summaries, static_consistency, args)
+        return
     ordered = sorted(captures, key=lambda item: (item.motion, item.protocol, item.capture_id))
     by_cell = {(capture.motion, capture.protocol): summaries[capture.capture_id] for capture in captures}
 
@@ -3004,6 +3531,7 @@ def write_tex_report(
 \definecolor{info}{HTML}{E0F2FE}
 \hypersetup{pdftitle={Dynamic and static comparison of three UWB protocols},pdfauthor={UWB ESP-IDF technical report}}
 \begin{document}
+\pagenumbering{gobble}
 \begin{titlepage}
 \centering
 \vspace*{18mm}
@@ -3631,6 +4159,8 @@ def main() -> int:
                     "all_rtk_fixed": item["all_rtk_fixed"],
                     "source_geometry_fit_rms_m": item["fit_rms_m"],
                     "anchor_ids": ",".join(str(value) for value in item["anchor_ids"]),
+                    "reflected": item.get("reflected", False),
+                    "scale": item.get("scale", 1.0),
                     "yaw_deg": item["yaw_deg"],
                     "translation_east_m": item["translation"][0],
                     "translation_north_m": item["translation"][1],
@@ -3641,6 +4171,8 @@ def main() -> int:
             )
 
         quality_flags = []
+        if finite(capture.duration_s) and capture.duration_s < 10.0:
+            quality_flags.append("capture_duration_less_than_10s")
         if finite(position_stream.get("wall_coverage_pct")) and position_stream["wall_coverage_pct"] < 80.0:
             quality_flags.append("position_stream_covers_less_than_80pct_of_capture")
         if finite(imu_stream.get("wall_coverage_pct")) and imu_stream["wall_coverage_pct"] < 80.0:
@@ -3660,6 +4192,9 @@ def main() -> int:
             "duration_s": capture.duration_s,
             "event_counts": dict(capture.counts),
             "imu_fused_position_records_excluded": capture.fused_positions_excluded,
+            "protocol_mismatch_position_records_excluded": (
+                capture.protocol_mismatch_positions_excluded
+            ),
             "warnings": capture.warnings,
             "quality_flags": quality_flags,
             "position_stream": position_stream,
@@ -3682,6 +4217,9 @@ def main() -> int:
                 "motion": capture.motion,
                 "duration_s": capture.duration_s,
                 "imu_fused_position_records_excluded": capture.fused_positions_excluded,
+                "protocol_mismatch_position_records_excluded": (
+                    capture.protocol_mismatch_positions_excluded
+                ),
                 **flatten("position_", position_stream),
                 **flatten("ekf_", ekf_stream),
                 **flatten("imu_", imu_stream),
@@ -3765,7 +4303,10 @@ def main() -> int:
             if rtk_reference_captures
             else "RTK-fixed M1; one nearest independent UWB position per GPS solution"
         ),
-        "frame_registration": "proper rigid 2-D rotation+translation; no scale",
+        "frame_registration": (
+            "best ID-keyed direct/reflected fixed-scale 2-D rigid transform "
+            "plus translation; scale fixed at one"
+        ),
         "rtk_is_independent_survey_truth": False,
         "rtk_interpretation": (
             "August 6 GPS-only availability and precision reference; not synchronized with August 12 UWB"

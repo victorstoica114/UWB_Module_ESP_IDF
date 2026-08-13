@@ -12629,18 +12629,21 @@ function gpsRtkToUwbAlignment(geometry, anchors, anchorIds = gpsRtkAnchorIds) {
     const rotationRad = Math.atan2(cross, dot);
     const cosine = Math.cos(rotationRad);
     const sine = Math.sin(rotationRad);
+    const scale = Math.hypot(dot, cross) / measuredSpread;
+    if (!Number.isFinite(scale) || scale <= 0) return null;
     const translationX = fixedX -
-      (cosine * measuredX - sine * measuredY);
+      scale * (cosine * measuredX - sine * measuredY);
     const translationY = fixedY -
-      (sine * measuredX + cosine * measuredY);
+      scale * (sine * measuredX + cosine * measuredY);
     const squaredErrors = measured.map(pair => {
-      const x = cosine * pair.x - sine * pair.y + translationX;
-      const y = sine * pair.x + cosine * pair.y + translationY;
+      const x = scale * (cosine * pair.x - sine * pair.y) + translationX;
+      const y = scale * (sine * pair.x + cosine * pair.y) + translationY;
       return (x - Number(pair.fixed.x)) ** 2 +
         (y - Number(pair.fixed.y)) ** 2;
     });
     return {
       rotationRad,
+      scale,
       translationX,
       translationY,
       reflected,
@@ -12676,10 +12679,12 @@ function gpsRtkTagTrack(moduleId = 1, alignment = null,
     if (alignment?.reflected) point.north = -point.north;
     const cosine = alignment ? Math.cos(alignment.rotationRad) : 1;
     const sine = alignment ? Math.sin(alignment.rotationRad) : 0;
+    const scale = Number.isFinite(Number(alignment?.scale))
+      ? Number(alignment.scale) : 1;
     return {
-      x: cosine * point.east - sine * point.north +
+      x: scale * (cosine * point.east - sine * point.north) +
         Number(alignment?.translationX || 0),
-      y: sine * point.east + cosine * point.north +
+      y: scale * (sine * point.east + cosine * point.north) +
         Number(alignment?.translationY || 0),
       z: point.up,
       t: sample.capturedAt / 1000,

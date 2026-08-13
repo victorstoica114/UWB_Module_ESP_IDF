@@ -1,0 +1,12 @@
+{
+  "source": "static_passive_ds_20260813.passive_ds.jsonl",
+  "segments": [
+    {
+      "protocol": "passive_ds",
+      "capture_id": "static_passive_ds_20260813",
+      "start_unix_ms": 1786643453056,
+      "stop_unix_ms": 1786643460644,
+      "provenance_note": "static interval ends at the recorded Passive DS-TWR to FlexTDOA protocol transition"
+    }
+  ]
+}

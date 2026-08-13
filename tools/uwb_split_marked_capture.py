@@ -48,6 +48,13 @@ def position_protocol(record: dict[str, Any]) -> str:
 
 def split_capture(source: pathlib.Path, markers: pathlib.Path, output_dir: pathlib.Path) -> list[pathlib.Path]:
     marker_payload = json.loads(markers.read_text(encoding="utf-8"))
+    source_envelope: dict[str, Any] = {}
+    with source.open(encoding="utf-8") as input_handle:
+        for line in input_handle:
+            candidate = json.loads(line)
+            if candidate.get("kind") == "capture_start":
+                source_envelope = candidate
+                break
     segments: list[dict[str, Any]] = []
     for item in marker_payload.get("segments", []):
         protocol = normalize_protocol(item.get("protocol"))
@@ -55,13 +62,18 @@ def split_capture(source: pathlib.Path, markers: pathlib.Path, output_dir: pathl
         stop_ms = int(item["stop_unix_ms"])
         if protocol == "unknown" or stop_ms <= start_ms:
             raise ValueError(f"invalid segment: {item!r}")
-        capture_id = f"{protocol}_final_dynamic_20260812"
+        capture_id = str(
+            item.get("capture_id") or f"{protocol}_final_dynamic_20260812"
+        ).strip()
+        if not capture_id:
+            raise ValueError(f"empty capture_id: {item!r}")
         segments.append(
             {
                 "protocol": protocol,
                 "start_ms": start_ms,
                 "stop_ms": stop_ms,
                 "capture_id": capture_id,
+                "provenance_note": str(item.get("provenance_note") or "").strip(),
                 "counts": Counter(),
             }
         )
@@ -87,7 +99,14 @@ def split_capture(source: pathlib.Path, markers: pathlib.Path, output_dir: pathl
                     "derived losslessly from a continuous capture using explicit operator markers",
                     f"source={source.as_posix()}",
                 ],
+                "source_capture_id": source_envelope.get("capture_id"),
+                "source_capture_protocol": source_envelope.get("protocol"),
+                "source_capture_started_wall_ns": source_envelope.get(
+                    "collector_wall_ns"
+                ),
             }
+            if segment["provenance_note"]:
+                start["warnings"].append(segment["provenance_note"])
             handle.write(json.dumps(start, separators=(",", ":"), sort_keys=True) + "\n")
 
         protocol_bound_kinds = {"position", "local_position", "ds_range", "anchor_range", "uwb_measurement"}

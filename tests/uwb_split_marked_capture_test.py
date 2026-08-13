@@ -21,7 +21,19 @@ class SplitMarkedCaptureTest(unittest.TestCase):
             source.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
             markers = root / "markers.json"
             markers.write_text(
-                json.dumps({"segments": [{"protocol": "native_ds", "start_unix_ms": 2000, "stop_unix_ms": 2500}]}),
+                json.dumps(
+                    {
+                        "segments": [
+                            {
+                                "protocol": "native_ds",
+                                "capture_id": "native_ds_final_dynamic_20260813",
+                                "start_unix_ms": 2000,
+                                "stop_unix_ms": 2500,
+                                "provenance_note": "operator-confirmed motion interval",
+                            }
+                        ]
+                    }
+                ),
                 encoding="utf-8",
             )
             outputs = split_capture(source, markers, root / "out")
@@ -30,6 +42,11 @@ class SplitMarkedCaptureTest(unittest.TestCase):
             self.assertEqual(payloads[-1]["kind"], "capture_end")
             self.assertEqual([item["kind"] for item in payloads[1:-1]], ["gps_fix", "position"])
             self.assertTrue(all(item["protocol"] == "native_ds" for item in payloads))
+            self.assertEqual(
+                payloads[0]["capture_id"], "native_ds_final_dynamic_20260813"
+            )
+            self.assertIn("operator-confirmed motion interval", payloads[0]["warnings"])
+            self.assertEqual(payloads[0]["source_capture_protocol"], "passive_ds")
 
 
 if __name__ == "__main__":

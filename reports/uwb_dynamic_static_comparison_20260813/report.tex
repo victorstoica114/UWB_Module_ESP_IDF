@@ -1,0 +1,283 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage{lmodern}
+\usepackage[margin=19mm]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[table]{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{parskip}
+\usepackage{array}
+\graphicspath{{figures/}}
+\definecolor{warning}{HTML}{FFF3CD}
+\definecolor{info}{HTML}{E0F2FE}
+\hypersetup{pdftitle={Dynamic and static comparison of three UWB protocols},pdfauthor={UWB ESP-IDF technical report}}
+\begin{document}
+\pagenumbering{gobble}
+\begin{titlepage}
+\centering
+\vspace*{18mm}
+{\Huge\bfseries Dynamic and static UWB comparison\par}
+\vspace{4mm}
+{\Large FlexTDOA, Native DS-TWR and Passive DS-TWR\par}
+\vspace{14mm}
+{\large Field campaign of August 13, 2026\par}
+\vspace{12mm}
+\begin{tabular}{rl}
+Platform: & 5 ESP32-S3 + DW3000 modules, Raspberry Pi collector\\
+Topology: & M1 tag; M2, M3, M4 and M5 anchors\\
+Radio: & UWB channel 9\\
+Position streams: & raw independent UWB and position-only adaptive EKF\\
+Reference: & embedded GPS RTK telemetry, quality audited per capture\\
+\end{tabular}
+\vfill
+\colorbox{info}{\parbox{0.88\textwidth}{\vspace{2mm}
+\textbf{Main result.} All six protocol/motion cells are populated. Dynamic
+continuity is directly measurable, and static local precision is consistently
+at centimetre scale. RTK anchor registration passes for some, but not all,
+captures, so no complete three-protocol absolute-accuracy ranking is claimed;
+raw UWB remains the audit stream.\vspace{2mm}}}
+\vfill
+{\large Reproducible technical report\par}
+\end{titlepage}
+\pagenumbering{roman}
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\section{Executive summary}
+\colorbox{warning}{\parbox{0.96\textwidth}{\textbf{Evidence boundary.}
+Rates, gaps, sample counts, local static precision and raw-versus-EKF
+comparisons are direct capture diagnostics. RTK is an in-system reference, not
+independently surveyed truth. Every RTK residual must be read with its per-row
+anchor-fit grade; a failed fit invalidates that row and prevents a complete
+cross-protocol absolute-accuracy ranking.}}
+
+The dynamic independent rates were \textbf{17.68 positions/s}
+for FlexTDOA, \textbf{21.32 positions/s} for Native
+DS-TWR and \textbf{23.83 positions/s} for Passive
+DS-TWR. Maximum observed gaps were 1740,
+600 and 700 ms respectively.
+
+Static raw local RMS was \textbf{2.33 cm} for FlexTDOA,
+\textbf{2.45 cm} for Native DS-TWR and
+\textbf{2.45 cm} for Passive DS-TWR. These values
+measure repeatability around each capture median, not absolute position error.
+
+\section{Scope and protocol background}
+The campaign compares the published position streams of three independent UWB
+protocols. FlexTDOA and Passive DS-TWR keep the tag radio receive-only. Native
+DS-TWR performs active tag-to-anchor exchanges and provides the coherent-frame
+baseline. Passive rolling windows may publish multiple events from shared radio
+measurements, so all-event and independent-frame rates are reported separately.
+
+\section{Captured evidence}
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrr}\toprule
+\textbf{Protocol} & \textbf{Mode} & \textbf{Capture ID} & \textbf{duration s} & \textbf{events} & \textbf{independent} & \textbf{indep Hz} & \textbf{coverage pct} & \textbf{epochs} \\
+\midrule
+FlexTDOA & dynamic & flextdoa\_final\_dynamic\_20260813 & 466.7 & 8252 & 8252 & 17.68 & 99.7 & 1 \\
+Native DS-TWR & dynamic & native\_ds\_final\_dynamic\_20260813 & 74.0 & 1578 & 1578 & 21.32 & 99.9 & 1 \\
+Passive DS-TWR & dynamic & passive\_ds\_final\_dynamic\_20260813 & 148.7 & 10821 & 3542 & 23.83 & 100.0 & 1 \\
+FlexTDOA & static & static\_flextdoa\_20260813 & 31.6 & 454 & 454 & 14.39 & 77.7 & 1 \\
+Native DS-TWR & static & native\_ds\_static\_final\_02\_rtk\_fixed & 30.1 & 780 & 780 & 25.89 & 99.6 & 1 \\
+Passive DS-TWR & static & static\_passive\_ds\_20260813 & 7.6 & 568 & 182 & 23.99 & 98.1 & 1 \\
+\bottomrule\end{tabular}}\end{center}
+
+\subsection{Capture-quality notices}
+These notices do not invalidate the retained samples, but they limit how far
+the affected block can be generalized.
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrl}\toprule
+\textbf{Protocol} & \textbf{Mode} & \textbf{envelope s} & \textbf{active span s} & \textbf{notice} \\
+\midrule
+FlexTDOA & static & 31.56 & 24.52 & position coverage below 80\%; first position at +6.52 s \\
+Passive DS-TWR & static & 7.59 & 7.44 & short capture; interpret static precision as indicative \\
+\bottomrule\end{tabular}}\end{center}
+
+All selected blocks have terminal capture envelopes. Derived blocks are
+lossless time slices of source JSONL captures. The raw records are not
+smoothed, trimmed by error or rewritten by the report generator.
+
+\section{Dynamic results}
+\subsection{Raw trajectories}
+The routes are separate physical trials. Their panels support continuity and
+gross-shape inspection; they are not synchronized point-by-point repeats.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/06_dynamic_trajectories.pdf}
+\caption{Raw independent UWB trajectories in each protocol's local frame. Green markers are anchors.}
+\end{figure}
+\subsection{Update rate and gaps}
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrr}\toprule
+\textbf{Protocol} & \textbf{duration s} & \textbf{events} & \textbf{independent} & \textbf{event Hz} & \textbf{indep Hz} & \textbf{gap P95 ms} & \textbf{gap max ms} & \textbf{step P95 m/s} \\
+\midrule
+FlexTDOA & 466.7 & 8252 & 8252 & 17.68 & 17.68 & 100 & 1740 & 1.72 \\
+Native DS-TWR & 74.0 & 1578 & 1578 & 21.32 & 21.32 & 80 & 600 & 5.70 \\
+Passive DS-TWR & 148.7 & 10821 & 3542 & 72.79 & 23.83 & 30 & 700 & 3.64 \\
+\bottomrule\end{tabular}}\end{center}
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{figures/01_position_rate.pdf}
+\caption{Independent position rate for every dynamic and static block.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{figures/02_position_gap.pdf}
+\caption{P95 positive position gap. Maximum gaps and counts remain in the tables.}
+\end{figure}
+
+\subsection{Complete continuity audit}
+Uptime epochs are separated at multi-second backsteps, so a protocol restart is
+never turned into a synthetic gap or step-speed measurement.
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrr}\toprule
+\textbf{Protocol} & \textbf{Mode} & \textbf{event Hz} & \textbf{indep Hz} & \textbf{P50 ms} & \textbf{P95} & \textbf{P99} & \textbf{max} & \textbf{gaps over 100 ms} \\
+\midrule
+FlexTDOA & dynamic & 17.68 & 17.68 & 50 & 100 & 150 & 1740 & 205 \\
+Native DS-TWR & dynamic & 21.32 & 21.32 & 40 & 80 & 130 & 600 & 25 \\
+Passive DS-TWR & dynamic & 72.79 & 23.83 & 10 & 30 & 90 & 700 & 78 \\
+FlexTDOA & static & 14.39 & 14.39 & 50 & 90 & 110 & 150 & 9 \\
+Native DS-TWR & static & 25.89 & 25.89 & 40 & 50 & 60 & 80 & 0 \\
+Passive DS-TWR & static & 74.86 & 23.99 & 10 & 34 & 87 & 150 & 3 \\
+\bottomrule\end{tabular}}\end{center}
+
+\section{Position-only adaptive EKF}
+The dashboard EKF consumes UWB positions only; acceleration is disabled. Raw
+measurements remain archived, and each valid EKF point is tied to its raw event.
+Step-speed P95 is a jitter diagnostic rather than physical walking speed.
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrr}\toprule
+\textbf{Protocol} & \textbf{Mode} & \textbf{coverage pct} & \textbf{raw step P95} & \textbf{EKF step P95} & \textbf{raw static RMS cm} & \textbf{EKF static RMS cm} \\
+\midrule
+FlexTDOA & dynamic & 100.0 & 1.72 & 1.26 & n/a & n/a \\
+Native DS-TWR & dynamic & 100.0 & 5.70 & 4.34 & n/a & n/a \\
+Passive DS-TWR & dynamic & 100.0 & 3.64 & 3.47 & n/a & n/a \\
+FlexTDOA & static & 100.0 & 1.10 & 0.15 & 2.33 & 1.05 \\
+Native DS-TWR & static & 100.0 & 1.61 & 0.23 & 2.45 & 0.89 \\
+Passive DS-TWR & static & 100.0 & 1.64 & 1.23 & 2.45 & 1.96 \\
+\bottomrule\end{tabular}}\end{center}
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/09_dynamic_raw_vs_ekf.pdf}
+\caption{Raw dynamic trajectories (blue) and position-only EKF trajectories (green).}
+\end{figure}
+
+
+\section{Static results}
+Static precision is radial displacement around each block's own component-wise
+median. All independent samples and outliers are retained.
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrr}\toprule
+\textbf{Protocol} & \textbf{N} & \textbf{CEP50 cm} & \textbf{RMS cm} & \textbf{P95 cm} & \textbf{P99 cm} & \textbf{max cm} & \textbf{drift cm} \\
+\midrule
+FlexTDOA & 454 & 1.92 & 2.33 & 4.12 & 5.14 & 5.70 & 1.20 \\
+Native DS-TWR & 780 & 1.72 & 2.45 & 3.95 & 8.81 & 12.30 & 0.67 \\
+Passive DS-TWR & 182 & 1.79 & 2.45 & 4.41 & 6.76 & 10.40 & 0.43 \\
+\bottomrule\end{tabular}}\end{center}
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{figures/03_static_precision.pdf}
+\caption{Static raw precision around each block median.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/07_static_position_clouds.pdf}
+\caption{Static raw position clouds, centered independently and drawn at one common scale.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/10_static_raw_vs_ekf.pdf}
+\caption{Static raw and position-only EKF clouds, each centered on its own median.}
+\end{figure}
+
+
+\clearpage
+\section{RTK association audit}
+Each quality-4 tag solution contributes at most one pair. The nearest
+independent UWB position must lie within 100 ms. The UWB
+frame is registered to robust RTK anchor centers using the better ID-keyed
+direct or reflected rigid transform. Scale is fixed at one and is never fitted.
+The reported anchor-fit value is the P95, across captured geometry snapshots,
+of the four-anchor RMSE. A row is graded usable only when the worst snapshot
+RMSE is at most 0.5 m, anchor RTK spread is at most 0.5 m and reflection choice
+is consistent.
+
+The stationary-tag cross-capture separation is 2.384 m,
+against a 0.250 m consistency gate. The gate fails.
+Absolute static ranking is therefore invalid.
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrr}\toprule
+\textbf{Protocol} & \textbf{Mode} & \textbf{pairs} & \textbf{time P95 ms} & \textbf{RMSE m} & \textbf{P95 m} & \textbf{debiased RMSE m} & \textbf{fit RMSE P95 m} & \textbf{grade} \\
+\midrule
+FlexTDOA & dynamic & 3635 & 38.8 & 0.218 & 0.263 & 0.087 & 0.411 & usable with limits \\
+Native DS-TWR & dynamic & 549 & 34.6 & 0.473 & 0.731 & 0.306 & 1.056 & poor; no accuracy claim \\
+Passive DS-TWR & dynamic & 1171 & 52.4 & 0.224 & 0.346 & 0.163 & 0.410 & usable with limits \\
+FlexTDOA & static & 97 & 30.8 & 0.237 & 0.260 & 0.022 & 0.390 & usable with limits \\
+Native DS-TWR & static & 0 & n/a & n/a & n/a & n/a & n/a & unavailable \\
+Passive DS-TWR & static & 59 & 64.8 & 0.219 & 0.256 & 0.031 & 0.391 & usable with limits \\
+\bottomrule\end{tabular}}\end{center}
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{figures/04_dynamic_rtk_error_cdf.pdf}
+\caption{Dynamic UWB--RTK residual CDF. Each legend entry includes its anchor-fit grade; RTK is not surveyed truth.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{figures/05_alignment_quality.pdf}
+\caption{Best direct/reflected fixed-scale anchor-registration residual. The per-row grade controls interpretation.}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/08_static_gps_rtk_clouds.pdf}
+\caption{RTK Fixed stationary tag clouds and cross-capture centers.}
+\end{figure}
+
+
+\clearpage
+\section{Interpretation}
+\begin{itemize}
+\item Passive DS-TWR has the highest independent dynamic rate in this dataset;
+its all-event rate is higher because rolling windows overlap.
+\item Native DS-TWR provides the best maximum dynamic gap among the three
+selected walks and remains the coherent active-ranging baseline.
+\item FlexTDOA preserves a receive-only tag but shows the longest gaps in this
+campaign.
+\item Static local precision is similar across all protocols. The EKF reduces
+visible stationary jitter but is not a replacement for raw UWB.
+\item FlexTDOA and Passive DS-TWR pass the configured dynamic anchor-fit gate;
+Native DS-TWR does not, so a complete absolute RTK ranking is not made.
+\end{itemize}
+
+\section{Limitations}
+\begin{itemize}
+\item RTK is an in-system comparison reference, not independently surveyed truth.
+\item GPS and UWB measurement times are associated in software, not by one hardware clock.
+\item GNSS and UWB antenna phase centers have unknown lever arms.
+\item Routes are single trials rather than randomized synchronized repeats.
+\item One static position does not characterize edge GDOP, NLOS or spatial bias.
+\item Collector rate measures the complete telemetry path, not DW3000 PHY throughput.
+\end{itemize}
+
+\section{Reproduction and audit files}
+The directory contains machine-readable JSON/CSV results, SVG/PDF figures,
+losslessly compressed raw captures, SHA-256 checksums and this TeX source.
+
+\begin{verbatim}
+$reportArgs = @(
+  "--input-dir", "reports/uwb_final_report_input_20260813"
+  "--output-dir", "reports/uwb_dynamic_static_comparison_20260813"
+  "--replay-dynamic-dir", "reports/uwb_final_report_input_20260813"
+  "--replay-static-dir", "reports/uwb_final_report_input_20260813"
+)
+python tools/uwb_dynamic_static_report.py @reportArgs
+\end{verbatim}
+
+No raw capture is modified during report generation.
+\end{document}

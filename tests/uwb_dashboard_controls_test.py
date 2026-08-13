@@ -201,12 +201,48 @@ const alignment = gpsRtkToUwbAlignment(geometry, anchors, [2, 3, 4, 5]);
 console.log(JSON.stringify({
   reflected: alignment.reflected,
   anchorCount: alignment.anchorCount,
+  scale: alignment.scale,
   rms: alignment.anchorFitRmsM,
 }));
 """)
         self.assertTrue(result["reflected"], result)
         self.assertEqual(result["anchorCount"], 4)
+        self.assertGreater(result["scale"], 0)
         self.assertLess(result["rms"], 0.5)
+
+    def test_rtk_overlay_fits_uniform_scale_without_moving_uwb_geometry(self) -> None:
+        result = run_gps_rtk_alignment_javascript(r"""
+const geometry = {points: new Map([
+  [2, {east: 0.0, north: 0.0}],
+  [3, {east: 0.0, north: 5.0}],
+  [4, {east: 4.0, north: 5.0}],
+  [5, {east: 4.0, north: 0.0}],
+])};
+const anchors = {
+  2: {x: 0.0, y: 0.0},
+  3: {x: 0.0, y: 6.0},
+  4: {x: 4.8, y: 6.0},
+  5: {x: 4.8, y: 0.0},
+};
+const alignment = gpsRtkToUwbAlignment(geometry, anchors, [2, 3, 4, 5]);
+console.log(JSON.stringify({
+  scale: alignment.scale,
+  rms: alignment.anchorFitRmsM,
+}));
+""")
+        self.assertAlmostEqual(result["scale"], 1.2, places=9)
+        self.assertLess(result["rms"], 1e-9)
+
+        tag_track = javascript_block(
+            "function gpsRtkTagTrack(",
+            "function positionGpsReferenceErrorStats(",
+        )
+        self.assertIn(
+            "scale * (cosine * point.east - sine * point.north)", tag_track
+        )
+        self.assertIn(
+            "scale * (sine * point.east + cosine * point.north)", tag_track
+        )
 
     def test_accelerometer_refresh_does_not_overwrite_unsaved_edit(self) -> None:
         function = javascript_block(
