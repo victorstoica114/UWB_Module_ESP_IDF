@@ -40,6 +40,8 @@ reports/**/*.aux
 reports/**/*.log
 reports/**/*.out
 reports/**/*.toc
+reports/**/*.fdb_latexmk
+reports/**/*.fls
 reports/**/report.pdf
 reports/uwb_adaptive_ekf_field_20260812/
 reports/uwb_final_dynamic_20260812/

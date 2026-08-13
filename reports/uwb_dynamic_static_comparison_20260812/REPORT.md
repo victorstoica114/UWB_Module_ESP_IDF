@@ -36,18 +36,6 @@ span. Coverage and end-lag fields expose captures whose telemetry stops early.
 
 ![Position gap](figures/02_position_gap.svg)
 
-## Historical baseline: August 6 versus August 12
-
-The August 6 report is used only as a historical software/field baseline. The
-walks were not synchronized repeats, so rate and continuity can be compared,
-while route shape and absolute RTK error cannot be treated as paired trials.
-
-| protocol | Aug 6 dynamic Hz | Aug 12 dynamic Hz | Aug 6 max gap ms | Aug 12 max gap ms | Aug 6 static raw RMS cm | Aug 12 static raw RMS cm |
-|---|---|---|---|---|---|---|
-| FlexTDOA | 25.31 | 25.01 | 520 | 830 | 2.59 | 2.41 |
-| Native DS-TWR | 21.74 | 25.35 | 200 | 130 | 4.87 | 2.45 |
-| Passive DS-TWR | 16.01 | 22.63 | 1610 | 250 | 4.00 | 2.26 |
-
 ## Static precision
 
 Static precision is radial displacement around each capture's own local-frame
@@ -160,8 +148,7 @@ python tools/uwb_dynamic_static_report.py `
   --input-dir D:/Documente/UWB_ESP_IDF/reports/uwb_final_report_input_20260812 `
   --output-dir D:/Documente/UWB_ESP_IDF/reports/uwb_dynamic_static_comparison_20260812 `
   --replay-dynamic-dir D:/Documente/UWB_ESP_IDF/reports/uwb_final_report_input_20260812 `
-  --replay-static-dir D:/Documente/UWB_ESP_IDF/reports/uwb_final_report_input_20260812 `
-  --baseline-report-dir D:/Documente/UWB_ESP_IDF/reports/uwb_dynamic_static_comparison_20260806
+  --replay-static-dir D:/Documente/UWB_ESP_IDF/reports/uwb_final_report_input_20260812
 
 ```
 

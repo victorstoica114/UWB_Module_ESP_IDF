@@ -1948,21 +1948,6 @@ def load_replay_summaries(
     return result
 
 
-def load_historical_baseline(directory: pathlib.Path) -> dict[tuple[str, str], dict[str, Any]]:
-    """Load the published August 6 summary as a non-synchronized baseline."""
-    path = directory / "analysis_summary.json"
-    if not path.exists():
-        return {}
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    result: dict[tuple[str, str], dict[str, Any]] = {}
-    for item in payload.get("captures", {}).values():
-        protocol = normalize_protocol(item.get("protocol"))
-        motion = str(item.get("motion", "unknown"))
-        if protocol in PROTOCOL_LABELS and motion in {"dynamic", "static"}:
-            result[(motion, protocol)] = item
-    return result
-
-
 def write_report(
     path: pathlib.Path,
     captures: list[Capture],
@@ -1971,7 +1956,6 @@ def write_report(
     static_consistency: dict[str, Any],
     args: argparse.Namespace,
     missing: list[dict[str, str]],
-    baseline: dict[tuple[str, str], dict[str, Any]],
 ) -> None:
     ordered = sorted(captures, key=lambda item: (item.motion, item.protocol, item.capture_id))
     stream_rows = []
@@ -1979,7 +1963,6 @@ def write_report(
     rtk_rows = []
     replay_rows = []
     ekf_rows = []
-    baseline_rows = []
     for capture in ordered:
         item = summaries[capture.capture_id]
         stream = item["position_stream"]
@@ -2065,29 +2048,6 @@ def write_report(
             ]
         )
 
-    for protocol in PROTOCOL_LABELS:
-        dynamic_old = baseline.get(("dynamic", protocol), {})
-        static_old = baseline.get(("static", protocol), {})
-        dynamic_new = next(
-            (summaries[capture.capture_id] for capture in captures if capture.motion == "dynamic" and capture.protocol == protocol),
-            {},
-        )
-        static_new = next(
-            (summaries[capture.capture_id] for capture in captures if capture.motion == "static" and capture.protocol == protocol),
-            {},
-        )
-        baseline_rows.append(
-            [
-                PROTOCOL_LABELS[protocol],
-                fmt(dynamic_old.get("position_stream", {}).get("independent_rate_hz"), 2),
-                fmt(dynamic_new.get("position_stream", {}).get("independent_rate_hz"), 2),
-                fmt(dynamic_old.get("position_stream", {}).get("gap_max_ms"), 0),
-                fmt(dynamic_new.get("position_stream", {}).get("gap_max_ms"), 0),
-                fmt(100 * static_old.get("static_precision", {}).get("rms_m", math.nan), 2),
-                fmt(100 * static_new.get("static_precision", {}).get("rms_m", math.nan), 2),
-            ]
-        )
-
     missing_text = "\n".join(
         f"- {PROTOCOL_LABELS.get(item['protocol'], item['protocol'])} / {item['motion']}: missing capture"
         for item in missing
@@ -2156,17 +2116,6 @@ span. Coverage and end-lag fields expose captures whose telemetry stops early.
 ![Independent position rate](figures/01_position_rate.svg)
 
 ![Position gap](figures/02_position_gap.svg)
-
-## Historical baseline: August 6 versus August 12
-
-The August 6 report is used only as a historical software/field baseline. The
-walks were not synchronized repeats, so rate and continuity can be compared,
-while route shape and absolute RTK error cannot be treated as paired trials.
-
-{markdown_table(
-    ["protocol", "Aug 6 dynamic Hz", "Aug 12 dynamic Hz", "Aug 6 max gap ms", "Aug 12 max gap ms", "Aug 6 static raw RMS cm", "Aug 12 static raw RMS cm"],
-    baseline_rows,
-)}
 
 ## Static precision
 
@@ -2270,8 +2219,7 @@ python tools/uwb_dynamic_static_report.py `
   --input-dir {args.input_dir.as_posix()} `
   --output-dir {args.output_dir.as_posix()} `
   --replay-dynamic-dir {args.replay_dynamic_dir.as_posix()} `
-  --replay-static-dir {args.replay_static_dir.as_posix()} `
-  --baseline-report-dir {args.baseline_report_dir.as_posix()}{(' `' if reproduce_options else '')}
+  --replay-static-dir {args.replay_static_dir.as_posix()}{(' `' if reproduce_options else '')}
 {reproduce_options}
 ```{raw_restore_instructions.rstrip()}
 """
@@ -2408,7 +2356,7 @@ def write_tex_report_legacy(
 \usepackage{parskip}
 \definecolor{warning}{HTML}{FFF3CD}
 \title{Dynamic/static UWB comparison\\\large FlexTDOA, Native DS-TWR, Passive DS-TWR}
-\author{Reproducible analysis of the 2026-08-06 captures}
+\author{Reproducible analysis of the 2026-08-12 captures}
 \date{Generated automatically}
 \begin{document}
 \maketitle
@@ -2511,7 +2459,6 @@ def write_tex_report(
     replays: dict[str, dict[str, Any]],
     static_consistency: dict[str, Any],
     args: argparse.Namespace,
-    baseline: dict[tuple[str, str], dict[str, Any]],
 ) -> None:
     """Write the full field report; the legacy compact writer is kept above for audit."""
     ordered = sorted(captures, key=lambda item: (item.motion, item.protocol, item.capture_id))
@@ -2527,7 +2474,6 @@ def write_tex_report(
     ekf_rows: list[list[Any]] = []
     imu_rows: list[list[Any]] = []
     rtk_rows: list[list[Any]] = []
-    baseline_rows: list[list[Any]] = []
     for capture in ordered:
         item = summaries[capture.capture_id]
         stream = item["position_stream"]
@@ -2625,21 +2571,6 @@ def write_tex_report(
                 fmt(delta_mm, 1), item["yaw_alignment_updates"], fmt(item["anchor_fit_rms_m"]),
             ]
         )
-    for protocol in PROTOCOL_LABELS:
-        dynamic_old = baseline.get(("dynamic", protocol), {})
-        static_old = baseline.get(("static", protocol), {})
-        baseline_rows.append(
-            [
-                PROTOCOL_LABELS[protocol],
-                fmt(dynamic_old.get("position_stream", {}).get("independent_rate_hz"), 2),
-                fmt(metric("dynamic", protocol, "position_stream", "independent_rate_hz"), 2),
-                fmt(dynamic_old.get("position_stream", {}).get("gap_max_ms"), 0),
-                fmt(metric("dynamic", protocol, "position_stream", "gap_max_ms"), 0),
-                fmt(100 * static_old.get("static_precision", {}).get("rms_m", math.nan), 2),
-                fmt(100 * metric("static", protocol, "static_precision", "rms_m"), 2),
-            ]
-        )
-
     tex = r"""\documentclass[10pt,a4paper]{article}
 \usepackage{lmodern}
 \usepackage[margin=19mm]{geometry}
@@ -2807,17 +2738,6 @@ worst-case continuity (130 ms). FlexTDOA was close in rate (25.01 Hz), but its
 maximum gap was 830 ms. Passive DS delivered 22.63 independent Hz despite
 overlapping dashboard publications, with a 250 ms maximum gap. Step speed is a
 sample-to-sample trajectory diagnostic, not measured walking speed.
-
-\subsection{Historical August 6 baseline}
-The August 6 campaign is retained as a historical software/field baseline. The
-walks are not synchronized route repeats, so cadence and continuity are
-comparable while shape and absolute RTK error are not paired evidence.
-"""
-    tex += tex_table(
-        ["Protocol", "Aug 6 Hz", "Aug 12 Hz", "Aug 6 max gap", "Aug 12 max gap", "Aug 6 static RMS cm", "Aug 12 static RMS cm"],
-        baseline_rows,
-    )
-    tex += r"""
 
 \subsection{Complete continuity audit}
 """
@@ -3129,19 +3049,12 @@ def main() -> int:
         action="store_true",
         help="skip lossless RAW XZ archive generation (intended only for fast development runs)",
     )
-    parser.add_argument(
-        "--baseline-report-dir",
-        type=pathlib.Path,
-        default=pathlib.Path("reports/uwb_dynamic_static_comparison_20260806"),
-        help="published historical report directory used for a non-paired baseline",
-    )
     args = parser.parse_args()
 
     args.input_dir = args.input_dir.resolve()
     args.output_dir = args.output_dir.resolve()
     args.replay_dynamic_dir = args.replay_dynamic_dir.resolve()
     args.replay_static_dir = args.replay_static_dir.resolve()
-    args.baseline_report_dir = args.baseline_report_dir.resolve()
     paths = sorted(args.input_dir.glob("*.jsonl"))
     if not paths:
         parser.error(f"no JSONL captures found in {args.input_dir}")
@@ -3180,7 +3093,6 @@ def main() -> int:
     replays = load_replay_summaries(
         args.replay_dynamic_dir, args.replay_static_dir, captures
     )
-    baseline = load_historical_baseline(args.baseline_report_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     figure_dir = args.output_dir / "figures"
 
@@ -3416,7 +3328,6 @@ def main() -> int:
         "missing_capture_matrix_cells": missing,
         "replay_dynamic_dir": str(args.replay_dynamic_dir),
         "replay_static_dir": str(args.replay_static_dir),
-        "historical_baseline_report_dir": str(args.baseline_report_dir),
     }
     raw_manifest = (
         [] if args.skip_raw_archive else archive_raw_captures(captures, args.output_dir)
@@ -3449,7 +3360,6 @@ def main() -> int:
         static_consistency,
         args,
         missing,
-        baseline,
     )
     write_tex_report(
         args.output_dir / "report.tex",
@@ -3458,7 +3368,6 @@ def main() -> int:
         replays,
         static_consistency,
         args,
-        baseline,
     )
 
     # LaTeX compilation intentionally remains an explicit reproducibility
