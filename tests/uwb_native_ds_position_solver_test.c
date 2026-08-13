@@ -197,6 +197,28 @@ int main(void)
     assert_near(output.x_m, tag_x, 0.001f);
     assert_near(output.y_m, tag_y, 0.001f);
 
+    /* The ID-keyed UWB geometry and live field ranges can contain a bounded
+     * systematic mismatch after an anchor layout change.  It remains a
+     * stable, useful raw solution and must not require GPS/RTK to publish. */
+    const float field_anchor_x[] = {0.000f, 0.000f, 7.036f, 7.410f};
+    const float field_anchor_y[] = {0.000f, 6.838f, 5.980f, 0.221f};
+    const float field_ranges[] = {4.960f, 4.497f, 3.929f, 4.686f};
+    struct uwb_native_ds_position_solver field_solver;
+    assert(uwb_native_ds_position_solver_init(
+        &field_solver, 1U, anchors, field_anchor_x, field_anchor_y,
+        anchor_count, 104U));
+    for (size_t index = 0U; index < anchor_count; ++index) {
+        assert(uwb_native_ds_position_solver_submit_tag_range(
+            &field_solver, 1U, anchors[index], 500U,
+            field_ranges[index], &output));
+    }
+    assert(output.position_valid);
+    assert(output.geometry_version == 104U);
+    assert(output.observation_count == 4U);
+    assert_near(output.x_m, 3.667f, 0.050f);
+    assert_near(output.y_m, 3.606f, 0.050f);
+    assert_near(output.rms_m, 0.297f, 0.050f);
+
     /* Anchor-to-anchor data only diagnoses the immutable RTK geometry. */
     for (size_t first = 0U; first < anchor_count; ++first) {
         for (size_t second = first + 1U; second < anchor_count; ++second) {

@@ -54,7 +54,160 @@ function gpsRxIsFresh(item) {
     return json.loads(completed.stdout)
 
 
+def run_gps_rtk_alignment_javascript(body: str) -> dict:
+    node = shutil.which("node")
+    if node is None:
+        raise unittest.SkipTest("node is required for dashboard JavaScript tests")
+    implementation = javascript_block(
+        "function gpsRtkToUwbAlignment(",
+        "function gpsRtkTagTrack(",
+    )
+    completed = subprocess.run(
+        [node, "-e", implementation + body],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
+
+
 class DashboardControlStateTests(unittest.TestCase):
+    def test_high_rate_gps_events_drive_dashboard_without_full_snapshot(self) -> None:
+        gps_stream = javascript_block(
+            "function gpsEventStatusPatch(",
+            "function snapshotPollDelayMs(",
+        )
+        self.assertIn('/api/gps-events?after=${state.gpsEventAfterId}', gps_stream)
+        self.assertIn("estimated_measurement_wall_ns", gps_stream)
+        self.assertIn("recordGpsRtkSamples(state.statuses)", gps_stream)
+        self.assertIn("requestAnimationFrame", gps_stream)
+        self.assertIn("schedulePositionStreamRender()", gps_stream)
+
+        position_stream = javascript_block(
+            "function renderPositionStreamFrame()",
+            "function schedulePositionStreamRender()",
+        )
+        self.assertIn("positionKnownReference(", position_stream)
+
+    def test_gps_rtk_recorder_retains_all_eight_hz_samples(self) -> None:
+        result = run_gps_rtk_javascript(r"""
+const base = {
+  module_id: 1,
+  http_status_online: true,
+  runtime_gps_enabled: true,
+  gps_powered: true,
+  gps_task_running: true,
+  gps_uart_ready: true,
+  gps_last_rx_age_ms: 0,
+  gps_last_fix_age_ms: 0,
+  gps_fix_valid: true,
+  gps_fix_quality: 4,
+  gps_latitude_deg: 44.33617448,
+  gps_longitude_deg: 25.94750246,
+  gps_altitude_m: 76.72,
+  gps_speed_mps: 0,
+  uptime_ms: 10000,
+  boot_guard_boot_count: 1,
+};
+const now = Date.now();
+for (let sequence = 1; sequence <= 8; sequence += 1) {
+  recordGpsRtkSamples([{
+    ...base,
+    gps_gga_count: sequence,
+    gps_utc_ms_of_day: 43200000 + sequence * 125,
+    _gps_event_captured_at_ms: now - (8 - sequence) * 125,
+  }]);
+}
+console.log(JSON.stringify({
+  count: state.gpsRtkSamples.get(1)?.length || 0,
+}));
+""")
+        self.assertEqual(result["count"], 8)
+
+    def test_gps_rtk_dedup_uses_binary_gga_sequence(self) -> None:
+        recorder = javascript_block(
+            "function recordGpsRtkSamples(",
+            "function gpsRtkEcef(",
+        )
+        self.assertIn("item.gps_utc_ms_of_day", recorder)
+        self.assertIn("item.gps_gga_count", recorder)
+        self.assertIn("_gps_event_captured_at_ms", recorder)
+
+    def test_native_position_bootstraps_without_gps_rtk(self) -> None:
+        geometry = javascript_block(
+            "function paperAnchorGeometry(",
+            "function freshTdoaObservations(",
+        )
+        self.assertGreaterEqual(
+            geometry.count("persistedModuleAnchorGeometry(anchorIds)"), 2
+        )
+        self.assertNotIn('protocol === "native_ds"\n        ? null', geometry)
+
+        readout = javascript_block(
+            "function renderPositionReadout(",
+            "function trimPositionRateWindow(",
+        )
+        self.assertNotIn("Waiting for GPS RTK anchor geometry", readout)
+        self.assertNotIn("every anchor reports RTK Fixed", readout)
+        self.assertIn("GPS/RTK is optional", readout)
+
+    def test_rtk_target_is_visible_for_every_protocol_even_when_fit_is_poor(self) -> None:
+        reference = javascript_block(
+            "function positionKnownReference(",
+            "function percentile(",
+        )
+        self.assertIn("const comparisonValid", reference)
+        self.assertIn("RTK target shown", reference)
+        self.assertIn("comparisonValid,", reference)
+        self.assertIn("comparisonWarning,", reference)
+        self.assertNotIn(
+            "GPS RTK reference blocked: rigid anchor fit RMS", reference
+        )
+        # This reference path is shared by FlexTDOA, Native DS-TWR and
+        # Passive DS-TWR and must never branch on the selected protocol.
+        self.assertNotIn("settings.solver", reference)
+
+        metrics = javascript_block(
+            "function positionReferenceErrorStats(",
+            "function selectedPositionModuleIds(",
+        )
+        self.assertIn(
+            "if (reference.comparisonValid === false) return null", metrics
+        )
+
+        drawing = javascript_block(
+            "function drawPosition(model)",
+            "function renderPositionGeometryPanel(",
+        )
+        self.assertIn("if (model.reference)", drawing)
+        self.assertIn("ctx.arc(x, y, 9", drawing)
+        self.assertIn('ctx.fillText("RTK target"', drawing)
+
+    def test_rtk_overlay_accepts_mirrored_uwb_local_frame(self) -> None:
+        result = run_gps_rtk_alignment_javascript(r"""
+const geometry = {points: new Map([
+  [2, {east: 0.0, north: 0.0}],
+  [3, {east: 4.917, north: 3.526}],
+  [4, {east: 1.081, north: 8.664}],
+  [5, {east: -3.901, north: 5.673}],
+])};
+const anchors = {
+  2: {x: 0.0, y: 0.0},
+  3: {x: 0.0, y: 6.838},
+  4: {x: 7.036, y: 5.980},
+  5: {x: 7.410, y: 0.221},
+};
+const alignment = gpsRtkToUwbAlignment(geometry, anchors, [2, 3, 4, 5]);
+console.log(JSON.stringify({
+  reflected: alignment.reflected,
+  anchorCount: alignment.anchorCount,
+  rms: alignment.anchorFitRmsM,
+}));
+""")
+        self.assertTrue(result["reflected"], result)
+        self.assertEqual(result["anchorCount"], 4)
+        self.assertLess(result["rms"], 0.5)
+
     def test_accelerometer_refresh_does_not_overwrite_unsaved_edit(self) -> None:
         function = javascript_block(
             "function updateAccelEnabledControl()",

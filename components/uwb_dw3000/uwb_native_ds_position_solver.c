@@ -7,9 +7,9 @@
 #define NATIVE_DS_MIN_RANGE_M 0.02f
 #define NATIVE_DS_MAX_RANGE_M 100.0f
 #define NATIVE_DS_MIN_GEOMETRY_AREA_M2 1.0e-4f
-#define NATIVE_DS_MAX_EQUATION_RMS_M 0.25f
+#define NATIVE_DS_MAX_EQUATION_RMS_M 0.40f
 #define NATIVE_DS_MAX_ABS_RESIDUAL_M 0.50f
-#define NATIVE_DS_RANGE_COHERENCE_MARGIN_M 0.50f
+#define NATIVE_DS_RANGE_COHERENCE_MARGIN_M 1.00f
 
 static int anchor_index(const struct uwb_native_ds_position_solver *solver,
                         uint8_t anchor_id)
