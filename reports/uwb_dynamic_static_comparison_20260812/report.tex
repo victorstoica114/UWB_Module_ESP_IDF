@@ -26,7 +26,8 @@ Platform: & 5 ESP32-S3 + DW3000 modules, Raspberry Pi collector\\
 Topology: & M1 tag; M2, M3, M4 and M5 anchors\\
 Radio: & UWB channel 9; configured 40 MHz SPI\\
 Firmware branch: & \texttt{localization-raw-calibration}\\
-Evidence: & six complete immutable JSONL captures; raw and position-only EKF\\
+UWB evidence: & six complete August 12 JSONL captures; raw and position-only EKF\\
+RTK evidence: & GPS-only reference captures from August 6\\
 \end{tabular}
 \vfill
 \colorbox{info}{\parbox{0.88\textwidth}{\vspace{2mm}
@@ -34,7 +35,7 @@ Evidence: & six complete immutable JSONL captures; raw and position-only EKF\\
 static datasets. Independent dynamic rates are approximately 25.0 Hz Flex,
 25.4 Hz Native and 22.6 Hz Passive. Raw static RMS is 2.3--2.4 cm. The
 position-only adaptive EKF materially reduces static jitter and dynamic
-sample-to-sample spikes, while raw UWB remains the accuracy reference.\vspace{2mm}}}
+sample-to-sample spikes, while raw UWB remains the permanent audit stream.\vspace{2mm}}}
 \vfill
 {\large Reproducible technical report\par}
 \end{titlepage}
@@ -46,9 +47,9 @@ sample-to-sample spikes, while raw UWB remains the accuracy reference.\vspace{2m
 \section{Executive summary}
 \colorbox{warning}{\parbox{0.96\textwidth}{\textbf{Evidence boundary.}
 Stream rates, uptime gaps, sample counts, fusion acceptance and reset counts are
-direct diagnostics. Absolute UWB--RTK disagreement is only indicative: RTK was
-not an independent survey, clocks are associated in software, antenna lever
-arms are unknown, and the UWB frame is registered through RTK anchor geometry.}}
+direct August 12 diagnostics. GPS RTK quality and precision use only the August
+6 reference captures. The two sessions are not time-paired, so this report does
+not calculate or claim August 12 absolute UWB--RTK position error.}}
 
 Passive DS overlapping raw windows remain visible in the telemetry rate, while
 all comparative precision and trajectory metrics use independent frames.
@@ -60,9 +61,9 @@ The dynamic independent rates were \textbf{25.01 positions/s} for FlexTDOA, \tex
 The static raw local RMS values were \textbf{2.41 cm} (FlexTDOA), \textbf{2.45 cm} (Native DS-TWR) and \textbf{2.26 cm} (Passive DS-TWR). These are precision around each capture median, not absolute accuracy.
 
 
-The stationary tag RTK centers differed between blocks and the anchor rigid-fit
-residual is poor in several captures, invalidating an absolute cross-protocol
-RTK ranking. The new filter uses positions only: this campaign intentionally
+The UWB and RTK evidence populations are intentionally separated: no August 6
+UWB positions enter the protocol results, and no August 12 GPS samples enter
+the RTK section. The new filter uses positions only: this campaign intentionally
 does not claim acceleration-derived position improvement.
 
 \section{Scope and questions}
@@ -70,9 +71,9 @@ The campaign asks how many independent positions each protocol delivers, where
 stream gaps occur, how stable the unfiltered stationary position is, and whether
 the position-only adaptive EKF reduces visible jitter without hiding raw UWB.
 
-The July 26 report used known static geometry and could make a direct accuracy
-statement. Here the anchors and tag are tied to mobile RTK-derived geometry and
-software time association, so the evidence boundary is deliberately stricter.
+The RTK reference was acquired in a separate session. It establishes receiver
+fix availability and short-term precision, but it cannot be paired sample by
+sample with the August 12 UWB walks or used as an absolute-error ground truth.
 
 \section{System and protocol background}
 \subsection{FlexTDOA}
@@ -119,11 +120,10 @@ Radial displacement is computed around each block's component-wise position
 median. CEP50, RMS, P95, P99, maximum, 2DRMS and first-to-last-decile drift use
 all independent samples. They describe repeatability, not offset from truth.
 
-\subsection{RTK audit}
-Only quality-4 fixes enter the audit. WGS84 is converted through ECEF to a common
-ENU frame. A proper 2-D rotation and translation is fitted from at least three
-anchor centers; scale is fixed. Tag matches must be within 100 ms. Anchor-fit
-residual and association timing accompany every tag error.
+\subsection{RTK reference}
+Only quality-4 fixes from the August 6 reference captures enter the RTK section.
+WGS84 is converted through ECEF to one local ENU frame for that session. No
+cross-session timestamp association or UWB--RTK rigid fit is performed.
 
 \section{Dynamic results}
 \subsection{Raw trajectories}
@@ -134,7 +134,7 @@ agreement.
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{figures/06_dynamic_trajectories.pdf}
-\caption{Raw independent dynamic trajectories in each local UWB frame. Green markers are anchors. Different panels represent different walks.}
+\caption{August 12 raw independent UWB trajectories in each local frame. Green markers are anchors; no August 6 UWB positions are used.}
 \end{figure}
 \subsection{Update rate and gaps}
 \begin{center}\scriptsize\resizebox{\textwidth}{!}{%
@@ -182,17 +182,17 @@ disabled, raw measurements remain archived separately, and each EKF result in
 this report comes from the same position event as its raw counterpart.
 Sample-to-sample step-speed P95 is a jitter/continuity diagnostic; it is not
 physical walking speed. Static RMS is repeatability about each stream's own
-median. RTK values are audit-only whenever anchor registration is poor.
+median. No cross-session RTK error is attached to the filter results.
 \begin{center}\scriptsize\resizebox{\textwidth}{!}{%
-\begin{tabular}{lrrrrrrrr}\toprule
-\textbf{Protocol} & \textbf{Mode} & \textbf{coverage pct} & \textbf{raw step P95} & \textbf{EKF step P95} & \textbf{raw static RMS cm} & \textbf{EKF static RMS cm} & \textbf{raw RTK m} & \textbf{EKF RTK m} \\
+\begin{tabular}{lrrrrrr}\toprule
+\textbf{Protocol} & \textbf{Mode} & \textbf{coverage pct} & \textbf{raw step P95} & \textbf{EKF step P95} & \textbf{raw static RMS cm} & \textbf{EKF static RMS cm} \\
 \midrule
-FlexTDOA & dynamic & 100.0 & 6.04 & 4.31 & n/a & n/a & 1.610 & 1.609 \\
-Native DS-TWR & dynamic & 100.0 & 7.15 & 3.44 & n/a & n/a & 1.694 & 1.710 \\
-Passive DS-TWR & dynamic & 100.0 & 4.66 & 4.50 & n/a & n/a & 1.397 & 1.395 \\
-FlexTDOA & static & 100.0 & 1.97 & 0.36 & 2.41 & 1.07 & 0.599 & 0.599 \\
-Native DS-TWR & static & 100.0 & 1.61 & 0.23 & 2.45 & 0.89 & n/a & n/a \\
-Passive DS-TWR & static & 100.0 & 1.62 & 0.00 & 2.26 & 0.00 & n/a & n/a \\
+FlexTDOA & dynamic & 100.0 & 6.04 & 4.31 & n/a & n/a \\
+Native DS-TWR & dynamic & 100.0 & 7.15 & 3.44 & n/a & n/a \\
+Passive DS-TWR & dynamic & 100.0 & 4.66 & 4.50 & n/a & n/a \\
+FlexTDOA & static & 100.0 & 1.97 & 0.36 & 2.41 & 1.07 \\
+Native DS-TWR & static & 100.0 & 1.61 & 0.23 & 2.45 & 0.89 \\
+Passive DS-TWR & static & 100.0 & 1.62 & 0.00 & 2.26 & 0.00 \\
 \bottomrule\end{tabular}}\end{center}
 \begin{figure}[htbp]
 \centering
@@ -229,23 +229,41 @@ Passive DS-TWR & 607 & 1.88 & 2.26 & 3.94 & 4.93 & 5.52 & 4.53 & 0.38 \\
 \caption{Static raw position clouds centered on their own medians and drawn at one common scale. The cross is the median.}
 \end{figure}
 
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=\textwidth]{figures/08_static_gps_rtk_clouds.pdf}
-\caption{GPS RTK Fixed tag solutions. Top: each protocol block is centered on its own median with one shared centimetre scale, showing within-block precision. Bottom: the same fixes and medians in the common ENU frame with equal axis scale, exposing cross-capture reference inconsistency.}
-\end{figure}
-
 All raw static RMS values lie in a narrow 2.26--2.45 cm range. Passive DS is
 best on RMS, while Native and Passive share the best P95 near 3.94 cm. All
 outliers are retained. One stationary point cannot characterize GDOP or
 spatial bias across the anchor polygon.
 
-The RTK Fixed clouds are individually useful, but their common-ENU centers do
-not agree across blocks. High short-term RTK precision therefore does not imply
-cross-session correctness.
+\section{GPS RTK reference from August 6}
+This section contains GPS data only. It characterizes RTK availability and
+short-term scatter for the unchanged receiver path; it does not reuse the old
+UWB trajectories and it is not synchronized with the August 12 walks.
+\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrrr}\toprule
+\textbf{Protocol} & \textbf{Mode} & \textbf{tag total} & \textbf{tag fixed} & \textbf{tag fixed pct} & \textbf{all modules fixed pct} & \textbf{fix-age P95 ms} & \textbf{fixed anchors} & \textbf{tag cloud RMS cm} & \textbf{tag cloud P95 cm} \\
+\midrule
+FlexTDOA & dynamic & 24 & 24 & 100.0 & 93.0 & 96 & 4 & 284.65 & 482.34 \\
+Native DS-TWR & dynamic & 30 & 28 & 93.3 & 55.9 & 96 & 3 & 334.51 & 487.56 \\
+Passive DS-TWR & dynamic & 26 & 25 & 96.2 & 72.2 & 106 & 4 & 367.91 & 625.14 \\
+FlexTDOA & static & 119 & 119 & 100.0 & 91.4 & 100 & 4 & 0.52 & 0.85 \\
+Native DS-TWR & static & 119 & 119 & 100.0 & 86.3 & 100 & 4 & 0.74 & 1.15 \\
+Passive DS-TWR & static & 119 & 102 & 85.7 & 93.0 & 130 & 4 & 1.40 & 2.02 \\
+\bottomrule\end{tabular}}\end{center}
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/08_static_gps_rtk_clouds.pdf}
+\caption{August 6 GPS RTK Fixed tag solutions only. Top: each reference block centered on its own median. Bottom: the same fixes in the August 6 common ENU frame.}
+\end{figure}
 
-\subsection{RTK cross-capture consistency gate}
-The stationary RTK center's maximum pairwise separation is \textbf{2.127 m}, versus a 0.250 m gate. \textbf{static absolute UWB-RTK errors are audit-only and invalid for cross-protocol ranking}. The failed gate forbids an absolute static ranking even when an individual cloud is tight.
+The trajectory panels below are GPS-only and remain in the August 6 ENU frame.
+They are shown as a qualitative RTK reference, not overlaid on the August 12
+UWB paths.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/11_dynamic_gps_rtk_reference.pdf}
+\caption{August 6 GPS RTK Fixed dynamic reference trajectories. No UWB positions from that session are plotted.}
+\end{figure}
 
 
 \section{Accelerometer scope}
@@ -253,36 +271,6 @@ Acceleration-assisted positioning was disabled for this final campaign because
 the preceding experiment did not improve raw UWB accuracy. The adaptive EKF
 assessed above is position-only. Orientation/IMU telemetry is outside the
 protocol ranking, and raw UWB remains the permanent audit stream.
-
-\section{UWB--RTK association audit}
-The following values are retained for transparency, not promoted to surveyed
-accuracy. Debiased RMSE removes median tag residual and is a shape diagnostic.
-\begin{center}\scriptsize\resizebox{\textwidth}{!}{%
-\begin{tabular}{lrrrrrrrr}\toprule
-\textbf{Protocol} & \textbf{Mode} & \textbf{pairs} & \textbf{time P95 ms} & \textbf{RMSE m} & \textbf{P95 m} & \textbf{debiased m} & \textbf{anchor fit m} & \textbf{alignment} \\
-\midrule
-FlexTDOA & dynamic & 656 & 34.9 & 1.610 & 1.828 & 0.376 & 0.859 & poor\_alignment\_do\_not\_claim\_accuracy \\
-Native DS-TWR & dynamic & 633 & 18.5 & 1.694 & 2.391 & 1.202 & 0.675 & poor\_alignment\_do\_not\_claim\_accuracy \\
-Passive DS-TWR & dynamic & 726 & 45.8 & 1.397 & 1.555 & 0.486 & 0.013 & usable\_with\_limitations \\
-FlexTDOA & static & 137 & 33.2 & 0.599 & 0.629 & 0.025 & 0.930 & poor\_alignment\_do\_not\_claim\_accuracy \\
-Native DS-TWR & static & 0 & n/a & n/a & n/a & n/a & n/a & unavailable \\
-Passive DS-TWR & static & 0 & n/a & n/a & n/a & n/a & n/a & unavailable \\
-\bottomrule\end{tabular}}\end{center}
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=0.94\textwidth]{figures/04_dynamic_rtk_error_cdf.pdf}
-\caption{Dynamic UWB--RTK disagreement after anchor-based rigid registration. This is not surveyed position error.}
-\end{figure}
-
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=0.94\textwidth]{figures/05_alignment_quality.pdf}
-\caption{Anchor-registration residual beside paired tag disagreement. Registration uncertainty limits tag interpretation.}
-\end{figure}
-
-Dynamic paths and anchor fits differ by capture. Passive DS dynamic geometry is
-partly GNSS-derived, making its registration non-independent. The RTK audit is
-still useful for gross frame errors and timing failures.
 
 \section{Protocol interpretation and selection}
 \subsection{FlexTDOA}
@@ -316,8 +304,8 @@ Recommendation & primary scalable mode & coherent baseline & passive scalable al
 
 \section{Limitations}
 \begin{itemize}
-\item RTK is an in-system comparison reference, not independently surveyed truth.
-\item Measurement time subtracts receiver-reported fix age from collector time; clocks are not hardware synchronized.
+\item RTK is a separate August 6 reference session, not synchronized August 12 truth.
+\item Cross-session UWB--RTK RMSE/P95 is intentionally not computed.
 \item GNSS and UWB antenna phase centers have unknown lever arms.
 \item Dynamic routes are not repeated surveyed paths; static/dynamic blocks are single trials.
 \item One static point does not cover edge geometry, NLOS, orientation or spatial bias.
@@ -328,7 +316,7 @@ Recommendation & primary scalable mode & coherent baseline & passive scalable al
 \begin{enumerate}
 \item Repeat every protocol on one marked route with identical orientation and synchronized markers.
 \item Interleave static blocks at the center, edges and outside the polygon.
-\item Keep one continuous RTK session and log correction age/reset state across protocol changes.
+\item Repeat the final UWB campaign with one simultaneous continuous RTK session.
 \item Add hardware-correlated timestamps for latency claims.
 \item Keep acceleration disabled until body-to-map yaw is independently validated.
 \item Capture focused FlexTDOA diagnostics around gaps above 250 ms.
@@ -339,7 +327,7 @@ Recommendation & primary scalable mode & coherent baseline & passive scalable al
 \item FlexTDOA remains a strong receive-only scalable mode, with one long-gap caveat.
 \item Native DS-TWR is the best coherent-frame rate and continuity baseline.
 \item Passive DS-TWR is a viable receive-only alternative when independent frames are counted correctly.
-\item The RTK consistency failure prevents a static absolute-accuracy ranking; local precision alone is ranked.
+\item The cross-session RTK reference cannot support an August 12 absolute-accuracy ranking; local UWB precision is ranked.
 \item The position-only EKF improves display stability; acceleration-assisted accuracy is not claimed.
 \end{itemize}
 
@@ -350,7 +338,10 @@ records whether optional lossless RAW archive generation was enabled; when it
 is skipped, immutable source JSONL paths remain recorded for reproduction.
 
 \begin{verbatim}
-python tools/uwb_dynamic_static_report.py --input-dir INPUT --output-dir OUTPUT
+python tools/uwb_dynamic_static_report.py `
+  --input-dir reports/uwb_final_report_input_20260812 `
+  --output-dir reports/uwb_dynamic_static_comparison_20260812 `
+  --rtk-reference-report-dir reports/uwb_dynamic_static_comparison_20260806
 \end{verbatim}
 
 No raw capture is modified during report generation.

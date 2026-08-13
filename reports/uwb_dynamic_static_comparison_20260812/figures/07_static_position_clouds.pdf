@@ -16,10 +16,10 @@ endobj
 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
 endobj
 6 0 obj
-<< /Length 135168 >>
+<< /Length 135167 >>
 stream
 1 J 1 j
-0.0667 0.0941 0.1529 rg BT /F2 17.00 Tf 1 0 0 1 279.00 363.00 Tm (Static raw position clouds about each capture median) Tj ET
+0.0667 0.0941 0.1529 rg BT /F2 17.00 Tf 1 0 0 1 283.25 363.00 Tm (Static raw UWB position clouds - August 12 captures) Tj ET
 0.8863 0.9098 0.9412 RG 0.60 w 50.00 55.00 m 50.00 305.00 l S
 0.8863 0.9098 0.9412 RG 0.60 w 50.00 55.00 m 300.00 55.00 l S
 0.8863 0.9098 0.9412 RG 0.60 w 100.00 55.00 m 100.00 305.00 l S
@@ -2276,5 +2276,5 @@ xref
 trailer
 << /Size 7 /Root 1 0 R >>
 startxref
-135630
+135629
 %%EOF

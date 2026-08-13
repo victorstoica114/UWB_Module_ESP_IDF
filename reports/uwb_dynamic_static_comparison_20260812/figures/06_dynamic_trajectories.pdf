@@ -16,10 +16,10 @@ endobj
 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
 endobj
 6 0 obj
-<< /Length 123653 >>
+<< /Length 123652 >>
 stream
 1 J 1 j
-0.0667 0.0941 0.1529 rg BT /F2 17.00 Tf 1 0 0 1 249.25 363.00 Tm (Raw dynamic trajectories in each protocol's local UWB frame) Tj ET
+0.0667 0.0941 0.1529 rg BT /F2 17.00 Tf 1 0 0 1 253.50 363.00 Tm (Raw dynamic UWB trajectories - August 12 position captures) Tj ET
 0.8863 0.9098 0.9412 RG 0.60 w 50.00 55.00 m 50.00 305.00 l S
 0.8863 0.9098 0.9412 RG 0.60 w 50.00 55.00 m 300.00 55.00 l S
 0.8863 0.9098 0.9412 RG 0.60 w 100.00 55.00 m 100.00 305.00 l S
@@ -112,5 +112,5 @@ xref
 trailer
 << /Size 7 /Root 1 0 R >>
 startxref
-124115
+124114
 %%EOF

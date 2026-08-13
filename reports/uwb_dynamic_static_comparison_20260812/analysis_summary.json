@@ -1,93 +1,37 @@
 {
   "analysis": {
     "capture_selection_policy": "one cell per protocol/motion; prefer rpi_static_*_rtkfixed and dynamic *_final",
+    "cross_session_rtk_pairing_performed": false,
     "excluded_superseded_captures": [],
     "frame_registration": "proper rigid 2-D rotation+translation; no scale",
-    "generated_utc": "2026-08-13T06:26:34.779957+00:00",
+    "generated_utc": "2026-08-13T09:11:35.756290+00:00",
     "input_dir": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_final_report_input_20260812",
     "max_non_exact_dynamic_geometry_age_s": 10.0,
     "missing_capture_matrix_cells": [],
-    "origin_wgs84": {
-      "altitude_m": 77.449,
-      "latitude_deg": 44.336177287,
-      "longitude_deg": 25.947485553
-    },
+    "origin_wgs84": null,
     "output_dir": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260812",
     "position_sample_policy": "independent_frame when available; all-event rate retained separately",
     "raw_archive_generated": true,
-    "replay_dynamic_dir": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_final_report_input_20260812",
-    "replay_static_dir": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_final_report_input_20260812",
-    "rtk_interpretation": "in-system comparison reference with alignment, timing, fix-state, and lever-arm limitations",
+    "replay_dynamic_dir": null,
+    "replay_static_dir": null,
+    "report_rtk_population": "GPS-only reference captures; no cross-session UWB/RTK association",
+    "rtk_interpretation": "August 6 GPS-only availability and precision reference; not synchronized with August 12 UWB",
     "rtk_is_independent_survey_truth": false,
     "rtk_match_limit_ms": 100.0,
-    "rtk_pair_policy": "RTK-fixed M1; one nearest independent UWB position per GPS solution",
-    "skipped_incomplete_captures": [],
-    "static_rtk_reference_consistency": {
-      "complete_protocol_matrix": true,
-      "interpretation": "static absolute UWB-RTK errors are audit-only and invalid for cross-protocol ranking",
-      "max_pairwise_distance_m": 2.1271904716651413,
-      "pairwise_distances": [
-        {
-          "distance_m": 2.1271904716651413,
-          "first_protocol": "flextdoa",
-          "second_protocol": "native_ds"
-        },
-        {
-          "distance_m": 1.1320642670636327,
-          "first_protocol": "flextdoa",
-          "second_protocol": "passive_ds"
-        },
-        {
-          "distance_m": 1.0241934425601904,
-          "first_protocol": "native_ds",
-          "second_protocol": "passive_ds"
-        }
-      ],
-      "stationary_tag_centers_enu_m": {
-        "flextdoa": {
-          "capture_id": "flextdoa_static_final_01",
-          "east_m": 0.8908397151378292,
-          "north_m": 0.3178036775496098
-        },
-        "native_ds": {
-          "capture_id": "native_ds_static_final_02_rtk_fixed",
-          "east_m": 2.032063758009242,
-          "north_m": -1.4773417167611667
-        },
-        "passive_ds": {
-          "capture_id": "passive_ds_static_final_01",
-          "east_m": 1.6394803320683968,
-          "north_m": -0.5313763572157745
-        }
-      },
-      "threshold_m": 0.25,
-      "valid_for_cross_protocol_absolute_ranking": false
+    "rtk_pair_policy": "not performed across sessions",
+    "rtk_reference_origin_wgs84": {
+      "altitude_m": 76.76,
+      "latitude_deg": 44.33617348,
+      "longitude_deg": 25.94749815
     },
+    "rtk_reference_report_dir": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260806",
+    "skipped_incomplete_captures": [],
+    "static_rtk_reference_consistency": null,
     "tag_id": 1,
     "tool": "tools/uwb_dynamic_static_report.py"
   },
   "captures": {
     "flextdoa_final_dynamic_20260812": {
-      "alignment": {
-        "anchor_count_min": 4,
-        "anchor_spread_p95_m_max": 0.030539489023150082,
-        "available": true,
-        "dynamic_snapshot_count": 0,
-        "exact_geometry_version_pct": 100.0,
-        "fit_residual_m_max": 1.3202263366253029,
-        "fit_rmse_m_max": 0.8593479334472318,
-        "fit_rmse_m_median": 0.8593479334472318,
-        "fit_rmse_m_p95": 0.8593479334472318,
-        "geometry_match_age_max_s": 1.8586761951446533,
-        "geometry_match_age_p95_s": 0.6204805374145508,
-        "quality_flag": "poor_alignment_do_not_claim_accuracy",
-        "rtk_derived_dynamic_geometry": false,
-        "snapshot_count": 78,
-        "transform_coverage_pct": 100.0,
-        "transformed_positions": 2117,
-        "yaw_deg_median": 8.698150982021387,
-        "yaw_deg_span": 0.0
-      },
       "capture_id": "flextdoa_final_dynamic_20260812",
       "complete": true,
       "duration_s": 84.63700008392334,
@@ -99,28 +43,6 @@
         "step_speed_n": 2111,
         "step_speed_p95_mps": 4.311192514879638,
         "step_speed_p99_mps": 7.0914797782442065
-      },
-      "ekf_rtk_error": {
-        "association_abs_max_ms": 86.81559562683105,
-        "association_abs_p50_ms": 4.853367805480957,
-        "association_abs_p95_ms": 34.918904304504395,
-        "bias_east_mean_m": -0.041259798252508216,
-        "bias_east_median_m": -0.09295342264909967,
-        "bias_north_mean_m": 1.5681835699220867,
-        "bias_north_median_m": 1.6657250284072838,
-        "debiased_error_max_m": 0.9650443050945885,
-        "debiased_error_p95_m": 0.7052408753071752,
-        "debiased_error_rmse_m": 0.3752913724670267,
-        "error_gt_0_5m": 656,
-        "error_gt_1m": 635,
-        "error_gt_2m": 15,
-        "error_max_m": 2.3149153076873774,
-        "error_median_m": 1.6798457146195684,
-        "error_p95_m": 1.8278995218817808,
-        "error_rmse_m": 1.6092107156140019,
-        "fixed_tag_solutions": 668,
-        "pair_coverage_pct": 98.20359281437126,
-        "pairs": 656
       },
       "ekf_static_precision": {
         "n": 0
@@ -225,93 +147,7 @@
       "protocol": "flextdoa",
       "protocol_label": "FlexTDOA",
       "quality_flags": [],
-      "rtk": {
-        "all_modules_fixed_pct": 70.76923076923077,
-        "anchor_spread_p95_m_max": 0.030539489023150082,
-        "by_module": {
-          "1": {
-            "fix_age_p95_ms": null,
-            "fixed": 668,
-            "fixed_pct": 98.81656804733728,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 4.548380542702626,
-            "satellites_median": 29.0,
-            "total": 676,
-            "valid": 676
-          },
-          "2": {
-            "fix_age_p95_ms": null,
-            "fixed": 534,
-            "fixed_pct": 78.99408284023669,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.030539489023150082,
-            "satellites_median": 27.0,
-            "total": 676,
-            "valid": 676
-          },
-          "3": {
-            "fix_age_p95_ms": null,
-            "fixed": 608,
-            "fixed_pct": 89.94082840236686,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.017475691777627544,
-            "satellites_median": 29.0,
-            "total": 676,
-            "valid": 676
-          },
-          "4": {
-            "fix_age_p95_ms": null,
-            "fixed": 45,
-            "fixed_pct": 6.65680473372781,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.0248280495824273,
-            "satellites_median": 29.0,
-            "total": 676,
-            "valid": 676
-          },
-          "5": {
-            "fix_age_p95_ms": null,
-            "fixed": 537,
-            "fixed_pct": 79.43786982248521,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.009523646465932014,
-            "satellites_median": 29.0,
-            "total": 676,
-            "valid": 676
-          }
-        },
-        "fixed_anchor_count": 4,
-        "tag_center_east_m": 0.7168192972016525,
-        "tag_center_north_m": -1.9441584192844141,
-        "tag_center_up_m": 0.9539994800379192,
-        "tag_fix_age_p95_ms": null,
-        "tag_fixed": 668,
-        "tag_fixed_pct": 98.81656804733728,
-        "tag_total": 676,
-        "tag_valid": 676
-      },
-      "rtk_error": {
-        "association_abs_max_ms": 86.81559562683105,
-        "association_abs_p50_ms": 4.853367805480957,
-        "association_abs_p95_ms": 34.918904304504395,
-        "bias_east_mean_m": -0.04029181041789636,
-        "bias_east_median_m": -0.08994257691482443,
-        "bias_north_mean_m": 1.5677980694143219,
-        "bias_north_median_m": 1.6558757365565482,
-        "debiased_error_max_m": 0.9627123800481752,
-        "debiased_error_p95_m": 0.703091005736854,
-        "debiased_error_rmse_m": 0.3758744572944684,
-        "error_gt_0_5m": 656,
-        "error_gt_1m": 633,
-        "error_gt_2m": 18,
-        "error_max_m": 2.3149153076873774,
-        "error_median_m": 1.67872011587144,
-        "error_p95_m": 1.8275501384591553,
-        "error_rmse_m": 1.6095567557652286,
-        "fixed_tag_solutions": 668,
-        "pair_coverage_pct": 98.20359281437126,
-        "pairs": 656
-      },
+      "rtk_note": "GPS embedded in this August 12 capture is excluded; see rtk_reference_captures for the August 6 GPS-only population",
       "static_precision": {
         "n": 0
       },
@@ -321,26 +157,6 @@
       ]
     },
     "flextdoa_static_final_01": {
-      "alignment": {
-        "anchor_count_min": 3,
-        "anchor_spread_p95_m_max": 0.011159852706790856,
-        "available": true,
-        "dynamic_snapshot_count": 0,
-        "exact_geometry_version_pct": 100.0,
-        "fit_residual_m_max": 1.2338604558209076,
-        "fit_rmse_m_max": 0.9302771434189658,
-        "fit_rmse_m_median": 0.9302771434189658,
-        "fit_rmse_m_p95": 0.9302771434189658,
-        "geometry_match_age_max_s": 0.985767126083374,
-        "geometry_match_age_p95_s": 0.5011255145072937,
-        "quality_flag": "poor_alignment_do_not_claim_accuracy",
-        "rtk_derived_dynamic_geometry": false,
-        "snapshot_count": 30,
-        "transform_coverage_pct": 100.0,
-        "transformed_positions": 798,
-        "yaw_deg_median": -4.770024835165837,
-        "yaw_deg_span": 0.0
-      },
       "capture_id": "flextdoa_static_final_01",
       "complete": true,
       "duration_s": 30.341198444366455,
@@ -352,28 +168,6 @@
         "step_speed_n": 795,
         "step_speed_p95_mps": 0.3556487853364432,
         "step_speed_p99_mps": 0.6058757681690752
-      },
-      "ekf_rtk_error": {
-        "association_abs_max_ms": 57.692766189575195,
-        "association_abs_p50_ms": 1.8754005432128906,
-        "association_abs_p95_ms": 33.1942081451416,
-        "bias_east_mean_m": 0.22981653007714964,
-        "bias_east_median_m": 0.2300961208118515,
-        "bias_north_mean_m": -0.5535169160357295,
-        "bias_north_median_m": -0.5537856597380236,
-        "debiased_error_max_m": 0.02538691247997989,
-        "debiased_error_p95_m": 0.019611428531512067,
-        "debiased_error_rmse_m": 0.011006539815695444,
-        "error_gt_0_5m": 137,
-        "error_gt_1m": 0,
-        "error_gt_2m": 0,
-        "error_max_m": 0.6229128687772946,
-        "error_median_m": 0.5995426719366957,
-        "error_p95_m": 0.6170590229914312,
-        "error_rmse_m": 0.5994310697310945,
-        "fixed_tag_solutions": 137,
-        "pair_coverage_pct": 100.0,
-        "pairs": 137
       },
       "ekf_static_precision": {
         "cep50_m": 0.00917830119250997,
@@ -489,94 +283,7 @@
       "protocol": "flextdoa",
       "protocol_label": "FlexTDOA",
       "quality_flags": [],
-      "rtk": {
-        "all_modules_fixed_pct": 42.22599830076466,
-        "anchor_spread_p95_m_max": 0.011159852706790856,
-        "by_module": {
-          "1": {
-            "fix_age_p95_ms": null,
-            "fixed": 137,
-            "fixed_pct": 57.083333333333336,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.0058222141684032575,
-            "satellites_median": 27.0,
-            "total": 240,
-            "valid": 240
-          },
-          "2": {
-            "fix_age_p95_ms": null,
-            "fixed": 29,
-            "fixed_pct": 13.36405529953917,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.005852885176925166,
-            "satellites_median": 27.0,
-            "total": 217,
-            "valid": 173
-          },
-          "3": {
-            "fix_age_p95_ms": null,
-            "fixed": 174,
-            "fixed_pct": 72.5,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.006581196083081956,
-            "satellites_median": 28.0,
-            "total": 240,
-            "valid": 240
-          },
-          "4": {
-            "fix_age_p95_ms": null,
-            "fixed": 157,
-            "fixed_pct": 65.41666666666667,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.011159852706790856,
-            "satellites_median": 28.0,
-            "total": 240,
-            "valid": 240
-          },
-          "5": {
-            "fix_age_p95_ms": null,
-            "fixed": 0,
-            "fixed_pct": 0.0,
-            "hdop_median": null,
-            "satellites_median": null,
-            "total": 240,
-            "valid": 240
-          }
-        },
-        "fixed_anchor_count": 3,
-        "tag_center_east_m": 0.8908397151378292,
-        "tag_center_north_m": 0.3178036775496098,
-        "tag_center_up_m": -0.7810000705304243,
-        "tag_fix_age_p95_ms": null,
-        "tag_fixed": 137,
-        "tag_fixed_pct": 57.083333333333336,
-        "tag_total": 240,
-        "tag_valid": 240
-      },
-      "rtk_error": {
-        "association_abs_max_ms": 57.692766189575195,
-        "association_abs_p50_ms": 1.8754005432128906,
-        "association_abs_p95_ms": 33.1942081451416,
-        "bias_east_mean_m": 0.2302526515169736,
-        "bias_east_median_m": 0.23179828615066123,
-        "bias_north_mean_m": -0.5523069694819743,
-        "bias_north_median_m": -0.5523585825087024,
-        "debiased_error_max_m": 0.07546960502588516,
-        "debiased_error_p95_m": 0.04768130059512063,
-        "debiased_error_rmse_m": 0.025208568869869795,
-        "error_gt_0_5m": 137,
-        "error_gt_1m": 0,
-        "error_gt_2m": 0,
-        "error_max_m": 0.6659296406415458,
-        "error_median_m": 0.596377198344057,
-        "error_p95_m": 0.62878102619841,
-        "error_rmse_m": 0.5989093022846622,
-        "fixed_tag_solutions": 137,
-        "interpretation_grade": "audit_only_invalid_for_cross_protocol_ranking",
-        "pair_coverage_pct": 100.0,
-        "pairs": 137,
-        "reference_consistency_valid_for_ranking": false
-      },
+      "rtk_note": "GPS embedded in this August 12 capture is excluded; see rtk_reference_captures for the August 6 GPS-only population",
       "static_precision": {
         "cep50_m": 0.01910497317454258,
         "first_to_last_decile_drift_m": 0.008246211251235274,
@@ -594,26 +301,6 @@
       "warnings": []
     },
     "native_ds_final_dynamic_20260812": {
-      "alignment": {
-        "anchor_count_min": 4,
-        "anchor_spread_p95_m_max": 0.016508157195607512,
-        "available": true,
-        "dynamic_snapshot_count": 0,
-        "exact_geometry_version_pct": 100.0,
-        "fit_residual_m_max": 0.8593275168734574,
-        "fit_rmse_m_max": 0.6748042180267221,
-        "fit_rmse_m_median": 0.6748042180267221,
-        "fit_rmse_m_p95": 0.6748042180267221,
-        "geometry_match_age_max_s": 1.1991136074066162,
-        "geometry_match_age_p95_s": 0.6023194193840027,
-        "quality_flag": "poor_alignment_do_not_claim_accuracy",
-        "rtk_derived_dynamic_geometry": false,
-        "snapshot_count": 90,
-        "transform_coverage_pct": 100.0,
-        "transformed_positions": 2876,
-        "yaw_deg_median": 2.393918870985548,
-        "yaw_deg_span": 0.0
-      },
       "capture_id": "native_ds_final_dynamic_20260812",
       "complete": true,
       "duration_s": 113.45000004768372,
@@ -625,28 +312,6 @@
         "step_speed_n": 2875,
         "step_speed_p95_mps": 3.444177413090994,
         "step_speed_p99_mps": 6.700269264114639
-      },
-      "ekf_rtk_error": {
-        "association_abs_max_ms": 42.34051704406738,
-        "association_abs_p50_ms": 6.525278091430664,
-        "association_abs_p95_ms": 18.521499633789062,
-        "bias_east_mean_m": 0.0807653847018061,
-        "bias_east_median_m": 0.7047261938332922,
-        "bias_north_mean_m": 1.365729754266703,
-        "bias_north_median_m": 1.2788271821093935,
-        "debiased_error_max_m": 2.6006399666676363,
-        "debiased_error_p95_m": 2.4570501054237495,
-        "debiased_error_rmse_m": 1.2034813687633397,
-        "error_gt_0_5m": 633,
-        "error_gt_1m": 633,
-        "error_gt_2m": 161,
-        "error_max_m": 2.602314512182332,
-        "error_median_m": 1.4640453077919493,
-        "error_p95_m": 2.3717085727138505,
-        "error_rmse_m": 1.7097453218641443,
-        "fixed_tag_solutions": 633,
-        "pair_coverage_pct": 100.0,
-        "pairs": 633
       },
       "ekf_static_precision": {
         "n": 0
@@ -751,93 +416,7 @@
       "protocol": "native_ds",
       "protocol_label": "Native DS-TWR",
       "quality_flags": [],
-      "rtk": {
-        "all_modules_fixed_pct": 50.100513736877375,
-        "anchor_spread_p95_m_max": 0.016508157195607512,
-        "by_module": {
-          "1": {
-            "fix_age_p95_ms": null,
-            "fixed": 633,
-            "fixed_pct": 70.64732142857143,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 3.575141902310073,
-            "satellites_median": 29.0,
-            "total": 896,
-            "valid": 896
-          },
-          "2": {
-            "fix_age_p95_ms": null,
-            "fixed": 404,
-            "fixed_pct": 45.13966480446928,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.01542971448703301,
-            "satellites_median": 24.0,
-            "total": 895,
-            "valid": 895
-          },
-          "3": {
-            "fix_age_p95_ms": null,
-            "fixed": 394,
-            "fixed_pct": 44.022346368715084,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.008768756468395655,
-            "satellites_median": 29.0,
-            "total": 895,
-            "valid": 895
-          },
-          "4": {
-            "fix_age_p95_ms": null,
-            "fixed": 239,
-            "fixed_pct": 26.674107142857142,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.016508157195607512,
-            "satellites_median": 30.0,
-            "total": 896,
-            "valid": 896
-          },
-          "5": {
-            "fix_age_p95_ms": null,
-            "fixed": 573,
-            "fixed_pct": 64.02234636871508,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.009768625112229107,
-            "satellites_median": 29.0,
-            "total": 895,
-            "valid": 895
-          }
-        },
-        "fixed_anchor_count": 4,
-        "tag_center_east_m": 0.4748490296220783,
-        "tag_center_north_m": -0.933965330229481,
-        "tag_center_up_m": 2.8159999121492865,
-        "tag_fix_age_p95_ms": null,
-        "tag_fixed": 633,
-        "tag_fixed_pct": 70.64732142857143,
-        "tag_total": 896,
-        "tag_valid": 896
-      },
-      "rtk_error": {
-        "association_abs_max_ms": 42.34051704406738,
-        "association_abs_p50_ms": 6.525278091430664,
-        "association_abs_p95_ms": 18.521499633789062,
-        "bias_east_mean_m": 0.08379128752571509,
-        "bias_east_median_m": 0.701575217684386,
-        "bias_north_mean_m": 1.3421967289062686,
-        "bias_north_median_m": 1.2970317957093793,
-        "debiased_error_max_m": 2.626622701472583,
-        "debiased_error_p95_m": 2.4575961818142322,
-        "debiased_error_rmse_m": 1.2019303471837044,
-        "error_gt_0_5m": 633,
-        "error_gt_1m": 633,
-        "error_gt_2m": 161,
-        "error_max_m": 2.6287914025732046,
-        "error_median_m": 1.4835967172961078,
-        "error_p95_m": 2.3913096819794757,
-        "error_rmse_m": 1.6939459090774036,
-        "fixed_tag_solutions": 633,
-        "pair_coverage_pct": 100.0,
-        "pairs": 633
-      },
+      "rtk_note": "GPS embedded in this August 12 capture is excluded; see rtk_reference_captures for the August 6 GPS-only population",
       "static_precision": {
         "n": 0
       },
@@ -847,14 +426,6 @@
       ]
     },
     "native_ds_static_final_02_rtk_fixed": {
-      "alignment": {
-        "available": false,
-        "exact_geometry_version_pct": null,
-        "geometry_match_age_max_s": null,
-        "geometry_match_age_p95_s": null,
-        "transform_coverage_pct": 0.0,
-        "transformed_positions": 0
-      },
       "capture_id": "native_ds_static_final_02_rtk_fixed",
       "complete": true,
       "duration_s": 30.128157377243042,
@@ -866,11 +437,6 @@
         "step_speed_n": 779,
         "step_speed_p95_mps": 0.22993327749484818,
         "step_speed_p99_mps": 0.32339301107405166
-      },
-      "ekf_rtk_error": {
-        "fixed_tag_solutions": 240,
-        "pair_coverage_pct": 0.0,
-        "pairs": 0
       },
       "ekf_static_precision": {
         "cep50_m": 0.00674708344614911,
@@ -986,76 +552,7 @@
       "protocol": "native_ds",
       "protocol_label": "Native DS-TWR",
       "quality_flags": [],
-      "rtk": {
-        "all_modules_fixed_pct": 29.592684954280966,
-        "anchor_spread_p95_m_max": 0.005374632004900867,
-        "by_module": {
-          "1": {
-            "fix_age_p95_ms": null,
-            "fixed": 240,
-            "fixed_pct": 100.0,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.007983715907678502,
-            "satellites_median": 28.0,
-            "total": 240,
-            "valid": 240
-          },
-          "2": {
-            "fix_age_p95_ms": null,
-            "fixed": 113,
-            "fixed_pct": 46.88796680497925,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.005374632004900867,
-            "satellites_median": 27.0,
-            "total": 241,
-            "valid": 241
-          },
-          "3": {
-            "fix_age_p95_ms": null,
-            "fixed": 3,
-            "fixed_pct": 1.2448132780082988,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.0009334103663752274,
-            "satellites_median": 28.0,
-            "total": 241,
-            "valid": 241
-          },
-          "4": {
-            "fix_age_p95_ms": null,
-            "fixed": 0,
-            "fixed_pct": 0.0,
-            "hdop_median": null,
-            "satellites_median": null,
-            "total": 240,
-            "valid": 240
-          },
-          "5": {
-            "fix_age_p95_ms": null,
-            "fixed": 0,
-            "fixed_pct": 0.0,
-            "hdop_median": null,
-            "satellites_median": null,
-            "total": 241,
-            "valid": 241
-          }
-        },
-        "fixed_anchor_count": 2,
-        "tag_center_east_m": 2.032063758009242,
-        "tag_center_north_m": -1.4773417167611667,
-        "tag_center_up_m": -2.0700004960387863,
-        "tag_fix_age_p95_ms": null,
-        "tag_fixed": 240,
-        "tag_fixed_pct": 100.0,
-        "tag_total": 240,
-        "tag_valid": 240
-      },
-      "rtk_error": {
-        "fixed_tag_solutions": 240,
-        "interpretation_grade": "audit_only_invalid_for_cross_protocol_ranking",
-        "pair_coverage_pct": 0.0,
-        "pairs": 0,
-        "reference_consistency_valid_for_ranking": false
-      },
+      "rtk_note": "GPS embedded in this August 12 capture is excluded; see rtk_reference_captures for the August 6 GPS-only population",
       "static_precision": {
         "cep50_m": 0.01720465053408527,
         "first_to_last_decile_drift_m": 0.006670832032063996,
@@ -1073,26 +570,6 @@
       "warnings": []
     },
     "passive_ds_final_dynamic_20260812": {
-      "alignment": {
-        "anchor_count_min": 3,
-        "anchor_spread_p95_m_max": 0.03950433693170757,
-        "available": true,
-        "dynamic_snapshot_count": 0,
-        "exact_geometry_version_pct": 100.0,
-        "fit_residual_m_max": 0.01670506455347472,
-        "fit_rmse_m_max": 0.013050684705681216,
-        "fit_rmse_m_median": 0.013050684705681216,
-        "fit_rmse_m_p95": 0.013050684705681216,
-        "geometry_match_age_max_s": 159.59347081184387,
-        "geometry_match_age_p95_s": 153.928240776062,
-        "quality_flag": "usable_with_limitations",
-        "rtk_derived_dynamic_geometry": false,
-        "snapshot_count": 1,
-        "transform_coverage_pct": 100.0,
-        "transformed_positions": 2409,
-        "yaw_deg_median": -0.07379608993206407,
-        "yaw_deg_span": 0.0
-      },
       "capture_id": "passive_ds_final_dynamic_20260812",
       "complete": true,
       "duration_s": 106.45299983024597,
@@ -1104,28 +581,6 @@
         "step_speed_n": 2408,
         "step_speed_p95_mps": 4.498072628672133,
         "step_speed_p99_mps": 6.859426902548367
-      },
-      "ekf_rtk_error": {
-        "association_abs_max_ms": 94.82240676879883,
-        "association_abs_p50_ms": 3.56900691986084,
-        "association_abs_p95_ms": 45.8032488822937,
-        "bias_east_mean_m": -0.08126034064706607,
-        "bias_east_median_m": -0.04075563647027003,
-        "bias_north_mean_m": 1.3071658822189685,
-        "bias_north_median_m": 1.3027810481845061,
-        "debiased_error_max_m": 0.7863296899555766,
-        "debiased_error_p95_m": 0.6163869055895966,
-        "debiased_error_rmse_m": 0.48347434521920984,
-        "error_gt_0_5m": 726,
-        "error_gt_1m": 724,
-        "error_gt_2m": 0,
-        "error_max_m": 1.8037661554988567,
-        "error_median_m": 1.4109879575843571,
-        "error_p95_m": 1.55438983987961,
-        "error_rmse_m": 1.395483239331292,
-        "fixed_tag_solutions": 747,
-        "pair_coverage_pct": 97.18875502008032,
-        "pairs": 726
       },
       "ekf_static_precision": {
         "n": 0
@@ -1230,92 +685,7 @@
       "protocol": "passive_ds",
       "protocol_label": "Passive DS-TWR",
       "quality_flags": [],
-      "rtk": {
-        "all_modules_fixed_pct": 66.41912276630309,
-        "anchor_spread_p95_m_max": 0.03950433693170757,
-        "by_module": {
-          "1": {
-            "fix_age_p95_ms": null,
-            "fixed": 747,
-            "fixed_pct": 86.65893271461717,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 5.480703752501526,
-            "satellites_median": 28.0,
-            "total": 862,
-            "valid": 862
-          },
-          "2": {
-            "fix_age_p95_ms": null,
-            "fixed": 848,
-            "fixed_pct": 98.49012775842044,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.03138496240655163,
-            "satellites_median": 28.0,
-            "total": 861,
-            "valid": 861
-          },
-          "3": {
-            "fix_age_p95_ms": null,
-            "fixed": 457,
-            "fixed_pct": 53.01624129930394,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.015362076089734049,
-            "satellites_median": 28.0,
-            "total": 862,
-            "valid": 862
-          },
-          "4": {
-            "fix_age_p95_ms": null,
-            "fixed": 810,
-            "fixed_pct": 93.96751740139212,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.03950433693170757,
-            "satellites_median": 29.0,
-            "total": 862,
-            "valid": 862
-          },
-          "5": {
-            "fix_age_p95_ms": null,
-            "fixed": 0,
-            "fixed_pct": 0.0,
-            "hdop_median": null,
-            "satellites_median": null,
-            "total": 862,
-            "valid": 862
-          }
-        },
-        "fixed_anchor_count": 3,
-        "tag_center_east_m": 1.6289529436510004,
-        "tag_center_north_m": -0.512485932649124,
-        "tag_center_up_m": -0.04900088207645065,
-        "tag_fix_age_p95_ms": null,
-        "tag_fixed": 747,
-        "tag_fixed_pct": 86.65893271461717,
-        "tag_total": 862,
-        "tag_valid": 862
-      },
-      "rtk_error": {
-        "association_abs_max_ms": 94.82240676879883,
-        "association_abs_p50_ms": 3.56900691986084,
-        "association_abs_p95_ms": 45.8032488822937,
-        "bias_east_mean_m": -0.08325596844476829,
-        "bias_east_median_m": -0.04221349052190637,
-        "bias_north_mean_m": 1.3072452014637435,
-        "bias_north_median_m": 1.3067836224989167,
-        "debiased_error_max_m": 0.78583509972524,
-        "debiased_error_p95_m": 0.616380739128244,
-        "debiased_error_rmse_m": 0.4862530233494245,
-        "error_gt_0_5m": 726,
-        "error_gt_1m": 724,
-        "error_gt_2m": 0,
-        "error_max_m": 1.8040453363129694,
-        "error_median_m": 1.410636437697927,
-        "error_p95_m": 1.555492480076304,
-        "error_rmse_m": 1.396631260461732,
-        "fixed_tag_solutions": 747,
-        "pair_coverage_pct": 97.18875502008032,
-        "pairs": 726
-      },
+      "rtk_note": "GPS embedded in this August 12 capture is excluded; see rtk_reference_captures for the August 6 GPS-only population",
       "static_precision": {
         "n": 0
       },
@@ -1325,14 +695,6 @@
       ]
     },
     "passive_ds_static_final_01": {
-      "alignment": {
-        "available": false,
-        "exact_geometry_version_pct": null,
-        "geometry_match_age_max_s": null,
-        "geometry_match_age_p95_s": null,
-        "transform_coverage_pct": 0.0,
-        "transformed_positions": 0
-      },
       "capture_id": "passive_ds_static_final_01",
       "complete": true,
       "duration_s": 31.21443772315979,
@@ -1344,11 +706,6 @@
         "step_speed_n": 606,
         "step_speed_p95_mps": 0.0,
         "step_speed_p99_mps": 0.0
-      },
-      "ekf_rtk_error": {
-        "fixed_tag_solutions": 240,
-        "pair_coverage_pct": 0.0,
-        "pairs": 0
       },
       "ekf_static_precision": {
         "cep50_m": 0.0,
@@ -1464,75 +821,7 @@
       "protocol": "passive_ds",
       "protocol_label": "Passive DS-TWR",
       "quality_flags": [],
-      "rtk": {
-        "all_modules_fixed_pct": 27.371048252911812,
-        "anchor_spread_p95_m_max": 0.005855358719981408,
-        "by_module": {
-          "1": {
-            "fix_age_p95_ms": null,
-            "fixed": 240,
-            "fixed_pct": 100.0,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.010460857975503198,
-            "satellites_median": 28.0,
-            "total": 240,
-            "valid": 240
-          },
-          "2": {
-            "fix_age_p95_ms": null,
-            "fixed": 0,
-            "fixed_pct": 0.0,
-            "hdop_median": null,
-            "satellites_median": null,
-            "total": 240,
-            "valid": 240
-          },
-          "3": {
-            "fix_age_p95_ms": null,
-            "fixed": 0,
-            "fixed_pct": 0.0,
-            "hdop_median": null,
-            "satellites_median": null,
-            "total": 241,
-            "valid": 241
-          },
-          "4": {
-            "fix_age_p95_ms": null,
-            "fixed": 0,
-            "fixed_pct": 0.0,
-            "hdop_median": null,
-            "satellites_median": null,
-            "total": 240,
-            "valid": 240
-          },
-          "5": {
-            "fix_age_p95_ms": null,
-            "fixed": 89,
-            "fixed_pct": 36.92946058091286,
-            "hdop_median": 0.5,
-            "horizontal_spread_p95_m": 0.005855358719981408,
-            "satellites_median": 28.0,
-            "total": 241,
-            "valid": 241
-          }
-        },
-        "fixed_anchor_count": 1,
-        "tag_center_east_m": 1.6394803320683968,
-        "tag_center_north_m": -0.5313763572157745,
-        "tag_center_up_m": -0.46500023113511146,
-        "tag_fix_age_p95_ms": null,
-        "tag_fixed": 240,
-        "tag_fixed_pct": 100.0,
-        "tag_total": 240,
-        "tag_valid": 240
-      },
-      "rtk_error": {
-        "fixed_tag_solutions": 240,
-        "interpretation_grade": "audit_only_invalid_for_cross_protocol_ranking",
-        "pair_coverage_pct": 0.0,
-        "pairs": 0,
-        "reference_consistency_valid_for_ranking": false
-      },
+      "rtk_note": "GPS embedded in this August 12 capture is excluded; see rtk_reference_captures for the August 6 GPS-only population",
       "static_precision": {
         "cep50_m": 0.018788294228056255,
         "first_to_last_decile_drift_m": 0.0038078865529326427,
@@ -1636,5 +925,626 @@
       "source_sha256": "c4001db91fbf6bae241b7ab0741dfdf97b661d14adbefdca720fc16ff7a9b35f"
     }
   ],
-  "replay_summaries": {}
+  "replay_summaries": {},
+  "rtk_reference_captures": {
+    "rpi_static_flextdoa_rtkfixed_180s": {
+      "capture_id": "rpi_static_flextdoa_rtkfixed_180s",
+      "duration_s": 180.0542368888855,
+      "motion": "static",
+      "protocol": "flextdoa",
+      "rtk": {
+        "all_modules_fixed_pct": 91.44295302013423,
+        "anchor_spread_p95_m_max": 0.1480256033319639,
+        "by_module": {
+          "1": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 119,
+            "fixed_pct": 100.0,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.008455415621369018,
+            "satellites_median": 25.0,
+            "total": 119,
+            "valid": 119
+          },
+          "2": {
+            "fix_age_p95_ms": 90.0,
+            "fixed": 95,
+            "fixed_pct": 79.83193277310924,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.015200890352042074,
+            "satellites_median": 23.0,
+            "total": 119,
+            "valid": 119
+          },
+          "3": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 111,
+            "fixed_pct": 92.5,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.1480256033319639,
+            "satellites_median": 25.0,
+            "total": 120,
+            "valid": 120
+          },
+          "4": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 112,
+            "fixed_pct": 94.11764705882354,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.01972577479262081,
+            "satellites_median": 25.0,
+            "total": 119,
+            "valid": 119
+          },
+          "5": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 108,
+            "fixed_pct": 90.75630252100841,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.015240985663442414,
+            "satellites_median": 25.0,
+            "total": 119,
+            "valid": 119
+          }
+        },
+        "fixed_anchor_count": 4,
+        "tag_center_east_m": 0.003987644355018388,
+        "tag_center_north_m": 0.6822777087000036,
+        "tag_center_up_m": 0.0499999634205584,
+        "tag_fix_age_p95_ms": 100.0,
+        "tag_fixed": 119,
+        "tag_fixed_pct": 100.0,
+        "tag_total": 119,
+        "tag_valid": 119
+      },
+      "tag_fixed_cloud_precision": {
+        "cep50_m": 0.004139574430256786,
+        "first_to_last_decile_drift_m": 0.008925317785350708,
+        "max_m": 0.01360345146863198,
+        "median_x_m": 0.003987644355018388,
+        "median_y_m": 0.6822777087000036,
+        "n": 119,
+        "p95_m": 0.008455415621369018,
+        "p99_m": 0.013318592681559022,
+        "rms_m": 0.005236150324470434,
+        "std_x_m": 0.0026453266647748623,
+        "std_y_m": 0.004479018866927731,
+        "two_drms_m": 0.010403723020854308
+      }
+    },
+    "rpi_static_native_rtkfixed_180s": {
+      "capture_id": "rpi_static_native_rtkfixed_180s",
+      "duration_s": 180.04557251930237,
+      "motion": "static",
+      "protocol": "native_ds",
+      "rtk": {
+        "all_modules_fixed_pct": 86.26465661641541,
+        "anchor_spread_p95_m_max": 1.8267358379636716,
+        "by_module": {
+          "1": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 119,
+            "fixed_pct": 100.0,
+            "hdop_median": 0.5,
+            "horizontal_spread_p95_m": 0.011515740738192476,
+            "satellites_median": 26.0,
+            "total": 119,
+            "valid": 119
+          },
+          "2": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 99,
+            "fixed_pct": 83.19327731092437,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.36208636228673774,
+            "satellites_median": 24.0,
+            "total": 119,
+            "valid": 119
+          },
+          "3": {
+            "fix_age_p95_ms": 98.50000000000001,
+            "fixed": 64,
+            "fixed_pct": 53.78151260504202,
+            "hdop_median": 0.5,
+            "horizontal_spread_p95_m": 1.8267358379636716,
+            "satellites_median": 26.0,
+            "total": 119,
+            "valid": 119
+          },
+          "4": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 119,
+            "fixed_pct": 99.16666666666667,
+            "hdop_median": 0.5,
+            "horizontal_spread_p95_m": 0.012583487108367805,
+            "satellites_median": 26.0,
+            "total": 120,
+            "valid": 120
+          },
+          "5": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 114,
+            "fixed_pct": 95.0,
+            "hdop_median": 0.5,
+            "horizontal_spread_p95_m": 0.012927446062310916,
+            "satellites_median": 26.0,
+            "total": 120,
+            "valid": 120
+          }
+        },
+        "fixed_anchor_count": 4,
+        "tag_center_east_m": -0.0023925864344308823,
+        "tag_center_north_m": 0.6811665081398852,
+        "tag_center_up_m": 0.06999996321057844,
+        "tag_fix_age_p95_ms": 100.0,
+        "tag_fixed": 119,
+        "tag_fixed_pct": 100.0,
+        "tag_total": 119,
+        "tag_valid": 119
+      },
+      "tag_fixed_cloud_precision": {
+        "cep50_m": 0.004565126999845673,
+        "first_to_last_decile_drift_m": 0.008643964554592877,
+        "max_m": 0.033953872129325914,
+        "median_x_m": -0.0023925864344308823,
+        "median_y_m": 0.6811665081398852,
+        "n": 119,
+        "p95_m": 0.011515740738192476,
+        "p99_m": 0.02863701260453866,
+        "rms_m": 0.007359631189672206,
+        "std_x_m": 0.005307800031063133,
+        "std_y_m": 0.005018219529188653,
+        "two_drms_m": 0.014608938142504975
+      }
+    },
+    "rpi_static_passive_rtkfixed_180s": {
+      "capture_id": "rpi_static_passive_rtkfixed_180s",
+      "duration_s": 180.05542540550232,
+      "motion": "static",
+      "protocol": "passive_ds",
+      "rtk": {
+        "all_modules_fixed_pct": 92.95302013422818,
+        "anchor_spread_p95_m_max": 0.2452632021698354,
+        "by_module": {
+          "1": {
+            "fix_age_p95_ms": 130.0,
+            "fixed": 102,
+            "fixed_pct": 85.71428571428571,
+            "hdop_median": 0.5,
+            "horizontal_spread_p95_m": 0.020154875064044075,
+            "satellites_median": 26.0,
+            "total": 119,
+            "valid": 119
+          },
+          "2": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 115,
+            "fixed_pct": 96.63865546218487,
+            "hdop_median": 0.5,
+            "horizontal_spread_p95_m": 0.12272780006975764,
+            "satellites_median": 26.0,
+            "total": 119,
+            "valid": 119
+          },
+          "3": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 118,
+            "fixed_pct": 98.33333333333333,
+            "hdop_median": 0.5,
+            "horizontal_spread_p95_m": 0.01285705495658558,
+            "satellites_median": 26.0,
+            "total": 120,
+            "valid": 120
+          },
+          "4": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 115,
+            "fixed_pct": 96.63865546218487,
+            "hdop_median": 0.5,
+            "horizontal_spread_p95_m": 0.026576770105305344,
+            "satellites_median": 26.0,
+            "total": 119,
+            "valid": 119
+          },
+          "5": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 104,
+            "fixed_pct": 87.39495798319328,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.2452632021698354,
+            "satellites_median": 25.0,
+            "total": 119,
+            "valid": 119
+          }
+        },
+        "fixed_anchor_count": 4,
+        "tag_center_east_m": -0.06579608443999974,
+        "tag_center_north_m": 2.262405149369263,
+        "tag_center_up_m": -2.960000400781812,
+        "tag_fix_age_p95_ms": 130.0,
+        "tag_fixed": 102,
+        "tag_fixed_pct": 85.71428571428571,
+        "tag_total": 119,
+        "tag_valid": 119
+      },
+      "tag_fixed_cloud_precision": {
+        "cep50_m": 0.012155774574327318,
+        "first_to_last_decile_drift_m": 0.03426569659232877,
+        "max_m": 0.04057487145846951,
+        "median_x_m": -0.06579608443999974,
+        "median_y_m": 2.262405149369263,
+        "n": 102,
+        "p95_m": 0.020154875064044075,
+        "p99_m": 0.0377796046267348,
+        "rms_m": 0.013973830338338383,
+        "std_x_m": 0.005971940399322065,
+        "std_y_m": 0.012691099170948622,
+        "two_drms_m": 0.02805195681587349
+      }
+    },
+    "walk_flex_final": {
+      "capture_id": "walk_flex_final",
+      "duration_s": 91.3547911643982,
+      "motion": "dynamic",
+      "protocol": "flextdoa",
+      "rtk": {
+        "all_modules_fixed_pct": 92.98245614035088,
+        "anchor_spread_p95_m_max": 0.14220351391726432,
+        "by_module": {
+          "1": {
+            "fix_age_p95_ms": 95.50000000000004,
+            "fixed": 24,
+            "fixed_pct": 100.0,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 4.823388026475103,
+            "satellites_median": 27.0,
+            "total": 24,
+            "valid": 24
+          },
+          "2": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 21,
+            "fixed_pct": 95.45454545454545,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.01748196745048881,
+            "satellites_median": 26.0,
+            "total": 22,
+            "valid": 22
+          },
+          "3": {
+            "fix_age_p95_ms": 73.0,
+            "fixed": 15,
+            "fixed_pct": 71.42857142857143,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.14220351391726432,
+            "satellites_median": 27.0,
+            "total": 21,
+            "valid": 21
+          },
+          "4": {
+            "fix_age_p95_ms": 77.99999999999997,
+            "fixed": 23,
+            "fixed_pct": 100.0,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.01230984092121308,
+            "satellites_median": 27.0,
+            "total": 23,
+            "valid": 23
+          },
+          "5": {
+            "fix_age_p95_ms": 108.99999999999999,
+            "fixed": 23,
+            "fixed_pct": 95.83333333333333,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.015486869328660969,
+            "satellites_median": 27.0,
+            "total": 24,
+            "valid": 24
+          }
+        },
+        "fixed_anchor_count": 4,
+        "tag_center_east_m": 0.3425387070559569,
+        "tag_center_north_m": -0.4161449460634764,
+        "tag_center_up_m": 0.3649987005748443,
+        "tag_fix_age_p95_ms": 95.50000000000004,
+        "tag_fixed": 24,
+        "tag_fixed_pct": 100.0,
+        "tag_total": 24,
+        "tag_valid": 24
+      },
+      "tag_fixed_cloud_precision": {
+        "cep50_m": 2.625833480777098,
+        "first_to_last_decile_drift_m": 3.6951175253490036,
+        "max_m": 5.1787967799648635,
+        "median_x_m": 0.3425387070559569,
+        "median_y_m": -0.4161449460634764,
+        "n": 24,
+        "p95_m": 4.823388026475103,
+        "p99_m": 5.114197582040434,
+        "rms_m": 2.8464753893777868,
+        "std_x_m": 2.2272404717119088,
+        "std_y_m": 1.8258825411362227,
+        "two_drms_m": 5.76001637944114
+      }
+    },
+    "walk_native_final": {
+      "capture_id": "walk_native_final",
+      "duration_s": 91.10271167755127,
+      "motion": "dynamic",
+      "protocol": "native_ds",
+      "rtk": {
+        "all_modules_fixed_pct": 55.86206896551724,
+        "anchor_spread_p95_m_max": 1.3155426902610188,
+        "by_module": {
+          "1": {
+            "fix_age_p95_ms": 96.49999999999999,
+            "fixed": 28,
+            "fixed_pct": 93.33333333333333,
+            "hdop_median": 0.5,
+            "horizontal_spread_p95_m": 4.875641530193141,
+            "satellites_median": 29.0,
+            "total": 30,
+            "valid": 30
+          },
+          "2": {
+            "fix_age_p95_ms": null,
+            "fixed": 0,
+            "fixed_pct": 0.0,
+            "hdop_median": null,
+            "satellites_median": null,
+            "total": 29,
+            "valid": 26
+          },
+          "3": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 21,
+            "fixed_pct": 75.0,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.010095710386845655,
+            "satellites_median": 27.0,
+            "total": 28,
+            "valid": 28
+          },
+          "4": {
+            "fix_age_p95_ms": 110.0,
+            "fixed": 24,
+            "fixed_pct": 85.71428571428571,
+            "hdop_median": 0.5,
+            "horizontal_spread_p95_m": 0.034329225977646934,
+            "satellites_median": 28.0,
+            "total": 28,
+            "valid": 28
+          },
+          "5": {
+            "fix_age_p95_ms": 93.0,
+            "fixed": 8,
+            "fixed_pct": 26.666666666666668,
+            "hdop_median": 0.5,
+            "horizontal_spread_p95_m": 1.3155426902610188,
+            "satellites_median": 29.0,
+            "total": 30,
+            "valid": 30
+          }
+        },
+        "fixed_anchor_count": 3,
+        "tag_center_east_m": 1.693952075268402,
+        "tag_center_north_m": 0.32169295750929855,
+        "tag_center_up_m": 0.6699990345920481,
+        "tag_fix_age_p95_ms": 96.49999999999999,
+        "tag_fixed": 28,
+        "tag_fixed_pct": 93.33333333333333,
+        "tag_total": 30,
+        "tag_valid": 30
+      },
+      "tag_fixed_cloud_precision": {
+        "cep50_m": 3.373505661997208,
+        "first_to_last_decile_drift_m": 4.282950770459508,
+        "max_m": 4.923770152506058,
+        "median_x_m": 1.693952075268402,
+        "median_y_m": 0.32169295750929855,
+        "n": 28,
+        "p95_m": 4.875641530193141,
+        "p99_m": 4.911606447045479,
+        "rms_m": 3.345058933124995,
+        "std_x_m": 2.1167783742040105,
+        "std_y_m": 2.658633595041743,
+        "two_drms_m": 6.796788441074904
+      }
+    },
+    "walk_passive_final": {
+      "capture_id": "walk_passive_final",
+      "duration_s": 95.71872806549072,
+      "motion": "dynamic",
+      "protocol": "passive_ds",
+      "rtk": {
+        "all_modules_fixed_pct": 72.22222222222223,
+        "anchor_spread_p95_m_max": 0.45941078623695775,
+        "by_module": {
+          "1": {
+            "fix_age_p95_ms": 106.00000000000001,
+            "fixed": 25,
+            "fixed_pct": 96.15384615384616,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 6.251424072531396,
+            "satellites_median": 28.0,
+            "total": 26,
+            "valid": 26
+          },
+          "2": {
+            "fix_age_p95_ms": 98.50000000000001,
+            "fixed": 24,
+            "fixed_pct": 100.0,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.016982154934714944,
+            "satellites_median": 26.5,
+            "total": 24,
+            "valid": 24
+          },
+          "3": {
+            "fix_age_p95_ms": 70.0,
+            "fixed": 13,
+            "fixed_pct": 52.0,
+            "hdop_median": 0.5,
+            "horizontal_spread_p95_m": 0.012739402126124,
+            "satellites_median": 28.0,
+            "total": 25,
+            "valid": 25
+          },
+          "4": {
+            "fix_age_p95_ms": 100.0,
+            "fixed": 14,
+            "fixed_pct": 53.84615384615385,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.012738331196925858,
+            "satellites_median": 28.0,
+            "total": 26,
+            "valid": 26
+          },
+          "5": {
+            "fix_age_p95_ms": 93.0,
+            "fixed": 15,
+            "fixed_pct": 60.0,
+            "hdop_median": 0.6,
+            "horizontal_spread_p95_m": 0.45941078623695775,
+            "satellites_median": 28.0,
+            "total": 25,
+            "valid": 25
+          }
+        },
+        "fixed_anchor_count": 4,
+        "tag_center_east_m": -0.8158729382789329,
+        "tag_center_north_m": -5.002628510519098,
+        "tag_center_up_m": 0.3499975886318216,
+        "tag_fix_age_p95_ms": 106.00000000000001,
+        "tag_fixed": 25,
+        "tag_fixed_pct": 96.15384615384616,
+        "tag_total": 26,
+        "tag_valid": 26
+      },
+      "tag_fixed_cloud_precision": {
+        "cep50_m": 2.951980143123763,
+        "first_to_last_decile_drift_m": 4.670628209255357,
+        "max_m": 6.638019505622213,
+        "median_x_m": -0.8158729382789329,
+        "median_y_m": -5.002628510519098,
+        "n": 25,
+        "p95_m": 6.251424072531396,
+        "p99_m": 6.58322126681056,
+        "rms_m": 3.6790945817662544,
+        "std_x_m": 2.3059445290517986,
+        "std_y_m": 2.8919892605309028,
+        "two_drms_m": 7.397562315814581
+      }
+    }
+  },
+  "rtk_reference_manifest": [
+    {
+      "archive_bytes": "5035156",
+      "archive_file": "data/rpi_static_flextdoa_rtkfixed_180s.flextdoa.jsonl.xz",
+      "archive_sha256": "afe755f27c1b605e67e9d020fee98c0fbbf1e0e69504d4605722bba788181bc1",
+      "capture_id": "rpi_static_flextdoa_rtkfixed_180s",
+      "compression": "existing verified XZ (lossless)",
+      "motion": "static",
+      "protocol": "flextdoa",
+      "records_used": "gps_fix only",
+      "reference_archive_file": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260806\\data\\rpi_static_flextdoa_rtkfixed_180s.flextdoa.jsonl.xz",
+      "reference_report_dir": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260806",
+      "reused_verified_sibling_archive": "True",
+      "roundtrip_sha256_matches": "True",
+      "source_bytes": "116687626",
+      "source_file": "D:\\Documente\\UWB_ESP_IDF\\.worktrees\\passive-ds-rx-recovery\\reports\\uwb_dynamic_capture\\rpi_static_flextdoa_rtkfixed_180s.flextdoa.jsonl",
+      "source_sha256": "6469e44ad4907c5232858fbfb9c7535e6f3ed55077e272478e62e5da8028e440",
+      "uwb_records_used": false
+    },
+    {
+      "archive_bytes": "4628168",
+      "archive_file": "data/rpi_static_native_rtkfixed_180s.native_ds.jsonl.xz",
+      "archive_sha256": "d3041a238de705ba28ca3efbdf001b081314ea10cfe362d96690f2fe4c1fb3ff",
+      "capture_id": "rpi_static_native_rtkfixed_180s",
+      "compression": "existing verified XZ (lossless)",
+      "motion": "static",
+      "protocol": "native_ds",
+      "records_used": "gps_fix only",
+      "reference_archive_file": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260806\\data\\rpi_static_native_rtkfixed_180s.native_ds.jsonl.xz",
+      "reference_report_dir": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260806",
+      "reused_verified_sibling_archive": "True",
+      "roundtrip_sha256_matches": "True",
+      "source_bytes": "113838017",
+      "source_file": "D:\\Documente\\UWB_ESP_IDF\\.worktrees\\passive-ds-rx-recovery\\reports\\uwb_dynamic_capture\\rpi_static_native_rtkfixed_180s.native_ds.jsonl",
+      "source_sha256": "2767eb2c68111b68ab603e21950b4c389e504884adb2a51ff5f579db6eb381d2",
+      "uwb_records_used": false
+    },
+    {
+      "archive_bytes": "6110396",
+      "archive_file": "data/rpi_static_passive_rtkfixed_180s.passive_ds.jsonl.xz",
+      "archive_sha256": "ad5f3f935b021b440eaf32500dc227052e3442bcd7956d6cc312f064e5693b62",
+      "capture_id": "rpi_static_passive_rtkfixed_180s",
+      "compression": "existing verified XZ (lossless)",
+      "motion": "static",
+      "protocol": "passive_ds",
+      "records_used": "gps_fix only",
+      "reference_archive_file": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260806\\data\\rpi_static_passive_rtkfixed_180s.passive_ds.jsonl.xz",
+      "reference_report_dir": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260806",
+      "reused_verified_sibling_archive": "True",
+      "roundtrip_sha256_matches": "True",
+      "source_bytes": "141124780",
+      "source_file": "D:\\Documente\\UWB_ESP_IDF\\.worktrees\\passive-ds-rx-recovery\\reports\\uwb_dynamic_capture\\rpi_static_passive_rtkfixed_180s.passive_ds.jsonl",
+      "source_sha256": "1db430cbb3c2147246f9a26f7856df7dcde00a4ce9faf32da5a48ff6ed213bc9",
+      "uwb_records_used": false
+    },
+    {
+      "archive_bytes": "1297368",
+      "archive_file": "data/walk_flex_final.flextdoa.jsonl.xz",
+      "archive_sha256": "511731bc6f179901d4e8e61e57e518d0fc57d38f07ae5c5921b9d419989f398e",
+      "capture_id": "walk_flex_final",
+      "compression": "XZ/LZMA2 preset 3 (lossless)",
+      "motion": "dynamic",
+      "protocol": "flextdoa",
+      "records_used": "gps_fix only",
+      "reference_archive_file": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260806\\data\\walk_flex_final.flextdoa.jsonl.xz",
+      "reference_report_dir": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260806",
+      "reused_verified_sibling_archive": "False",
+      "roundtrip_sha256_matches": "True",
+      "source_bytes": "37218915",
+      "source_file": "D:\\Documente\\UWB_ESP_IDF\\.worktrees\\passive-ds-rx-recovery\\reports\\uwb_dynamic_capture\\walk_flex_final.flextdoa.jsonl",
+      "source_sha256": "85df1b96f569ce119e722119b85624e35d0d46ef7d48c12df9df41bfb3256734",
+      "uwb_records_used": false
+    },
+    {
+      "archive_bytes": "1305884",
+      "archive_file": "data/walk_native_final.native_ds.jsonl.xz",
+      "archive_sha256": "4fee911afc6507a1ade61e0d197b2d1333c7ed047d1a51a01227a866e96e2741",
+      "capture_id": "walk_native_final",
+      "compression": "XZ/LZMA2 preset 3 (lossless)",
+      "motion": "dynamic",
+      "protocol": "native_ds",
+      "records_used": "gps_fix only",
+      "reference_archive_file": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260806\\data\\walk_native_final.native_ds.jsonl.xz",
+      "reference_report_dir": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260806",
+      "reused_verified_sibling_archive": "False",
+      "roundtrip_sha256_matches": "True",
+      "source_bytes": "39083256",
+      "source_file": "D:\\Documente\\UWB_ESP_IDF\\.worktrees\\passive-ds-rx-recovery\\reports\\uwb_dynamic_capture\\walk_native_final.native_ds.jsonl",
+      "source_sha256": "b6b906a8a1c2fa39470232639bff5684b121b3787de762e9cd71099889d356a6",
+      "uwb_records_used": false
+    },
+    {
+      "archive_bytes": "1535144",
+      "archive_file": "data/walk_passive_final.passive_ds.jsonl.xz",
+      "archive_sha256": "4478f48af50f39926befbea94969616a9c4466228db9d2fb6699c96e3fb18e0c",
+      "capture_id": "walk_passive_final",
+      "compression": "XZ/LZMA2 preset 3 (lossless)",
+      "motion": "dynamic",
+      "protocol": "passive_ds",
+      "records_used": "gps_fix only",
+      "reference_archive_file": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260806\\data\\walk_passive_final.passive_ds.jsonl.xz",
+      "reference_report_dir": "D:\\Documente\\UWB_ESP_IDF\\reports\\uwb_dynamic_static_comparison_20260806",
+      "reused_verified_sibling_archive": "False",
+      "roundtrip_sha256_matches": "True",
+      "source_bytes": "42874035",
+      "source_file": "D:\\Documente\\UWB_ESP_IDF\\.worktrees\\passive-ds-rx-recovery\\reports\\uwb_dynamic_capture\\walk_passive_final.passive_ds.jsonl",
+      "source_sha256": "3765fb77bfc1d3ac75da3a14651fbd14fe71dde113fce4fbc8aec7305c197b16",
+      "uwb_records_used": false
+    }
+  ]
 }

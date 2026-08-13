@@ -497,6 +497,153 @@ def load_capture(path: pathlib.Path, tag_id: int) -> Capture:
     return capture
 
 
+def load_rtk_reference_capture(
+    path: pathlib.Path,
+    *,
+    capture_id: str,
+    protocol: str,
+    motion: str,
+) -> Capture:
+    """Load only GPS fixes from an archived reference capture.
+
+    Reference archives can contain hundreds of megabytes of UWB and IMU
+    telemetry.  The final cross-session report deliberately uses none of that
+    older positioning data, so this reader retains only capture bounds and
+    ``gps_fix`` records.
+    """
+    capture = Capture(
+        path=path,
+        capture_id=capture_id,
+        protocol=normalize_protocol(protocol),
+        motion=motion,
+    )
+    handle_context = (
+        lzma.open(path, "rt", encoding="utf-8")
+        if path.suffix.lower() == ".xz"
+        else path.open(encoding="utf-8")
+    )
+    with handle_context as handle:
+        for line_number, line in enumerate(handle, start=1):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                capture.warnings.append(
+                    f"invalid JSON on line {line_number}: {error}"
+                )
+                continue
+            kind = str(record.get("kind", "unknown"))
+            if kind == "capture_start":
+                capture.start_wall = wall_seconds(record)
+            elif kind == "capture_end":
+                capture.complete = True
+                capture.interrupted = bool(record.get("interrupted"))
+                capture.end_wall = wall_seconds(record)
+            elif kind == "gps_fix":
+                capture.gps.append(
+                    {
+                        "time": wall_seconds(record, measurement=True),
+                        "received_time": wall_seconds(record),
+                        "module_id": int(record.get("module_id", -1)),
+                        "valid": bool(record.get("gps_fix_valid")),
+                        "quality": int(record.get("gps_fix_quality", 0)),
+                        "latitude_deg": float(record["gps_latitude_deg"])
+                        if finite(record.get("gps_latitude_deg"))
+                        else math.nan,
+                        "longitude_deg": float(record["gps_longitude_deg"])
+                        if finite(record.get("gps_longitude_deg"))
+                        else math.nan,
+                        "altitude_m": float(record["gps_altitude_m"])
+                        if finite(record.get("gps_altitude_m"))
+                        else math.nan,
+                        "fix_age_ms": float(record["gps_last_fix_age_ms"])
+                        if finite(record.get("gps_last_fix_age_ms"))
+                        else math.nan,
+                        "hdop": float(record["gps_hdop"])
+                        if finite(record.get("gps_hdop"))
+                        else math.nan,
+                        "satellites": int(record.get("gps_satellites", 0)),
+                        "speed_mps": float(record["gps_speed_mps"])
+                        if finite(record.get("gps_speed_mps"))
+                        else math.nan,
+                        "gga_count": int(record.get("gps_gga_count", -1)),
+                    }
+                )
+    if not finite(capture.end_wall):
+        observed = [
+            point["received_time"]
+            for point in capture.gps
+            if finite(point.get("received_time"))
+        ]
+        if observed:
+            capture.end_wall = max(observed)
+    return capture
+
+
+def load_rtk_reference_report(
+    report_dir: pathlib.Path, tag_id: int
+) -> tuple[
+    list[Capture],
+    dict[str, dict[str, Any]],
+    list[dict[str, Any]],
+    tuple[float, float, float],
+]:
+    """Load the GPS-only reference matrix and its provenance manifest."""
+    manifest_path = report_dir / "raw_data_manifest.csv"
+    if not manifest_path.is_file():
+        raise RuntimeError(f"RTK reference manifest not found: {manifest_path}")
+    with manifest_path.open(newline="", encoding="utf-8-sig") as handle:
+        manifest = list(csv.DictReader(handle))
+    reference_manifest: list[dict[str, Any]] = []
+    captures: list[Capture] = []
+    for row in manifest:
+        protocol = normalize_protocol(row.get("protocol"))
+        motion = str(row.get("motion", "unknown"))
+        if protocol not in PROTOCOL_LABELS or motion not in {"static", "dynamic"}:
+            continue
+        archive = report_dir / str(row.get("archive_file", ""))
+        if not archive.is_file():
+            raise RuntimeError(f"RTK reference archive not found: {archive}")
+        reference_manifest.append(
+            {
+                **row,
+                "reference_report_dir": str(report_dir),
+                "reference_archive_file": str(archive),
+                "records_used": "gps_fix only",
+                "uwb_records_used": False,
+            }
+        )
+        captures.append(
+            load_rtk_reference_capture(
+                archive,
+                capture_id=str(row.get("capture_id") or archive.stem),
+                protocol=protocol,
+                motion=motion,
+            )
+        )
+    selected, _ = select_capture_matrix(captures)
+    origin = gps_origin(selected)
+    add_enu(selected, origin)
+    summaries: dict[str, dict[str, Any]] = {}
+    for capture in selected:
+        rtk, _, _ = rtk_metrics(capture, tag_id)
+        fixed_points = fixed_tag_rtk_points(capture, tag_id)
+        cloud = precision_metrics(
+            [
+                {"x_m": point[0], "y_m": point[1]}
+                for point in fixed_points
+            ]
+        )
+        summaries[capture.capture_id] = {
+            "capture_id": capture.capture_id,
+            "protocol": capture.protocol,
+            "motion": capture.motion,
+            "duration_s": capture.duration_s,
+            "rtk": rtk,
+            "tag_fixed_cloud_precision": cloud,
+        }
+    return selected, summaries, reference_manifest, origin
+
+
 def select_capture_matrix(captures: list[Capture]) -> tuple[list[Capture], list[Capture]]:
     """Select one completed capture per protocol/motion cell.
 
@@ -1461,11 +1608,19 @@ def fixed_tag_rtk_points(capture: Capture, tag_id: int = 1) -> list[tuple[float,
     ]
 
 
-def pdf_static_rtk_clouds(path: pathlib.Path, captures: list[Capture], tag_id: int = 1) -> None:
+def pdf_static_rtk_clouds(
+    path: pathlib.Path,
+    captures: list[Capture],
+    tag_id: int = 1,
+    source_label: str = "",
+) -> None:
     """Show both within-block RTK precision and the absolute cross-block ENU jump."""
     width, height = 1000.0, 735.0
     canvas = PdfCanvas(width, height)
-    canvas.text(width / 2, height - 27, "GPS RTK Fixed tag clouds and cross-capture centers", 17, bold=True, centered=True)
+    title = "GPS RTK Fixed tag clouds and cross-capture centers"
+    if source_label:
+        title += f" - {source_label}"
+    canvas.text(width / 2, height - 27, title, 17, bold=True, centered=True)
     canvas.text(
         width / 2,
         height - 48,
@@ -1561,6 +1716,64 @@ def pdf_static_rtk_clouds(path: pathlib.Path, captures: list[Capture], tag_id: i
         canvas.text(width / 2, 362, "Common ENU frame; equal East/North scale", 12, bold=True, centered=True)
         canvas.text(plot_x, 40, f"East [{min_e:.2f}, {max_e:.2f}] m", 8, "#475569")
         canvas.text(plot_x + 160, 40, f"North [{min_n:.2f}, {max_n:.2f}] m", 8, "#475569")
+    canvas.save(path)
+
+
+def pdf_rtk_reference_trajectories(
+    path: pathlib.Path,
+    captures: list[Capture],
+    tag_id: int = 1,
+    source_label: str = "",
+) -> None:
+    """Draw GPS-only RTK Fixed dynamic trajectories without older UWB data."""
+    width, height = 1000.0, 390.0
+    canvas = PdfCanvas(width, height)
+    title = "GPS RTK Fixed dynamic reference trajectories"
+    if source_label:
+        title += f" - {source_label}"
+    canvas.text(width / 2, height - 27, title, 17, bold=True, centered=True)
+    panel_width = 300.0
+    plot_size = 250.0
+    panel_gap = (width - panel_width * len(captures)) / (len(captures) + 1)
+    for panel_index, capture in enumerate(captures):
+        points = fixed_tag_rtk_points(capture, tag_id)
+        panel_x = panel_gap + panel_index * (panel_width + panel_gap)
+        plot_x, plot_y = panel_x + 25, 55.0
+        min_x = min((point[0] for point in points), default=0.0)
+        max_x = max((point[0] for point in points), default=1.0)
+        min_y = min((point[1] for point in points), default=0.0)
+        max_y = max((point[1] for point in points), default=1.0)
+        span = max(max_x - min_x, max_y - min_y, 1.0) * 1.08
+        center_x, center_y = (min_x + max_x) / 2, (min_y + max_y) / 2
+        min_x, max_x = center_x - span / 2, center_x + span / 2
+        min_y, max_y = center_y - span / 2, center_y + span / 2
+
+        def map_point(item: tuple[float, float]) -> tuple[float, float]:
+            return (
+                plot_x + plot_size * (item[0] - min_x) / max(1e-12, max_x - min_x),
+                plot_y + plot_size * (item[1] - min_y) / max(1e-12, max_y - min_y),
+            )
+
+        for grid in range(6):
+            offset = plot_size * grid / 5
+            canvas.line(plot_x + offset, plot_y, plot_x + offset, plot_y + plot_size, "#e2e8f0", 0.6)
+            canvas.line(plot_x, plot_y + offset, plot_x + plot_size, plot_y + offset, "#e2e8f0", 0.6)
+        canvas.rect(plot_x, plot_y, plot_size, plot_size, "#94a3b8", fill=False)
+        mapped = [map_point(point) for point in points]
+        color = PROTOCOL_COLORS.get(capture.protocol, "#15803d")
+        canvas.polyline(mapped, color, 1.25)
+        canvas.text(
+            panel_x + panel_width / 2,
+            328,
+            PROTOCOL_LABELS.get(capture.protocol, capture.protocol),
+            12,
+            color,
+            bold=True,
+            centered=True,
+        )
+        canvas.text(plot_x, 34, f"x [{min_x:.2f}, {max_x:.2f}] m", 8, "#475569")
+        canvas.text(plot_x + 132, 34, f"y [{min_y:.2f}, {max_y:.2f}] m", 8, "#475569")
+        canvas.text(plot_x, 19, f"n={len(points)} RTK Fixed tag fixes", 8, "#475569")
     canvas.save(path)
 
 
@@ -1695,6 +1908,7 @@ def make_figures(
     summaries: dict[str, dict[str, Any]],
     transformed: dict[str, list[dict[str, Any]]],
     pairs_by_capture: dict[str, list[dict[str, Any]]],
+    rtk_reference_captures: list[Capture] | None = None,
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     ordered = sorted(captures, key=lambda item: (item.motion, item.protocol, item.capture_id))
@@ -1752,13 +1966,17 @@ def make_figures(
         )
         pdf_position_panels(
             directory / "07_static_position_clouds.pdf",
-            "Static raw position clouds about each capture median",
+            "Static raw UWB position clouds - August 12 captures",
             static,
             centered_static=True,
         )
+        rtk_static = [
+            item for item in (rtk_reference_captures or static) if item.motion == "static"
+        ]
         pdf_static_rtk_clouds(
             directory / "08_static_gps_rtk_clouds.pdf",
-            static,
+            rtk_static,
+            source_label="August 6 RTK reference" if rtk_reference_captures else "",
         )
         pdf_raw_ekf_panels(
             directory / "10_static_raw_vs_ekf.pdf",
@@ -1767,32 +1985,33 @@ def make_figures(
             centered_static=True,
         )
 
-    dynamic = [item for item in ordered if item.motion == "dynamic" and pairs_by_capture.get(item.capture_id)]
+    dynamic = [item for item in ordered if item.motion == "dynamic"]
     if dynamic:
-        cdf_series = []
-        for capture in dynamic:
-            pairs = pairs_by_capture[capture.capture_id]
-            errors = [pair["error_m"] for pair in pairs]
-            cdf_series.append(
-                (
-                    f"{PROTOCOL_LABELS.get(capture.protocol, capture.protocol)} (n={len(errors)})",
-                    errors,
-                    PROTOCOL_COLORS.get(capture.protocol, "#64748b"),
+        if rtk_reference_captures is None:
+            cdf_series = []
+            for capture in dynamic:
+                pairs = pairs_by_capture[capture.capture_id]
+                errors = [pair["error_m"] for pair in pairs]
+                cdf_series.append(
+                    (
+                        f"{PROTOCOL_LABELS.get(capture.protocol, capture.protocol)} (n={len(errors)})",
+                        errors,
+                        PROTOCOL_COLORS.get(capture.protocol, "#64748b"),
+                    )
                 )
+            svg_cdf_chart(
+                directory / "04_dynamic_rtk_error_cdf.svg",
+                "Dynamic paired error CDF (RTK is not surveyed truth)",
+                cdf_series,
             )
-        svg_cdf_chart(
-            directory / "04_dynamic_rtk_error_cdf.svg",
-            "Dynamic paired error CDF (RTK is not surveyed truth)",
-            cdf_series,
-        )
-        pdf_cdf_chart(
-            directory / "04_dynamic_rtk_error_cdf.pdf",
-            "Dynamic paired error CDF (RTK is not surveyed truth)",
-            cdf_series,
-        )
+            pdf_cdf_chart(
+                directory / "04_dynamic_rtk_error_cdf.pdf",
+                "Dynamic paired error CDF (RTK is not surveyed truth)",
+                cdf_series,
+            )
         pdf_position_panels(
             directory / "06_dynamic_trajectories.pdf",
-            "Raw dynamic trajectories in each protocol's local UWB frame",
+            "Raw dynamic UWB trajectories - August 12 position captures",
             dynamic,
             centered_static=False,
         )
@@ -1803,7 +2022,27 @@ def make_figures(
             centered_static=False,
         )
 
-    aligned = [item for item in ordered if summaries[item.capture_id]["alignment"].get("available")]
+    if rtk_reference_captures:
+        rtk_dynamic = [item for item in rtk_reference_captures if item.motion == "dynamic"]
+        if rtk_dynamic:
+            pdf_rtk_reference_trajectories(
+                directory / "11_dynamic_gps_rtk_reference.pdf",
+                rtk_dynamic,
+                source_label="August 6 RTK reference",
+            )
+        for stale_name in (
+            "04_dynamic_rtk_error_cdf.svg",
+            "04_dynamic_rtk_error_cdf.pdf",
+            "05_alignment_quality.svg",
+            "05_alignment_quality.pdf",
+        ):
+            stale = directory / stale_name
+            if stale.exists():
+                stale.unlink()
+
+    aligned = [] if rtk_reference_captures else [
+        item for item in ordered if summaries[item.capture_id]["alignment"].get("available")
+    ]
     if aligned:
         fit = [summaries[item.capture_id]["alignment"]["fit_rmse_m_p95"] for item in aligned]
         error = [summaries[item.capture_id]["rtk_error"].get("error_rmse_m", math.nan) for item in aligned]
@@ -1839,6 +2078,151 @@ def markdown_table(headers: list[str], rows: list[list[Any]]) -> str:
     lines = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
     lines.extend("| " + " | ".join(str(value) for value in row) + " |" for row in rows)
     return "\n".join(lines)
+
+
+def write_cross_session_report_md(
+    path: pathlib.Path,
+    captures: list[Capture],
+    summaries: dict[str, dict[str, Any]],
+    args: argparse.Namespace,
+    rtk_reference_captures: list[Capture],
+    rtk_reference_summaries: dict[str, dict[str, Any]],
+) -> None:
+    """Write the concise audit companion for split-date UWB/RTK evidence."""
+    capture_rows: list[list[Any]] = []
+    static_rows: list[list[Any]] = []
+    ekf_rows: list[list[Any]] = []
+    for capture in sorted(captures, key=lambda item: (item.motion, item.protocol)):
+        item = summaries[capture.capture_id]
+        stream = item["position_stream"]
+        capture_rows.append(
+            [
+                PROTOCOL_LABELS.get(capture.protocol, capture.protocol),
+                capture.motion,
+                capture.capture_id,
+                fmt(item["duration_s"], 1),
+                stream["events"],
+                stream["independent_events"],
+                fmt(stream["independent_rate_hz"], 2),
+                fmt(stream["gap_p95_ms"], 0),
+                fmt(stream["gap_max_ms"], 0),
+            ]
+        )
+        if capture.motion == "static":
+            precision = item["static_precision"]
+            static_rows.append(
+                [
+                    PROTOCOL_LABELS.get(capture.protocol, capture.protocol),
+                    precision.get("n", 0),
+                    fmt(100 * precision.get("cep50_m", math.nan), 2),
+                    fmt(100 * precision.get("rms_m", math.nan), 2),
+                    fmt(100 * precision.get("p95_m", math.nan), 2),
+                    fmt(100 * precision.get("max_m", math.nan), 2),
+                ]
+            )
+        ekf_rows.append(
+            [
+                PROTOCOL_LABELS.get(capture.protocol, capture.protocol),
+                capture.motion,
+                fmt(item["ekf_stream"].get("available_pct"), 1),
+                fmt(item["position_jumps"].get("step_speed_p95_mps"), 2),
+                fmt(item["ekf_position_jumps"].get("step_speed_p95_mps"), 2),
+                fmt(100 * item["static_precision"].get("rms_m", math.nan), 2),
+                fmt(100 * item["ekf_static_precision"].get("rms_m", math.nan), 2),
+            ]
+        )
+    reference_rows: list[list[Any]] = []
+    for capture in sorted(
+        rtk_reference_captures, key=lambda item: (item.motion, item.protocol)
+    ):
+        item = rtk_reference_summaries[capture.capture_id]
+        rtk = item["rtk"]
+        cloud = item["tag_fixed_cloud_precision"]
+        reference_rows.append(
+            [
+                PROTOCOL_LABELS.get(capture.protocol, capture.protocol),
+                capture.motion,
+                capture.capture_id,
+                rtk.get("tag_total", 0),
+                rtk.get("tag_fixed", 0),
+                fmt(rtk.get("tag_fixed_pct"), 1),
+                fmt(rtk.get("all_modules_fixed_pct"), 1),
+                fmt(rtk.get("tag_fix_age_p95_ms"), 0),
+                fmt(100 * cloud.get("rms_m", math.nan), 2),
+                fmt(100 * cloud.get("p95_m", math.nan), 2),
+            ]
+        )
+    report = f"""# Dynamic/static UWB comparison
+
+## Evidence boundary
+
+- All UWB position, rate, gap, static-precision and EKF results come exclusively
+  from the final August 12 captures.
+- All GPS RTK availability and cloud results come exclusively from the August 6
+  reference captures.
+- No August 6 UWB position enters this report, and no August 12 GPS sample enters
+  the RTK section.
+- The sessions are not synchronized; cross-session UWB–RTK RMSE/P95 is therefore
+  intentionally not calculated.
+
+## August 12 UWB capture matrix
+
+{markdown_table(
+    ["protocol", "mode", "capture", "duration s", "events", "independent", "independent Hz", "gap P95 ms", "gap max ms"],
+    capture_rows,
+)}
+
+![August 12 raw UWB dynamic trajectories](figures/06_dynamic_trajectories.pdf)
+
+## August 12 static UWB precision
+
+{markdown_table(
+    ["protocol", "n", "CEP50 cm", "RMS cm", "P95 cm", "max cm"],
+    static_rows,
+)}
+
+![August 12 static raw UWB clouds](figures/07_static_position_clouds.pdf)
+
+## Position-only adaptive EKF
+
+{markdown_table(
+    ["protocol", "mode", "coverage %", "raw step P95 m/s", "EKF step P95 m/s", "raw static RMS cm", "EKF static RMS cm"],
+    ekf_rows,
+)}
+
+![August 12 dynamic raw versus EKF](figures/09_dynamic_raw_vs_ekf.pdf)
+
+![August 12 static raw versus EKF](figures/10_static_raw_vs_ekf.pdf)
+
+## August 6 GPS RTK reference
+
+This is a GPS-only reference population. It characterizes RTK fix availability
+and short-term scatter for the unchanged receiver path, but is not paired with
+the August 12 UWB positions.
+
+{markdown_table(
+    ["protocol", "mode", "capture", "tag total", "tag fixed", "tag fixed %", "all modules fixed %", "fix-age P95 ms", "tag cloud RMS cm", "tag cloud P95 cm"],
+    reference_rows,
+)}
+
+![August 6 GPS RTK Fixed dynamic reference](figures/11_dynamic_gps_rtk_reference.pdf)
+
+![August 6 GPS RTK Fixed static clouds](figures/08_static_gps_rtk_clouds.pdf)
+
+## Reproduction
+
+```powershell
+python tools/uwb_dynamic_static_report.py `
+  --input-dir reports/uwb_final_report_input_20260812 `
+  --output-dir reports/uwb_dynamic_static_comparison_20260812 `
+  --rtk-reference-report-dir reports/uwb_dynamic_static_comparison_20260806
+```
+
+The August 12 raw UWB captures remain archived losslessly under `data/`. The RTK
+reference manifest points to the already-versioned August 6 lossless archives;
+the older UWB records in those archives are never loaded by the GPS-only reader.
+"""
+    path.write_text(report, encoding="utf-8")
 
 
 def load_replay_summaries(
@@ -1956,7 +2340,19 @@ def write_report(
     static_consistency: dict[str, Any],
     args: argparse.Namespace,
     missing: list[dict[str, str]],
+    rtk_reference_captures: list[Capture] | None = None,
+    rtk_reference_summaries: dict[str, dict[str, Any]] | None = None,
 ) -> None:
+    if rtk_reference_captures and rtk_reference_summaries:
+        write_cross_session_report_md(
+            path,
+            captures,
+            summaries,
+            args,
+            rtk_reference_captures,
+            rtk_reference_summaries,
+        )
+        return
     ordered = sorted(captures, key=lambda item: (item.motion, item.protocol, item.capture_id))
     stream_rows = []
     static_rows = []
@@ -2459,6 +2855,8 @@ def write_tex_report(
     replays: dict[str, dict[str, Any]],
     static_consistency: dict[str, Any],
     args: argparse.Namespace,
+    rtk_reference_captures: list[Capture] | None = None,
+    rtk_reference_summaries: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """Write the full field report; the legacy compact writer is kept above for audit."""
     ordered = sorted(captures, key=lambda item: (item.motion, item.protocol, item.capture_id))
@@ -2474,6 +2872,7 @@ def write_tex_report(
     ekf_rows: list[list[Any]] = []
     imu_rows: list[list[Any]] = []
     rtk_rows: list[list[Any]] = []
+    rtk_reference_rows: list[list[Any]] = []
     for capture in ordered:
         item = summaries[capture.capture_id]
         stream = item["position_stream"]
@@ -2540,8 +2939,6 @@ def write_tex_report(
                 fmt(item["ekf_position_jumps"].get("step_speed_p95_mps"), 2),
                 fmt(100 * item["static_precision"].get("rms_m", math.nan), 2),
                 fmt(100 * item["ekf_static_precision"].get("rms_m", math.nan), 2),
-                fmt(error.get("error_rmse_m")),
-                fmt(ekf_error.get("error_rmse_m")),
             ]
         )
         alignment = item["alignment"]
@@ -2552,6 +2949,28 @@ def write_tex_report(
                 fmt(error.get("error_rmse_m")), fmt(error.get("error_p95_m")),
                 fmt(error.get("debiased_error_rmse_m")), fmt(alignment.get("fit_rmse_m_p95")),
                 alignment.get("quality_flag", "unavailable"),
+            ]
+        )
+
+    for capture in sorted(
+        rtk_reference_captures or [],
+        key=lambda item: (item.motion, item.protocol, item.capture_id),
+    ):
+        item = (rtk_reference_summaries or {}).get(capture.capture_id, {})
+        rtk = item.get("rtk", {})
+        cloud = item.get("tag_fixed_cloud_precision", {})
+        rtk_reference_rows.append(
+            [
+                PROTOCOL_LABELS.get(capture.protocol, capture.protocol),
+                capture.motion,
+                rtk.get("tag_total", 0),
+                rtk.get("tag_fixed", 0),
+                fmt(rtk.get("tag_fixed_pct"), 1),
+                fmt(rtk.get("all_modules_fixed_pct"), 1),
+                fmt(rtk.get("tag_fix_age_p95_ms"), 0),
+                rtk.get("fixed_anchor_count", 0),
+                fmt(100 * cloud.get("rms_m", math.nan), 2),
+                fmt(100 * cloud.get("p95_m", math.nan), 2),
             ]
         )
 
@@ -2599,7 +3018,8 @@ Platform: & 5 ESP32-S3 + DW3000 modules, Raspberry Pi collector\\
 Topology: & M1 tag; M2, M3, M4 and M5 anchors\\
 Radio: & UWB channel 9; configured 40 MHz SPI\\
 Firmware branch: & \texttt{localization-raw-calibration}\\
-Evidence: & six complete immutable JSONL captures; raw and position-only EKF\\
+UWB evidence: & six complete August 12 JSONL captures; raw and position-only EKF\\
+RTK evidence: & GPS-only reference captures from August 6\\
 \end{tabular}
 \vfill
 \colorbox{info}{\parbox{0.88\textwidth}{\vspace{2mm}
@@ -2607,7 +3027,7 @@ Evidence: & six complete immutable JSONL captures; raw and position-only EKF\\
 static datasets. Independent dynamic rates are approximately 25.0 Hz Flex,
 25.4 Hz Native and 22.6 Hz Passive. Raw static RMS is 2.3--2.4 cm. The
 position-only adaptive EKF materially reduces static jitter and dynamic
-sample-to-sample spikes, while raw UWB remains the accuracy reference.\vspace{2mm}}}
+sample-to-sample spikes, while raw UWB remains the permanent audit stream.\vspace{2mm}}}
 \vfill
 {\large Reproducible technical report\par}
 \end{titlepage}
@@ -2619,9 +3039,9 @@ sample-to-sample spikes, while raw UWB remains the accuracy reference.\vspace{2m
 \section{Executive summary}
 \colorbox{warning}{\parbox{0.96\textwidth}{\textbf{Evidence boundary.}
 Stream rates, uptime gaps, sample counts, fusion acceptance and reset counts are
-direct diagnostics. Absolute UWB--RTK disagreement is only indicative: RTK was
-not an independent survey, clocks are associated in software, antenna lever
-arms are unknown, and the UWB frame is registered through RTK anchor geometry.}}
+direct August 12 diagnostics. GPS RTK quality and precision use only the August
+6 reference captures. The two sessions are not time-paired, so this report does
+not calculate or claim August 12 absolute UWB--RTK position error.}}
 
 Passive DS overlapping raw windows remain visible in the telemetry rate, while
 all comparative precision and trajectory metrics use independent frames.
@@ -2647,9 +3067,9 @@ metrics. Outliers are retained.
         + " cm} (Passive DS-TWR). These are precision around each capture median, not absolute accuracy.\n\n"
     )
     tex += r"""
-The stationary tag RTK centers differed between blocks and the anchor rigid-fit
-residual is poor in several captures, invalidating an absolute cross-protocol
-RTK ranking. The new filter uses positions only: this campaign intentionally
+The UWB and RTK evidence populations are intentionally separated: no August 6
+UWB positions enter the protocol results, and no August 12 GPS samples enter
+the RTK section. The new filter uses positions only: this campaign intentionally
 does not claim acceleration-derived position improvement.
 
 \section{Scope and questions}
@@ -2657,9 +3077,9 @@ The campaign asks how many independent positions each protocol delivers, where
 stream gaps occur, how stable the unfiltered stationary position is, and whether
 the position-only adaptive EKF reduces visible jitter without hiding raw UWB.
 
-The July 26 report used known static geometry and could make a direct accuracy
-statement. Here the anchors and tag are tied to mobile RTK-derived geometry and
-software time association, so the evidence boundary is deliberately stricter.
+The RTK reference was acquired in a separate session. It establishes receiver
+fix availability and short-term precision, but it cannot be paired sample by
+sample with the August 12 UWB walks or used as an absolute-error ground truth.
 
 \section{System and protocol background}
 \subsection{FlexTDOA}
@@ -2701,11 +3121,10 @@ Radial displacement is computed around each block's component-wise position
 median. CEP50, RMS, P95, P99, maximum, 2DRMS and first-to-last-decile drift use
 all independent samples. They describe repeatability, not offset from truth.
 
-\subsection{RTK audit}
-Only quality-4 fixes enter the audit. WGS84 is converted through ECEF to a common
-ENU frame. A proper 2-D rotation and translation is fitted from at least three
-anchor centers; scale is fixed. Tag matches must be within 100 ms. Anchor-fit
-residual and association timing accompany every tag error.
+\subsection{RTK reference}
+Only quality-4 fixes from the August 6 reference captures enter the RTK section.
+WGS84 is converted through ECEF to one local ENU frame for that session. No
+cross-session timestamp association or UWB--RTK rigid fit is performed.
 
 \section{Dynamic results}
 \subsection{Raw trajectories}
@@ -2715,7 +3134,7 @@ agreement.
 """
     tex += tex_figure(
         "06_dynamic_trajectories.pdf",
-        "Raw independent dynamic trajectories in each local UWB frame. Green markers are anchors. Different panels represent different walks.",
+        "August 12 raw independent UWB trajectories in each local frame. Green markers are anchors; no August 6 UWB positions are used.",
         r"\textwidth",
     )
     tex += r"""\subsection{Update rate and gaps}
@@ -2753,10 +3172,10 @@ disabled, raw measurements remain archived separately, and each EKF result in
 this report comes from the same position event as its raw counterpart.
 Sample-to-sample step-speed P95 is a jitter/continuity diagnostic; it is not
 physical walking speed. Static RMS is repeatability about each stream's own
-median. RTK values are audit-only whenever anchor registration is poor.
+median. No cross-session RTK error is attached to the filter results.
 """
     tex += tex_table(
-        ["Protocol", "Mode", "coverage pct", "raw step P95", "EKF step P95", "raw static RMS cm", "EKF static RMS cm", "raw RTK m", "EKF RTK m"],
+        ["Protocol", "Mode", "coverage pct", "raw step P95", "EKF step P95", "raw static RMS cm", "EKF static RMS cm"],
         ekf_rows,
     )
     tex += tex_figure(
@@ -2787,29 +3206,35 @@ median. RTK values are audit-only whenever anchor registration is poor.
         "Static raw position clouds centered on their own medians and drawn at one common scale. The cross is the median.",
         r"\textwidth",
     )
-    tex += tex_figure(
-        "08_static_gps_rtk_clouds.pdf",
-        "GPS RTK Fixed tag solutions. Top: each protocol block is centered on its own median with one shared centimetre scale, showing within-block precision. Bottom: the same fixes and medians in the common ENU frame with equal axis scale, exposing cross-capture reference inconsistency.",
-        r"\textwidth",
-    )
     tex += r"""
 All raw static RMS values lie in a narrow 2.26--2.45 cm range. Passive DS is
 best on RMS, while Native and Passive share the best P95 near 3.94 cm. All
 outliers are retained. One stationary point cannot characterize GDOP or
 spatial bias across the anchor polygon.
 
-The RTK Fixed clouds are individually useful, but their common-ENU centers do
-not agree across blocks. High short-term RTK precision therefore does not imply
-cross-session correctness.
-
-\subsection{RTK cross-capture consistency gate}
+\section{GPS RTK reference from August 6}
+This section contains GPS data only. It characterizes RTK availability and
+short-term scatter for the unchanged receiver path; it does not reuse the old
+UWB trajectories and it is not synchronized with the August 12 walks.
 """
-    tex += (
-        "The stationary RTK center's maximum pairwise separation is \\textbf{"
-        + fmt(static_consistency.get("max_pairwise_distance_m"))
-        + " m}, versus a " + fmt(static_consistency.get("threshold_m"))
-        + " m gate. \\textbf{" + tex_escape(static_consistency.get("interpretation"))
-        + "}. The failed gate forbids an absolute static ranking even when an individual cloud is tight.\n"
+    tex += tex_table(
+        ["Protocol", "Mode", "tag total", "tag fixed", "tag fixed pct", "all modules fixed pct", "fix-age P95 ms", "fixed anchors", "tag cloud RMS cm", "tag cloud P95 cm"],
+        rtk_reference_rows,
+    )
+    tex += tex_figure(
+        "08_static_gps_rtk_clouds.pdf",
+        "August 6 GPS RTK Fixed tag solutions only. Top: each reference block centered on its own median. Bottom: the same fixes in the August 6 common ENU frame.",
+        r"\textwidth",
+    )
+    tex += r"""
+The trajectory panels below are GPS-only and remain in the August 6 ENU frame.
+They are shown as a qualitative RTK reference, not overlaid on the August 12
+UWB paths.
+"""
+    tex += tex_figure(
+        "11_dynamic_gps_rtk_reference.pdf",
+        "August 6 GPS RTK Fixed dynamic reference trajectories. No UWB positions from that session are plotted.",
+        r"\textwidth",
     )
     tex += r"""
 
@@ -2818,27 +3243,6 @@ Acceleration-assisted positioning was disabled for this final campaign because
 the preceding experiment did not improve raw UWB accuracy. The adaptive EKF
 assessed above is position-only. Orientation/IMU telemetry is outside the
 protocol ranking, and raw UWB remains the permanent audit stream.
-
-\section{UWB--RTK association audit}
-The following values are retained for transparency, not promoted to surveyed
-accuracy. Debiased RMSE removes median tag residual and is a shape diagnostic.
-"""
-    tex += tex_table(
-        ["Protocol", "Mode", "pairs", "time P95 ms", "RMSE m", "P95 m", "debiased m", "anchor fit m", "alignment"],
-        rtk_rows,
-    )
-    tex += tex_figure(
-        "04_dynamic_rtk_error_cdf.pdf",
-        "Dynamic UWB--RTK disagreement after anchor-based rigid registration. This is not surveyed position error.",
-    )
-    tex += tex_figure(
-        "05_alignment_quality.pdf",
-        "Anchor-registration residual beside paired tag disagreement. Registration uncertainty limits tag interpretation.",
-    )
-    tex += r"""
-Dynamic paths and anchor fits differ by capture. Passive DS dynamic geometry is
-partly GNSS-derived, making its registration non-independent. The RTK audit is
-still useful for gross frame errors and timing failures.
 
 \section{Protocol interpretation and selection}
 \subsection{FlexTDOA}
@@ -2872,8 +3276,8 @@ Recommendation & primary scalable mode & coherent baseline & passive scalable al
 
 \section{Limitations}
 \begin{itemize}
-\item RTK is an in-system comparison reference, not independently surveyed truth.
-\item Measurement time subtracts receiver-reported fix age from collector time; clocks are not hardware synchronized.
+\item RTK is a separate August 6 reference session, not synchronized August 12 truth.
+\item Cross-session UWB--RTK RMSE/P95 is intentionally not computed.
 \item GNSS and UWB antenna phase centers have unknown lever arms.
 \item Dynamic routes are not repeated surveyed paths; static/dynamic blocks are single trials.
 \item One static point does not cover edge geometry, NLOS, orientation or spatial bias.
@@ -2884,7 +3288,7 @@ Recommendation & primary scalable mode & coherent baseline & passive scalable al
 \begin{enumerate}
 \item Repeat every protocol on one marked route with identical orientation and synchronized markers.
 \item Interleave static blocks at the center, edges and outside the polygon.
-\item Keep one continuous RTK session and log correction age/reset state across protocol changes.
+\item Repeat the final UWB campaign with one simultaneous continuous RTK session.
 \item Add hardware-correlated timestamps for latency claims.
 \item Keep acceleration disabled until body-to-map yaw is independently validated.
 \item Capture focused FlexTDOA diagnostics around gaps above 250 ms.
@@ -2895,7 +3299,7 @@ Recommendation & primary scalable mode & coherent baseline & passive scalable al
 \item FlexTDOA remains a strong receive-only scalable mode, with one long-gap caveat.
 \item Native DS-TWR is the best coherent-frame rate and continuity baseline.
 \item Passive DS-TWR is a viable receive-only alternative when independent frames are counted correctly.
-\item The RTK consistency failure prevents a static absolute-accuracy ranking; local precision alone is ranked.
+\item The cross-session RTK reference cannot support an August 12 absolute-accuracy ranking; local UWB precision is ranked.
 \item The position-only EKF improves display stability; acceleration-assisted accuracy is not claimed.
 \end{itemize}
 
@@ -2906,7 +3310,10 @@ records whether optional lossless RAW archive generation was enabled; when it
 is skipped, immutable source JSONL paths remain recorded for reproduction.
 
 \begin{verbatim}
-python tools/uwb_dynamic_static_report.py --input-dir INPUT --output-dir OUTPUT
+python tools/uwb_dynamic_static_report.py `
+  --input-dir reports/uwb_final_report_input_20260812 `
+  --output-dir reports/uwb_dynamic_static_comparison_20260812 `
+  --rtk-reference-report-dir reports/uwb_dynamic_static_comparison_20260806
 \end{verbatim}
 
 No raw capture is modified during report generation.
@@ -2935,10 +3342,20 @@ def archive_raw_captures(captures: list[Capture], output_dir: pathlib.Path) -> l
     for capture in sorted(captures, key=lambda item: item.path.name):
         destination = data_dir / f"{capture.path.name}.xz"
         temporary = destination.with_suffix(destination.suffix + ".tmp")
+        if temporary.exists():
+            temporary.unlink()
         raw_sha256 = sha256_file(capture.path)
         sibling_archive = pathlib.Path(str(capture.path) + ".xz")
+        destination_reused = False
         reused_existing = False
-        if sibling_archive.exists():
+        if destination.exists():
+            restored_digest = hashlib.sha256()
+            with lzma.open(destination, "rb") as restored:
+                for chunk in iter(lambda: restored.read(1024 * 1024), b""):
+                    restored_digest.update(chunk)
+            if restored_digest.hexdigest() == raw_sha256:
+                destination_reused = True
+        if not destination_reused and sibling_archive.exists():
             restored_digest = hashlib.sha256()
             with lzma.open(sibling_archive, "rb") as restored:
                 for chunk in iter(lambda: restored.read(1024 * 1024), b""):
@@ -2946,12 +3363,14 @@ def archive_raw_captures(captures: list[Capture], output_dir: pathlib.Path) -> l
             if restored_digest.hexdigest() == raw_sha256:
                 shutil.copy2(sibling_archive, temporary)
                 reused_existing = True
-        if not reused_existing:
+                destination_reused = True
+        if not destination_reused:
             with capture.path.open("rb") as source, lzma.open(
                 temporary, "wb", format=lzma.FORMAT_XZ, preset=3
             ) as compressed:
                 shutil.copyfileobj(source, compressed, length=1024 * 1024)
-        temporary.replace(destination)
+        if temporary.exists():
+            temporary.replace(destination)
         archived_digest = sha256_file(destination)
         restored_digest = hashlib.sha256()
         with lzma.open(destination, "rb") as restored:
@@ -3012,6 +3431,14 @@ def main() -> int:
         help="directory containing final static replay summary JSON files",
     )
     parser.add_argument(
+        "--rtk-reference-report-dir",
+        type=pathlib.Path,
+        help=(
+            "optional prior report whose lossless archives supply GPS RTK data only; "
+            "older UWB/IMU records are never loaded into the comparison"
+        ),
+    )
+    parser.add_argument(
         "--rtk-match-ms",
         type=float,
         default=100.0,
@@ -3055,6 +3482,8 @@ def main() -> int:
     args.output_dir = args.output_dir.resolve()
     args.replay_dynamic_dir = args.replay_dynamic_dir.resolve()
     args.replay_static_dir = args.replay_static_dir.resolve()
+    if args.rtk_reference_report_dir is not None:
+        args.rtk_reference_report_dir = args.rtk_reference_report_dir.resolve()
     paths = sorted(args.input_dir.glob("*.jsonl"))
     if not paths:
         parser.error(f"no JSONL captures found in {args.input_dir}")
@@ -3090,8 +3519,23 @@ def main() -> int:
 
     origin = gps_origin(captures)
     add_enu(captures, origin)
-    replays = load_replay_summaries(
-        args.replay_dynamic_dir, args.replay_static_dir, captures
+    rtk_reference_captures: list[Capture] = []
+    rtk_reference_summaries: dict[str, dict[str, Any]] = {}
+    rtk_reference_manifest: list[dict[str, Any]] = []
+    rtk_reference_origin: tuple[float, float, float] | None = None
+    if args.rtk_reference_report_dir is not None:
+        (
+            rtk_reference_captures,
+            rtk_reference_summaries,
+            rtk_reference_manifest,
+            rtk_reference_origin,
+        ) = load_rtk_reference_report(args.rtk_reference_report_dir, args.tag_id)
+    replays = (
+        {}
+        if rtk_reference_captures
+        else load_replay_summaries(
+            args.replay_dynamic_dir, args.replay_static_dir, captures
+        )
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     figure_dir = args.output_dir / "figures"
@@ -3311,47 +3755,144 @@ def main() -> int:
         "tag_id": args.tag_id,
         "rtk_match_limit_ms": args.rtk_match_ms,
         "max_non_exact_dynamic_geometry_age_s": args.max_geometry_age_s,
-        "static_rtk_reference_consistency": static_consistency,
+        "static_rtk_reference_consistency": (
+            None if rtk_reference_captures else static_consistency
+        ),
         "position_sample_policy": "independent_frame when available; all-event rate retained separately",
         "capture_selection_policy": "one cell per protocol/motion; prefer rpi_static_*_rtkfixed and dynamic *_final",
-        "rtk_pair_policy": "RTK-fixed M1; one nearest independent UWB position per GPS solution",
+        "rtk_pair_policy": (
+            "not performed across sessions"
+            if rtk_reference_captures
+            else "RTK-fixed M1; one nearest independent UWB position per GPS solution"
+        ),
         "frame_registration": "proper rigid 2-D rotation+translation; no scale",
         "rtk_is_independent_survey_truth": False,
-        "rtk_interpretation": "in-system comparison reference with alignment, timing, fix-state, and lever-arm limitations",
-        "origin_wgs84": {
-            "latitude_deg": origin[0],
-            "longitude_deg": origin[1],
-            "altitude_m": origin[2],
-        },
+        "rtk_interpretation": (
+            "August 6 GPS-only availability and precision reference; not synchronized with August 12 UWB"
+            if rtk_reference_captures
+            else "in-system comparison reference with alignment, timing, fix-state, and lever-arm limitations"
+        ),
+        "report_rtk_population": (
+            "GPS-only reference captures; no cross-session UWB/RTK association"
+            if rtk_reference_captures
+            else "GPS records embedded in the selected captures"
+        ),
+        "rtk_reference_report_dir": (
+            str(args.rtk_reference_report_dir)
+            if args.rtk_reference_report_dir is not None
+            else None
+        ),
+        "rtk_reference_origin_wgs84": (
+            {
+                "latitude_deg": rtk_reference_origin[0],
+                "longitude_deg": rtk_reference_origin[1],
+                "altitude_m": rtk_reference_origin[2],
+            }
+            if rtk_reference_origin is not None
+            else None
+        ),
+        "cross_session_rtk_pairing_performed": False if rtk_reference_captures else True,
+        "origin_wgs84": (
+            None
+            if rtk_reference_captures
+            else {
+                "latitude_deg": origin[0],
+                "longitude_deg": origin[1],
+                "altitude_m": origin[2],
+            }
+        ),
         "skipped_incomplete_captures": skipped,
         "excluded_superseded_captures": [capture.capture_id for capture in superseded],
         "missing_capture_matrix_cells": missing,
-        "replay_dynamic_dir": str(args.replay_dynamic_dir),
-        "replay_static_dir": str(args.replay_static_dir),
+        "replay_dynamic_dir": (
+            None if rtk_reference_captures else str(args.replay_dynamic_dir)
+        ),
+        "replay_static_dir": (
+            None if rtk_reference_captures else str(args.replay_static_dir)
+        ),
     }
     raw_manifest = (
         [] if args.skip_raw_archive else archive_raw_captures(captures, args.output_dir)
     )
     analysis["raw_archive_generated"] = not args.skip_raw_archive
+    exported_summaries = summaries
+    if rtk_reference_captures:
+        exported_summaries = {}
+        for capture_id, summary in summaries.items():
+            exported = dict(summary)
+            for field_name in ("rtk", "alignment", "rtk_error", "ekf_rtk_error"):
+                exported.pop(field_name, None)
+            exported["rtk_note"] = (
+                "GPS embedded in this August 12 capture is excluded; see "
+                "rtk_reference_captures for the August 6 GPS-only population"
+            )
+            exported_summaries[capture_id] = exported
+        capture_rows = [
+            {
+                key: value
+                for key, value in row.items()
+                if not key.startswith(("rtk_", "error_", "ekf_error_"))
+            }
+            for row in capture_rows
+        ]
     output = {
         "analysis": analysis,
-        "captures": summaries,
+        "captures": exported_summaries,
         "replay_summaries": replays,
         "raw_data_manifest": raw_manifest,
+        "rtk_reference_captures": rtk_reference_summaries,
+        "rtk_reference_manifest": rtk_reference_manifest,
     }
     (args.output_dir / "analysis_summary.json").write_text(
         json.dumps(json_clean(output), indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
     write_csv(args.output_dir / "capture_metrics.csv", capture_rows)
-    write_csv(args.output_dir / "rtk_alignment_metrics.csv", rtk_rows)
-    write_csv(args.output_dir / "rtk_pairs.csv", pair_rows)
-    write_csv(args.output_dir / "alignment_snapshots.csv", alignment_rows)
-    write_csv(
-        args.output_dir / "replay_metrics.csv",
-        [replays[key] for key in sorted(replays)],
+    if rtk_reference_captures:
+        reference_rows = []
+        for capture in rtk_reference_captures:
+            item = rtk_reference_summaries[capture.capture_id]
+            reference_rows.append(
+                {
+                    "capture_id": capture.capture_id,
+                    "protocol": capture.protocol,
+                    "motion": capture.motion,
+                    "duration_s": capture.duration_s,
+                    **flatten("rtk_", item["rtk"]),
+                    **flatten("tag_cloud_", item["tag_fixed_cloud_precision"]),
+                }
+            )
+        write_csv(args.output_dir / "rtk_reference_metrics.csv", reference_rows)
+        write_csv(args.output_dir / "rtk_reference_manifest.csv", rtk_reference_manifest)
+        for stale_name in (
+            "rtk_alignment_metrics.csv",
+            "rtk_pairs.csv",
+            "alignment_snapshots.csv",
+        ):
+            stale = args.output_dir / stale_name
+            if stale.exists():
+                stale.unlink()
+    else:
+        write_csv(args.output_dir / "rtk_alignment_metrics.csv", rtk_rows)
+        write_csv(args.output_dir / "rtk_pairs.csv", pair_rows)
+        write_csv(args.output_dir / "alignment_snapshots.csv", alignment_rows)
+    if rtk_reference_captures:
+        stale_replay = args.output_dir / "replay_metrics.csv"
+        if stale_replay.exists():
+            stale_replay.unlink()
+    else:
+        write_csv(
+            args.output_dir / "replay_metrics.csv",
+            [replays[key] for key in sorted(replays)],
+        )
+    make_figures(
+        figure_dir,
+        captures,
+        summaries,
+        transformed_by_capture,
+        pairs_by_capture,
+        rtk_reference_captures or None,
     )
-    make_figures(figure_dir, captures, summaries, transformed_by_capture, pairs_by_capture)
     write_report(
         args.output_dir / "REPORT.md",
         captures,
@@ -3360,6 +3901,8 @@ def main() -> int:
         static_consistency,
         args,
         missing,
+        rtk_reference_captures or None,
+        rtk_reference_summaries or None,
     )
     write_tex_report(
         args.output_dir / "report.tex",
@@ -3368,6 +3911,8 @@ def main() -> int:
         replays,
         static_consistency,
         args,
+        rtk_reference_captures or None,
+        rtk_reference_summaries or None,
     )
 
     # LaTeX compilation intentionally remains an explicit reproducibility
@@ -3377,12 +3922,16 @@ def main() -> int:
     print(f"Generated {args.output_dir / 'REPORT.md'}")
     for capture in sorted(captures, key=lambda item: (item.motion, item.protocol)):
         item = summaries[capture.capture_id]
-        print(
+        line = (
             f"{capture.capture_id}: positions={item['position_stream']['events']}, "
-            f"independent={item['position_stream']['independent_events']}, "
-            f"RTK pairs={item['rtk_error'].get('pairs', 0)}, "
-            f"alignment={item['alignment'].get('quality_flag', 'unavailable')}"
+            f"independent={item['position_stream']['independent_events']}"
         )
+        if not rtk_reference_captures:
+            line += (
+                f", RTK pairs={item['rtk_error'].get('pairs', 0)}, "
+                f"alignment={item['alignment'].get('quality_flag', 'unavailable')}"
+            )
+        print(line)
     if skipped:
         print("Skipped incomplete captures: " + ", ".join(skipped))
     return 0
