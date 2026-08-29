@@ -1,7 +1,11 @@
 build/
 build-*/
 build_*/
-firmware_images/
+# Firmware release archives are intentionally versioned, including images
+# stored below directories whose names match the generic build rules above.
+!firmware_images/
+!firmware_images/**/
+!firmware_images/**
 managed_components/
 # sdkconfig is intentionally versioned so every worktree and CI build uses
 # the same ESP32-S3 target and hardware/runtime options.

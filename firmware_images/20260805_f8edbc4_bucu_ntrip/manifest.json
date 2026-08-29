@@ -1,0 +1,45 @@
+{
+  "format": 1,
+  "chip": "esp32s3",
+  "source_commit": "f8edbc419398b75f9ff4a0e5a12b0a2230a21153",
+  "source_state": "f8edbc4",
+  "esp_idf": "v6.0.2",
+  "built_at": "2026-08-05T08:03:21+03:00",
+  "full_restore": [
+    "python -m esptool --chip esp32s3 write-flash 0x0 uwb_full_flash.bin"
+  ],
+  "files": {
+    "README.txt": {
+      "bytes": 641,
+      "sha256": "180757c4b20d239b8a0659c242ee55d0e909b94d7cc725fbb4cbbc65930a0299"
+    },
+    "bootloader.bin": {
+      "bytes": 22560,
+      "sha256": "75c036115cd2c794e6e06cf470464f67494e2f2648a4e807a2a6ad614c4d4538"
+    },
+    "flasher_args.json": {
+      "bytes": 1081,
+      "sha256": "22427370d31b3d1b9fad68121746401d0d0d00a4f3f345924b7dc4c71fd146c0"
+    },
+    "ota_data_initial.bin": {
+      "bytes": 8192,
+      "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+    },
+    "partition-table.bin": {
+      "bytes": 3072,
+      "sha256": "97187d98c91ab294f933f6e22dbcb17bf548aaaa68b52ff8e396c965d9b7a945"
+    },
+    "sdkconfig": {
+      "bytes": 82285,
+      "sha256": "ac8b211b81aec5fdcbb7ac9217db8d7f74622a2a28258951b4ddf2ea50c41221"
+    },
+    "uwb_full_flash.bin": {
+      "bytes": 1412624,
+      "sha256": "68d7452f1eced152684686321a508078f43e39939780e81f1353d3374b0fc6cc"
+    },
+    "uwb_ota.bin": {
+      "bytes": 1281552,
+      "sha256": "2d5e9ee322c8898a348de3d6507adbf82e2600173543045de7e5ae454141efba"
+    }
+  }
+}
