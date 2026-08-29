@@ -1,33 +1,54 @@
 # UWB ESP-IDF
 
-ESP-IDF project for ESP32-S3-WROOM-1-N16R8.
+ESP-IDF 6.0.2 firmware for the custom UWB Module V1.0 Rev.B, based on an
+ESP32-S3-WROOM-1-N16R8. The same application image runs on every module;
+persistent identity and runtime configuration select the role and active
+workflow on each board.
 
-Current step:
+The current firmware combines DW3000 positioning, PX1105R GNSS/RTK, BNO085
+IMU telemetry, BQ25792 charging, MAX77958 USB-C Power Delivery, authenticated
+HTTP OTA/configuration, a browser dashboard, and boot-loop/OTA recovery. The
+UWB radio runtimes include Native DS-TWR, FlexTDOA, Passive DS-TWR, calibration,
+survey, distance-test, and beacon diagnostics.
 
-- ESP-IDF v6.0.2 project skeleton
-- custom 16 MB OTA partition table
-- board, application, and UWB settings in `components/config`
-- verified status LED blink on GPIO42 via `components/app_manager`
-- Wi-Fi STA connection via `components/wifi_service`
-- local HTTP OTA via `components/ota_service`
-- bootloop recovery guard and ESP-IDF OTA rollback via `components/boot_guard`
-- authenticated HTTP runtime configuration via `components/ota_service`
-- DW3000 UWB SPI/reset bring-up and random TX/RX beacon smoke test via `components/uwb_dw3000`
-- DW3000 hardware RXOK/SFD/RX/TX LED blink configured once at radio init
-- first DS-TWR two-module distance test runtime
-- antenna delay calibration runtime for two-module and three-module setups
-- native four-packet, tag-initiated 1-tag/4-anchor DS-TWR ranging runtime with dashboard
-  position view
-- optional BNO085 accelerometer hardware test via `components/bno085_service`
-- fixed PX1105R firmware update through ESP32 PSRAM; see
-  `PX1105R-firmware/validated/README.md`
+Current firmware defaults, before an NVS override is loaded:
 
-The board boot log confirms 16 MB QIO flash, 8 MB octal PSRAM at 80 MHz, and
-the app running from the `ota_0` partition.
+| Setting | Default |
+| --- | --- |
+| Runtime | `uwb_ranging` (Native DS-TWR) |
+| UWB | enabled |
+| BNO085 | disabled; `2 ms` / 500 Hz requested when enabled |
+| PX1105R GNSS | disabled |
+| BQ25792 monitor | enabled, nominal 1 Hz refresh |
+| MAX77958 monitor | enabled, nominal 1 Hz refresh |
+| Wi-Fi logs / binary telemetry | enabled |
+| Storage | 16 MB flash, dual 4 MB OTA slots, 8 MB octal PSRAM |
 
-Wi-Fi SSID/password and tokens are read from `secrets.h`. Non-secret
-application settings, including provisioning switches, live in `components/config`.
-Use `secrets.example.h` as the template for local credentials.
+Wi-Fi credentials, the OTA token, and optional NTRIP credentials are read from
+the Git-ignored `secrets.h`. Copy `secrets.example.h` as the starting template.
+Non-secret defaults live in `components/config`; authenticated runtime
+overrides are stored in ESP32 NVS.
+
+## Documentation Map
+
+- Hardware, firmware ownership, boot order, and tasks are documented below in
+  [Hardware](#hardware) and [Firmware Architecture](#firmware-architecture).
+- UWB modes and packet/timing details start at [App Modes](#app-modes) and
+  [UWB Ranging Protocol](#uwb-ranging-protocol). Passive DS-TWR and the clean
+  FlexTDOA implementation also have dedicated notes in
+  [`docs/PASSIVE_DS_TWR.md`](docs/PASSIVE_DS_TWR.md) and
+  [`docs/FLEXTDOA_CLEAN_REIMPLEMENTATION.md`](docs/FLEXTDOA_CLEAN_REIMPLEMENTATION.md).
+- Operator controls are grouped under [HTTP Control Surface](#http-control-surface),
+  [BNO085 IMU](#bno085-imu), [BQ25792 Battery Charger](#bq25792-battery-charger),
+  and [MAX77958 USB-C PD Controller](#max77958-usb-c-pd-controller).
+- Build, serial flash, OTA, dashboard, and host-test commands are under
+  [Local Workflow, Flashing, and VS Code Tasks](#local-workflow-flashing-and-vs-code-tasks).
+- Released ESP32 images are on the
+  [GitHub Releases page](https://github.com/victorstoica114/UWB_Module_ESP_IDF/releases),
+  while the separately versioned GNSS image is indexed in
+  [`PX1105R-firmware/README.md`](PX1105R-firmware/README.md).
+- Final reports and their retained evidence bundles are indexed in
+  [`reports/README.md`](reports/README.md).
 
 ## Hardware
 
@@ -50,12 +71,13 @@ Active pin mapping lives in `components/config/include/board_config.h`.
 | Function | GPIO |
 | --- | --- |
 | Status LED | `42` |
-| I2C SDA / SCL | `9` / `10` |
+| Shared I2C SDA / SCL | `9` / `10` |
 | BNO085 reset / interrupt | `40` / `15` |
+| BQ25792 interrupt / QON command / board PG | `4` / `38` / `5` |
 | UWB reset / IRQ / CS / wakeup | `8` / `6` / `48` / `7` |
 | SPI MOSI / SCK / MISO | `11` / `12` / `13` |
 | GPS enable / RX / TX | `47` / `18` / `17` |
-| RTCM TX | `1` |
+| GNSS correction UART TX | `1` |
 
 ### DW3000 SPI Clock
 
@@ -95,28 +117,53 @@ The radio test exercises TX-buffer writes, delayed-TX programming, timestamp
 and status reads, and RX-buffer reads. It is therefore a stronger link check
 than probing `DEV_ID` alone.
 
-Project layout:
+## Firmware Architecture
 
-```text
-main/                         app_main entry point
-components/config/            board, app, and UWB configuration headers
-components/app_manager/       app startup and status LED behavior
-components/boot_guard/        OTA rollback confirmation and bootloop recovery
-components/wifi_service/      Wi-Fi STA connection
-components/ota_service/       local authenticated HTTP OTA
-components/wireless_log_service/  TCP wireless mirror for ESP-IDF logs
-components/bno085_service/    optional BNO085 accelerometer hardware test
-components/uwb_dw3000/        DW3000 bring-up, beacon smoke test, DS-TWR loop
-components/uwb_calibration_service/  antenna delay calibration entry point
-components/uwb_distance_test_service/  two-module distance test entry point
-components/uwb_ranging_service/  anchor/tag ranging entry point
-docs/                         protocol notes and operator documentation
-PCB/V1.REV.B/                 KiCad source, fabrication, BOM, and placement package
-Schematic/                    exported schematic PDF
-datasheets/                   local component/reference datasheets
-reference/                    migration notes and legacy headers kept in-tree
-reference/external/           optional local clones of third-party references
-```
+`main/app_main.c` only calls `app_manager_start()`. The application manager
+initializes identity and runtime configuration, brings up the recovery/control
+plane first, and then starts hardware services and exactly one UWB runtime.
+
+| Component | Responsibility |
+| --- | --- |
+| `app_manager` | Boot sequencing, status LED, recovery cutoff, and active-runtime selection. |
+| `config` | Board pins, compile-time defaults, persistent module identity/antenna delay, and NVS runtime configuration. |
+| `boot_guard` | ESP-IDF OTA validation plus RTC-memory crash-loop detection and recovery mode. |
+| `wifi_service` | STA scan, connection, reconnect, BSSID/channel diagnostics, and network status. |
+| `ota_service` | HTTP server, `/status`, OTA, GNSS update staging, and authenticated configuration endpoints. |
+| `wireless_log_service` | TCP mirror of ESP-IDF text logs. |
+| `wireless_telemetry_service` | Batched `UWT1` binary sensor, geometry, range, and position streams. |
+| `resource_monitor_service` | Bounded RAM, PSRAM, flash, temperature, and per-core CPU diagnostics. |
+| `i2c_bus_service` | Shared BNO085 realtime/BQ25792/MAX77958 background arbitration and optional SCL measurement. |
+| `bno085_service` | Interrupt-driven accelerometer and GyroRV acquisition, timestamp reconstruction, recovery, rings, and telemetry. |
+| `charger_service` | BQ25792 monitoring, decoded status/ADC data, controlled writes, and NVS-backed charger policy. |
+| `max77958_service` | MAX77958 status, AP commands, optional direct-HS I2C, PDO/PPS control, and NVS-backed PD policy. |
+| `gps_service` | PX1105R power/UART control, NMEA/SkyTraq parsing, 8 Hz setup, moving-base transport, and NTRIP. |
+| `gnss_firmware_updater` | Fixed PX1105R loader/image update sequence using ESP32 PSRAM staging. |
+| `uwb_dw3000` | DW3000 GPIO/SPI/IRQ ownership and all timing-critical UWB runtime loops. |
+| `uwb_ranging_service` | Native DS-TWR positioning entry point. |
+| `uwb_distance_test_service` | Two-module five-frame diagnostic DS-TWR entry point. |
+| `uwb_calibration_service` | Two- and three-module antenna-delay calibration entry point. |
+| `uwb_anchor_survey_service` | Anchor-to-anchor survey entry point. |
+| `flextdoa_protocol` | FlexTDOA packet codec, collector, and CFO estimator. |
+| `flextdoa_algmin` | FlexTDOA frame aggregation and 2D minimization. |
+| `flextdoa_solver_service` | Asynchronous embedded FlexTDOA solver and position publication. |
+| `passive_ds_solver_service` | Passive DS batching, dynamic geometry, correlated solve, and position publication. |
+| `uwb_mobile_geometry` | Converts GNSS anchor positions into a shared local UWB coordinate frame. |
+| `uwb_localization_solver` | Generic tested range/range-difference solver library; it is not the owner of a current runtime loop. |
+
+Repository-level supporting material:
+
+| Path | Contents |
+| --- | --- |
+| `tools/` | Build/OTA helpers, dashboard, listeners, capture, replay, calibration, and analysis tools. |
+| `tests/` | Python host tests and standalone C algorithm/protocol tests. |
+| `docs/` | Focused protocol and implementation notes. |
+| `firmware_images/` | Retained ESP32 release inputs, stored through Git LFS where configured. |
+| `PX1105R-firmware/` | Permanent GNSS firmware index and validated ESP32-assisted update artifacts. |
+| `reports/` | Final PDFs plus one self-contained evidence bundle for each report. |
+| `PCB/V1.REV.B/` | KiCad source, fabrication, BOM, and placement package. |
+| `Schematic/` / `datasheets/` | Exported board schematic and local silicon/reference documents. |
+| `reference/` | Migration notes and the intentionally retained legacy GPIO header. |
 
 `components/config/include/board_config.h` is the active board pin map.
 Old GPIO naming is kept only under `reference/legacy_headers`.
@@ -140,6 +187,14 @@ Runtime ownership is intentionally narrow:
 - Long-lived workflows live in separate services/components, then are selected
   or sequenced by `app_manager`.
 
+The current boot sequence is also explicit. `app_manager` starts the status LED
+and boot guard, loads identity/runtime configuration, then brings up Wi-Fi,
+wireless logs, binary telemetry, and the HTTP/OTA server. It schedules stable
+boot confirmation only after that recovery/control plane is reachable. A normal
+boot then starts the resource monitor, optional GNSS, the selected UWB runtime,
+BQ25792, MAX77958, and finally the optional BNO085 service. Recovery mode stops
+before that second group and holds the DW3000 in reset.
+
 The application task/core split is kept simple so the UWB loop is isolated from
 most Wi-Fi and TCP work:
 
@@ -150,9 +205,14 @@ most Wi-Fi and TCP work:
 | `boot_guard` | unpinned | Confirms stable boots after Wi-Fi/OTA are online and holds recovery state across resets. |
 | `wifi_service` | 0 | Owns Wi-Fi STA connect/reconnect management. |
 | `ota_service` / `httpd` | 0 | Starts authenticated OTA, `/status`, and runtime-config HTTP handling. |
-| `bno085` | 0 | Optional BNO085 accelerometer test when enabled; owns realtime priority on the shared I2C bus. |
+| `bno085` | 0 | Interrupt-driven BNO085 accelerometer/GyroRV service; owns realtime priority on the shared I2C bus. |
 | `bq25792` | 0 | Low-rate charger monitor; uses background I2C access so BNO085 can win bus arbitration. |
 | `max77958` | 0 | Low-rate USB-C PD monitor/config service; also uses background I2C access. |
+| `gps` | 0 | PX1105R power, UART parsing, and moving-base integration when runtime-enabled. |
+| `gps_ntrip` | unpinned | Optional single NTRIP caster connection owned by the configured module. |
+| `flex_algmin` | 0 | FlexTDOA solver worker, created only by that runtime. |
+| `passive_ds_solver` | 0 | Passive DS solver worker with its large stack allocated from PSRAM. |
+| `resource_monitor` | 0 | Low-priority bounded resource sampling. |
 | `wireless_log` | unpinned | Drains the log queue and mirrors logs over TCP; FreeRTOS may run it on either core. |
 | `wireless_tel` | 1 | Drains high-rate telemetry into batched TCP writes. |
 | short-lived reboot tasks | unpinned | Temporary restart helpers after OTA or runtime-config changes that explicitly require a reboot. |
@@ -211,6 +271,46 @@ Important: rollback lives in the bootloader. OTA updates replace only the app
 partition, so each module needs one full serial flash after enabling rollback.
 After that, future OTA images are protected by the rollback flow.
 
+## HTTP Control Surface
+
+The ESP32 exposes one HTTP control plane after Wi-Fi starts. `GET /` and
+`GET /status` are intentionally readable without authentication. Every `POST`
+endpoint requires the same header used by OTA:
+
+```text
+X-OTA-Token: <APP_OTA_PASSWORD>
+```
+
+The password comes from the Git-ignored `secrets.h`. Configuration values are
+passed as URL query parameters even though the method is `POST`; an empty body
+is valid. For example:
+
+```sh
+curl -X POST -H "X-OTA-Token: <APP_OTA_PASSWORD>" \
+  "http://<module-ip>/config/runtime?bno085=1&bno085_sample_hz=500"
+```
+
+| Method and path | Purpose | Persistence / restart behavior |
+| --- | --- | --- |
+| `GET /` | Short endpoint and usage summary. | Read-only. |
+| `GET /status` | JSON snapshot of identity, boot, UWB, GNSS, IMU, charger, PD, resources, logs, and telemetry. | Read-only. |
+| `POST /ota` | Upload an ESP-IDF application image to the inactive OTA slot. | Reboots into the new image; NVS is preserved. |
+| `POST /gnss/loader` | Stage the validated PX1105R loader artifact in PSRAM. | Volatile staging step. |
+| `POST /gnss/firmware` | Stage the validated PX1105R firmware artifact in PSRAM. | Volatile staging step. |
+| `POST /gnss/firmware/run` | Run the fixed GNSS loader/update sequence using the staged artifacts. | Reprograms the GNSS receiver, not the ESP32. |
+| `POST /config/antenna-delay` | Stage a calibrated DW3000 antenna delay. | Stored in NVS; applied at radio initialization. |
+| `POST /config/runtime` | Change runtime, topology, timing, diagnostics, GNSS, UWB, or BNO085 configuration. | Stored in NVS; some fields apply live or by UWB hot switch, others require `reboot=1`. |
+| `POST /config/recovery` | Clear the local boot-guard latch and optionally reboot. | Updates boot-guard state. |
+| `POST /config/charger` | Refresh or configure the BQ25792. | High-level policy is stored in NVS; raw writes are not. |
+| `POST /config/max77958` | Refresh, inspect, or configure MAX77958 USB-C/PD behavior. | Selected high-level policy is stored in NVS; diagnostic operations and raw writes are not. |
+
+Boolean charger/PD parameters accept `1/0`, `true/false`, `on/off`, and
+`yes/no`. Runtime booleans accept `1/0`, `true/false`, and `on/off`. Invalid,
+out-of-range, incomplete, or unauthenticated requests are rejected; callers
+should check both the HTTP status and the JSON response instead of assuming a
+write succeeded. The exact BNO085, charger, and PD command tables are in their
+respective sections below.
+
 ## PCB Package
 
 The hardware package is versioned with the firmware so the board definition and
@@ -227,6 +327,35 @@ software assumptions stay together.
 PCB preview:
 
 ![UWB PCB Preview](PCB/V1.REV.B/Kicad%20project/Preview/UWB.png)
+
+## Released Firmware Images
+
+ESP32 images are published as one GitHub Release per firmware version, ordered
+from the oldest retained version to the newest. Each release keeps only the
+artifacts needed to install that version; intermediate ESP-IDF build trees are
+not release artifacts. The retained source images under `firmware_images/` are
+tracked with Git LFS.
+
+The release asset names have distinct purposes:
+
+| Asset | Use |
+| --- | --- |
+| `uwb_ota.bin` | OTA through `POST /ota` or `tools/ota_upload.py`; preserves NVS. |
+| `uwb_full_flash.bin` | Complete serial recovery/provisioning image written at offset `0x0`; may replace NVS and therefore require identity, runtime, and antenna-delay provisioning again. |
+| Per-partition `.bin` files, when present | Low-level ESP-IDF/esptool recovery and diagnosis. Use the offsets documented with that release. |
+
+The current retained ESP32 sequence starts at
+`firmware-20260804-222730-flextdoa-accuracy` and ends at
+`firmware-20260813-190254-native-uwb-only`. Use the
+[GitHub Releases page](https://github.com/victorstoica114/UWB_Module_ESP_IDF/releases)
+as the canonical download location rather than copying binaries from an old
+build directory.
+
+PX1105R firmware is versioned independently so the same GNSS payload is not
+duplicated in every ESP32 release. The permanent entry point is
+[`PX1105R-firmware/README.md`](PX1105R-firmware/README.md), which links the
+dedicated `gps-px1105r-01.07.33` release and records the validated artifacts and
+ESP32-assisted update command.
 
 ## App Modes
 
@@ -253,7 +382,7 @@ The expected UWB workflow split is:
    Fast Star and Robust Rotating schedules; see
    [`docs/PASSIVE_DS_TWR.md`](docs/PASSIVE_DS_TWR.md). The surveyed-square
    calibration data and 1.89 cm offline RMSE result are preserved in
-   [`reports/passive_ds_known_geometry_20260727`](reports/passive_ds_known_geometry_20260727/README.md).
+   [`reports/bundles/passive_ds_known_geometry_20260727`](reports/bundles/passive_ds_known_geometry_20260727/README.md).
 
 The beacon smoke mode, distance-test mode, antenna-delay calibration workflows,
 anchor survey, multi-anchor ranging, and experimental FlexTDOA runtimes are
@@ -1665,6 +1794,10 @@ Useful code entry points:
 | Delayed TX helpers | `uwb_dw3000_send_payload_delayed*()` |
 | Antenna-delay calibration | `components/uwb_dw3000/uwb_dw3000_calibration.inc` |
 
+## Identity and Wi-Fi
+
+### Persistent Module Identity
+
 The board identity is stored in NVS, which plays the role of persistent EEPROM
 storage on ESP32. Normal firmware reads `module_id` from NVS and builds the
 hostname from `APP_IDENTITY_HOSTNAME_PREFIX`, for example `uwb-module-2`. To
@@ -1684,6 +1817,8 @@ and flash the common firmware again. `/status` exposes `hostname`, `module_id`,
 `module_id_from_nvs`, `module_id_provisioned_this_boot`, `uwb_role_name`,
 `uwb_role_from_nvs`, and `uwb_role_provisioned_this_boot`.
 
+### Wi-Fi Selection and Reconnect
+
 The Wi-Fi service scans before connecting and logs each matching AP with BSSID,
 channel, RSSI, auth mode, and cipher. If a network broadcasts the same SSID
 from multiple radios and one behaves better, lock the board to that AP in
@@ -1697,6 +1832,8 @@ from multiple radios and one behaves better, lock the board to that AP in
 
 The firmware also keeps reconnecting after disconnects and exposes the last
 disconnect reason plus scan/connected AP details in `/status`.
+
+## UWB Bring-up and Calibration
 
 UWB bring-up follows the same first-step pattern used by the Zephyr DW3000
 decadriver reference: initialize hardware, reset the chip, then read `DEV_ID`.
@@ -1912,29 +2049,69 @@ with `APP_UWB_DW_RXOK_LED_ENABLED`, `APP_UWB_DW_SFD_LED_ENABLED`,
 The configured antenna delay is applied to both DW3000 RX and TX antenna delay
 registers during radio init.
 
-The BNO085 accelerometer test is controlled from
-`components/config/include/app_config.h`:
+## BNO085 IMU
+
+The BNO085 is a live runtime service, not only a factory test. It uses address
+`0x4A` at `400 kHz` on the shared I2C bus, GPIO40 for reset, and the active-low
+level interrupt on GPIO15. Firmware enables calibrated acceleration report
+`0x01` at the selected interval and GyroRV report `0x2A` at a fixed 50 Hz.
+The compile-time defaults in `components/config/include/app_config.h` are:
 
 ```c
 #define APP_BNO085_ACCEL_TEST_ENABLED 0
 #define APP_BNO085_I2C_ADDRESS 0x4A
 #define APP_BNO085_I2C_CLOCK_HZ 400000
-#define APP_BNO085_ACCEL_INTERVAL_MS 50
+#define APP_BNO085_ACCEL_INTERVAL_MS 2
 #define APP_BNO085_LOG_INTERVAL_MS 1000
 #define APP_BNO085_INT_WAIT_TIMEOUT_MS 250
 ```
 
-Keep `APP_BNO085_ACCEL_TEST_ENABLED` at `0` for normal ranging builds. Set it
-to `1` only while verifying the accelerometer hardware. When enabled, the task
-runs on core 0, pulses BNO085 reset on GPIO40, enables
-the calibrated accelerometer report over I2C/SHTP, then waits on the BNO085
-active-low interrupt on GPIO15. The GPIO interrupt is configured as active-level,
-not edge-only: on I2C the BNO08X deasserts `H_INTN` as soon as the I2C address
-is recognized, so the ISR masks the GPIO interrupt and the task rearms it after
-draining the pending SHTP packet. The timeout is only a fallback if an interrupt
-is missed. It logs lines like
-`BNO085 accel x=... y=... z=... m/s^2 accuracy=... irqs=... wait_timeouts=...`.
-Leaving it disabled avoids the extra I2C and CPU work.
+`APP_BNO085_ACCEL_TEST_ENABLED` supplies the default runtime-enabled state and
+remains `0`, so normal images boot with the IMU held in reset. It can be enabled
+live and persisted through the authenticated runtime endpoint. When enabled,
+the task runs on core 0, resets the sensor, initializes SHTP/SH2, then drains
+pending packets from the GPIO interrupt. The GPIO is deliberately configured as
+active-level, not edge-only: on I2C the BNO08X deasserts `H_INTN` when its I2C
+address is recognized, so the ISR masks the GPIO interrupt and the task rearms
+it after draining the packet. The timeout is a missed-interrupt fallback.
+
+The service has bounded startup retries, soft/hard recovery, and a stall reset
+when reports stop for five seconds. Samples are kept in bounded local rings
+(using PSRAM where configured) before they are exported; `/status` exposes
+report, packet, IRQ, timeout, read/parse error, ring-overwrite, telemetry,
+recovery, and current-value counters.
+
+### BNO085 Runtime Commands
+
+All BNO085 controls use `POST /config/runtime` and require `X-OTA-Token`.
+Changes are saved in NVS and applied immediately by starting, stopping, or
+reconfiguring the service; no ESP32 reboot is required.
+
+| Parameter | Accepted value | Effect |
+| --- | --- | --- |
+| `bno085` | Runtime boolean | Enables or disables the service. `bno085_accel` is an alias. |
+| `bno085_sample_hz` | Integer `1..500` Hz | Converts the requested frequency to the nearest whole-millisecond interval, clamped to at least `2 ms`. This is the dashboard control. |
+| `bno085_sample_ms` | Integer `2..60000` ms | Sets the accelerometer interval directly. Alias for the interval field. |
+| `bno085_accel_interval_ms` | Integer `2..60000` ms | Sets the accelerometer interval directly. |
+| `bno085_log_interval_ms` | Integer `2..60000` ms | Sets the human-readable summary-log interval; it does not change the binary sample rate. |
+
+Send only one of the three sample-rate forms in a request. If both
+`bno085_sample_hz` and `bno085_sample_ms` are present, handler order makes the
+millisecond value win, which is valid but unnecessarily ambiguous.
+
+```sh
+# Enable the validated maximum-rate profile.
+curl -X POST -H "X-OTA-Token: <APP_OTA_PASSWORD>" \
+  "http://<module-ip>/config/runtime?bno085=1&bno085_sample_hz=500"
+
+# Reduce acceleration to 100 Hz while keeping 1 Hz summary logs.
+curl -X POST -H "X-OTA-Token: <APP_OTA_PASSWORD>" \
+  "http://<module-ip>/config/runtime?bno085=1&bno085_sample_ms=10&bno085_log_interval_ms=1000"
+
+# Stop the service and hold the sensor in reset.
+curl -X POST -H "X-OTA-Token: <APP_OTA_PASSWORD>" \
+  "http://<module-ip>/config/runtime?bno085=0"
+```
 
 Runtime enable/disable is applied live through `/config/runtime` and the
 dashboard Settings tab. If BNO085 is disabled, firmware does not keep an
@@ -1946,12 +2123,14 @@ FreeRTOS task notifications (`INT`, `CONFIG`, `STOP`).
 The dashboard Graphs tab plots accelerometer samples as soon as their wireless
 telemetry arrives. Its `Timebase` control only changes the visible time window,
 oscilloscope-style. `Samples/s` is the actual BNO085/report export rate; the
-dashboard applies it as `bno085_sample_hz`, which updates runtime config and
-sets both `bno085_accel_interval_ms` and `bno085_log_interval_ms`. The running
+dashboard applies it as `bno085_sample_hz`, which updates the runtime
+accelerometer interval. The running
 BNO085 task picks up rate changes live by sending a new `Set Feature` command,
 so no reboot is needed. The BNO08X datasheet lists
 `Accelerometer` at a maximum configurable rate of 500 Hz, although I2C bandwidth
 and wireless throughput still need to be considered in practice.
+
+### Shared I2C Arbitration
 
 When BNO085 is enabled, the shared I2C service treats its configured sample
 period as a realtime reservation. BNO085 packet reads and `Set Feature` writes
@@ -2122,24 +2301,35 @@ refresh rates human-scale, and route charger/PD reads through the background
 window model. The current validated human-scale refresh target is 1 Hz for both
 BQ25792 and MAX77958 while BNO085 runs at 500 Hz.
 
-High-rate accelerometer telemetry is intentionally handled like a small sensor
-stream, not like human log text. The BNO085 task does not enqueue accelerometer
-samples until the telemetry TCP connection is established, so startup transients
-do not fill the queue. Once connected, samples are batched into binary frames:
+### BNO085 Binary Telemetry
+
+High-rate IMU data is handled as a sensor stream, not as human-readable log
+text. The BNO085 service does not enqueue samples until the telemetry TCP
+connection is established, so startup data cannot fill the queue. Samples are
+batched into `UWT1` version 1 frames. Every frame starts with this 12-byte
+header:
 
 ```text
-header: "UWT1", version=1, stream=1, module_id, sample_size=21,
-        count_le16, payload_len_le16
-sample: uptime_ms_le32, reports_le32,
-        x_milli_le32, y_milli_le32, z_milli_le32, accuracy_u8
+magic[4]="UWT1", version_u8, stream_u8, module_id_u8, sample_size_u8,
+count_le16, payload_len_le16
 ```
 
-The dashboard also keeps support for the older compact text frame
-`A,module,uptime_ms,x_milli,y_milli,z_milli,accuracy,reports` and the older
-verbose `T,...,bno085.accel,...` frame, but normal high-rate data should use the
-binary `UWT1` stream. `/status` exposes `wireless_telemetry_binary_frames`,
+The active BNO085 streams are:
+
+| Stream | Sample size | Little-endian sample layout |
+| ---: | ---: | --- |
+| `22` acceleration | `26` bytes | `uptime_ms:u32`, `fusion_ticks:u64`, `sequence:u32`, `x/y/z_q8:i16`, `sensor_delay_100us:u16`, `accuracy:u8`, `time_flags:u8` |
+| `23` orientation | `32` bytes | `uptime_ms:u32`, `fusion_ticks:u64`, `sequence:u32`, quaternion `i/j/k/real_q14:i16`, gyro `x/y/z_q10:i16`, `time_flags:u8`, `valid:u8` |
+| `24` clock anchor | `20` bytes | `uptime_ms:u32`, `fusion_ticks:u64`, `esp_timer_us:u64` |
+
+`fusion_ticks` is the reconstructed 10 MHz sensor timeline. The dashboard still
+decodes older binary streams `1`, `19`, and `20`, plus the legacy text forms,
+for capture compatibility; current firmware emits the split compact streams
+`22..24`. `/status` exposes `wireless_telemetry_binary_frames`,
 `wireless_telemetry_binary_samples`, and `wireless_telemetry_text_frames` so the
 active transport is visible during tests.
+
+## PX1105R GNSS and NTRIP
 
 The GPS/GNSS path is disabled by default and can be enabled live with runtime
 config (`gps=1`) or from the dashboard Settings tab. When disabled, GPIO47 is
@@ -2183,6 +2373,8 @@ precisely-kinematic base -> M2 moving rover) remains available when NTRIP is
 disabled. Enabling NTRIP selects the independent multi-rover topology instead,
 preventing RTCM and raw moving-base observations from being interleaved on the
 same GNSS RXD2 input.
+
+## BQ25792 Battery Charger
 
 The BQ25792 Li-Po charger monitor runs on the shared I2C bus
 (`GPIO9/GPIO10`, address `0x6B`) at 1 MHz. A complete register-window dump
@@ -2258,6 +2450,63 @@ current, recharge threshold/debounce, and charge safety timers using human units
 (`mV`/`mA`/milliseconds/minutes/hours). It also has a guarded
 raw register write path (`reg`, `value`, optional
 `mask`/`bits`, and `confirm=1`) for datasheet-level experiments.
+
+### BQ25792 Command Table
+
+All commands below use authenticated `POST /config/charger`. Every controlled
+configuration setter first disables the BQ25792 watchdog, performs a read-back,
+and stores the high-level policy in ESP32 NVS. That policy is reapplied once at
+charger startup; periodic refreshes only read the device. Hardware-unit fields
+are rounded to the nearest supported step.
+
+| Parameter | Accepted value | Persistence and effect |
+| --- | --- | --- |
+| `refresh=1` | Flag | Requests an immediate register/status refresh. Not a policy value. |
+| `disable_watchdog=1` | Flag | Disables the charger watchdog and persists that policy. `watchdog_disable=1` is an alias. There is intentionally no matching enable command. |
+| `charge_enabled` | Boolean | Controls `EN_CHG` and persists it. Aliases: `charging`, `en_chg`. |
+| `adc` | Boolean | Enables/disables ADC and persists the whole ADC profile. When enabling, firmware also enables every exposed ADC channel. |
+| `adc_rate` | `continuous`, `cont`, `0`, `oneshot`, `one_shot`, or `1` | ADC conversion mode. Send it together with `adc`; omitted value defaults to continuous for that request. |
+| `adc_sample` | `0..3` | Send with `adc`. Maps to `15 bit / 24 ms`, `14 bit / 12 ms`, `13 bit / 6 ms`, or `12 bit / 3 ms`; request default is `2`. |
+| `adc_avg` | Boolean | Send with `adc`; enables/disables the running average. Request default is off. |
+| `minimal_system_voltage_mv` | `2500..16000` mV | Sets `VSYSMIN`, rounded to `250 mV`, and persists it. |
+| `charge_voltage_mv` | `3000..18800` mV | Sets `VREG`, rounded to `10 mV`, and persists it. Check the attached cell's safe maximum. |
+| `charge_current_ma` | `50..5000` mA | Sets `ICHG`, rounded to `10 mA`, and persists it. |
+| `input_voltage_mv` | `3600..22000` mV | Sets `VINDPM`, rounded to `100 mV`, and persists it. |
+| `input_current_ma` | `100..3300` mA | Sets `IINDPM`, rounded to `10 mA`, and persists it. `iindpm_ma` is an alias; do not send both. |
+| `external_input_current_limit_enabled` | Boolean | Controls the external `ILIM_HIZ` clamp and persists it. Aliases: `external_ilim_enabled`, `en_extilim`. |
+| `termination_enabled` | Boolean | Enables/disables hardware charge termination. Part of the persisted termination/recharge group. |
+| `termination_current_ma` | `40..1000` mA | Sets `ITERM`, rounded to `40 mA`. Part of the termination/recharge group. |
+| `recharge_threshold_offset_mv` | `50..800` mV | Sets the `VREG - VRECHG` offset, rounded to `50 mV`. Part of the termination/recharge group. |
+| `recharge_deglitch_ms` | Exactly `64`, `256`, `1024`, or `2048` ms | Sets `TRECHG`. Part of the termination/recharge group. |
+| `topoff_timer_minutes` | Exactly `0`, `15`, `30`, or `45` min | Selects top-off duration; `0` disables it. Part of the persisted safety-timer group. |
+| `trickle_timer_enabled` | Boolean | Controls the fixed one-hour trickle timer. Part of the safety-timer group. |
+| `precharge_timer_enabled` | Boolean | Controls the pre-charge safety timer. Part of the safety-timer group. |
+| `precharge_timer_minutes` | Exactly `30` or `120` min | Selects pre-charge duration. Part of the safety-timer group. |
+| `fast_charge_timer_enabled` | Boolean | Controls the CC/CV fast-charge safety timer. Part of the safety-timer group. |
+| `fast_charge_timer_hours` | Exactly `5`, `8`, `12`, or `24` h | Selects fast-charge timeout. Part of the safety-timer group. |
+| `timer_2x_enabled` | Boolean | Controls `TMR2X`, which doubles active safety timers during DPM/thermal regulation. Part of the safety-timer group. |
+| `reg` + `value` + `confirm=1` | `reg=0x00..0x48`, `value=0..255` | Guarded full-byte raw write. It disables/persists the disabled watchdog first, but the raw register value itself is not policy and is not restored at boot. |
+| `reg` + `mask` + `bits` + `confirm=1` | Register/mask/bits each `0..255`, register at most `0x48` | Guarded read-modify-write. `value` is accepted as an alias for `bits` when `mask` is present. Raw result is not persisted. |
+
+Termination parameters form one register policy and safety-timer parameters form
+another. A request may change only one member of a group: firmware retains the
+other currently decoded values (or safe code defaults if no valid snapshot is
+available) and writes the group atomically. The response includes the first
+operation error and a fresh decoded snapshot; verify it before applying the
+same battery policy to the remaining modules.
+
+Typical high-level requests:
+
+```sh
+curl -X POST -H "X-OTA-Token: <APP_OTA_PASSWORD>" \
+  "http://<module-ip>/config/charger?charge_enabled=1&charge_voltage_mv=4200&charge_current_ma=500"
+
+curl -X POST -H "X-OTA-Token: <APP_OTA_PASSWORD>" \
+  "http://<module-ip>/config/charger?input_voltage_mv=4600&input_current_ma=500&external_input_current_limit_enabled=0"
+
+curl -X POST -H "X-OTA-Token: <APP_OTA_PASSWORD>" \
+  "http://<module-ip>/config/charger?termination_enabled=1&termination_current_ma=200&recharge_threshold_offset_mv=200&recharge_deglitch_ms=1024"
+```
 
 Dashboard charger ADC controls affect measurement behavior, not charging loops
 directly:
@@ -2377,18 +2626,51 @@ It also exposes HS diagnostics:
 `pd_i2c_hs_direct_error_count`, and
 `pd_i2c_hs_direct_last_elapsed_us`.
 
-The authenticated live endpoint is `/config/max77958`. Useful operations are:
+### MAX77958 Command Table
 
-| Operation | Example | Effect |
+All commands use authenticated `POST /config/max77958`. AP commands are
+reported through the endpoint response and `pd_last_*` fields in `/status`.
+
+| Parameter | Accepted value | Persistence and effect |
 | --- | --- | --- |
-| Refresh | `/config/max77958?refresh=1` | Requests an immediate status/AP discovery refresh. |
-| BC detect | `/config/max77958?bc_trigger=1` | Triggers BC1.2 charger detection. |
-| USB2 switch | `/config/max77958?usb2_closed=1` | Opens/closes the D+/D- pass-through switches through CTRL1. |
-| Source PDO request | `/config/max77958?source_pdo_pos=2` | Requests one fixed supply profile from the source by advertised PDO position. |
-| Sink PDO set | `/config/max77958?sink_pdos=5000:3000,9000:3000` | Writes fixed sink capabilities in `mV:mA` form to RAM by default. Add `sink_pdos_mtp=1` only when intentionally changing the non-volatile MAX77958 profile. |
-| Sink PDO read | `/config/max77958?read_sink=1` or `read_sink_mtp=1` | Reads sink PDOs from RAM or MTP. |
-| PPS default | `/config/max77958?pps_enabled=1&pps_voltage_mv=9000&pps_current_ma=2000` | Stores the default PPS policy in ESP32 NVS and applies it at MAX77958 startup. |
-| APDO request | `/config/max77958?apdo_pos=1&apdo_voltage_mv=9000&apdo_current_ma=2000` | Requests a programmable PPS/APDO contract at runtime, if the source advertises one. |
+| `refresh=1` | Flag | Requests an immediate raw/status and AP-discovery refresh. Not persisted. |
+| `bc_trigger=1` | Flag | Triggers BC1.2 detection. `trigger_bc=1` is an alias. Runtime operation only. |
+| `usb2_closed` | Boolean | Closes/opens both D+/D- pass-through switches through `CTRL1`. `usb2_switch_closed` is an alias. Stored in ESP32 NVS and reapplied at MAX77958 startup. |
+| `source_pdo_pos` | Integer `1..7` | Requests a fixed source PDO by the position currently advertised by the connected source. `source_pos` is an alias. The selected position is saved in ESP32 NVS and requested again at startup. |
+| `sink_pdos` | `mV:mA` or `mV/mA`, comma-separated, `1..5` entries | Programs fixed sink PDOs. Voltage must be a positive `50 mV` multiple up to `51150 mV`; current a positive `10 mA` multiple up to `10230 mA`. The policy is always saved in ESP32 NVS and applied to MAX77958 RAM at startup. |
+| `sink_pdos_mtp` | Boolean, only with `sink_pdos` | `0` (default) changes MAX77958 RAM. `1` also writes the chip's nonvolatile MTP profile; use deliberately because MTP programming is not a routine runtime operation. |
+| `read_sink=1` | Flag | Reads current sink PDOs from MAX77958 RAM. Not persisted. |
+| `read_sink_mtp` | Boolean | Presence triggers a read: `1` reads MTP, `0` reads RAM. Not persisted. |
+| `pps_enabled` | Boolean | Part of the saved default PPS policy. Send it together with both PPS values. |
+| `pps_voltage_mv` | Multiple of `20 mV`, `0..20000` | Part of the default PPS policy. Handler default is `5000 mV` when omitted. |
+| `pps_current_ma` | Multiple of `50 mA`, `0..6200` | Part of the default PPS policy. Handler default is `3000 mA` when omitted. |
+| `apdo_pos` | Nonzero integer `1..255` | Runtime APDO/PPS source position. All three APDO parameters are mandatory; the service/source ultimately decides whether the position is valid. Not persisted. |
+| `apdo_voltage_mv` | Multiple of `20 mV`, `0..20000` | Requested runtime APDO voltage; must accompany `apdo_pos` and current. Not persisted. |
+| `apdo_current_ma` | Multiple of `50 mA`, `0..6200` | Requested runtime APDO current; must accompany `apdo_pos` and voltage. Not persisted. |
+| `reg` + `value` + `confirm=1` | `reg=0x00..0xE0`, `value=0..255` | Guarded raw byte write. Runtime only; neither the register/value nor an inferred policy is stored. |
+
+Any one PPS key triggers a complete PPS-policy write; missing members fall back
+to `disabled`, `5000 mV`, and `3000 mA` for that request. For clarity and to
+avoid accidentally replacing an existing value with a default, always send all
+three PPS parameters. APDO requests are stricter: all three keys must be present.
+
+Examples:
+
+```sh
+# Inspect the source and current sink configuration.
+curl -X POST -H "X-OTA-Token: <APP_OTA_PASSWORD>" \
+  "http://<module-ip>/config/max77958?refresh=1&read_sink=1"
+
+# Save fixed sink capabilities in ESP NVS and apply them to MAX RAM.
+curl -X POST -H "X-OTA-Token: <APP_OTA_PASSWORD>" \
+  "http://<module-ip>/config/max77958?sink_pdos=5000:3000,9000:3000,15000:3000"
+
+# Save/apply a default PPS profile, then make a runtime APDO request.
+curl -X POST -H "X-OTA-Token: <APP_OTA_PASSWORD>" \
+  "http://<module-ip>/config/max77958?pps_enabled=1&pps_voltage_mv=9000&pps_current_ma=2000"
+curl -X POST -H "X-OTA-Token: <APP_OTA_PASSWORD>" \
+  "http://<module-ip>/config/max77958?apdo_pos=1&apdo_voltage_mv=9000&apdo_current_ma=2000"
+```
 
 Changing the module supply voltage is therefore done through USB-C PD
 negotiation, not by directly forcing a rail voltage. For fixed adapters, first
@@ -2399,14 +2681,14 @@ the MAX77958 opcode uses 20 mV voltage units and 50 mA current units.
 The dashboard has a `USB-C PD` tab with a live table for all modules, human
 controls for Source PDO, Sink PDOs, PPS/APDO, BC detect, USB2 switch, and a
 hidden raw-register section. High-level policy settings are stored in ESP32 NVS
-and applied once at MAX77958 startup; raw register writes are guarded with
-`confirm=1` and are not persisted as policy.
+and applied once at MAX77958 startup; BC detection, reads, APDO requests, and raw
+register writes are runtime-only. Raw writes require `confirm=1`.
 
 The protocol reference used for the AP-command opcodes is stored locally as
 `datasheets/max77958-customization-script-and-opcode-command-guide.pdf`, with
 extracted text in `datasheets/extracted_text/max77958-customization-script-and-opcode-command-guide.txt`.
 
-## Local Workflow and VS Code Tasks
+## Local Workflow, Flashing, and VS Code Tasks
 
 Recommended workflow from this folder, in the ESP-IDF v6.0.2 terminal:
 
@@ -2414,6 +2696,17 @@ Recommended workflow from this folder, in the ESP-IDF v6.0.2 terminal:
 idf.py set-target esp32s3
 idf.py build
 idf.py flash monitor
+```
+
+On the maintained Windows workstation, the deterministic wrapper is preferred
+for release/audit builds. It resolves the installed ESP-IDF environment,
+requires exactly ESP-IDF `6.0.2`, passes `git describe --always --dirty` as
+`PROJECT_VER`, prevents concurrent use of one build directory, and prints the
+application image SHA-256:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\build_idf.ps1 `
+  -BuildDir build-audit -Jobs 4
 ```
 
 If using plain CMD instead of the ESP-IDF terminal, the local wrapper uses the
@@ -2478,6 +2771,35 @@ python3 tools/ota_upload.py --target-list tools/ota_targets.local.txt --parallel
 
 For VS Code, use the `ESP-IDF OTA Upload All` task.
 
+### Installing Released Images
+
+If Git LFS is installed after cloning, materialize the retained release inputs
+before using them:
+
+```sh
+git lfs install
+git lfs pull
+```
+
+Use `uwb_ota.bin` for normal upgrades because OTA preserves identity, runtime
+configuration, charger/PD policy, and calibrated antenna delay in NVS:
+
+```sh
+python tools/ota_upload.py --firmware uwb_ota.bin \
+  --target-list tools/ota_targets.local.txt --parallel 5
+```
+
+Use `uwb_full_flash.bin` only for first provisioning or serial recovery. It is
+a merged image written at offset `0x0`:
+
+```sh
+python -m esptool --chip esp32s3 write-flash 0x0 uwb_full_flash.bin
+```
+
+A full flash can replace NVS. Recheck `/status` afterward and reprovision the
+module identity, runtime topology, and antenna delay as needed. Do not pass an
+OTA-only application binary to the offset-`0x0` command.
+
 Runtime configuration can change the common test settings without rebuilding or
 uploading a new firmware image. The endpoint uses the same `X-OTA-Token` header
 as OTA and stores values in NVS:
@@ -2490,8 +2812,10 @@ python3 tools/runtime_config.py --target-list tools/ota_targets.local.txt \
   --ranging-final-delay-ms 2 --ranging-auto-rx-delay-uus 500 --hot-switch
 ```
 
-Useful mode names are `ranging`, `survey`, `calibration`, `distance`, and
-`beacon`. Runtime role changes such as `mode`, `tag`, `anchors`, and survey
+Useful mode names are `ranging`, `flex_tdoa`, `passive_ds`, `survey`,
+`calibration`, `distance`, and `beacon`. Numeric values `0..6` and the aliases
+accepted by `app_runtime_config` remain available, but names are clearer in
+operator scripts. Runtime role changes such as `mode`, `tag`, `anchors`, and survey
 `coordinator` should be sent with `--reboot`. Native and Passive DS-TWR
 timing-only changes can use `--hot-switch` to restart the UWB runtime in place;
 other timing changes require the protocol-specific behavior documented above.
@@ -2534,6 +2858,32 @@ The listener uses ANSI colors when the terminal supports them. Use
 printing only connection and progress summaries.
 
 For VS Code, use the `Wireless Logs` task.
+
+### Host Validation
+
+The Python suite exercises the dashboard/control serialization, telemetry
+decoders, capture/report helpers, GNSS events, IMU fusion/replay, and native UWB
+analysis without hardware:
+
+```sh
+python -m unittest discover -s tests -p "*_test.py"
+```
+
+Protocol boundary checks and the documentation/code consistency audit are
+separate so they can fail with focused messages:
+
+```sh
+python tools/check_uwb_protocol_boundaries.py
+python tools/check_documentation.py
+```
+
+The standalone C tests under `tests/` cover protocol codecs, timestamp/ranging
+math, localization solvers, mobile geometry, BNO timing, and NTRIP stream
+decoding. They are host tests with `tests/host_stubs`, not replacements for a
+real ESP-IDF build or tests on all five boards. A documentation-only change
+should run the Python/audit suite plus an ESP-IDF build; changes to timing,
+peripheral control, or radio behavior still require hardware validation before
+release.
 
 The local dashboard combines the wireless log stream, module status polling, and
 runtime configuration controls in a browser UI:
