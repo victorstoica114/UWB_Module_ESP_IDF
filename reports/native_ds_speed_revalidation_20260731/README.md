@@ -1,6 +1,7 @@
 # Native DS-TWR static precision reference — firmware 54a586c-dirty
 
-This capture preserves a reproducible unfiltered Native DS-TWR precision reference.
+This directory preserves the derived Native DS-TWR precision reference and the
+minimum RAW set required by the current report generator.
 
 ## Test identity
 
@@ -26,6 +27,13 @@ Precision is measured around each series' own mean and is the correct metric for
 
 ## Files
 
+> Retention note (2026-08-29): aggressive RAW retention keeps only the event
+> streams for the decisive 58/59/60 ms validations. Other event streams and
+> all Native DS-TWR raw log streams were removed. The file list and
+> `SHA256SUMS` below are retained as a historical manifest of the original
+> complete capture. The retained event streams and metadata are now under
+> `../raw/native_ds_speed_revalidation_20260731/`.
+
 - `data/baseline_410ms_legacy_precision_180s.jsonl` — deduplicated DS-TWR range events and status snapshots
 - `data/baseline_410ms_legacy_precision_180s.logs.jsonl` — raw dashboard log records, including every `UWB_RANGING result` line
 - `data/baseline_410ms_legacy_precision_180s.metadata.json` — full initial/final module status and capture settings
@@ -43,9 +51,14 @@ transmissions.
 
 The full English field report is:
 
-- `DS-TWR_speed_limit_field_report_2026-07-31.pdf`
+- [`../pdfs/native_ds_speed_revalidation_20260731.pdf`](../pdfs/native_ds_speed_revalidation_20260731.pdf)
 
 Supporting outputs:
+
+Only the decisive 58/59/60 ms validation directories in the central RAW
+archive contain event streams. Other `candidate_*` and `profile_*` report
+directories retain metadata,
+unfiltered positions, summaries and per-anchor raw-integrity audits.
 
 - `PROFILE_REVALIDATION.md` — concise decision and interpretation;
 - `profile_comparison.csv` — machine-readable aggregate table;

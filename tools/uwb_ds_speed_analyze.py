@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import json
+import lzma
 import math
 import pathlib
 import re
@@ -36,10 +37,10 @@ from uwb_compare_analyze import (
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASELINE_DIR = (
-    ROOT / "reports" / "uwb_protocol_comparison_20260726" / "data"
+    ROOT / "reports" / "raw" / "uwb_protocol_comparison_20260726" / "data"
 )
 STUDY_DIR = ROOT / "reports" / "ds_twr_speed_limit_20260726"
-DATA_DIR = STUDY_DIR / "data"
+DATA_DIR = ROOT / "reports" / "raw" / "ds_twr_speed_limit_20260726" / "data"
 FIGURE_DIR = STUDY_DIR / "figures"
 
 BASELINE_BLOCKS = ("ds_1", "ds_2", "ds_3")
@@ -51,7 +52,10 @@ TIMING_PATTERN = re.compile(
 
 
 def read_jsonl(path: pathlib.Path) -> Iterable[dict[str, Any]]:
-    with path.open(encoding="utf-8") as handle:
+    if not path.exists():
+        path = path.with_suffix(path.suffix + ".xz")
+    opener = lzma.open if path.suffix == ".xz" else open
+    with opener(path, "rt", encoding="utf-8") as handle:
         for line in handle:
             if line.strip():
                 yield json.loads(line)
@@ -780,7 +784,9 @@ def main() -> int:
     for metadata_path in sorted(DATA_DIR.glob("*.metadata.json")):
         block = metadata_path.name.removesuffix(".metadata.json")
         events_path = DATA_DIR / f"{block}.jsonl"
-        if not events_path.exists():
+        if not events_path.exists() and not events_path.with_suffix(
+            events_path.suffix + ".xz"
+        ).exists():
             continue
         row, positions = analyze_block(
             events_path,

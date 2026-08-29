@@ -129,7 +129,8 @@ python3 tools/uwb_passive_ds_known_geometry_analyze.py
 ```
 
 The ready-to-read report is
-`Passive_DS-TWR_known_geometry_report_2026-07-27.pdf`. The analyzer reads
+[`../pdfs/passive_ds_known_geometry_20260727.pdf`](../pdfs/passive_ds_known_geometry_20260727.pdf).
+The analyzer reads
 either the committed `*.jsonl.xz` files or decompressed `*.jsonl` files and
 regenerates its supporting outputs:
 

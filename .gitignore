@@ -36,6 +36,11 @@ reports/**/*.jsonl
 reports/**/*.jsonl.xz
 reports/**/*.metadata.json
 reports/**/*.sse
+# The curated central RAW archive is intentionally versioned (large capture
+# formats remain routed through Git LFS by .gitattributes).
+!reports/raw/
+!reports/raw/**/
+!reports/raw/**
 reports/**/*.aux
 reports/**/*.log
 reports/**/*.out

@@ -83,3 +83,11 @@ pipeline.
 All five modules were left online in `Deadline + Rolling`, with the rolling cap
 at 100 Hz and the 1.0/1.0 ms Robust Rotating timing unchanged.
 
+## RAW retention
+
+The four event streams and their metadata remain because they are consumed by
+`tools/uwb_passive_pipeline_report.py`. They are stored under
+`../raw/passive_ds_pipeline_20260728/data/`. The four raw dashboard
+`*.logs.jsonl` files were removed on 2026-08-29; the report generator does not
+consume them.
+

@@ -87,14 +87,19 @@ other RF geometries are still required. Until then:
 
 ## Reproducibility
 
-Each profile directory contains:
+Each profile directory retains:
 
-- the event and timing-log JSONL files;
 - full initial/final module status metadata;
 - unfiltered coherent and rolling position reconstructions;
 - per-anchor range metrics;
 - `summary.json`;
 - `raw_quality.json`, including negative and >10 cm anomaly counts.
+
+Under the aggressive retention policy, only the decisive 58/59/60 ms
+validation event streams remain. Other event streams and all Native DS-TWR
+raw log streams were removed after their derived artifacts were verified.
+The per-capture `SHA256SUMS` files remain historical manifests and can name
+RAW files that are no longer present.
 
 The fresh control is documented in `README.md`. Exact profile results are in
 the corresponding `profile_*` and `candidate_*` directories.

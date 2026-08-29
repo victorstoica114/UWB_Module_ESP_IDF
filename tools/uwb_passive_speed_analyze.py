@@ -26,7 +26,7 @@ import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REPORT_DIR = ROOT / "reports" / "passive_ds_speed_limit_20260727"
-DATA_DIR = REPORT_DIR / "data"
+DATA_DIR = ROOT / "reports" / "raw" / "passive_ds_speed_limit_20260727" / "data"
 FIGURE_DIR = REPORT_DIR / "figures"
 TRUTH = (1.5, 1.5)
 

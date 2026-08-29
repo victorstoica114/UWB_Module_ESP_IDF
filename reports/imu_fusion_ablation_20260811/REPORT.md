@@ -134,16 +134,16 @@ anchor registration and is a shape/repeatability diagnostic, not accuracy.
 - `rtk_pairs.csv`: every accepted time association and residual;
 - `alignment_snapshots.csv`: every geometry-to-RTK rigid fit;
 - `replay_metrics.csv`: continuity, fusion and replay RTK diagnostics;
-- RAW capture archiving was intentionally skipped for this development run; the immutable source JSONL paths remain in `analysis_summary.json`.
+- `../raw/imu_fusion_ablation_20260811/data/*.jsonl.xz`: the seven RAW captures used by the report, compressed losslessly;
+- `raw_data_manifest.csv` and `SHA256SUMS`: source/archive integrity and round-trip verification.
 - `figures/`: dependency-free SVG plots.
 
 ## Reproduce
 
-```powershell
-python tools/uwb_dynamic_static_report.py `
-  --input-dir D:/Documente/UWB_ESP_IDF/.cache/imu_report_stage `
-  --output-dir D:/Documente/UWB_ESP_IDF/reports/imu_fusion_ablation_20260811 `
-  --replay-dynamic-dir D:/Documente/UWB_ESP_IDF/.cache/imu_replay_dynamic `
-  --replay-static-dir D:/Documente/UWB_ESP_IDF/.cache/imu_replay_static `
-  --skip-raw-archive
-```
+The original scratch paths are recorded in `analysis_summary.json`. Those RAW
+files were replaced by the lossless archives in
+`../raw/imu_fusion_ablation_20260811/data/`; decompress them to a
+scratch input directory before rerunning the report pipeline. Run
+`python generate_manifest.py` from this directory to verify every archive
+against the original byte count and SHA-256 digest and to regenerate the
+archive manifest.

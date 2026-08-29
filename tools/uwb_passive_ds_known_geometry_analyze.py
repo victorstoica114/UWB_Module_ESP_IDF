@@ -26,7 +26,7 @@ from uwb_compare_analyze import position_metrics, solve_tdoa
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REPORT_DIR = ROOT / "reports" / "passive_ds_known_geometry_20260727"
-DATA_DIR = REPORT_DIR / "data"
+DATA_DIR = ROOT / "reports" / "raw" / "passive_ds_known_geometry_20260727" / "data"
 FIGURE_DIR = REPORT_DIR / "figures"
 BLOCKS = (
     ("passive_ds_known_geometry_1", "Uncalibrated"),
@@ -425,7 +425,7 @@ def main() -> int:
             manifest_rows.append(
                 {
                     "capture": label,
-                    "file": str(path.relative_to(REPORT_DIR)),
+                    "file": str(path.relative_to(ROOT)),
                     "bytes": path.stat().st_size,
                     "sha256": sha256(path),
                 }

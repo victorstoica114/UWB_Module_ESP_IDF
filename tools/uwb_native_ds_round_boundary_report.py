@@ -41,6 +41,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("reports/native_ds_round_boundary_20260731"),
     )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("reports/raw/native_ds_round_boundary_20260731/data"),
+    )
     return parser.parse_args()
 
 
@@ -57,10 +62,10 @@ def save(fig, output_dir: Path, stem: str) -> None:
     plt.close(fig)
 
 
-def load_summaries(report_dir: Path) -> list[dict]:
+def load_summaries(data_dir: Path) -> list[dict]:
     rows = []
     for label, stem, guarded in CAPTURES:
-        path = report_dir / "data" / f"{stem}.logs.jsonl"
+        path = data_dir / f"{stem}.logs.jsonl"
         summary = capture_summary(path)
         rejects = summary["source_rejects"]
         duration = float(summary["duration_sec"])
@@ -216,14 +221,14 @@ def minute_series(path: Path, duration_sec: float) -> tuple[np.ndarray, np.ndarr
     return valid / 60.0, np.cumsum(rejects)
 
 
-def plot_before_after_timeline(rows: list[dict], report_dir: Path, output_dir: Path) -> None:
+def plot_before_after_timeline(rows: list[dict], data_dir: Path, output_dir: Path) -> None:
     before = next(row for row in rows if row["stem"] == "candidate_53ms_round_boundary_3600s")
     after = next(row for row in rows if row["stem"] == "candidate_53ms_guarded_3600s")
     before_rate, before_reject = minute_series(
-        report_dir / "data" / f"{before['stem']}.logs.jsonl", before["duration_sec"]
+        data_dir / f"{before['stem']}.logs.jsonl", before["duration_sec"]
     )
     after_rate, after_reject = minute_series(
-        report_dir / "data" / f"{after['stem']}.logs.jsonl", after["duration_sec"]
+        data_dir / f"{after['stem']}.logs.jsonl", after["duration_sec"]
     )
     minutes_before = np.arange(len(before_rate)) + 1
     minutes_after = np.arange(len(after_rate)) + 1
@@ -320,17 +325,18 @@ def plot_schedule(output_dir: Path) -> None:
 def main() -> int:
     args = parse_args()
     report_dir = args.report_dir.resolve()
+    data_dir = args.data_dir.resolve()
     output_dir = report_dir / "figures"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = load_summaries(report_dir)
+    rows = load_summaries(data_dir)
     (report_dir / "report_summary.json").write_text(
         json.dumps(rows, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     plot_throughput(rows, output_dir)
     plot_boundary_rejects(rows, output_dir)
     plot_failure_rates(rows, output_dir)
-    plot_before_after_timeline(rows, report_dir, output_dir)
+    plot_before_after_timeline(rows, data_dir, output_dir)
     plot_anchor_distribution(rows, output_dir)
     plot_schedule(output_dir)
     print(f"Generated report data and figures in {report_dir}")

@@ -287,10 +287,10 @@ def block_protocol(metadata: dict[str, Any], path: pathlib.Path) -> str:
     return "flextdoa"
 
 
-def load_capture(report_dir: pathlib.Path) -> dict[str, Any]:
+def load_capture(data_dir: pathlib.Path) -> dict[str, Any]:
     blocks: dict[str, dict[str, Any]] = {}
     gps: dict[int, dict[tuple[int, int], dict[str, Any]]] = defaultdict(dict)
-    for data_path in sorted((report_dir / "data").glob("*.jsonl")):
+    for data_path in sorted(data_dir.glob("*.jsonl")):
         metadata_path = data_path.with_suffix(".metadata.json")
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         protocol = block_protocol(metadata, data_path)
@@ -899,12 +899,18 @@ def main() -> int:
         nargs="?",
         default=pathlib.Path("reports/uwb_gps_rtk_comparison_20260803"),
     )
+    parser.add_argument(
+        "--data-dir",
+        type=pathlib.Path,
+        default=pathlib.Path("reports/raw/uwb_gps_rtk_comparison_20260803/data"),
+    )
     args = parser.parse_args()
     report_dir = args.report_dir.resolve()
+    data_dir = args.data_dir.resolve()
     figure_dir = report_dir / "figures"
     figure_dir.mkdir(parents=True, exist_ok=True)
 
-    capture = load_capture(report_dir)
+    capture = load_capture(data_dir)
     rtk = rtk_reference(capture["gps"])
     geometry_block, rtk_centers, rtk_integrity = select_coherent_rtk_geometry(
         capture["blocks"], rtk

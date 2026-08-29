@@ -46,7 +46,9 @@ The remaining gap is approximately 38.2% in accepted position throughput. The li
 
 ## Reproducibility
 
-Raw event streams, status snapshots, and timing logs are in [`data/`](data/). Recreate the tables and figures with:
+The retained raw event streams, status snapshots, and timing logs are in
+[`../raw/passive_ds_speed_limit_20260727/data/`](../raw/passive_ds_speed_limit_20260727/data/).
+Recreate the tables and figures with:
 
 ```bash
 python3 tools/uwb_passive_speed_analyze.py

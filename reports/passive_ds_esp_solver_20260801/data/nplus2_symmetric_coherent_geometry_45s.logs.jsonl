@@ -1,2 +1,0 @@
-{"client":"192.168.50.198:52378","component":"uwb","host":"uwb-module-1","id":5644,"level":"W","message":"PASSIVE_DS tag RX failed: ESP_FAIL","module_id":1,"received_at":1785540450.724698,"tag":"uwb_dw3000","uptime_ms":45998}
-{"client":"192.168.50.198:52378","component":"uwb","host":"uwb-module-1","id":5800,"level":"W","message":"PASSIVE_DS tag RX failed: ESP_FAIL","module_id":1,"received_at":1785540464.7717977,"tag":"uwb_dw3000","uptime_ms":60048}

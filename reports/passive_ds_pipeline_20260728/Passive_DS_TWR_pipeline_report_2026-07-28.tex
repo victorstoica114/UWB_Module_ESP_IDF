@@ -267,7 +267,8 @@ accuracy improvement.
 \noindent\textbf{Operational state and reproducibility.}
 All modules were left online in Deadline + Rolling at 100 Hz with Robust
 Rotating 1.0/1.0 ms; the dashboard remained active. The report directory
-contains all captures, metadata, timing logs, bootstrap outputs, metrics, and
-the reproducible report generator in \texttt{tools/}.
+retains the four event streams and metadata consumed by the generator, plus
+bootstrap outputs and metrics. Raw dashboard log streams were removed under
+the 2026-08-29 aggressive retention policy.
 
 \end{document}

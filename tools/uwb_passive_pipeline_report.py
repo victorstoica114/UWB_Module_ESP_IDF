@@ -331,13 +331,17 @@ def parse_args() -> argparse.Namespace:
         "--report-dir",
         default="reports/passive_ds_pipeline_20260728",
     )
+    parser.add_argument(
+        "--data-dir",
+        default="reports/raw/passive_ds_pipeline_20260728/data",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     report_dir = pathlib.Path(args.report_dir).expanduser().resolve()
-    data_dir = report_dir / "data"
+    data_dir = pathlib.Path(args.data_dir).expanduser().resolve()
     figures_dir = report_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
     configure_plot_style()

@@ -529,17 +529,23 @@ per-anchor median and include the negative observations.
   \path{README.md} & fresh 410 ms control identity and precision reference\\
   \path{PROFILE_REVALIDATION.md} & concise findings and boundary decision\\
   \path{profile_comparison.csv} & machine-readable aggregate table\\
-  \path{*/data/*.jsonl} & raw range/status events and timing logs\\
+  \path{candidate_*ms_validation/data/*.jsonl} & retained RAW event streams
+  for the decisive 58/59/60 ms boundary\\
   \path{*/data/*.metadata.json} & full initial/final module status and runtime
   configuration\\
   \path{*/positions.csv} & unfiltered coherent and rolling reconstructions\\
   \path{*/summary.json} & complete per-capture metrics\\
   \path{*/raw_quality.json} & per-anchor raw integrity audit\\
+  \path{*/SHA256SUMS} & historical hashes for the original capture files\\
   \path{figures/} & report plots in vector PDF and PNG\\
   \bottomrule
 \end{tabularx}
 
 \paragraph{Reproduction}
+The repository uses an aggressive retention policy: the current figure
+generator can rebuild the published plots from the three retained boundary
+event streams and the derived per-profile artifacts. Re-auditing every
+profile from its original RAW stream is no longer possible.
 \begin{verbatim}
 cd /home/pi/Documents/UWB
 python3 tools/uwb_native_ds_speed_revalidation_report.py

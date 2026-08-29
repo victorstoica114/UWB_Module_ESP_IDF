@@ -1,6 +1,12 @@
 # Native DS-TWR static precision reference — firmware 54a586c-dirty
 
-This capture preserves a reproducible unfiltered Native DS-TWR precision reference.
+This directory retains the derived metrics and metadata for the original
+unfiltered Native DS-TWR precision capture.
+
+> Retention note (2026-08-29): only the decisive 58/59/60 ms validation
+> event streams remain in this report bundle. Other event streams and all
+> Native DS-TWR raw log streams listed below were intentionally removed.
+> `SHA256SUMS` is retained as a historical manifest.
 
 ## Test identity
 

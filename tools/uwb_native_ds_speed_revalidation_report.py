@@ -301,10 +301,12 @@ def load_anchor_ranges(directory: Path, anchor_id: int) -> tuple[np.ndarray, np.
     return time, np.asarray(distances)
 
 
-def plot_boundary_integrity(profiles: dict[int, dict], output_dir: Path) -> None:
+def plot_boundary_integrity(
+    profiles: dict[int, dict], raw_root: Path, output_dir: Path
+) -> None:
     fig, axes = plt.subplots(3, 1, figsize=(10.5, 7.2), sharex=True)
     for axis, period in zip(axes, [58, 59, 60], strict=True):
-        time, distance = load_anchor_ranges(profiles[period]["directory"], 2)
+        time, distance = load_anchor_ranges(profile_path(raw_root, period), 2)
         median = float(np.median(distance))
         error_cm = (distance - median) * 100.0
         normal = np.abs(error_cm) <= 10.0
@@ -431,6 +433,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("reports/native_ds_speed_revalidation_20260731"),
     )
+    parser.add_argument(
+        "--raw-root",
+        type=Path,
+        default=Path("reports/raw/native_ds_speed_revalidation_20260731"),
+    )
     parser.add_argument("--output-dir", type=Path)
     return parser.parse_args()
 
@@ -438,6 +445,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     root = args.root.resolve()
+    raw_root = args.raw_root.resolve()
     output_dir = (
         args.output_dir.resolve() if args.output_dir else root / "figures"
     )
@@ -450,7 +458,7 @@ def main() -> int:
     plot_rate_and_delivery(profiles, output_dir)
     plot_central_precision(profiles, output_dir)
     plot_raw_anomalies(profiles, output_dir)
-    plot_boundary_integrity(profiles, output_dir)
+    plot_boundary_integrity(profiles, raw_root, output_dir)
     plot_precision_cdf(profiles, output_dir)
     plot_anchor_stability(profiles, output_dir)
     print(f"generated six report figures in {output_dir}")

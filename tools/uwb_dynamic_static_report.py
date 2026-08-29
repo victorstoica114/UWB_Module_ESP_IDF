@@ -20,6 +20,7 @@ import html
 import json
 import lzma
 import math
+import os
 import pathlib
 import re
 import shutil
@@ -2324,12 +2325,13 @@ the August 12 UWB positions.
 
 ```powershell
 python tools/uwb_dynamic_static_report.py `
-  --input-dir reports/uwb_final_report_input_20260812 `
+  --input-dir reports/raw/uwb_dynamic_static_comparison_20260812/data `
   --output-dir reports/uwb_dynamic_static_comparison_20260812 `
   --rtk-reference-report-dir reports/uwb_dynamic_static_comparison_20260806
 ```
 
-The August 12 raw UWB captures remain archived losslessly under `data/`. The RTK
+The August 12 raw UWB captures remain archived losslessly under
+`../raw/uwb_dynamic_static_comparison_20260812/data/`. The RTK
 reference manifest points to the already-versioned August 6 lossless archives;
 the older UWB records in those archives are never loaded by the GPS-only reader.
 """
@@ -3358,7 +3360,7 @@ losslessly compressed raw captures, SHA-256 checksums and this TeX source.
 
 \begin{verbatim}
 $reportArgs = @(
-  "--input-dir", "reports/uwb_final_report_input_20260813"
+  "--input-dir", "reports/raw/uwb_dynamic_static_comparison_20260813/data"
   "--output-dir", "reports/uwb_dynamic_static_comparison_20260813"
   "--replay-dynamic-dir", "reports/uwb_final_report_input_20260813"
   "--replay-static-dir", "reports/uwb_final_report_input_20260813"
@@ -3839,7 +3841,7 @@ is skipped, immutable source JSONL paths remain recorded for reproduction.
 
 \begin{verbatim}
 python tools/uwb_dynamic_static_report.py `
-  --input-dir reports/uwb_final_report_input_20260812 `
+  --input-dir reports/raw/uwb_dynamic_static_comparison_20260812/data `
   --output-dir reports/uwb_dynamic_static_comparison_20260812 `
   --rtk-reference-report-dir reports/uwb_dynamic_static_comparison_20260806
 \end{verbatim}
@@ -3858,8 +3860,11 @@ def sha256_file(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def archive_raw_captures(captures: list[Capture], output_dir: pathlib.Path) -> list[dict[str, Any]]:
-    data_dir = output_dir / "data"
+def archive_raw_captures(
+    captures: list[Capture],
+    output_dir: pathlib.Path,
+    data_dir: pathlib.Path,
+) -> list[dict[str, Any]]:
     data_dir.mkdir(parents=True, exist_ok=True)
     expected = {f"{capture.path.name}.xz" for capture in captures}
     for stale in data_dir.glob("*.jsonl.xz"):
@@ -3907,6 +3912,9 @@ def archive_raw_captures(captures: list[Capture], output_dir: pathlib.Path) -> l
         roundtrip_matches = restored_digest.hexdigest() == raw_sha256
         if not roundtrip_matches:
             raise RuntimeError(f"lossless archive verification failed for {capture.path}")
+        archive_file = pathlib.Path(
+            os.path.relpath(destination, output_dir)
+        ).as_posix()
         rows.append(
             {
                 "capture_id": capture.capture_id,
@@ -3915,7 +3923,7 @@ def archive_raw_captures(captures: list[Capture], output_dir: pathlib.Path) -> l
                 "source_file": str(capture.path),
                 "source_bytes": capture.path.stat().st_size,
                 "source_sha256": raw_sha256,
-                "archive_file": f"data/{destination.name}",
+                "archive_file": archive_file,
                 "archive_bytes": destination.stat().st_size,
                 "archive_sha256": archived_digest,
                 "compression": "existing verified XZ (lossless)"
@@ -3925,7 +3933,7 @@ def archive_raw_captures(captures: list[Capture], output_dir: pathlib.Path) -> l
                 "roundtrip_sha256_matches": roundtrip_matches,
             }
         )
-        checksum_lines.append(f"{archived_digest}  data/{destination.name}")
+        checksum_lines.append(f"{archived_digest}  {archive_file}")
     write_csv(output_dir / "raw_data_manifest.csv", rows)
     (output_dir / "SHA256SUMS").write_text("\n".join(checksum_lines) + "\n", encoding="ascii")
     return rows
@@ -3936,7 +3944,7 @@ def main() -> int:
     parser.add_argument(
         "--input-dir",
         type=pathlib.Path,
-        default=pathlib.Path("reports/uwb_dynamic_capture"),
+        default=pathlib.Path("reports/raw/uwb_dynamic_static_comparison_20260806/data"),
         help="directory containing capture JSONL files",
     )
     parser.add_argument(
@@ -3944,6 +3952,14 @@ def main() -> int:
         type=pathlib.Path,
         default=pathlib.Path("reports/uwb_dynamic_static_comparison_20260806"),
         help="new report directory",
+    )
+    parser.add_argument(
+        "--raw-output-dir",
+        type=pathlib.Path,
+        help=(
+            "RAW archive directory; defaults to "
+            "<output parent>/raw/<output name>/data"
+        ),
     )
     parser.add_argument("--tag-id", type=int, default=1)
     parser.add_argument(
@@ -4008,6 +4024,11 @@ def main() -> int:
 
     args.input_dir = args.input_dir.resolve()
     args.output_dir = args.output_dir.resolve()
+    if args.raw_output_dir is None:
+        args.raw_output_dir = (
+            args.output_dir.parent / "raw" / args.output_dir.name / "data"
+        )
+    args.raw_output_dir = args.raw_output_dir.resolve()
     args.replay_dynamic_dir = args.replay_dynamic_dir.resolve()
     args.replay_static_dir = args.replay_static_dir.resolve()
     if args.rtk_reference_report_dir is not None:
@@ -4353,7 +4374,9 @@ def main() -> int:
         ),
     }
     raw_manifest = (
-        [] if args.skip_raw_archive else archive_raw_captures(captures, args.output_dir)
+        []
+        if args.skip_raw_archive
+        else archive_raw_captures(captures, args.output_dir, args.raw_output_dir)
     )
     analysis["raw_archive_generated"] = not args.skip_raw_archive
     exported_summaries = summaries

@@ -1,7 +1,8 @@
 # IMU fusion ablation and raw UWB regression audit — 2026-08-11
 
 The complete 13-page dynamic/static field report is
-`UWB_dynamic_static_IMU_validation_2026-08-11.pdf`. It includes the six-cell
+[`../pdfs/imu_fusion_ablation_20260811.pdf`](../pdfs/imu_fusion_ablation_20260811.pdf).
+It includes the six-cell
 protocol matrix, continuity, static UWB and GPS RTK clouds, dynamic RTK audit,
 radio-loss diagnostics, raw/fused comparison, controlled IMU ablation,
 limitations and reproduction artifacts. The notes below are the compact audit
@@ -113,10 +114,10 @@ The next validation sequence is:
 
 ## Source artifacts
 
-- `../imu_fusion_final_validation_20260811/native_ds_dynamic_quality_gate_02.native_ds.jsonl`
-- `../imu_fusion_final_validation_20260811/passive_ds_dynamic_final_01.passive_ds.jsonl`
-- `../imu_fusion_final_validation_20260811/flextdoa_dynamic_final_01.flextdoa.jsonl`
-- `../imu_fusion_final_validation_20260811/passive_ds_static_raw_regression_01.passive_ds.jsonl`
+- `../raw/imu_fusion_ablation_20260811/data/native_ds_dynamic_quality_gate_02.native_ds.jsonl.xz`
+- `../raw/imu_fusion_ablation_20260811/data/passive_ds_dynamic_final_01.passive_ds.jsonl.xz`
+- `../raw/imu_fusion_ablation_20260811/data/flextdoa_dynamic_final_01.flextdoa.jsonl.xz`
+- `../raw/imu_fusion_ablation_20260811/data/passive_ds_static_raw_regression_01.passive_ds.jsonl.xz`
 - `../imu_fusion_final_validation_20260811/passive_ds_static_raw_regression_01.replay.json`
 - `analysis_summary.json`
 - `ablation_metrics.csv`

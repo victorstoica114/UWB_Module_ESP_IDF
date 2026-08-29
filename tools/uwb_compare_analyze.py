@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import lzma
 import math
 import pathlib
 import statistics
@@ -28,7 +29,7 @@ import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REPORT_DIR = ROOT / "reports" / "uwb_protocol_comparison_20260726"
-DATA_DIR = REPORT_DIR / "data"
+DATA_DIR = ROOT / "reports" / "raw" / "uwb_protocol_comparison_20260726" / "data"
 FIGURE_DIR = REPORT_DIR / "figures"
 
 ANCHOR_IDS = (2, 3, 4, 5)
@@ -106,7 +107,11 @@ def flex_position_is_structurally_valid(event: dict[str, Any]) -> bool:
 
 
 def load_events(block: str) -> Iterable[dict[str, Any]]:
-    with (DATA_DIR / f"{block}.jsonl").open(encoding="utf-8") as handle:
+    path = DATA_DIR / f"{block}.jsonl"
+    if not path.exists():
+        path = path.with_suffix(path.suffix + ".xz")
+    opener = lzma.open if path.suffix == ".xz" else open
+    with opener(path, "rt", encoding="utf-8") as handle:
         for line in handle:
             yield json.loads(line)
 
@@ -1158,7 +1163,7 @@ def main() -> int:
                 digest.update(chunk)
         manifest_rows.append(
             {
-                "file": str(path.relative_to(REPORT_DIR)),
+                "file": str(path.relative_to(ROOT)),
                 "bytes": path.stat().st_size,
                 "sha256": digest.hexdigest(),
             }

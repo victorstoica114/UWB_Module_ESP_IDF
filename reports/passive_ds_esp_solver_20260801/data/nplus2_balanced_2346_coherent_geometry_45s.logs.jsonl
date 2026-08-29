@@ -1,4 +1,0 @@
-{"client":"192.168.50.198:54741","component":"uwb","host":"uwb-module-1","id":435,"level":"W","message":"PASSIVE_DS tag RX failed: ESP_FAIL","module_id":1,"received_at":1785540954.0362499,"tag":"uwb_dw3000","uptime_ms":38377}
-{"client":"192.168.50.198:54741","component":"uwb","host":"uwb-module-1","id":624,"level":"W","message":"PASSIVE_DS tag RX failed: ESP_FAIL","module_id":1,"received_at":1785540972.272486,"tag":"uwb_dw3000","uptime_ms":56587}
-{"client":"192.168.50.198:54741","component":"uwb","host":"uwb-module-1","id":635,"level":"W","message":"PASSIVE_DS tag RX failed: ESP_FAIL","module_id":1,"received_at":1785540972.6879997,"tag":"uwb_dw3000","uptime_ms":57027}
-{"client":"192.168.50.198:54741","component":"uwb","host":"uwb-module-1","id":732,"level":"W","message":"PASSIVE_DS tag RX failed: ESP_FAIL","module_id":1,"received_at":1785540981.6638553,"tag":"uwb_dw3000","uptime_ms":65997}

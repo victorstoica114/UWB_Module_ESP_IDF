@@ -2,7 +2,7 @@
 
 Static LOS speed sweep for the native `POLL -> RESP -> FINAL` DS-TWR
 implementation. The immutable 64 ms field captures from
-`reports/uwb_protocol_comparison_20260726/data` are the reference.
+`reports/raw/uwb_protocol_comparison_20260726/data` are the reference.
 
 Key validated results:
 
@@ -30,7 +30,7 @@ Reproduce:
 
 ```bash
 cd /home/pi/Documents/UWB
-xz --decompress --keep reports/ds_twr_speed_limit_20260726/data/*.jsonl.xz
+xz --decompress --keep reports/raw/ds_twr_speed_limit_20260726/data/*.jsonl.xz
 python3 tools/uwb_ds_speed_analyze.py
 cd reports/ds_twr_speed_limit_20260726
 latexmk -pdf -interaction=nonstopmode -halt-on-error report.tex
@@ -38,11 +38,11 @@ latexmk -pdf -interaction=nonstopmode -halt-on-error report.tex
 
 Outputs:
 
-- `DS-TWR_speed_limit_field_report_2026-07-26.pdf`
+- [`../pdfs/ds_twr_speed_limit_20260726.pdf`](../pdfs/ds_twr_speed_limit_20260726.pdf)
 - `profile_metrics.csv`
 - `block_metrics.csv`
 - `positions.csv`
 - `analysis_summary.json`
 - `raw_data_manifest.csv`
 - `figures/`
-- `data/*.jsonl.xz` and `data/*.metadata.json`
+- `../raw/ds_twr_speed_limit_20260726/data/*.jsonl.xz` and adjacent metadata

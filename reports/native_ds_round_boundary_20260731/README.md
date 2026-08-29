@@ -9,7 +9,7 @@ Reference commit before instrumentation: `c727a64`
 ## Report
 
 The illustrated interpretation report is available as
-[`Native_DS-TWR_round_boundary_report_2026-07-31.pdf`](Native_DS-TWR_round_boundary_report_2026-07-31.pdf).
+[`../pdfs/native_ds_round_boundary_20260731.pdf`](../pdfs/native_ds_round_boundary_20260731.pdf).
 Its figures and machine-readable summary can be regenerated with:
 
 ```bash
@@ -108,16 +108,19 @@ geometry schedule.
 
 ```bash
 tools/analyze_native_ds_round_boundary.py \
-  reports/native_ds_round_boundary_20260731/data/candidate_59ms_round_boundary_3600s.logs.jsonl \
-  reports/native_ds_round_boundary_20260731/data/candidate_58ms_round_boundary_3600s.logs.jsonl \
-  reports/native_ds_round_boundary_20260731/data/candidate_57ms_round_boundary_3600s.logs.jsonl \
-  reports/native_ds_round_boundary_20260731/data/candidate_53ms_round_boundary_3600s.logs.jsonl \
-  reports/native_ds_round_boundary_20260731/data/candidate_53ms_guarded_3600s.logs.jsonl
+  reports/raw/native_ds_round_boundary_20260731/data/candidate_59ms_round_boundary_3600s.logs.jsonl \
+  reports/raw/native_ds_round_boundary_20260731/data/candidate_58ms_round_boundary_3600s.logs.jsonl \
+  reports/raw/native_ds_round_boundary_20260731/data/candidate_57ms_round_boundary_3600s.logs.jsonl \
+  reports/raw/native_ds_round_boundary_20260731/data/candidate_53ms_round_boundary_3600s.logs.jsonl \
+  reports/raw/native_ds_round_boundary_20260731/data/candidate_53ms_guarded_3600s.logs.jsonl
 ```
 
-Raw event and timing-log streams are stored in `data/` as individually
+Raw event and timing-log streams are stored in
+`../raw/native_ds_round_boundary_20260731/data/` as individually
 compressed `.jsonl.zst` archives, alongside their uncompressed metadata
-sidecars. Restore them with `zstd --decompress --keep data/*.jsonl.zst` before
+sidecars. Restore them with
+`zstd --decompress --keep reports/raw/native_ds_round_boundary_20260731/data/*.jsonl.zst`
+before
 running the reproduction command. The interrupted 130 s capture is retained
 and explicitly named `candidate_53ms_guarded_aborted_130s` because it
 documents the performance effect of over-instrumenting every post-geometry
