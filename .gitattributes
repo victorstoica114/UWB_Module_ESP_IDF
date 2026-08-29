@@ -3,4 +3,8 @@ reports/**/*.jsonl.xz filter=lfs diff=lfs merge=lfs -text
 reports/**/*.jsonl.zst filter=lfs diff=lfs merge=lfs -text
 firmware_images/**/*.bin filter=lfs diff=lfs merge=lfs -text
 firmware_images/**/*.elf filter=lfs diff=lfs merge=lfs -text
+PX1105R-firmware/**/*.bin binary
+PX1105R-firmware/**/*.zip binary
+PX1105R-firmware/validated/*.srec text eol=lf
+PX1105R-firmware/validated/*.b64 text eol=lf
 *.pdf binary
