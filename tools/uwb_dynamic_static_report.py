@@ -2325,13 +2325,13 @@ the August 12 UWB positions.
 
 ```powershell
 python tools/uwb_dynamic_static_report.py `
-  --input-dir reports/raw/uwb_dynamic_static_comparison_20260812/data `
-  --output-dir reports/uwb_dynamic_static_comparison_20260812 `
-  --rtk-reference-report-dir reports/uwb_dynamic_static_comparison_20260806
+  --input-dir reports/bundles/uwb_dynamic_static_comparison_20260812/raw/data `
+  --output-dir reports/bundles/uwb_dynamic_static_comparison_20260812/analysis `
+  --rtk-reference-report-dir reports/bundles/uwb_dynamic_static_comparison_20260806/analysis
 ```
 
 The August 12 raw UWB captures remain archived losslessly under
-`../raw/uwb_dynamic_static_comparison_20260812/data/`. The RTK
+`../raw/data/`. The RTK
 reference manifest points to the already-versioned August 6 lossless archives;
 the older UWB records in those archives are never loaded by the GPS-only reader.
 """
@@ -3360,8 +3360,8 @@ losslessly compressed raw captures, SHA-256 checksums and this TeX source.
 
 \begin{verbatim}
 $reportArgs = @(
-  "--input-dir", "reports/raw/uwb_dynamic_static_comparison_20260813/data"
-  "--output-dir", "reports/uwb_dynamic_static_comparison_20260813"
+  "--input-dir", "reports/bundles/uwb_dynamic_static_comparison_20260813/raw/data"
+  "--output-dir", "reports/bundles/uwb_dynamic_static_comparison_20260813/analysis"
   "--replay-dynamic-dir", "reports/uwb_final_report_input_20260813"
   "--replay-static-dir", "reports/uwb_final_report_input_20260813"
 )
@@ -3841,9 +3841,9 @@ is skipped, immutable source JSONL paths remain recorded for reproduction.
 
 \begin{verbatim}
 python tools/uwb_dynamic_static_report.py `
-  --input-dir reports/raw/uwb_dynamic_static_comparison_20260812/data `
-  --output-dir reports/uwb_dynamic_static_comparison_20260812 `
-  --rtk-reference-report-dir reports/uwb_dynamic_static_comparison_20260806
+  --input-dir reports/bundles/uwb_dynamic_static_comparison_20260812/raw/data `
+  --output-dir reports/bundles/uwb_dynamic_static_comparison_20260812/analysis `
+  --rtk-reference-report-dir reports/bundles/uwb_dynamic_static_comparison_20260806/analysis
 \end{verbatim}
 
 No raw capture is modified during report generation.
@@ -3944,13 +3944,13 @@ def main() -> int:
     parser.add_argument(
         "--input-dir",
         type=pathlib.Path,
-        default=pathlib.Path("reports/raw/uwb_dynamic_static_comparison_20260806/data"),
+        default=pathlib.Path("reports/bundles/uwb_dynamic_static_comparison_20260806/raw/data"),
         help="directory containing capture JSONL files",
     )
     parser.add_argument(
         "--output-dir",
         type=pathlib.Path,
-        default=pathlib.Path("reports/uwb_dynamic_static_comparison_20260806"),
+        default=pathlib.Path("reports/bundles/uwb_dynamic_static_comparison_20260806/analysis"),
         help="new report directory",
     )
     parser.add_argument(
@@ -4026,7 +4026,9 @@ def main() -> int:
     args.output_dir = args.output_dir.resolve()
     if args.raw_output_dir is None:
         args.raw_output_dir = (
-            args.output_dir.parent / "raw" / args.output_dir.name / "data"
+            args.output_dir.parent / "raw" / "data"
+            if args.output_dir.name == "analysis"
+            else args.output_dir.parent / "raw" / args.output_dir.name / "data"
         )
     args.raw_output_dir = args.raw_output_dir.resolve()
     args.replay_dynamic_dir = args.replay_dynamic_dir.resolve()
@@ -4087,7 +4089,13 @@ def main() -> int:
         )
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    figure_dir = args.output_dir / "figures"
+    bundle_layout = args.output_dir.name == "analysis"
+    figure_dir = (
+        args.output_dir.parent / "figures"
+        if bundle_layout
+        else args.output_dir / "figures"
+    )
+    source_dir = args.output_dir.parent / "source" if bundle_layout else args.output_dir
 
     summaries: dict[str, dict[str, Any]] = {}
     transformed_by_capture: dict[str, list[dict[str, Any]]] = {}
@@ -4458,7 +4466,7 @@ def main() -> int:
         rtk_reference_captures or None,
     )
     write_report(
-        args.output_dir / "REPORT.md",
+        source_dir / "REPORT.md",
         captures,
         summaries,
         replays,
@@ -4469,7 +4477,7 @@ def main() -> int:
         rtk_reference_summaries or None,
     )
     write_tex_report(
-        args.output_dir / "report.tex",
+        source_dir / "report.tex",
         captures,
         summaries,
         replays,
@@ -4483,7 +4491,7 @@ def main() -> int:
     # step.  The generated source has a stable descriptive name in the report
     # directory, while `report.tex` stays convenient for pdflatex.
 
-    print(f"Generated {args.output_dir / 'REPORT.md'}")
+    print(f"Generated {source_dir / 'REPORT.md'}")
     for capture in sorted(captures, key=lambda item: (item.motion, item.protocol)):
         item = summaries[capture.capture_id]
         line = (

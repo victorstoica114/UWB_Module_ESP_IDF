@@ -28,9 +28,10 @@ import numpy as np
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-REPORT_DIR = ROOT / "reports" / "uwb_protocol_comparison_20260726"
-DATA_DIR = ROOT / "reports" / "raw" / "uwb_protocol_comparison_20260726" / "data"
-FIGURE_DIR = REPORT_DIR / "figures"
+BUNDLE_DIR = ROOT / "reports" / "bundles" / "uwb_protocol_comparison_20260726"
+REPORT_DIR = BUNDLE_DIR / "analysis"
+DATA_DIR = BUNDLE_DIR / "raw" / "data"
+FIGURE_DIR = BUNDLE_DIR / "figures"
 
 ANCHOR_IDS = (2, 3, 4, 5)
 ANCHOR_INDEX = {anchor_id: index for index, anchor_id in enumerate(ANCHOR_IDS)}

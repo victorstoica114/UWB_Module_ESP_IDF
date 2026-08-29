@@ -897,17 +897,17 @@ def main() -> int:
         "report_dir",
         type=pathlib.Path,
         nargs="?",
-        default=pathlib.Path("reports/uwb_gps_rtk_comparison_20260803"),
+        default=pathlib.Path("reports/bundles/uwb_gps_rtk_comparison_20260803/analysis"),
     )
     parser.add_argument(
         "--data-dir",
         type=pathlib.Path,
-        default=pathlib.Path("reports/raw/uwb_gps_rtk_comparison_20260803/data"),
+        default=pathlib.Path("reports/bundles/uwb_gps_rtk_comparison_20260803/raw/data"),
     )
     args = parser.parse_args()
     report_dir = args.report_dir.resolve()
     data_dir = args.data_dir.resolve()
-    figure_dir = report_dir / "figures"
+    figure_dir = report_dir.parent / "figures"
     figure_dir.mkdir(parents=True, exist_ok=True)
 
     capture = load_capture(data_dir)

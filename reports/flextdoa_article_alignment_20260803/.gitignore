@@ -1,2 +1,0 @@
-# Keep the canonical field captures in Git as lossless XZ archives.
-*.jsonl

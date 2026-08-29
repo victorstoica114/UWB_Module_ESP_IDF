@@ -39,12 +39,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--report-dir",
         type=Path,
-        default=Path("reports/native_ds_round_boundary_20260731"),
+        default=Path("reports/bundles/native_ds_round_boundary_20260731/analysis"),
     )
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("reports/raw/native_ds_round_boundary_20260731/data"),
+        default=Path("reports/bundles/native_ds_round_boundary_20260731/raw/data"),
     )
     return parser.parse_args()
 
@@ -326,7 +326,7 @@ def main() -> int:
     args = parse_args()
     report_dir = args.report_dir.resolve()
     data_dir = args.data_dir.resolve()
-    output_dir = report_dir / "figures"
+    output_dir = report_dir.parent / "figures"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     rows = load_summaries(data_dir)

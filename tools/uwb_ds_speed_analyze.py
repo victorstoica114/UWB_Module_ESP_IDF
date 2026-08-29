@@ -37,11 +37,12 @@ from uwb_compare_analyze import (
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASELINE_DIR = (
-    ROOT / "reports" / "raw" / "uwb_protocol_comparison_20260726" / "data"
+    ROOT / "reports" / "bundles" / "uwb_protocol_comparison_20260726" / "raw" / "data"
 )
-STUDY_DIR = ROOT / "reports" / "ds_twr_speed_limit_20260726"
-DATA_DIR = ROOT / "reports" / "raw" / "ds_twr_speed_limit_20260726" / "data"
-FIGURE_DIR = STUDY_DIR / "figures"
+BUNDLE_DIR = ROOT / "reports" / "bundles" / "ds_twr_speed_limit_20260726"
+STUDY_DIR = BUNDLE_DIR / "analysis"
+DATA_DIR = BUNDLE_DIR / "raw" / "data"
+FIGURE_DIR = BUNDLE_DIR / "figures"
 
 BASELINE_BLOCKS = ("ds_1", "ds_2", "ds_3")
 TIMING_PATTERN = re.compile(

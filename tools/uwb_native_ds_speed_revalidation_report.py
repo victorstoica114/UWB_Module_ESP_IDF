@@ -431,12 +431,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path("reports/native_ds_speed_revalidation_20260731"),
+        default=Path("reports/bundles/native_ds_speed_revalidation_20260731/analysis"),
     )
     parser.add_argument(
         "--raw-root",
         type=Path,
-        default=Path("reports/raw/native_ds_speed_revalidation_20260731"),
+        default=Path("reports/bundles/native_ds_speed_revalidation_20260731/raw"),
     )
     parser.add_argument("--output-dir", type=Path)
     return parser.parse_args()
@@ -447,7 +447,7 @@ def main() -> int:
     root = args.root.resolve()
     raw_root = args.raw_root.resolve()
     output_dir = (
-        args.output_dir.resolve() if args.output_dir else root / "figures"
+        args.output_dir.resolve() if args.output_dir else root.parent / "figures"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 

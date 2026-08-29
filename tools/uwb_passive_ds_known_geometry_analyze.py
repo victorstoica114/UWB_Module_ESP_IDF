@@ -25,9 +25,10 @@ from uwb_compare_analyze import position_metrics, solve_tdoa
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-REPORT_DIR = ROOT / "reports" / "passive_ds_known_geometry_20260727"
-DATA_DIR = ROOT / "reports" / "raw" / "passive_ds_known_geometry_20260727" / "data"
-FIGURE_DIR = REPORT_DIR / "figures"
+BUNDLE_DIR = ROOT / "reports" / "bundles" / "passive_ds_known_geometry_20260727"
+REPORT_DIR = BUNDLE_DIR / "analysis"
+DATA_DIR = BUNDLE_DIR / "raw" / "data"
+FIGURE_DIR = BUNDLE_DIR / "figures"
 BLOCKS = (
     ("passive_ds_known_geometry_1", "Uncalibrated"),
     ("passive_ds_calibrated_1", "Calibrated"),

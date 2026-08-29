@@ -1,20 +1,31 @@
-# Report archive layout
+# Report archive
 
-The report archive is split into three layers:
+This directory keeps the 13 final PDF reports directly at the top level. Each
+PDF has one matching self-contained package under `bundles/<report>/`.
 
-- `pdfs/` contains the 13 unique final reports, with normalized filenames;
-- `raw/<report>/` contains retained RAW captures and adjacent capture metadata;
-- the other report directories contain derived tables, figures, summaries,
-  Markdown notes and report sources.
+```text
+reports/
+  <report>.pdf
+  PDF_SHA256SUMS
+  bundles/
+    RAW_SHA256SUMS
+    <report>/
+      README.md
+      source/
+      analysis/
+      figures/
+      raw/
+```
 
-Plot PDFs remain next to their report sources. Only final report PDFs are
-collected in `pdfs/`.
+Bundle contents:
 
-RAW files keep their original relative layout below the report name. Paths in
-analysis tools point to this central archive. Large JSONL formats are stored
-through Git LFS.
+- `source/`: TeX, Markdown, helper scripts and source-local configuration;
+- `analysis/`: CSV/JSON results, manifests and historical derived data;
+- `figures/`: retained PNG/SVG figures (intermediate plot PDFs were removed);
+- `raw/`: retained RAW captures and adjacent metadata, with their original
+  internal layout preserved.
 
-The central `raw/SHA256SUMS` and `pdfs/SHA256SUMS` files are authoritative for
-the reorganized archive. Per-report manifests remain as historical provenance
-and can contain the original capture paths or entries removed by the aggressive
-retention pass.
+`PDF_SHA256SUMS` verifies the final PDFs. `bundles/RAW_SHA256SUMS` verifies all
+140 retained RAW and metadata files. Capture formats are stored through Git
+LFS. Historical manifests inside `analysis/` may still record original paths
+or captures removed by the aggressive retention pass.

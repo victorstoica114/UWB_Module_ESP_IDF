@@ -25,9 +25,10 @@ import numpy as np
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-REPORT_DIR = ROOT / "reports" / "passive_ds_speed_limit_20260727"
-DATA_DIR = ROOT / "reports" / "raw" / "passive_ds_speed_limit_20260727" / "data"
-FIGURE_DIR = REPORT_DIR / "figures"
+BUNDLE_DIR = ROOT / "reports" / "bundles" / "passive_ds_speed_limit_20260727"
+REPORT_DIR = BUNDLE_DIR / "analysis"
+DATA_DIR = BUNDLE_DIR / "raw" / "data"
+FIGURE_DIR = BUNDLE_DIR / "figures"
 TRUTH = (1.5, 1.5)
 
 BLOCKS = (
