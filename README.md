@@ -49,6 +49,9 @@ overrides are stored in ESP32 NVS.
   [`PX1105R-firmware/README.md`](PX1105R-firmware/README.md).
 - Final reports and their retained evidence bundles are indexed in
   [`reports/README.md`](reports/README.md).
+- The parametric enclosure sources, print-ready STL files, STEP exports, and
+  assembly notes are under
+  [`mechanical/uwb-gps-enclosure/`](mechanical/uwb-gps-enclosure/README.md).
 
 ## Hardware
 
@@ -161,6 +164,7 @@ Repository-level supporting material:
 | `firmware_images/` | Retained ESP32 release inputs, stored through Git LFS where configured. |
 | `PX1105R-firmware/` | Permanent GNSS firmware index and validated ESP32-assisted update artifacts. |
 | `reports/` | Final PDFs plus one self-contained evidence bundle for each report. |
+| `mechanical/uwb-gps-enclosure/` | Parametric V4 enclosure source, reference geometry, print-ready STL files, STEP exports, and previews. |
 | `PCB/V1.REV.B/` | KiCad source, fabrication, BOM, and placement package. |
 | `Schematic/` / `datasheets/` | Exported board schematic and local silicon/reference documents. |
 | `reference/` | Migration notes and the intentionally retained legacy GPIO header. |
@@ -310,6 +314,25 @@ out-of-range, incomplete, or unauthenticated requests are rejected; callers
 should check both the HTTP status and the JSON response instead of assuming a
 write succeeded. The exact BNO085, charger, and PD command tables are in their
 respective sections below.
+
+## 3D-Printed Enclosure
+
+The complete modular V4 enclosure is versioned under
+[`mechanical/uwb-gps-enclosure/`](mechanical/uwb-gps-enclosure/README.md). It
+includes the CadQuery generator, input reference geometry, validation manifest,
+assembly STEP model, rendered previews, and eight print-oriented STL parts.
+
+For printing, use the files ending in `_PRINT.stl` from
+[`mechanical/uwb-gps-enclosure/exports/`](mechanical/uwb-gps-enclosure/exports/).
+The enclosure README documents the required inserts, magnets, screws, print
+orientation, and assembly order.
+
+![UWB GPS enclosure preview](mechanical/uwb-gps-enclosure/previews/01_ansamblu_exterior.png)
+
+The binary CAD, mesh, reference-image, and preview assets are stored through
+Git LFS. The source was imported from the validated V4 enclosure revision
+`7e0be77` of
+[`AlexandruPalacean/uwb-gps-enclosure`](https://github.com/AlexandruPalacean/uwb-gps-enclosure).
 
 ## PCB Package
 

@@ -7,4 +7,8 @@ PX1105R-firmware/**/*.bin binary
 PX1105R-firmware/**/*.zip binary
 PX1105R-firmware/validated/*.srec text eol=lf
 PX1105R-firmware/validated/*.b64 text eol=lf
+mechanical/uwb-gps-enclosure/**/*.step filter=lfs diff=lfs merge=lfs -text
+mechanical/uwb-gps-enclosure/**/*.stl filter=lfs diff=lfs merge=lfs -text
+mechanical/uwb-gps-enclosure/**/*.png filter=lfs diff=lfs merge=lfs -text
+mechanical/uwb-gps-enclosure/**/*.jpg filter=lfs diff=lfs merge=lfs -text
 *.pdf binary
